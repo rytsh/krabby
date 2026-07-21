@@ -25,6 +25,9 @@ the background, and lets any MCP-capable LLM agent query them.
 - **Docs & RAG (optional)**: with an LLM configured, krabby generates per-file
   Markdown documentation (prompt is configurable in Settings) plus a repo
   overview, browsable in the UI.
+- **Semantic code search (optional)**: source is chunked at graphify symbol
+  boundaries (with line-window fallback), embedded with a dedicated code model
+  such as Codestral Embed, and returned as ranked path/line snippets.
 
 ## Requirements
 
@@ -76,6 +79,10 @@ Example opencode config:
 | `query_graph` | BFS/DFS search over one repo or the merged graph |
 | `get_node` / `get_neighbors` / `get_community` | Node-level inspection |
 | `god_nodes` / `graph_stats` / `shortest_path` | Graph-level analysis |
+| `search_docs` / `list_docs` / `get_doc` | Search and read generated Markdown documentation |
+| `search_code` | Semantic source search returning snippets with path, symbol and line range |
+| `get_docs_config` / `set_docs_config` | Read or live-update docs and code RAG settings |
+| `test_llm` / `test_embedder` / `test_code_embedder` | Validate model endpoints without saving |
 
 All query tools take an optional `repo` (`owner/name`); omit it to query the
 merged cross-repo graph.
@@ -97,6 +104,9 @@ merged cross-repo graph.
 | `GET /api/v1/repos/{owner}/{name}/report` | `GRAPH_REPORT.md` audit report |
 | `GET /api/v1/repos/{owner}/{name}/html` | Interactive graph visualization |
 | `GET /api/v1/graph` | Merged cross-repo `graph.json` |
+| `GET /api/v1/docs/search?q=&repo=&top=` | Semantic documentation search |
+| `GET /api/v1/code/search?q=&repo=&top=` | Semantic source-code snippet search |
+| `GET/PUT /api/v1/docs/config` | Read/update docs and code RAG settings |
 | `GET /api/v1/credentials` | List credential patterns (secrets never returned) |
 | `PUT /api/v1/credentials` `{"pattern","secret","kind","username"}` | Store a credential |
 | `DELETE /api/v1/credentials?pattern=...` | Remove a credential |
@@ -117,6 +127,8 @@ other tools (doc generators, linters, indexers) are free to read it:
 │       └── manifest.json       # incremental-update manifest
 ├── merged/graph.json           # cross-repo merged graph
 ├── keys/                       # materialized credential SSH keys (0600)
+├── docs-vectors/               # embedded documentation vector index
+├── code-vectors/               # embedded source-code vector index
 └── state/                      # registry + credentials database
 ```
 
@@ -169,7 +181,8 @@ webhook / poll / refresh_repo
   → git fetch (new commits?) → git pull
   → graphify update <repo>          # incremental, AST-only, no LLM
   → graphify merge-graphs → merged/graph.json
-  → per-graph query servers hot-reload automatically
+  → code RAG index (when enabled)
+  → generated docs + docs RAG index (when enabled)
 ```
 
 Repos are also polled every `git.poll_interval` (default 1h).
@@ -179,6 +192,11 @@ Repos are also polled every `git.poll_interval` (default 1h).
 See [krabby.example.yaml](krabby.example.yaml). Loaded via
 [chu](https://github.com/rakunlabs/chu): defaults → `krabby.yaml` (or
 `CONFIG_FILE`) → `KRABBY_*` env vars.
+
+Docs RAG and code RAG are independently switchable in the Settings UI. Code RAG
+can use its own `code_embedder`; when that block is unset it reuses `embedder`.
+The embedded backend keeps docs and code in separate stores so different vector
+dimensions are safe. With Qdrant, code uses `<collection>-code`.
 
 ## Docker
 

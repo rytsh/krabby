@@ -43,6 +43,11 @@ type Config struct {
 	Embedder Embedder `cfg:"embedder"`
 	// RAG configures chunking, retrieval and the vector store backend.
 	RAG RAG `cfg:"rag"`
+	// CodeEmbedder is a dedicated embeddings client for source-code RAG (e.g.
+	// Codestral Embed). When unset, the docs Embedder is used for code too.
+	CodeEmbedder Embedder `cfg:"code_embedder"`
+	// CodeRAG configures semantic search over raw source code.
+	CodeRAG CodeRAG `cfg:"code_rag"`
 
 	// Repos seeds the registry at startup; repos can also be added at runtime.
 	Repos []RepoSeed `cfg:"repos"`
@@ -148,6 +153,28 @@ type RAG struct {
 	Store VectorStore `cfg:"store"`
 }
 
+// CodeRAG configures semantic search over raw source code. It shares the
+// vector store backend selection with RAG but indexes into its own namespace
+// (separate directory for the embedded store, separate Qdrant collection), so
+// docs and code can use embedding models with different dimensions.
+type CodeRAG struct {
+	// Enabled turns on code indexing + the search_code tool. Off by default so
+	// the (potentially large) code corpus is only embedded when wanted.
+	Enabled bool `cfg:"enabled"`
+	// ChunkSize is the target chunk length in characters. The 3000/1000
+	// defaults follow the Codestral Embed retrieval recommendation.
+	ChunkSize int `cfg:"chunk_size" default:"3000"`
+	// ChunkOverlap is the character overlap between adjacent chunks.
+	ChunkOverlap int `cfg:"chunk_overlap" default:"1000"`
+	// TopK is how many code snippets to return per search.
+	TopK int `cfg:"top_k" default:"10"`
+	// Include globs select source files to index (repo-relative). Empty uses a
+	// built-in source-extension allowlist.
+	Include []string `cfg:"include"`
+	// Exclude globs skip files (evaluated after Include).
+	Exclude []string `cfg:"exclude"`
+}
+
 // VectorStore selects a vector backend and holds per-backend settings.
 type VectorStore struct {
 	// Kind is "embedded" (default, file-backed) or "qdrant".
@@ -215,8 +242,14 @@ func (c *Config) DocsDir(repoPath string) string {
 	return filepath.Join(repoPath, "krabby-docs")
 }
 
-// VectorsDir holds the embedded vector store backend's data.
-func (c *Config) VectorsDir() string { return filepath.Join(c.DataDir, "vectors") }
+// DocsVectorsDir holds the embedded vector store data for docs RAG.
+func (c *Config) DocsVectorsDir() string { return filepath.Join(c.DataDir, "docs-vectors") }
+
+// CodeVectorsDir holds the embedded vector store data for code RAG. It is a
+// separate database from DocsVectorsDir because the two indexes may use
+// embedding models with different dimensions (a dim change wipes the whole
+// store).
+func (c *Config) CodeVectorsDir() string { return filepath.Join(c.DataDir, "code-vectors") }
 
 func expandHome(p string) (string, error) {
 	if p == "~" || strings.HasPrefix(p, "~/") {

@@ -84,7 +84,7 @@ zero-infra promise; Qdrant is opt-in for scale.
     ├── overview.md               # repo-level summary
     ├── <pkg>/<file>.md           # per file/package docs
     └── ...
-~/.krabby/vectors/                # NEW (embedded store backend)
+~/.krabby/docs-vectors/           # embedded docs store backend
 └── ...                           # bw (BadgerDB) database: chunk records + HNSW vector index
 ```
 
@@ -172,7 +172,7 @@ rag:
       collection: "krabby"
 ```
 
-New `Config` helpers: `DocsDir(repoPath)`, `VectorsDir()`.
+New `Config` helpers: `DocsDir(repoPath)`, `DocsVectorsDir()`.
 
 ## Manager integration
 

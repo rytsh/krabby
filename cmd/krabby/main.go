@@ -93,10 +93,16 @@ func run(ctx context.Context) error {
 
 	mgr := manager.New(ctx, reg, git, gfy, engine, creds, cfg.ReposDir(), cfg.MergedGraphPath(),
 		manager.DocsDeps{
-			DocsDir:    cfg.DocsDir,
-			VectorsDir: cfg.VectorsDir(),
+			DocsDir:        cfg.DocsDir,
+			DocsVectorsDir: cfg.DocsVectorsDir(),
+			CodeVectorsDir: cfg.CodeVectorsDir(),
 		},
 	)
+	defer func() {
+		if err := mgr.Close(); err != nil {
+			slog.Error("close manager", "error", err)
+		}
+	}()
 	mgr.SetSettingsStore(settingsStore)
 
 	// Build the initial docs/RAG client bundle from the persisted settings.
@@ -160,6 +166,20 @@ func seedSettings(cfg *config.Config) settings.Settings {
 		RAGTopK:         cfg.RAG.TopK,
 		RAGTopDocs:      cfg.RAG.TopDocs,
 		StoreKind:       cfg.RAG.Store.Kind,
+
+		CodeEmbedBaseURL: cfg.CodeEmbedder.BaseURL,
+		CodeEmbedAPIKey:  cfg.CodeEmbedder.APIKey,
+		CodeEmbedModel:   cfg.CodeEmbedder.Model,
+		CodeEmbedDim:     cfg.CodeEmbedder.Dim,
+		CodeEmbedBatch:   cfg.CodeEmbedder.Batch,
+		CodeEmbedTimeout: cfg.CodeEmbedder.Timeout,
+
+		CodeRAGEnabled:      cfg.CodeRAG.Enabled,
+		CodeRAGChunkSize:    cfg.CodeRAG.ChunkSize,
+		CodeRAGChunkOverlap: cfg.CodeRAG.ChunkOverlap,
+		CodeRAGTopK:         cfg.CodeRAG.TopK,
+		CodeRAGInclude:      cfg.CodeRAG.Include,
+		CodeRAGExclude:      cfg.CodeRAG.Exclude,
 
 		QdrantURL:        cfg.RAG.Store.Qdrant.URL,
 		QdrantAPIKey:     cfg.RAG.Store.Qdrant.APIKey,

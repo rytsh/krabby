@@ -11,16 +11,26 @@
   let docsErr = "";
   let docsMsg = "";
   let saving = false;
+  let promptView = "custom";
   // Secret inputs are write-only; blank means "keep existing".
   let llmKey = "";
   let embedKey = "";
+  let codeEmbedKey = "";
   let qdrantKey = "";
 
   // Connection test state.
   let llmTest = null; // { ok, latency_ms, model, error }
   let embedTest = null; // { ok, dim, latency_ms, model, error }
+  let codeEmbedTest = null; // { ok, dim, latency_ms, model, error }
   let testingLLM = false;
   let testingEmbed = false;
+  let testingCodeEmbed = false;
+
+  function logTestFailure(name, result) {
+    if (result && !result.ok) {
+      console.error(`[krabby] ${name} test failed`, result);
+    }
+  }
 
   async function load() {
     try {
@@ -47,10 +57,13 @@
     const patch = { ...docsCfg };
     delete patch.llm_api_key_set;
     delete patch.embed_api_key_set;
+    delete patch.code_embed_api_key_set;
     delete patch.qdrant_api_key_set;
+    delete patch.docs_default_prompt;
     delete patch.updated_at;
     patch.llm_api_key = llmKey;
     patch.embed_api_key = embedKey;
+    patch.code_embed_api_key = codeEmbedKey;
     patch.qdrant_api_key = qdrantKey;
     return patch;
   }
@@ -61,8 +74,8 @@
     docsMsg = "";
     try {
       docsCfg = await api.setDocsConfig(buildPatch());
-      llmKey = embedKey = qdrantKey = "";
-      docsMsg = "Saved. Clients rebuilt.";
+      llmKey = embedKey = codeEmbedKey = qdrantKey = "";
+      docsMsg = "Saved. Existing repositories queued for reindex.";
     } catch (e) {
       docsErr = e.message;
     } finally {
@@ -75,8 +88,10 @@
     llmTest = null;
     try {
       llmTest = await api.testLLM(buildPatch());
+      logTestFailure("LLM", llmTest);
     } catch (e) {
       llmTest = { ok: false, error: e.message };
+      console.error("[krabby] LLM test request failed", e);
     } finally {
       testingLLM = false;
     }
@@ -87,11 +102,32 @@
     embedTest = null;
     try {
       embedTest = await api.testEmbedder(buildPatch());
+      logTestFailure("embedder", embedTest);
     } catch (e) {
       embedTest = { ok: false, error: e.message };
+      console.error("[krabby] Embedder test request failed", e);
     } finally {
       testingEmbed = false;
     }
+  }
+
+  async function testCodeEmbedder() {
+    testingCodeEmbed = true;
+    codeEmbedTest = null;
+    try {
+      codeEmbedTest = await api.testCodeEmbedder(buildPatch());
+      logTestFailure("code embedder", codeEmbedTest);
+    } catch (e) {
+      codeEmbedTest = { ok: false, error: e.message };
+      console.error("[krabby] Code embedder test request failed", e);
+    } finally {
+      testingCodeEmbed = false;
+    }
+  }
+
+  function useDefaultPrompt() {
+    docsCfg.docs_prompt = docsCfg.docs_default_prompt;
+    promptView = "custom";
   }
 
   onMount(load);
@@ -207,7 +243,7 @@
       <input type="checkbox" bind:checked={docsCfg.docs_enabled} />
       Generate markdown docs on refresh
     </label>
-    <div class="grid grid-cols-2 gap-3">
+    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         LLM base URL
         <input class="input" bind:value={docsCfg.llm_base_url} placeholder="https://api.openai.com/v1" />
@@ -226,19 +262,52 @@
       </label>
     </div>
 
-    <label class="mt-3 flex flex-col gap-1 text-[13px] text-dim">
-      Doc generation prompt (system)
-      <textarea
-        class="input font-mono text-[12px]"
-        rows="8"
-        bind:value={docsCfg.docs_prompt}
-        placeholder="Leave blank to use the built-in default prompt."
-      ></textarea>
+    <div class="mt-3 flex flex-col gap-1 text-[13px] text-dim">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <span>Doc generation prompt (system)</span>
+        <div class="flex gap-1" role="tablist" aria-label="Prompt view">
+          <button
+            type="button"
+            class="btn btn-sm"
+            class:btn-primary={promptView === "custom"}
+            role="tab"
+            aria-selected={promptView === "custom"}
+            on:click={() => (promptView = "custom")}>Custom</button
+          >
+          <button
+            type="button"
+            class="btn btn-sm"
+            class:btn-primary={promptView === "default"}
+            role="tab"
+            aria-selected={promptView === "default"}
+            on:click={() => (promptView = "default")}>Default (read-only)</button
+          >
+        </div>
+      </div>
+      {#if promptView === "custom"}
+        <textarea
+          class="input font-mono text-[12px]"
+          rows="12"
+          bind:value={docsCfg.docs_prompt}
+          placeholder="Leave blank to use the built-in default prompt."
+        ></textarea>
+      {:else}
+        <textarea
+          class="input bg-surface-2 font-mono text-[12px]"
+          rows="12"
+          readonly
+          value={docsCfg.docs_default_prompt}
+        ></textarea>
+        <div class="mt-1 flex items-center justify-between gap-3">
+          <span class="text-[12px] text-faint">Built into this krabby version. Select and copy any part you need.</span>
+          <button type="button" class="btn btn-sm shrink-0" on:click={useDefaultPrompt}>Use as custom</button>
+        </div>
+      {/if}
       <span class="text-[12px] text-faint">
         Sent as the system message for each file. The file content and its graph neighborhood are
         appended as the user message. Blank = built-in default.
       </span>
-    </label>
+    </div>
 
     <!-- Embeddings -->
     <div class="mb-2 mt-6 flex items-center justify-between">
@@ -258,7 +327,7 @@
         </button>
       </span>
     </div>
-    <div class="grid grid-cols-2 gap-3">
+    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Embedder base URL
         <input class="input" bind:value={docsCfg.embed_base_url} placeholder="http://localhost:11434/v1" />
@@ -277,13 +346,70 @@
       </label>
     </div>
 
+    <!-- Source-code embeddings -->
+    <div class="mb-2 mt-6 flex items-center justify-between">
+      <span class="text-[13px] font-semibold text-dim">Code embeddings</span>
+      <span class="flex items-center gap-2">
+        {#if codeEmbedTest}
+          {#if codeEmbedTest.ok}
+            <span class="text-[12px] text-ok">
+              ✓ ok · {codeEmbedTest.model || "?"} · dim {codeEmbedTest.dim || "?"} · {codeEmbedTest.latency_ms}ms
+            </span>
+          {:else}
+            <span class="max-w-[24rem] truncate text-[12px] text-err" title={codeEmbedTest.error}>✗ {codeEmbedTest.error}</span>
+          {/if}
+        {/if}
+        <button class="btn btn-sm" on:click={testCodeEmbedder} disabled={testingCodeEmbed}>
+          {testingCodeEmbed ? "Testing…" : "Test code embedder"}
+        </button>
+      </span>
+    </div>
+    <label class="mb-3 flex items-center gap-2 text-[13px]">
+      <input type="checkbox" bind:checked={docsCfg.code_rag_enabled} />
+      Enable source-code indexing &amp; semantic search
+    </label>
+    <p class="mb-3 text-[12px] text-faint">
+      Uses symbol boundaries from graphify and falls back to line-aligned chunks. Leave the code
+      embedder URL blank to reuse the docs embedder.
+    </p>
+    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Code embedder base URL
+        <input class="input" bind:value={docsCfg.code_embed_base_url} placeholder="https://api.mistral.ai/v1" />
+      </label>
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Code embedder model
+        <input class="input" bind:value={docsCfg.code_embed_model} placeholder="codestral-embed-2505" />
+      </label>
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Code embedder API key {docsCfg.code_embed_api_key_set ? "(set)" : "(not set)"}
+        <input class="input" type="password" bind:value={codeEmbedKey} placeholder="leave blank to keep" />
+      </label>
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Code embedding dim (0 = infer)
+        <input class="input" type="number" bind:value={docsCfg.code_embed_dim} />
+      </label>
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Code chunk size (chars)
+        <input class="input" type="number" bind:value={docsCfg.code_rag_chunk_size} />
+      </label>
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Code chunk overlap (chars)
+        <input class="input" type="number" bind:value={docsCfg.code_rag_chunk_overlap} />
+      </label>
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Code snippets returned (top_k)
+        <input class="input" type="number" bind:value={docsCfg.code_rag_top_k} />
+      </label>
+    </div>
+
     <!-- Retrieval + store -->
     <div class="mb-2 mt-6 text-[13px] font-semibold text-dim">Retrieval &amp; vector store</div>
     <label class="mb-3 flex items-center gap-2 text-[13px]">
       <input type="checkbox" bind:checked={docsCfg.rag_enabled} />
       Enable RAG indexing &amp; retrieval
     </label>
-    <div class="grid grid-cols-2 gap-3">
+    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Vector store
         <select class="input" bind:value={docsCfg.store_kind}>
@@ -311,7 +437,7 @@
 
     {#if docsCfg.store_kind === "qdrant"}
       <div class="mb-2 mt-6 text-[13px] font-semibold text-dim">Qdrant</div>
-      <div class="grid grid-cols-2 gap-3">
+      <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <label class="flex flex-col gap-1 text-[13px] text-dim">
           URL
           <input class="input" bind:value={docsCfg.qdrant_url} placeholder="http://localhost:6333" />

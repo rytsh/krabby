@@ -28,11 +28,10 @@ graphify:
 webhook:
   # github_secret: change-me  # verifies X-Hub-Signature-256 on /webhook/github
 
-# --- Documentation + RAG (optional) ------------------------------------------
-# Generate markdown docs per repo (LLM), embed them into a vector store, and
-# expose file-level retrieval over MCP (search_docs/list_docs/get_doc) and REST
-# (/api/v1/docs/search, /repos/{o}/{n}/docs). All best-effort: if the LLM /
-# embedder / store is missing or misconfigured, the feature disables itself.
+# --- Documentation + RAG + code search (optional) ----------------------------
+# Generate markdown docs per repo (LLM), embed docs and/or raw source code, and
+# expose semantic retrieval over MCP and REST. All three capabilities have
+# independent enabled switches and run best-effort.
 
 docs:
   enabled: false            # generate markdown docs in the refresh pipeline
@@ -54,6 +53,16 @@ embedder:                   # OpenAI-compatible embeddings (RAG)
   batch: 64
   timeout: 30s
 
+# Dedicated source-code embedder. Leave base_url empty to reuse `embedder`
+# above. Codestral Embed is optimized for natural-language-to-code retrieval.
+code_embedder:
+  # base_url: https://api.mistral.ai/v1
+  # api_key: ...
+  # model: codestral-embed-2505
+  # dim: 0                  # infer from first response
+  batch: 64
+  timeout: 30s
+
 rag:
   enabled: false            # index docs + enable retrieval tools
   chunk_size: 1200          # target chunk length (chars)
@@ -66,6 +75,14 @@ rag:
       url: http://localhost:6333
       # api_key: ""
       collection: krabby
+
+code_rag:
+  enabled: false            # index source + enable search_code
+  chunk_size: 3000          # Codestral's recommended target (chars)
+  chunk_overlap: 1000       # used for fallback / oversized symbols
+  top_k: 10                 # snippets returned
+  # include: ["**/*.go", "**/*.ts"] # empty = built-in source extensions
+  exclude: ["vendor/", "node_modules/", "**/*.min.js", "**/generated/**"]
 
 # Repositories to track at startup. More can be added at runtime via the
 # add_repo MCP tool or POST /api/v1/repos.

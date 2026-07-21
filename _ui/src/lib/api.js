@@ -43,8 +43,11 @@ export const api = {
   setDocsConfig: (cfg) => req("/docs/config", { method: "PUT", body: JSON.stringify(cfg) }),
   testLLM: (cfg) => req("/docs/config/test/llm", { method: "POST", body: JSON.stringify(cfg) }),
   testEmbedder: (cfg) => req("/docs/config/test/embedder", { method: "POST", body: JSON.stringify(cfg) }),
+  testCodeEmbedder: (cfg) => req("/docs/config/test/code-embedder", { method: "POST", body: JSON.stringify(cfg) }),
   searchDocs: (q, repo = "", top = 0) =>
     req(`/docs/search?q=${encodeURIComponent(q)}&repo=${encodeURIComponent(repo)}&top=${top}`),
+  searchCode: (q, repo = "", top = 0) =>
+    req(`/code/search?q=${encodeURIComponent(q)}&repo=${encodeURIComponent(repo)}&top=${top}`),
   docs: (id) => req(`/repos/${id}/docs`),
   doc: (id, path) => req(`/repos/${id}/doc?path=${encodeURIComponent(path)}`),
 };

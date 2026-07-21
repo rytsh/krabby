@@ -12,7 +12,7 @@ import (
 )
 
 // embedded is the default vector store, backed by a bw (BadgerDB) database
-// under vectorsDir. Vectors live in an HNSW index (cosine), payloads in the
+// under its configured data directory. Vectors live in an HNSW index (cosine), payloads in the
 // same record, so search + payload fetch is one lookup. It keeps krabby's
 // zero-infra promise: everything is plain files under data_dir.
 //
@@ -29,12 +29,15 @@ type embedded struct {
 
 // chunkRecord is one embedded chunk in the bw bucket.
 type chunkRecord struct {
-	ID      string    `bw:"id,pk"`
-	Repo    string    `bw:"repo,index"`
-	DocPath string    `bw:"doc_path"`
-	Title   string    `bw:"title"`
-	Chunk   string    `bw:"chunk"`
-	Vector  []float32 `bw:"vector,vector(metric=cosine)"`
+	ID        string    `bw:"id,pk"`
+	Repo      string    `bw:"repo,index"`
+	DocPath   string    `bw:"doc_path"`
+	Title     string    `bw:"title"`
+	Chunk     string    `bw:"chunk"`
+	Symbol    string    `bw:"symbol"`
+	StartLine int       `bw:"start_line"`
+	EndLine   int       `bw:"end_line"`
+	Vector    []float32 `bw:"vector,vector(metric=cosine)"`
 }
 
 // bucketName is the bw bucket holding all chunks (all repos).
@@ -53,6 +56,11 @@ type sharedHandle struct {
 	db     *bw.DB
 	bucket *bw.Bucket[chunkRecord]
 	refs   int
+
+	// opMu lets ordinary operations run concurrently but makes a dimension
+	// migration (Wipe + first insert) exclusive across every handle sharing the
+	// same database.
+	opMu sync.RWMutex
 }
 
 var sharedDBs = struct {
@@ -96,16 +104,21 @@ func (s *embedded) Upsert(ctx context.Context, items []Item) error {
 	records := make([]*chunkRecord, 0, len(items))
 	for _, it := range items {
 		records = append(records, &chunkRecord{
-			ID:      it.ID,
-			Repo:    it.Payload.Repo,
-			DocPath: it.Payload.DocPath,
-			Title:   it.Payload.Title,
-			Chunk:   it.Payload.Chunk,
-			Vector:  it.Vector,
+			ID:        it.ID,
+			Repo:      it.Payload.Repo,
+			DocPath:   it.Payload.DocPath,
+			Title:     it.Payload.Title,
+			Chunk:     it.Payload.Chunk,
+			Symbol:    it.Payload.Symbol,
+			StartLine: it.Payload.StartLine,
+			EndLine:   it.Payload.EndLine,
+			Vector:    it.Vector,
 		})
 	}
 
+	s.h.opMu.RLock()
 	err := s.h.bucket.InsertMany(ctx, records)
+	s.h.opMu.RUnlock()
 	if err == nil {
 		return nil
 	}
@@ -118,6 +131,19 @@ func (s *embedded) Upsert(ctx context.Context, items []Item) error {
 	// so wipe it and retry once; other repos re-index on their next refresh.
 	s.wipeMu.Lock()
 	defer s.wipeMu.Unlock()
+	s.h.opMu.Lock()
+	defer s.h.opMu.Unlock()
+
+	// Another concurrent upsert may have completed the migration while this
+	// call waited. Recheck before wiping so completed repo indexes are not lost.
+	err = s.h.bucket.InsertMany(ctx, records)
+	if err == nil {
+		return nil
+	}
+
+	if !errors.Is(err, bw.ErrDimMismatch) {
+		return err
+	}
 
 	slog.Warn("embedding dimension changed; wiping vector index for rebuild",
 		"dir", s.h.dir, "error", err)
@@ -139,6 +165,9 @@ func (s *embedded) Search(ctx context.Context, repo string, vec []float32, topK 
 		opts.Filter = repoQuery(repo)
 	}
 
+	s.h.opMu.RLock()
+	defer s.h.opMu.RUnlock()
+
 	hits, err := s.h.bucket.SearchVector(ctx, vec, opts)
 	if err != nil {
 		if errors.Is(err, bw.ErrDimMismatch) {
@@ -154,10 +183,13 @@ func (s *embedded) Search(ctx context.Context, repo string, vec []float32, topK 
 		matches = append(matches, Match{
 			Score: float32(h.Score),
 			Payload: Payload{
-				Repo:    h.Record.Repo,
-				DocPath: h.Record.DocPath,
-				Title:   h.Record.Title,
-				Chunk:   h.Record.Chunk,
+				Repo:      h.Record.Repo,
+				DocPath:   h.Record.DocPath,
+				Title:     h.Record.Title,
+				Chunk:     h.Record.Chunk,
+				Symbol:    h.Record.Symbol,
+				StartLine: h.Record.StartLine,
+				EndLine:   h.Record.EndLine,
 			},
 		})
 	}
@@ -166,6 +198,9 @@ func (s *embedded) Search(ctx context.Context, repo string, vec []float32, topK 
 }
 
 func (s *embedded) DeleteRepo(ctx context.Context, repo string) error {
+	s.h.opMu.RLock()
+	defer s.h.opMu.RUnlock()
+
 	var ids []string
 
 	err := s.h.bucket.Walk(ctx, repoQuery(repo), func(r *chunkRecord) error {

@@ -4,6 +4,7 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/rytsh/krabby/internal/service/coderag"
 	"github.com/rytsh/krabby/internal/service/credentials"
 	"github.com/rytsh/krabby/internal/service/docgen"
 	"github.com/rytsh/krabby/internal/service/gitops"
@@ -36,24 +38,29 @@ type Manager struct {
 	engine *graphquery.Engine
 	creds  *credentials.Store
 
-	reposDir   string
-	mergedPath string
-	vectorsDir string
+	reposDir       string
+	mergedPath     string
+	docsVectorsDir string
+	codeVectorsDir string
 
 	// Optional docs+RAG subsystem, held as an atomically swappable bundle so
 	// settings changes rebuild the clients live. docsDir resolves a clone path
 	// to its markdown docs dir. docsMu guards the bundle.
-	docsMu   sync.RWMutex
-	docs     *docsBundle
-	docsDir  func(repoPath string) string
-	settings *settings.Store
+	docsMu      sync.RWMutex
+	docs        *docsBundle
+	docsDir     func(repoPath string) string
+	settings    *settings.Store
+	settingsMu  sync.Mutex
+	configureMu sync.Mutex
 
 	baseCtx context.Context //nolint:containedctx // background lifecycle for async jobs
 
-	mu      sync.Mutex
-	locks   map[string]*sync.Mutex
-	mergeMu sync.Mutex
-	wg      sync.WaitGroup
+	mu          sync.Mutex
+	locks       map[string]*sync.Mutex
+	mergeMu     sync.Mutex
+	wg          sync.WaitGroup
+	lifecycleMu sync.Mutex
+	closing     bool
 
 	leases *lease.Manager
 }
@@ -65,6 +72,9 @@ type docsBundle struct {
 	gen   docgen.Generator
 	rag   *rag.Service
 	store vectorstore.Store // owned; closed on swap
+
+	codeRag   *coderag.Service
+	codeStore vectorstore.Store // owned; closed on swap
 }
 
 // DocsDeps carries the immutable wiring for the docs/RAG subsystem.
@@ -72,8 +82,12 @@ type DocsDeps struct {
 	// DocsDir resolves a repo clone path to its markdown docs directory
 	// (typically config.Config.DocsDir).
 	DocsDir func(repoPath string) string
-	// VectorsDir is the embedded vector store's data directory.
-	VectorsDir string
+	// DocsVectorsDir is the embedded vector store's data directory for docs RAG.
+	DocsVectorsDir string
+	// CodeVectorsDir is the embedded vector store's data directory for code
+	// RAG. Separate from DocsVectorsDir because the indexes may use embedding
+	// models with different dimensions.
+	CodeVectorsDir string
 }
 
 // New creates a Manager. baseCtx bounds background refresh jobs. docs carries the
@@ -89,30 +103,32 @@ func New(
 	docs DocsDeps,
 ) *Manager {
 	m := &Manager{
-		reg:        reg,
-		git:        git,
-		gfy:        gfy,
-		engine:     engine,
-		creds:      creds,
-		reposDir:   reposDir,
-		mergedPath: mergedPath,
-		vectorsDir: docs.VectorsDir,
-		docsDir:    docs.DocsDir,
-		docs:       &docsBundle{}, // empty bundle: docs/rag disabled until Configure
-		baseCtx:    baseCtx,
-		locks:      map[string]*sync.Mutex{},
+		reg:            reg,
+		git:            git,
+		gfy:            gfy,
+		engine:         engine,
+		creds:          creds,
+		reposDir:       reposDir,
+		mergedPath:     mergedPath,
+		docsVectorsDir: docs.DocsVectorsDir,
+		codeVectorsDir: docs.CodeVectorsDir,
+		docsDir:        docs.DocsDir,
+		docs:           &docsBundle{}, // empty bundle: docs/rag disabled until Configure
+		baseCtx:        baseCtx,
+		locks:          map[string]*sync.Mutex{},
 	}
 	m.leases = lease.New(m.TriggerRefresh)
 
 	return m
 }
 
-// currentDocs returns the active docs bundle under the read lock.
-func (m *Manager) currentDocs() *docsBundle {
+// acquireDocs leases the active bundle until the returned release function is
+// called. Configure waits for all leases before closing replaced stores, so an
+// in-flight search/index can never race a live settings update.
+func (m *Manager) acquireDocs() (*docsBundle, func()) {
 	m.docsMu.RLock()
-	defer m.docsMu.RUnlock()
 
-	return m.docs
+	return m.docs, m.docsMu.RUnlock
 }
 
 // Credentials exposes the credential store for API and MCP handlers.
@@ -120,6 +136,61 @@ func (m *Manager) Credentials() *credentials.Store { return m.creds }
 
 // Wait blocks until in-flight background jobs finish.
 func (m *Manager) Wait() { m.wg.Wait() }
+
+// Close waits for background work and releases active vector stores. It is safe
+// to call once server shutdown has stopped accepting new manager operations.
+func (m *Manager) Close() error {
+	m.lifecycleMu.Lock()
+	if m.closing {
+		m.lifecycleMu.Unlock()
+
+		return nil
+	}
+	m.closing = true
+	m.lifecycleMu.Unlock()
+
+	// Wait for an in-flight Configure and prevent another one from starting
+	// before the active bundle is detached.
+	m.configureMu.Lock()
+	defer m.configureMu.Unlock()
+
+	m.Wait()
+
+	m.docsMu.Lock()
+	prev := m.docs
+	m.docs = &docsBundle{}
+	m.docsMu.Unlock()
+
+	var errs []error
+	if prev != nil && prev.store != nil {
+		if err := prev.store.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close docs vector store; %w", err))
+		}
+	}
+
+	if prev != nil && prev.codeStore != nil {
+		if err := prev.codeStore.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close code vector store; %w", err))
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+// startWork registers one background task unless shutdown has started. The
+// lifecycle lock prevents WaitGroup.Add from racing Close's Wait.
+func (m *Manager) startWork() bool {
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+
+	if m.closing {
+		return false
+	}
+
+	m.wg.Add(1)
+
+	return true
+}
 
 func (m *Manager) lock(id string) *sync.Mutex {
 	m.mu.Lock()
@@ -230,11 +301,19 @@ func (m *Manager) RemoveRepo(ctx context.Context, id string) error {
 
 	m.engine.Invalidate(graphify.GraphPath(repo.Path))
 
-	// Best-effort: drop the repo's vectors from the RAG index. The markdown docs
-	// live under repo.Path and are removed with the clone below.
-	if d := m.currentDocs(); d.rag != nil {
+	// Best-effort: drop the repo's vectors from the RAG indexes. The markdown
+	// docs live under repo.Path and are removed with the clone below.
+	d, releaseDocs := m.acquireDocs()
+	defer releaseDocs()
+	if d.rag != nil {
 		if err := d.rag.DeleteRepo(ctx, id); err != nil {
 			slog.Error("delete repo from rag index", "repo", id, "error", err)
+		}
+	}
+
+	if d.codeRag != nil {
+		if err := d.codeRag.DeleteRepo(ctx, id); err != nil {
+			slog.Error("delete repo from code index", "repo", id, "error", err)
 		}
 	}
 
@@ -248,7 +327,9 @@ func (m *Manager) RemoveRepo(ctx context.Context, id string) error {
 		}
 	}
 
-	m.wg.Add(1)
+	if !m.startWork() {
+		return nil
+	}
 	go func() {
 		defer m.wg.Done()
 
@@ -263,13 +344,61 @@ func (m *Manager) RemoveRepo(ctx context.Context, id string) error {
 // TriggerRefresh starts a background refresh for a repo. Concurrent triggers
 // for the same repo serialize on the per-repo lock.
 func (m *Manager) TriggerRefresh(id string) {
-	m.wg.Add(1)
+	if !m.startWork() {
+		return
+	}
 
 	go func() {
 		defer m.wg.Done()
 
 		if err := m.Refresh(m.baseCtx, id); err != nil {
 			slog.Error("refresh repo", "repo", id, "error", err)
+		}
+	}()
+}
+
+// TriggerReindexAll rebuilds optional docs/code indexes for every ready repo
+// without fetching git or rebuilding graphify output. It is used after a live
+// settings update because an ordinary refresh intentionally exits early when
+// the repository commit has not changed.
+func (m *Manager) TriggerReindexAll() {
+	if !m.startWork() {
+		return
+	}
+
+	go func() {
+		defer m.wg.Done()
+
+		repos, err := m.reg.List(m.baseCtx)
+		if err != nil {
+			slog.Error("list repos for reindex", "error", err)
+
+			return
+		}
+
+		// Reindex repositories sequentially to avoid multiplying LLM/embedder
+		// concurrency by the number of tracked repositories.
+		for _, listed := range repos {
+			if listed.Status != registry.StatusReady {
+				continue
+			}
+
+			l := m.lock(listed.ID)
+			l.Lock()
+
+			repo, err := m.reg.Get(m.baseCtx, listed.ID)
+			if err != nil {
+				slog.Error("load repo for reindex", "repo", listed.ID, "error", err)
+				l.Unlock()
+
+				continue
+			}
+
+			if repo != nil && repo.Status == registry.StatusReady {
+				m.buildDocsAndIndex(m.baseCtx, repo)
+			}
+
+			l.Unlock()
 		}
 	}()
 }
@@ -372,11 +501,24 @@ func (m *Manager) refresh(ctx context.Context, repo *registry.Repo) error {
 	return nil
 }
 
-// buildDocsAndIndex regenerates markdown docs and refreshes the RAG index for a
-// repo. Both steps are optional and best-effort: a nil generator/service or an
-// error is logged and swallowed so the graph build result stands.
+// buildDocsAndIndex regenerates markdown docs and refreshes the RAG indexes
+// (docs + code) for a repo. All steps are optional and best-effort: a nil
+// generator/service or an error is logged and swallowed so the graph build
+// result stands.
 func (m *Manager) buildDocsAndIndex(ctx context.Context, repo *registry.Repo) {
-	d := m.currentDocs()
+	d, releaseDocs := m.acquireDocs()
+	defer releaseDocs()
+	if d.gen == nil && d.rag == nil && d.codeRag == nil {
+		return
+	}
+
+	// Code index first: it only needs the clone + graph, not the docs.
+	if d.codeRag != nil {
+		if err := d.codeRag.Index(ctx, repo.ID, repo.Path); err != nil {
+			slog.Error("index code for rag", "repo", repo.ID, "error", err)
+		}
+	}
+
 	if d.gen == nil && d.rag == nil {
 		return
 	}

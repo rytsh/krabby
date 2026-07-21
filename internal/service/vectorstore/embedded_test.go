@@ -2,6 +2,7 @@ package vectorstore
 
 import (
 	"context"
+	"sync"
 	"testing"
 )
 
@@ -210,5 +211,49 @@ func TestEmbeddedDimChangeWipesAndRebuilds(t *testing.T) {
 
 	if len(matches) != 1 || matches[0].Payload.Repo != "o/a" {
 		t.Fatalf("matches after dim change = %+v", matches)
+	}
+}
+
+func TestEmbeddedConcurrentDimChangeWipesOnce(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	dir := t.TempDir()
+	s1 := openEmbedded(t, dir)
+	s2 := openEmbedded(t, dir)
+
+	if err := s1.Upsert(ctx, testItems()); err != nil { // establish dim=3
+		t.Fatalf("Upsert dim=3: %v", err)
+	}
+
+	batches := [][]Item{
+		{{ID: "o/a/new.go#0", Vector: []float32{1, 0, 0, 0}, Payload: Payload{Repo: "o/a", DocPath: "new.go", Chunk: "one"}}},
+		{{ID: "o/b/new.go#0", Vector: []float32{0, 1, 0, 0}, Payload: Payload{Repo: "o/b", DocPath: "new.go", Chunk: "two"}}},
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, len(batches))
+	for i, batch := range batches {
+		wg.Add(1)
+		go func(store *embedded, items []Item) {
+			defer wg.Done()
+			errs <- store.Upsert(ctx, items)
+		}([]*embedded{s1, s2}[i], batch)
+	}
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent upsert: %v", err)
+		}
+	}
+
+	matches, err := s1.Search(ctx, "", []float32{1, 0, 0, 0}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 2 {
+		t.Fatalf("got %d records after concurrent migration, want 2", len(matches))
 	}
 }

@@ -76,15 +76,21 @@ func (q *qdrant) ensureCollection(ctx context.Context, dim int) error {
 		return nil
 	}
 
-	status, _, err := q.do(ctx, http.MethodGet, "/collections/"+q.collection, nil)
+	status, raw, err := q.do(ctx, http.MethodGet, "/collections/"+q.collection, nil)
 	if err != nil {
 		return fmt.Errorf("qdrant get collection; %w", err)
 	}
 
 	if status == http.StatusOK {
-		q.ensured = true
+		existingDim := qdrantVectorSize(raw)
+		if existingDim == 0 || existingDim == dim {
+			q.dim = dim
+			q.ensured = true
 
-		return nil
+			return nil
+		}
+
+		return fmt.Errorf("qdrant collection %q has vector dimension %d, embedder uses %d; configure a new collection name or recreate the derived collection", q.collection, existingDim, dim)
 	}
 
 	if status != http.StatusNotFound {
@@ -98,7 +104,7 @@ func (q *qdrant) ensureCollection(ctx context.Context, dim int) error {
 		},
 	}
 
-	status, raw, err := q.do(ctx, http.MethodPut, "/collections/"+q.collection, body)
+	status, raw, err = q.do(ctx, http.MethodPut, "/collections/"+q.collection, body)
 	if err != nil {
 		return fmt.Errorf("qdrant create collection; %w", err)
 	}
@@ -111,6 +117,29 @@ func (q *qdrant) ensureCollection(ctx context.Context, dim int) error {
 	q.ensured = true
 
 	return nil
+}
+
+// qdrantVectorSize reads the size of the default unnamed vector from a Qdrant
+// collection response. It returns 0 for unknown/newer response shapes so an
+// existing collection is never destructively changed unless mismatch is clear.
+func qdrantVectorSize(raw []byte) int {
+	var out struct {
+		Result struct {
+			Config struct {
+				Params struct {
+					Vectors struct {
+						Size int `json:"size"`
+					} `json:"vectors"`
+				} `json:"params"`
+			} `json:"config"`
+		} `json:"result"`
+	}
+
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return 0
+	}
+
+	return out.Result.Config.Params.Vectors.Size
 }
 
 type qdrantPoint struct {
@@ -133,16 +162,26 @@ func (q *qdrant) Upsert(ctx context.Context, items []Item) error {
 
 		points := make([]qdrantPoint, 0, end-start)
 		for _, it := range items[start:end] {
+			payload := map[string]any{
+				"item_id":  it.ID,
+				"repo":     it.Payload.Repo,
+				"doc_path": it.Payload.DocPath,
+				"title":    it.Payload.Title,
+				"chunk":    it.Payload.Chunk,
+			}
+			if it.Payload.Symbol != "" {
+				payload["symbol"] = it.Payload.Symbol
+			}
+
+			if it.Payload.EndLine > 0 {
+				payload["start_line"] = it.Payload.StartLine
+				payload["end_line"] = it.Payload.EndLine
+			}
+
 			points = append(points, qdrantPoint{
-				ID:     pointID(it.ID),
-				Vector: it.Vector,
-				Payload: map[string]any{
-					"item_id":  it.ID,
-					"repo":     it.Payload.Repo,
-					"doc_path": it.Payload.DocPath,
-					"title":    it.Payload.Title,
-					"chunk":    it.Payload.Chunk,
-				},
+				ID:      pointID(it.ID),
+				Vector:  it.Vector,
+				Payload: payload,
 			})
 		}
 
@@ -195,10 +234,13 @@ func (q *qdrant) Search(ctx context.Context, repo string, vec []float32, topK in
 		Result []struct {
 			Score   float32 `json:"score"`
 			Payload struct {
-				Repo    string `json:"repo"`
-				DocPath string `json:"doc_path"`
-				Title   string `json:"title"`
-				Chunk   string `json:"chunk"`
+				Repo      string `json:"repo"`
+				DocPath   string `json:"doc_path"`
+				Title     string `json:"title"`
+				Chunk     string `json:"chunk"`
+				Symbol    string `json:"symbol"`
+				StartLine int    `json:"start_line"`
+				EndLine   int    `json:"end_line"`
 			} `json:"payload"`
 		} `json:"result"`
 	}
@@ -212,10 +254,13 @@ func (q *qdrant) Search(ctx context.Context, repo string, vec []float32, topK in
 		matches = append(matches, Match{
 			Score: r.Score,
 			Payload: Payload{
-				Repo:    r.Payload.Repo,
-				DocPath: r.Payload.DocPath,
-				Title:   r.Payload.Title,
-				Chunk:   r.Payload.Chunk,
+				Repo:      r.Payload.Repo,
+				DocPath:   r.Payload.DocPath,
+				Title:     r.Payload.Title,
+				Chunk:     r.Payload.Chunk,
+				Symbol:    r.Payload.Symbol,
+				StartLine: r.Payload.StartLine,
+				EndLine:   r.Payload.EndLine,
 			},
 		})
 	}

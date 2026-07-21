@@ -78,10 +78,12 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	api.GET("/repos/{owner}/{name}/docs", server.Wrap(listDocs(mgr)))
 	api.GET("/repos/{owner}/{name}/doc", server.Wrap(getDoc(mgr)))
 	api.GET("/docs/search", server.Wrap(searchDocs(mgr)))
+	api.GET("/code/search", server.Wrap(searchCode(mgr)))
 	api.GET("/docs/config", server.Wrap(getDocsConfig(mgr)))
 	api.PUT("/docs/config", server.Wrap(setDocsConfig(mgr)))
 	api.POST("/docs/config/test/llm", server.Wrap(testLLM(mgr)))
 	api.POST("/docs/config/test/embedder", server.Wrap(testEmbedder(mgr)))
+	api.POST("/docs/config/test/code-embedder", server.Wrap(testCodeEmbedder(mgr)))
 	api.GET("/graph", mergedGraph(mgr))
 	api.GET("/credentials", server.Wrap(listCredentials(mgr)))
 	api.PUT("/credentials", server.Wrap(setCredential(mgr)))
@@ -94,7 +96,7 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	// this catch-all wildcard.
 	uiHandler, built := webHandler()
 	if !built {
-		slog.Warn("web UI not built; serving placeholder (run `make ui`)")
+		slog.Warn("web UI not built; serving placeholder (run `make build-ui`)")
 	}
 
 	server.HandleWildcard("/", uiHandler)
@@ -143,8 +145,8 @@ type settingsResponse struct {
 	} `json:"server"`
 
 	MCP struct {
-		Path         string `json:"path"`
-		APIKeySet    bool   `json:"api_key_set"`
+		Path      string `json:"path"`
+		APIKeySet bool   `json:"api_key_set"`
 	} `json:"mcp"`
 
 	Git struct {
@@ -485,6 +487,31 @@ func searchDocs(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
+func searchCode(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		q := c.Request.URL.Query().Get("q")
+		if q == "" {
+			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": "q query param is required"})
+		}
+
+		repo := c.Request.URL.Query().Get("repo") // "" = all repos
+
+		var top int
+		if v := c.Request.URL.Query().Get("top"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				top = n
+			}
+		}
+
+		snippets, err := mgr.SearchCode(c.Request.Context(), repo, q, top)
+		if err != nil {
+			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+		}
+
+		return c.SendJSON(snippets)
+	}
+}
+
 func getDocsConfig(mgr *manager.Manager) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		cfg, err := mgr.GetDocsConfig(c.Request.Context())
@@ -503,7 +530,7 @@ func setDocsConfig(mgr *manager.Manager) ada.HandlerFunc {
 			return c.SetStatus(http.StatusBadRequest).Err(err)
 		}
 
-		cfg, err := mgr.SetDocsConfig(c.Request.Context(), patch.ToSettings())
+		cfg, err := mgr.PatchDocsConfig(c.Request.Context(), patch)
 		if err != nil {
 			// Settings were saved but the client rebuild failed: report the
 			// error while still returning the redacted (persisted) config.
@@ -526,7 +553,12 @@ func testLLM(mgr *manager.Manager) ada.HandlerFunc {
 			}
 		}
 
-		return c.SendJSON(mgr.TestLLM(c.Request.Context(), patch.ToSettings()))
+		merged, err := applySettingsPatch(c.Request.Context(), mgr, patch)
+		if err != nil {
+			return c.Err(err)
+		}
+
+		return c.SendJSON(mgr.TestLLM(c.Request.Context(), merged))
 	}
 }
 
@@ -539,8 +571,40 @@ func testEmbedder(mgr *manager.Manager) ada.HandlerFunc {
 			}
 		}
 
-		return c.SendJSON(mgr.TestEmbedder(c.Request.Context(), patch.ToSettings()))
+		merged, err := applySettingsPatch(c.Request.Context(), mgr, patch)
+		if err != nil {
+			return c.Err(err)
+		}
+
+		return c.SendJSON(mgr.TestEmbedder(c.Request.Context(), merged))
 	}
+}
+
+func testCodeEmbedder(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		var patch settings.Patch
+		if c.Request.ContentLength != 0 {
+			if err := c.Bind(&patch); err != nil {
+				return c.SetStatus(http.StatusBadRequest).Err(err)
+			}
+		}
+
+		merged, err := applySettingsPatch(c.Request.Context(), mgr, patch)
+		if err != nil {
+			return c.Err(err)
+		}
+
+		return c.SendJSON(mgr.TestCodeEmbedder(c.Request.Context(), merged))
+	}
+}
+
+func applySettingsPatch(ctx context.Context, mgr *manager.Manager, patch settings.Patch) (settings.Settings, error) {
+	current, err := mgr.GetDocsConfig(ctx)
+	if err != nil {
+		return settings.Settings{}, err
+	}
+
+	return patch.Apply(current.Settings), nil
 }
 
 func mergedGraph(mgr *manager.Manager) http.HandlerFunc {

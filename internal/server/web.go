@@ -9,7 +9,7 @@ import (
 )
 
 // dist embeds the built Svelte SPA (source in _ui, built into
-// internal/server/dist). Build it with `make ui` (or `cd _ui && pnpm install &&
+// internal/server/dist). Build it with `make build-ui` (or `cd _ui && pnpm install &&
 // pnpm build`) before compiling krabby; a .gitkeep placeholder keeps the embed
 // pattern valid when the UI has not been built.
 //
@@ -60,7 +60,7 @@ func webPlaceholder() http.Handler {
 		`<title>krabby</title></head>` +
 		`<body style="font-family:system-ui;max-width:40rem;margin:4rem auto;padding:0 1rem">` +
 		`<h1>krabby</h1><p>The web UI has not been built yet.</p>` +
-		`<p>Build it with <code>make ui</code> ` +
+		`<p>Build it with <code>make build-ui</code> ` +
 		`(or <code>cd _ui &amp;&amp; pnpm install &amp;&amp; pnpm build</code>), then rebuild krabby.</p>` +
 		`<p>The REST API is at <code>/api/v1</code> and the MCP endpoint at <code>/mcp</code>.</p>` +
 		`</body></html>`

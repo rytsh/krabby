@@ -52,6 +52,23 @@ type Settings struct {
 	RAGTopDocs      int    `bw:"rag_top_docs"      json:"rag_top_docs"`
 	StoreKind       string `bw:"store_kind"        json:"store_kind"`
 
+	// Code embedder (embeddings) for code RAG. When BaseURL is empty the docs
+	// embedder settings above are used for code as well.
+	CodeEmbedBaseURL string        `bw:"code_embed_base_url" json:"code_embed_base_url"`
+	CodeEmbedAPIKey  string        `bw:"code_embed_api_key"  json:"-"` // write-only
+	CodeEmbedModel   string        `bw:"code_embed_model"    json:"code_embed_model"`
+	CodeEmbedDim     int           `bw:"code_embed_dim"      json:"code_embed_dim"`
+	CodeEmbedBatch   int           `bw:"code_embed_batch"    json:"code_embed_batch"`
+	CodeEmbedTimeout time.Duration `bw:"code_embed_timeout"  json:"code_embed_timeout"`
+
+	// Code RAG (source-code semantic search).
+	CodeRAGEnabled      bool     `bw:"code_rag_enabled"       json:"code_rag_enabled"`
+	CodeRAGChunkSize    int      `bw:"code_rag_chunk_size"    json:"code_rag_chunk_size"`
+	CodeRAGChunkOverlap int      `bw:"code_rag_chunk_overlap" json:"code_rag_chunk_overlap"`
+	CodeRAGTopK         int      `bw:"code_rag_top_k"         json:"code_rag_top_k"`
+	CodeRAGInclude      []string `bw:"code_rag_include"       json:"code_rag_include"`
+	CodeRAGExclude      []string `bw:"code_rag_exclude"       json:"code_rag_exclude"`
+
 	// Qdrant (used when StoreKind == "qdrant").
 	QdrantURL        string `bw:"qdrant_url"        json:"qdrant_url"`
 	QdrantAPIKey     string `bw:"qdrant_api_key"   json:"-"` // write-only
@@ -64,23 +81,27 @@ type Settings struct {
 // booleans indicating whether each is set.
 type Redacted struct {
 	Settings
-	LLMAPIKeySet    bool `json:"llm_api_key_set"`
-	EmbedAPIKeySet  bool `json:"embed_api_key_set"`
-	QdrantAPIKeySet bool `json:"qdrant_api_key_set"`
+	DocsDefaultPrompt  string `json:"docs_default_prompt"`
+	LLMAPIKeySet       bool   `json:"llm_api_key_set"`
+	EmbedAPIKeySet     bool   `json:"embed_api_key_set"`
+	CodeEmbedAPIKeySet bool   `json:"code_embed_api_key_set"`
+	QdrantAPIKeySet    bool   `json:"qdrant_api_key_set"`
 }
 
 // Redact returns a view with secrets removed and "*_set" booleans populated.
 func (s Settings) Redact() Redacted {
 	r := Redacted{
-		Settings:        s,
-		LLMAPIKeySet:    s.LLMAPIKey != "",
-		EmbedAPIKeySet:  s.EmbedAPIKey != "",
-		QdrantAPIKeySet: s.QdrantAPIKey != "",
+		Settings:           s,
+		LLMAPIKeySet:       s.LLMAPIKey != "",
+		EmbedAPIKeySet:     s.EmbedAPIKey != "",
+		CodeEmbedAPIKeySet: s.CodeEmbedAPIKey != "",
+		QdrantAPIKeySet:    s.QdrantAPIKey != "",
 	}
 	// Defensive: ensure the embedded copy carries no secrets (they have json:"-"
 	// so they never marshal, but zero them to avoid accidental in-process leaks).
 	r.Settings.LLMAPIKey = ""
 	r.Settings.EmbedAPIKey = ""
+	r.Settings.CodeEmbedAPIKey = ""
 	r.Settings.QdrantAPIKey = ""
 
 	return r
@@ -90,64 +111,163 @@ func (s Settings) Redact() Redacted {
 // Unlike Settings, its secret fields DO decode from JSON (write-only on input);
 // they are never present in any response type. Empty secret = keep existing.
 type Patch struct {
-	DocsEnabled     bool     `json:"docs_enabled"`
-	DocsConcurrency int      `json:"docs_concurrency"`
-	DocsInclude     []string `json:"docs_include"`
-	DocsExclude     []string `json:"docs_exclude"`
-	DocsPrompt      string   `json:"docs_prompt"`
+	DocsEnabled     *bool     `json:"docs_enabled"`
+	DocsConcurrency *int      `json:"docs_concurrency"`
+	DocsInclude     *[]string `json:"docs_include"`
+	DocsExclude     *[]string `json:"docs_exclude"`
+	DocsPrompt      *string   `json:"docs_prompt"`
 
-	LLMBaseURL string        `json:"llm_base_url"`
-	LLMAPIKey  string        `json:"llm_api_key"`
-	LLMModel   string        `json:"llm_model"`
-	LLMTimeout time.Duration `json:"llm_timeout"`
+	LLMBaseURL *string        `json:"llm_base_url"`
+	LLMAPIKey  *string        `json:"llm_api_key"`
+	LLMModel   *string        `json:"llm_model"`
+	LLMTimeout *time.Duration `json:"llm_timeout"`
 
-	EmbedBaseURL string        `json:"embed_base_url"`
-	EmbedAPIKey  string        `json:"embed_api_key"`
-	EmbedModel   string        `json:"embed_model"`
-	EmbedDim     int           `json:"embed_dim"`
-	EmbedBatch   int           `json:"embed_batch"`
-	EmbedTimeout time.Duration `json:"embed_timeout"`
+	EmbedBaseURL *string        `json:"embed_base_url"`
+	EmbedAPIKey  *string        `json:"embed_api_key"`
+	EmbedModel   *string        `json:"embed_model"`
+	EmbedDim     *int           `json:"embed_dim"`
+	EmbedBatch   *int           `json:"embed_batch"`
+	EmbedTimeout *time.Duration `json:"embed_timeout"`
 
-	RAGEnabled      bool   `json:"rag_enabled"`
-	RAGChunkSize    int    `json:"rag_chunk_size"`
-	RAGChunkOverlap int    `json:"rag_chunk_overlap"`
-	RAGTopK         int    `json:"rag_top_k"`
-	RAGTopDocs      int    `json:"rag_top_docs"`
-	StoreKind       string `json:"store_kind"`
+	RAGEnabled      *bool   `json:"rag_enabled"`
+	RAGChunkSize    *int    `json:"rag_chunk_size"`
+	RAGChunkOverlap *int    `json:"rag_chunk_overlap"`
+	RAGTopK         *int    `json:"rag_top_k"`
+	RAGTopDocs      *int    `json:"rag_top_docs"`
+	StoreKind       *string `json:"store_kind"`
 
-	QdrantURL        string `json:"qdrant_url"`
-	QdrantAPIKey     string `json:"qdrant_api_key"`
-	QdrantCollection string `json:"qdrant_collection"`
+	CodeEmbedBaseURL *string        `json:"code_embed_base_url"`
+	CodeEmbedAPIKey  *string        `json:"code_embed_api_key"`
+	CodeEmbedModel   *string        `json:"code_embed_model"`
+	CodeEmbedDim     *int           `json:"code_embed_dim"`
+	CodeEmbedBatch   *int           `json:"code_embed_batch"`
+	CodeEmbedTimeout *time.Duration `json:"code_embed_timeout"`
+
+	CodeRAGEnabled      *bool     `json:"code_rag_enabled"`
+	CodeRAGChunkSize    *int      `json:"code_rag_chunk_size"`
+	CodeRAGChunkOverlap *int      `json:"code_rag_chunk_overlap"`
+	CodeRAGTopK         *int      `json:"code_rag_top_k"`
+	CodeRAGInclude      *[]string `json:"code_rag_include"`
+	CodeRAGExclude      *[]string `json:"code_rag_exclude"`
+
+	QdrantURL        *string `json:"qdrant_url"`
+	QdrantAPIKey     *string `json:"qdrant_api_key"`
+	QdrantCollection *string `json:"qdrant_collection"`
 }
 
-// ToSettings converts a decoded Patch into a Settings value for Store.Set.
-func (p Patch) ToSettings() Settings {
-	return Settings{
-		DocsEnabled:      p.DocsEnabled,
-		DocsConcurrency:  p.DocsConcurrency,
-		DocsInclude:      p.DocsInclude,
-		DocsExclude:      p.DocsExclude,
-		DocsPrompt:       p.DocsPrompt,
-		LLMBaseURL:       p.LLMBaseURL,
-		LLMAPIKey:        p.LLMAPIKey,
-		LLMModel:         p.LLMModel,
-		LLMTimeout:       p.LLMTimeout,
-		EmbedBaseURL:     p.EmbedBaseURL,
-		EmbedAPIKey:      p.EmbedAPIKey,
-		EmbedModel:       p.EmbedModel,
-		EmbedDim:         p.EmbedDim,
-		EmbedBatch:       p.EmbedBatch,
-		EmbedTimeout:     p.EmbedTimeout,
-		RAGEnabled:       p.RAGEnabled,
-		RAGChunkSize:     p.RAGChunkSize,
-		RAGChunkOverlap:  p.RAGChunkOverlap,
-		RAGTopK:          p.RAGTopK,
-		RAGTopDocs:       p.RAGTopDocs,
-		StoreKind:        p.StoreKind,
-		QdrantURL:        p.QdrantURL,
-		QdrantAPIKey:     p.QdrantAPIKey,
-		QdrantCollection: p.QdrantCollection,
+// Apply overlays fields present in p onto base. Pointer fields distinguish an
+// omitted JSON property from an explicit zero/false/empty value.
+func (p Patch) Apply(base Settings) Settings {
+	if p.DocsEnabled != nil {
+		base.DocsEnabled = *p.DocsEnabled
 	}
+	if p.DocsConcurrency != nil {
+		base.DocsConcurrency = *p.DocsConcurrency
+	}
+	if p.DocsInclude != nil {
+		base.DocsInclude = *p.DocsInclude
+	}
+	if p.DocsExclude != nil {
+		base.DocsExclude = *p.DocsExclude
+	}
+	if p.DocsPrompt != nil {
+		base.DocsPrompt = *p.DocsPrompt
+	}
+	if p.LLMBaseURL != nil {
+		base.LLMBaseURL = *p.LLMBaseURL
+	}
+	if p.LLMAPIKey != nil {
+		base.LLMAPIKey = *p.LLMAPIKey
+	}
+	if p.LLMModel != nil {
+		base.LLMModel = *p.LLMModel
+	}
+	if p.LLMTimeout != nil {
+		base.LLMTimeout = *p.LLMTimeout
+	}
+	if p.EmbedBaseURL != nil {
+		base.EmbedBaseURL = *p.EmbedBaseURL
+	}
+	if p.EmbedAPIKey != nil {
+		base.EmbedAPIKey = *p.EmbedAPIKey
+	}
+	if p.EmbedModel != nil {
+		base.EmbedModel = *p.EmbedModel
+	}
+	if p.EmbedDim != nil {
+		base.EmbedDim = *p.EmbedDim
+	}
+	if p.EmbedBatch != nil {
+		base.EmbedBatch = *p.EmbedBatch
+	}
+	if p.EmbedTimeout != nil {
+		base.EmbedTimeout = *p.EmbedTimeout
+	}
+	if p.RAGEnabled != nil {
+		base.RAGEnabled = *p.RAGEnabled
+	}
+	if p.RAGChunkSize != nil {
+		base.RAGChunkSize = *p.RAGChunkSize
+	}
+	if p.RAGChunkOverlap != nil {
+		base.RAGChunkOverlap = *p.RAGChunkOverlap
+	}
+	if p.RAGTopK != nil {
+		base.RAGTopK = *p.RAGTopK
+	}
+	if p.RAGTopDocs != nil {
+		base.RAGTopDocs = *p.RAGTopDocs
+	}
+	if p.StoreKind != nil {
+		base.StoreKind = *p.StoreKind
+	}
+	if p.CodeEmbedBaseURL != nil {
+		base.CodeEmbedBaseURL = *p.CodeEmbedBaseURL
+	}
+	if p.CodeEmbedAPIKey != nil {
+		base.CodeEmbedAPIKey = *p.CodeEmbedAPIKey
+	}
+	if p.CodeEmbedModel != nil {
+		base.CodeEmbedModel = *p.CodeEmbedModel
+	}
+	if p.CodeEmbedDim != nil {
+		base.CodeEmbedDim = *p.CodeEmbedDim
+	}
+	if p.CodeEmbedBatch != nil {
+		base.CodeEmbedBatch = *p.CodeEmbedBatch
+	}
+	if p.CodeEmbedTimeout != nil {
+		base.CodeEmbedTimeout = *p.CodeEmbedTimeout
+	}
+	if p.CodeRAGEnabled != nil {
+		base.CodeRAGEnabled = *p.CodeRAGEnabled
+	}
+	if p.CodeRAGChunkSize != nil {
+		base.CodeRAGChunkSize = *p.CodeRAGChunkSize
+	}
+	if p.CodeRAGChunkOverlap != nil {
+		base.CodeRAGChunkOverlap = *p.CodeRAGChunkOverlap
+	}
+	if p.CodeRAGTopK != nil {
+		base.CodeRAGTopK = *p.CodeRAGTopK
+	}
+	if p.CodeRAGInclude != nil {
+		base.CodeRAGInclude = *p.CodeRAGInclude
+	}
+	if p.CodeRAGExclude != nil {
+		base.CodeRAGExclude = *p.CodeRAGExclude
+	}
+	if p.QdrantURL != nil {
+		base.QdrantURL = *p.QdrantURL
+	}
+	if p.QdrantAPIKey != nil {
+		base.QdrantAPIKey = *p.QdrantAPIKey
+	}
+	if p.QdrantCollection != nil {
+		base.QdrantCollection = *p.QdrantCollection
+	}
+
+	return base
 }
 
 // Store persists a single Settings record.
@@ -229,6 +349,10 @@ func (s *Store) Set(ctx context.Context, patch Settings) (Settings, error) {
 
 	if next.EmbedAPIKey == "" {
 		next.EmbedAPIKey = cur.EmbedAPIKey
+	}
+
+	if next.CodeEmbedAPIKey == "" {
+		next.CodeEmbedAPIKey = cur.CodeEmbedAPIKey
 	}
 
 	if next.QdrantAPIKey == "" {
