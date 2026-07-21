@@ -154,10 +154,9 @@ type settingsResponse struct {
 	} `json:"git"`
 
 	Graphify struct {
-		Bin              string `json:"bin"`
-		Python           string `json:"python,omitempty"`
-		BuildTimeout     string `json:"build_timeout"`
-		ServeIdleTimeout string `json:"serve_idle_timeout"`
+		Bin          string `json:"bin"`
+		Python       string `json:"python,omitempty"`
+		BuildTimeout string `json:"build_timeout"`
 	} `json:"graphify"`
 
 	Webhook struct {
@@ -185,7 +184,6 @@ func getSettings(cfg *config.Config) ada.HandlerFunc {
 		s.Graphify.Bin = cfg.Graphify.Bin
 		s.Graphify.Python = cfg.Graphify.Python
 		s.Graphify.BuildTimeout = cfg.Graphify.BuildTimeout.String()
-		s.Graphify.ServeIdleTimeout = cfg.Graphify.ServeIdleTimeout.String()
 
 		s.Webhook.GithubSecretSet = cfg.Webhook.GithubSecret != ""
 

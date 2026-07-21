@@ -226,6 +226,20 @@
       </label>
     </div>
 
+    <label class="mt-3 flex flex-col gap-1 text-[13px] text-dim">
+      Doc generation prompt (system)
+      <textarea
+        class="input font-mono text-[12px]"
+        rows="8"
+        bind:value={docsCfg.docs_prompt}
+        placeholder="Leave blank to use the built-in default prompt."
+      ></textarea>
+      <span class="text-[12px] text-faint">
+        Sent as the system message for each file. The file content and its graph neighborhood are
+        appended as the user message. Blank = built-in default.
+      </span>
+    </label>
+
     <!-- Embeddings -->
     <div class="mb-2 mt-6 flex items-center justify-between">
       <span class="text-[13px] font-semibold text-dim">Embeddings</span>

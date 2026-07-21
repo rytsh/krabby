@@ -81,6 +81,7 @@ type setDocsConfigArgs struct {
 	DocsConcurrency int      `json:"docs_concurrency,omitempty" jsonschema:"parallel per-file LLM doc calls"`
 	DocsInclude     []string `json:"docs_include,omitempty" jsonschema:"source globs to document (repo-relative)"`
 	DocsExclude     []string `json:"docs_exclude,omitempty" jsonschema:"source globs to skip"`
+	DocsPrompt      string   `json:"docs_prompt,omitempty" jsonschema:"system prompt for per-file doc generation (empty uses the built-in default)"`
 
 	LLMBaseURL string `json:"llm_base_url,omitempty" jsonschema:"OpenAI-compatible chat base URL, e.g. https://api.openai.com/v1"`
 	LLMAPIKey  string `json:"llm_api_key,omitempty" jsonschema:"chat API key (write-only; leave empty to keep existing)"`
@@ -118,6 +119,7 @@ func (a setDocsConfigArgs) toSettings() settings.Settings {
 		DocsConcurrency: a.DocsConcurrency,
 		DocsInclude:     a.DocsInclude,
 		DocsExclude:     a.DocsExclude,
+		DocsPrompt:      a.DocsPrompt,
 
 		LLMBaseURL: a.LLMBaseURL,
 		LLMAPIKey:  a.LLMAPIKey,

@@ -15,11 +15,11 @@ import (
 	"github.com/rytsh/krabby/internal/service/credentials"
 	"github.com/rytsh/krabby/internal/service/gitops"
 	"github.com/rytsh/krabby/internal/service/graphify"
+	"github.com/rytsh/krabby/internal/service/graphquery"
 	"github.com/rytsh/krabby/internal/service/manager"
 	"github.com/rytsh/krabby/internal/service/mcptools"
 	"github.com/rytsh/krabby/internal/service/registry"
 	"github.com/rytsh/krabby/internal/service/scheduler"
-	"github.com/rytsh/krabby/internal/service/servepool"
 	"github.com/rytsh/krabby/internal/service/settings"
 	"github.com/rytsh/krabby/internal/storage"
 )
@@ -74,9 +74,8 @@ func run(ctx context.Context) error {
 
 	slog.Info("graphify resolved", "python", gfy.Python())
 
-	// Per-graph python MCP server pool.
-	pool := servepool.New(ctx, gfy.Python(), version, cfg.Graphify.ServeIdleTimeout)
-	defer pool.StopAll()
+	// Native in-process graph query engine (replaces the python serve pool).
+	engine := graphquery.NewEngine()
 
 	git := gitops.New(cfg.Git.SSHKeyPath)
 
@@ -92,7 +91,7 @@ func run(ctx context.Context) error {
 		return err
 	}
 
-	mgr := manager.New(ctx, reg, git, gfy, pool, creds, cfg.ReposDir(), cfg.MergedGraphPath(),
+	mgr := manager.New(ctx, reg, git, gfy, engine, creds, cfg.ReposDir(), cfg.MergedGraphPath(),
 		manager.DocsDeps{
 			DocsDir:    cfg.DocsDir,
 			VectorsDir: cfg.VectorsDir(),
@@ -141,6 +140,7 @@ func seedSettings(cfg *config.Config) settings.Settings {
 		DocsConcurrency: cfg.Docs.Concurrency,
 		DocsInclude:     cfg.Docs.Include,
 		DocsExclude:     cfg.Docs.Exclude,
+		DocsPrompt:      cfg.Docs.Prompt,
 
 		LLMBaseURL: cfg.LLM.BaseURL,
 		LLMAPIKey:  cfg.LLM.APIKey,

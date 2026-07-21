@@ -114,7 +114,7 @@ func (m *Manager) buildBundle(s settings.Settings) (*docsBundle, error) {
 		case err != nil:
 			return nil, fmt.Errorf("build llm client; %w", err)
 		default:
-			b.gen = docgen.New(docsConfig(s), chat)
+			b.gen = docgen.New(docsConfig(s), chat, m.engine)
 		}
 	}
 
@@ -252,6 +252,7 @@ func docsConfig(s settings.Settings) config.Docs {
 		Concurrency: s.DocsConcurrency,
 		Include:     s.DocsInclude,
 		Exclude:     s.DocsExclude,
+		Prompt:      s.DocsPrompt,
 	}
 }
 

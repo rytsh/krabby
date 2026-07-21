@@ -11,23 +11,27 @@ the background, and lets any MCP-capable LLM agent query them.
  (streamable HTTP)   │  ├─ MCP tools (manage + query)        │──► git clone/pull
                      │  ├─ REST API + GitHub webhook         │──► graphify update
  CI/webhook ──HTTP─► │  ├─ Registry (bw/BadgerDB)            │──► graphify merge-graphs
+                     │  ├─ Native graph query engine (Go)    │
                      │  └─ Scheduler (poll interval)         │
-                     └──────────────┬────────────────────────┘
-                                    │ lazy spawn + MCP proxy
-                                    ▼
-                     python -m graphify.serve (one per graph, hot-reloads)
+                     └───────────────────────────────────────┘
 ```
 
-- **Queries are fast**: per-graph `graphify.serve` processes are spawned lazily,
-  keep the graph in memory, hot-reload `graph.json` on rebuild, and are killed
-  when idle.
-- **Builds are cheap**: code extraction is AST-based — no LLM key needed.
+- **Queries are fast**: the graph query tools (`query_graph`, `get_node`,
+  `get_neighbors`, `get_community`, `god_nodes`, `graph_stats`, `shortest_path`)
+  are answered **in-process by a native Go engine** that reads `graph.json`
+  directly and hot-reloads it on rebuild — no per-graph subprocess is spawned.
+- **Builds are cheap**: code extraction is AST-based — no LLM key needed. The
+  graphify CLI is only invoked to build/merge graphs.
+- **Docs & RAG (optional)**: with an LLM configured, krabby generates per-file
+  Markdown documentation (prompt is configurable in Settings) plus a repo
+  overview, browsable in the UI.
 
 ## Requirements
 
 - Go 1.26+ (build), git, ssh (for private repos)
-- graphify CLI with the MCP extra: `uv tool install --with 'graphifyy[mcp]' graphifyy`
-  (or `pip install 'graphifyy[mcp]'`) — the extra provides the HTTP query servers
+- graphify CLI for building graphs: `uv tool install graphifyy`
+  (or `pip install graphifyy`). The MCP extra is **no longer required** — graph
+  queries are answered in-process by krabby's native Go engine.
 
 ## Quick start
 

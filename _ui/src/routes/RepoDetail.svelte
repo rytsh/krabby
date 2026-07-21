@@ -14,6 +14,40 @@
   let fileContent = null;
   let fileError = "";
 
+  // Browser mode: "files" (source tree) or "docs" (generated markdown).
+  let mode = "files";
+  let docList = [];
+  let docsError = "";
+  let selectedDoc = null;
+  let docContent = null;
+
+  async function loadDocs() {
+    docsError = "";
+    try {
+      docList = await api.docs(repoId);
+    } catch (e) {
+      docsError = e.message;
+      docList = [];
+    }
+  }
+
+  async function openDoc(d) {
+    selectedDoc = d.path;
+    docContent = null;
+    docsError = "";
+    try {
+      const res = await api.doc(repoId, d.path);
+      docContent = res.content;
+    } catch (e) {
+      docsError = e.message;
+    }
+  }
+
+  function setMode(m) {
+    mode = m;
+    if (m === "docs" && docList.length === 0 && !docsError) loadDocs();
+  }
+
   async function loadRepo() {
     try {
       repo = await api.repo(repoId);
@@ -130,49 +164,99 @@
   </div>
 {/if}
 
-<div class="grid grid-cols-[280px_1fr] items-start gap-3">
-  <div class="card max-h-[70vh] overflow-auto">
-    <div class="sticky top-0 flex items-center gap-2 border-b border-line bg-surface px-3 py-2.5">
-      <span class="text-[13px] text-dim">Files</span>
-      <span class="font-mono text-[13px] text-faint">/{cwd}</span>
-      {#if cwd}<button class="btn btn-sm ml-auto" on:click={up}>up</button>{/if}
-    </div>
-    {#if fileError}
-      <div class="err-box m-2">{fileError}</div>
-    {/if}
-    <ul class="m-0 list-none p-1.5">
-      {#each entries as e}
-        <li>
-          <button
-            class="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[13px] text-dim hover:bg-surface-2 hover:text-fg"
-            class:!bg-surface-2={selected === e.path}
-            class:!text-fg={selected === e.path}
-            on:click={() => open(e)}
-          >
-            <span class="w-3 text-faint">{e.is_dir ? "▸" : ""}</span>
-            <span class="font-mono">{baseName(e.path)}</span>
-          </button>
-        </li>
-      {/each}
-      {#if entries.length === 0 && !fileError}
-        <li class="p-4 text-dim">empty</li>
-      {/if}
-    </ul>
-  </div>
+<div class="mb-3 flex gap-1">
+  <button class="btn btn-sm" class:btn-primary={mode === "files"} on:click={() => setMode("files")}>Files</button>
+  <button class="btn btn-sm" class:btn-primary={mode === "docs"} on:click={() => setMode("docs")}>Docs</button>
+</div>
 
-  <div class="card max-h-[70vh] min-h-[200px] overflow-auto">
-    {#if selected}
-      <div class="sticky top-0 border-b border-line bg-surface px-3.5 py-2.5 font-mono text-xs text-faint">
-        {selected}
-        {#if fileContent && fileContent.truncated}<span class="ml-2 text-warn">truncated</span>{/if}
+<div class="grid grid-cols-[280px_1fr] items-start gap-3">
+  {#if mode === "files"}
+    <div class="card max-h-[70vh] overflow-auto">
+      <div class="sticky top-0 flex items-center gap-2 border-b border-line bg-surface px-3 py-2.5">
+        <span class="text-[13px] text-dim">Files</span>
+        <span class="font-mono text-[13px] text-faint">/{cwd}</span>
+        {#if cwd}<button class="btn btn-sm ml-auto" on:click={up}>up</button>{/if}
       </div>
-      {#if fileContent}
-        <pre class="m-0 overflow-x-auto p-3.5 font-mono text-[12.5px] leading-relaxed">{fileContent.content}</pre>
-      {:else if !fileError}
-        <div class="p-4 text-dim">Loading…</div>
+      {#if fileError}
+        <div class="err-box m-2">{fileError}</div>
       {/if}
-    {:else}
-      <div class="p-4 text-dim">Select a file to view its source.</div>
-    {/if}
-  </div>
+      <ul class="m-0 list-none p-1.5">
+        {#each entries as e}
+          <li>
+            <button
+              class="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[13px] text-dim hover:bg-surface-2 hover:text-fg"
+              class:!bg-surface-2={selected === e.path}
+              class:!text-fg={selected === e.path}
+              on:click={() => open(e)}
+            >
+              <span class="w-3 text-faint">{e.is_dir ? "▸" : ""}</span>
+              <span class="font-mono">{baseName(e.path)}</span>
+            </button>
+          </li>
+        {/each}
+        {#if entries.length === 0 && !fileError}
+          <li class="p-4 text-dim">empty</li>
+        {/if}
+      </ul>
+    </div>
+
+    <div class="card max-h-[70vh] min-h-[200px] overflow-auto">
+      {#if selected}
+        <div class="sticky top-0 border-b border-line bg-surface px-3.5 py-2.5 font-mono text-xs text-faint">
+          {selected}
+          {#if fileContent && fileContent.truncated}<span class="ml-2 text-warn">truncated</span>{/if}
+        </div>
+        {#if fileContent}
+          <pre class="m-0 overflow-x-auto p-3.5 font-mono text-[12.5px] leading-relaxed">{fileContent.content}</pre>
+        {:else if !fileError}
+          <div class="p-4 text-dim">Loading…</div>
+        {/if}
+      {:else}
+        <div class="p-4 text-dim">Select a file to view its source.</div>
+      {/if}
+    </div>
+  {:else}
+    <div class="card max-h-[70vh] overflow-auto">
+      <div class="sticky top-0 flex items-center gap-2 border-b border-line bg-surface px-3 py-2.5">
+        <span class="text-[13px] text-dim">Generated docs</span>
+        <span class="font-mono text-[13px] text-faint">{docList.length}</span>
+      </div>
+      {#if docsError}
+        <div class="err-box m-2">{docsError}</div>
+      {/if}
+      <ul class="m-0 list-none p-1.5">
+        {#each docList as d}
+          <li>
+            <button
+              class="flex w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-left text-[13px] text-dim hover:bg-surface-2 hover:text-fg"
+              class:!bg-surface-2={selectedDoc === d.path}
+              class:!text-fg={selectedDoc === d.path}
+              on:click={() => openDoc(d)}
+            >
+              <span class="font-mono">{d.title || d.path}</span>
+              {#if d.source_path}<span class="text-[11px] text-faint">{d.source_path}</span>{/if}
+            </button>
+          </li>
+        {/each}
+        {#if docList.length === 0 && !docsError}
+          <li class="p-4 text-dim">No generated docs. Enable doc generation in Settings, then refresh the repo.</li>
+        {/if}
+      </ul>
+    </div>
+
+    <div class="card max-h-[70vh] min-h-[200px] overflow-auto">
+      {#if selectedDoc}
+        <div class="sticky top-0 border-b border-line bg-surface px-3.5 py-2.5 font-mono text-xs text-faint">
+          {selectedDoc}
+        </div>
+        {#if docContent !== null}
+          <pre class="m-0 overflow-x-auto whitespace-pre-wrap p-3.5 text-[13px] leading-relaxed">{docContent}</pre>
+        {:else if !docsError}
+          <div class="p-4 text-dim">Loading…</div>
+        {/if}
+      {:else}
+        <div class="p-4 text-dim">Select a document to view it.</div>
+      {/if}
+    </div>
+  {/if}
 </div>

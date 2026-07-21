@@ -79,8 +79,6 @@ type Graphify struct {
 	Python string `cfg:"python"`
 	// BuildTimeout bounds a single extract/update/merge run.
 	BuildTimeout time.Duration `cfg:"build_timeout" default:"30m"`
-	// ServeIdleTimeout kills per-graph python MCP servers idle this long. 0 disables.
-	ServeIdleTimeout time.Duration `cfg:"serve_idle_timeout" default:"30m"`
 }
 
 // Webhook configures inbound webhook verification.
@@ -100,6 +98,10 @@ type Docs struct {
 	Include []string `cfg:"include"`
 	// Exclude globs skip files (evaluated after Include).
 	Exclude []string `cfg:"exclude"`
+	// Prompt is the system prompt sent to the LLM for per-file documentation.
+	// Empty falls back to docgen.DefaultPrompt. The file content and its graph
+	// neighborhood are appended as the user message.
+	Prompt string `cfg:"prompt"`
 }
 
 // LLM configures an OpenAI-compatible chat-completions endpoint.

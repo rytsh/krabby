@@ -1,5 +1,5 @@
 // Package manager orchestrates repositories: clone, build, refresh, merge,
-// and query routing to the servepool.
+// and query routing to the native graph query engine.
 package manager
 
 import (
@@ -18,22 +18,23 @@ import (
 	"github.com/rytsh/krabby/internal/service/docgen"
 	"github.com/rytsh/krabby/internal/service/gitops"
 	"github.com/rytsh/krabby/internal/service/graphify"
+	"github.com/rytsh/krabby/internal/service/graphquery"
 	"github.com/rytsh/krabby/internal/service/lease"
 	"github.com/rytsh/krabby/internal/service/rag"
 	"github.com/rytsh/krabby/internal/service/registry"
 	"github.com/rytsh/krabby/internal/service/repofs"
-	"github.com/rytsh/krabby/internal/service/servepool"
 	"github.com/rytsh/krabby/internal/service/settings"
 	"github.com/rytsh/krabby/internal/service/vectorstore"
 )
 
-// Manager coordinates registry, git, graphify builds and the serve pool.
+// Manager coordinates registry, git, graphify builds and the native graph
+// query engine.
 type Manager struct {
-	reg   *registry.Registry
-	git   *gitops.Git
-	gfy   *graphify.Client
-	pool  *servepool.Pool
-	creds *credentials.Store
+	reg    *registry.Registry
+	git    *gitops.Git
+	gfy    *graphify.Client
+	engine *graphquery.Engine
+	creds  *credentials.Store
 
 	reposDir   string
 	mergedPath string
@@ -82,7 +83,7 @@ func New(
 	reg *registry.Registry,
 	git *gitops.Git,
 	gfy *graphify.Client,
-	pool *servepool.Pool,
+	engine *graphquery.Engine,
 	creds *credentials.Store,
 	reposDir, mergedPath string,
 	docs DocsDeps,
@@ -91,7 +92,7 @@ func New(
 		reg:        reg,
 		git:        git,
 		gfy:        gfy,
-		pool:       pool,
+		engine:     engine,
 		creds:      creds,
 		reposDir:   reposDir,
 		mergedPath: mergedPath,
@@ -227,7 +228,7 @@ func (m *Manager) RemoveRepo(ctx context.Context, id string) error {
 		return fmt.Errorf("repo %s not found", id)
 	}
 
-	m.pool.Invalidate(graphify.GraphPath(repo.Path))
+	m.engine.Invalidate(graphify.GraphPath(repo.Path))
 
 	// Best-effort: drop the repo's vectors from the RAG index. The markdown docs
 	// live under repo.Path and are removed with the clone below.
@@ -552,15 +553,24 @@ func (m *Manager) GraphPathFor(ctx context.Context, repoID string) (string, erro
 	return gp, nil
 }
 
-// CallGraphTool proxies an MCP tool call to the server for the resolved graph.
+// CallGraphTool answers a graph query tool call against the resolved graph using
+// the in-process native engine (no python serve process is spawned).
 func (m *Manager) CallGraphTool(ctx context.Context, repoID, tool string, args map[string]any) (*mcp.CallToolResult, error) {
 	graphPath, err := m.GraphPathFor(ctx, repoID)
 	if err != nil {
 		return nil, err
 	}
 
-	return m.pool.CallTool(ctx, graphPath, tool, args)
+	text, err := m.engine.Call(graphPath, tool, args)
+	if err != nil {
+		return nil, err
+	}
+
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}, nil
 }
+
+// GraphEngine exposes the native graph engine for in-process consumers (docgen).
+func (m *Manager) GraphEngine() *graphquery.Engine { return m.engine }
 
 // repoCloneDir resolves a repo id to its on-disk clone directory, verifying the
 // repo is tracked and has actually been cloned.

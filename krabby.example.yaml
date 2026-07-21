@@ -23,8 +23,7 @@ git:
 graphify:
   bin: graphify              # graphify CLI (uv tool install graphifyy)
   # python: /path/to/python  # interpreter that can `import graphify` (auto-detected)
-  build_timeout: 30m
-  serve_idle_timeout: 30m    # kill idle per-graph query servers
+  build_timeout: 30m         # graph queries are answered in-process (no serve subprocess)
 
 webhook:
   # github_secret: change-me  # verifies X-Hub-Signature-256 on /webhook/github

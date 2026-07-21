@@ -28,6 +28,7 @@ type Settings struct {
 	DocsConcurrency int      `bw:"docs_concurrency" json:"docs_concurrency"`
 	DocsInclude     []string `bw:"docs_include"     json:"docs_include"`
 	DocsExclude     []string `bw:"docs_exclude"     json:"docs_exclude"`
+	DocsPrompt      string   `bw:"docs_prompt"      json:"docs_prompt"`
 
 	// LLM (chat) for doc generation.
 	LLMBaseURL string        `bw:"llm_base_url" json:"llm_base_url"`
@@ -93,6 +94,7 @@ type Patch struct {
 	DocsConcurrency int      `json:"docs_concurrency"`
 	DocsInclude     []string `json:"docs_include"`
 	DocsExclude     []string `json:"docs_exclude"`
+	DocsPrompt      string   `json:"docs_prompt"`
 
 	LLMBaseURL string        `json:"llm_base_url"`
 	LLMAPIKey  string        `json:"llm_api_key"`
@@ -125,6 +127,7 @@ func (p Patch) ToSettings() Settings {
 		DocsConcurrency:  p.DocsConcurrency,
 		DocsInclude:      p.DocsInclude,
 		DocsExclude:      p.DocsExclude,
+		DocsPrompt:       p.DocsPrompt,
 		LLMBaseURL:       p.LLMBaseURL,
 		LLMAPIKey:        p.LLMAPIKey,
 		LLMModel:         p.LLMModel,
