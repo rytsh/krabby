@@ -1,0 +1,6 @@
+bin/
+dist/
+krabby.yaml
+krabby.toml
+.env
+.env.local

@@ -1,0 +1,39 @@
+# krabby example configuration.
+# Copy to krabby.yaml (auto-discovered in cwd) or point CONFIG_FILE at it.
+# Every field can also be set via env with the KRABBY_ prefix,
+# e.g. KRABBY_SERVER_PORT=9090, KRABBY_MCP_API_KEY=....
+
+log_level: info
+
+# Clones, graphs and state live here.
+data_dir: ~/.krabby
+
+server:
+  host: ""
+  port: "8080"
+
+mcp:
+  path: /mcp
+  # api_key: change-me            # require X-Api-Key / Bearer on /mcp
+
+git:
+  # ssh_key_path: ~/.ssh/id_ed25519   # for private repos
+  poll_interval: 1h                    # 0 disables background polling
+
+graphify:
+  bin: graphify              # graphify CLI (uv tool install graphifyy)
+  # python: /path/to/python  # interpreter that can `import graphify` (auto-detected)
+  build_timeout: 30m
+  serve_idle_timeout: 30m    # kill idle per-graph query servers
+
+webhook:
+  # github_secret: change-me  # verifies X-Hub-Signature-256 on /webhook/github
+
+# Repositories to track at startup. More can be added at runtime via the
+# add_repo MCP tool or POST /api/v1/repos.
+repos:
+  - url: git@github.com:rakunlabs/ada.git
+  - url: git@github.com:rakunlabs/chu.git
+    branch: main
+
+telemetry: {}
