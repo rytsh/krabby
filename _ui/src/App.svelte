@@ -35,7 +35,7 @@
   <aside class="flex w-60 flex-shrink-0 flex-col border-r border-line bg-surface p-3">
     <div class="flex items-center gap-2 px-2 pb-5 pt-2">
       <span class="grid h-7 w-7 place-items-center rounded-md bg-accent text-accent-fg">
-        <Icon name="graph" size={16} />
+        <Icon name="warehouse" size={16} />
       </span>
       <span class="text-base font-semibold tracking-tight">krabby</span>
     </div>

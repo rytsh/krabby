@@ -1,7 +1,8 @@
 # Design: Docs + RAG subsystem
 
-Status: **Draft / scaffolding** — interfaces and skeletons landed; implementations
-to follow, reviewed part by part.
+Status: **Implemented** — indexing (chunk → embed → upsert), file-level
+retrieval, and both vector store backends (embedded via bw/Badger HNSW,
+Qdrant over HTTP) are in place.
 
 ## Goal
 
@@ -10,7 +11,7 @@ Extend krabby beyond code knowledge graphs with a documentation + retrieval laye
 1. **Repo → Markdown docs.** For every tracked repo, generate human-readable
    markdown documentation (per file / per package + an overview), using the
    existing graphify graph + source files, enriched by an **LLM**.
-2. **Render docs in the UI** (existing Svelte app under `_ui/` → `web/`) with
+2. **Render docs in the UI** (existing Svelte app under `_ui/` → `internal/server/dist`) with
    full-text **search**.
 3. **RAG index.** Chunk + embed the generated markdown into a **vector store**;
    on a question, retrieve the most relevant docs.
@@ -35,7 +36,7 @@ Extend krabby beyond code knowledge graphs with a documentation + retrieval laye
 | --- | --- |
 | Doc generation | **LLM-generated** per file/package (chat completion). Pluggable behind a `docgen.Generator` interface so a deterministic fallback can be added. |
 | Embeddings | **Pluggable OpenAI-compatible** HTTP embedder (`/v1/embeddings`). Works with OpenAI, Ollama, LM Studio, TEI, vLLM. |
-| Vector store | **Pluggable `vectorstore.Store` interface.** Default = **embedded** (vectors stored under `data_dir`, cosine similarity in Go). Optional **Qdrant** backend; room for more (pgvector, etc.). |
+| Vector store | **Pluggable `vectorstore.Store` interface.** Default = **embedded**: a dedicated bw (BadgerDB) database under `data_dir/vectors` with an HNSW cosine index; the embedding dimension is auto-detected on first insert and a model/dimension change wipes + rebuilds the derived index. Optional **Qdrant** backend; room for more (pgvector, etc.). |
 | LLM chat | **OpenAI-compatible** `/v1/chat/completions` client (shared config style with embedder). |
 
 Rationale: mirrors krabby's existing "plain files under `data_dir`, external
@@ -84,7 +85,7 @@ zero-infra promise; Qdrant is opt-in for scale.
     ├── <pkg>/<file>.md           # per file/package docs
     └── ...
 ~/.krabby/vectors/                # NEW (embedded store backend)
-└── <owner>__<name>.json          # vectors + payloads for that repo (or badger bucket)
+└── ...                           # bw (BadgerDB) database: chunk records + HNSW vector index
 ```
 
 Docs are plain markdown so external tools (and the UI) can read them directly,
@@ -214,7 +215,7 @@ UI consumes these for rendering + search.
 
 - Docs browser: tree of `krabby-docs/` per repo, markdown render.
 - Search box → `/api/v1/docs/search`, show ranked docs, open full doc.
-- Existing Svelte app in `_ui/` (build output in `web/`) is the host.
+- Existing Svelte app in `_ui/` (build output in `internal/server/dist`) is the host.
 
 ## Build / rebuild semantics
 

@@ -136,7 +136,7 @@ func (m *Manager) buildBundle(s settings.Settings) (*docsBundle, error) {
 		}
 
 		b.store = store
-		b.rag = rag.New(ragConfig(s), emb, store)
+		b.rag = rag.New(ragConfig(s), emb, store, m.repoDocsDir)
 	}
 
 	return b, nil

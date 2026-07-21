@@ -4,17 +4,23 @@
 // Retrieval is file-level: the vector index only routes a question to the most
 // relevant markdown documents; the WHOLE markdown file(s) are then returned to
 // the caller/LLM (not just the matching chunks).
-//
-// SCAFFOLD: types and the Service surface are final; Index/Retrieve bodies are
-// stubs.
 package rag
 
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 
 	"github.com/rytsh/krabby/internal/config"
+	"github.com/rytsh/krabby/internal/service/docgen"
 	"github.com/rytsh/krabby/internal/service/embedder"
+	"github.com/rytsh/krabby/internal/service/repofs"
 	"github.com/rytsh/krabby/internal/service/vectorstore"
 )
 
@@ -27,30 +33,122 @@ type Doc struct {
 	Content string  `json:"content"`
 }
 
+// DocsDirResolver maps a repo id to its markdown docs directory. Used by
+// Retrieve to read the whole document files behind the chunk matches.
+type DocsDirResolver func(ctx context.Context, repo string) (string, error)
+
 // Service indexes generated docs and retrieves whole docs for a question.
 type Service struct {
-	cfg   config.RAG
-	emb   *embedder.Client
-	store vectorstore.Store
+	cfg     config.RAG
+	emb     *embedder.Client
+	store   vectorstore.Store
+	docsDir DocsDirResolver
 }
 
 // New builds a RAG service. emb and store must be non-nil; callers gate on
-// rag.enabled + configured embedder/store before constructing.
-func New(cfg config.RAG, emb *embedder.Client, store vectorstore.Store) *Service {
-	return &Service{cfg: cfg, emb: emb, store: store}
+// rag.enabled + configured embedder/store before constructing. docsDir resolves
+// a repo id to its docs directory for whole-file retrieval.
+func New(cfg config.RAG, emb *embedder.Client, store vectorstore.Store, docsDir DocsDirResolver) *Service {
+	return &Service{cfg: cfg, emb: emb, store: store, docsDir: docsDir}
 }
 
 // Index (re)builds the vector index for a repo's generated docs. It reads the
-// markdown files under docsDir, chunks them, embeds the chunks and upserts them
-// into the store (replacing any prior vectors for the repo).
-//
-// TODO(scaffold):
-//   1. store.DeleteRepo(repo)  (full rebuild) or diff via manifest (incremental)
-//   2. for each doc: chunk (heading-aware, size-capped) -> texts
-//   3. emb.Embed(texts) -> vectors
-//   4. store.Upsert(items{ID: repo+path+idx, Vector, Payload{repo,path,title,chunk}})
-func (s *Service) Index(_ context.Context, _ string, _ string) error {
-	return errors.New("rag.Index: not implemented (scaffold)")
+// markdown files under docsDir, chunks them (heading-aware, size-capped),
+// embeds the chunks and upserts them into the store, replacing any prior
+// vectors for the repo.
+func (s *Service) Index(ctx context.Context, repo string, docsDir string) error {
+	titles := manifestTitles(docsDir)
+
+	var (
+		items []vectorstore.Item
+		texts []string
+	)
+
+	err := filepath.WalkDir(docsDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if d.IsDir() || !strings.HasSuffix(d.Name(), ".md") {
+			return nil
+		}
+
+		rel, err := filepath.Rel(docsDir, path)
+		if err != nil {
+			return err
+		}
+
+		docPath := filepath.ToSlash(rel)
+
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+
+		content := string(b)
+
+		title := titles[docPath]
+		if title == "" {
+			title = firstHeading(content)
+		}
+
+		if title == "" {
+			title = docPath
+		}
+
+		for i, c := range chunk(content, s.cfg.ChunkSize, s.cfg.ChunkOverlap) {
+			items = append(items, vectorstore.Item{
+				ID: fmt.Sprintf("%s/%s#%d", repo, docPath, i),
+				Payload: vectorstore.Payload{
+					Repo:    repo,
+					DocPath: docPath,
+					Title:   title,
+					Chunk:   c,
+				},
+			})
+			texts = append(texts, c)
+		}
+
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("docs dir %s does not exist; generate docs first", docsDir)
+		}
+
+		return fmt.Errorf("walk docs dir; %w", err)
+	}
+
+	if len(items) == 0 {
+		// No docs -> make the index match (empty).
+		return s.store.DeleteRepo(ctx, repo)
+	}
+
+	vecs, err := s.emb.Embed(ctx, texts)
+	if err != nil {
+		return fmt.Errorf("embed %d chunks; %w", len(texts), err)
+	}
+
+	if len(vecs) != len(items) {
+		return fmt.Errorf("embedder returned %d vectors for %d chunks", len(vecs), len(items))
+	}
+
+	for i := range items {
+		items[i].Vector = vecs[i]
+	}
+
+	// Full rebuild: drop prior vectors so removed docs disappear, then upsert.
+	if err := s.store.DeleteRepo(ctx, repo); err != nil {
+		return fmt.Errorf("clear prior vectors; %w", err)
+	}
+
+	if err := s.store.Upsert(ctx, items); err != nil {
+		return fmt.Errorf("upsert %d vectors; %w", len(items), err)
+	}
+
+	slog.Info("rag index rebuilt", "repo", repo, "docs", len(titlesIndexed(items)), "chunks", len(items))
+
+	return nil
 }
 
 // DeleteRepo removes a repo's vectors from the index (on repo removal).
@@ -61,13 +159,136 @@ func (s *Service) DeleteRepo(ctx context.Context, repo string) error {
 // Retrieve returns up to topDocs whole markdown documents most relevant to the
 // question. repo == "" searches across all repos. topDocs <= 0 uses the
 // configured default (RAG.TopDocs).
-//
-// TODO(scaffold):
-//   1. emb.Embed([question]) -> qvec
-//   2. store.Search(repo, qvec, cfg.TopK) -> chunk matches
-//   3. group matches by DocPath, doc score = max chunk score
-//   4. take top N doc paths, read the WHOLE markdown file for each
-//   5. return []Doc sorted by score
-func (s *Service) Retrieve(_ context.Context, _ string, _ string, _ int) ([]Doc, error) {
-	return nil, errors.New("rag.Retrieve: not implemented (scaffold)")
+func (s *Service) Retrieve(ctx context.Context, repo string, question string, topDocs int) ([]Doc, error) {
+	if strings.TrimSpace(question) == "" {
+		return nil, errors.New("question is empty")
+	}
+
+	if topDocs <= 0 {
+		topDocs = s.cfg.TopDocs
+	}
+
+	if topDocs <= 0 {
+		topDocs = 5
+	}
+
+	topK := s.cfg.TopK
+	if topK <= 0 {
+		topK = 20
+	}
+
+	// Fetch more chunks than docs wanted so grouping has material to rank.
+	if topK < topDocs {
+		topK = topDocs * 4
+	}
+
+	vecs, err := s.emb.Embed(ctx, []string{question})
+	if err != nil {
+		return nil, fmt.Errorf("embed question; %w", err)
+	}
+
+	if len(vecs) != 1 {
+		return nil, fmt.Errorf("embedder returned %d vectors for the question", len(vecs))
+	}
+
+	matches, err := s.store.Search(ctx, repo, vecs[0], topK)
+	if err != nil {
+		return nil, fmt.Errorf("vector search; %w", err)
+	}
+
+	// Group chunk matches into documents; doc score = best chunk score.
+	type docKey struct{ repo, path string }
+
+	best := map[docKey]vectorstore.Match{}
+
+	var order []docKey
+
+	for _, m := range matches {
+		k := docKey{m.Payload.Repo, m.Payload.DocPath}
+
+		if prev, ok := best[k]; !ok {
+			best[k] = m
+			order = append(order, k)
+		} else if m.Score > prev.Score {
+			best[k] = m
+		}
+	}
+
+	sort.SliceStable(order, func(i, j int) bool {
+		return best[order[i]].Score > best[order[j]].Score
+	})
+
+	docs := make([]Doc, 0, topDocs)
+
+	for _, k := range order {
+		if len(docs) == topDocs {
+			break
+		}
+
+		m := best[k]
+
+		content, err := s.readDoc(ctx, k.repo, k.path)
+		if err != nil {
+			// Stale index entry (doc removed/renamed); skip it, don't fail retrieval.
+			slog.Warn("rag: skip unreadable doc", "repo", k.repo, "doc", k.path, "error", err)
+
+			continue
+		}
+
+		docs = append(docs, Doc{
+			Repo:    k.repo,
+			Path:    k.path,
+			Title:   m.Payload.Title,
+			Score:   m.Score,
+			Content: content,
+		})
+	}
+
+	return docs, nil
+}
+
+// readDoc reads a whole markdown document, sandboxed to the repo's docs dir.
+func (s *Service) readDoc(ctx context.Context, repo, docPath string) (string, error) {
+	if s.docsDir == nil {
+		return "", errors.New("docs dir resolver not configured")
+	}
+
+	dir, err := s.docsDir(ctx, repo)
+	if err != nil {
+		return "", err
+	}
+
+	fc, err := repofs.ReadFile(dir, docPath, 0, 0)
+	if err != nil {
+		return "", err
+	}
+
+	return fc.Content, nil
+}
+
+// manifestTitles maps doc path -> title from the docgen manifest, when present.
+func manifestTitles(docsDir string) map[string]string {
+	out := map[string]string{}
+
+	man, err := docgen.LoadManifest(docsDir)
+	if err != nil || man == nil {
+		return out
+	}
+
+	for _, d := range man.Docs {
+		out[d.Path] = d.Title
+	}
+
+	return out
+}
+
+// titlesIndexed counts distinct documents in an item batch (for logging).
+func titlesIndexed(items []vectorstore.Item) map[string]struct{} {
+	docs := map[string]struct{}{}
+
+	for _, it := range items {
+		docs[it.Payload.DocPath] = struct{}{}
+	}
+
+	return docs
 }

@@ -1,6 +1,6 @@
-# krabby
+![krabby](./assets/krabby.webp)
 
-Multi-repo [graphify](https://github.com/safishamsi/graphify) knowledge graphs
+krabby multi-repo [graphify](https://github.com/safishamsi/graphify) knowledge graphs
 served over MCP. Point it at your repositories; it clones them, builds a code
 knowledge graph per repo (plus a merged cross-repo graph), keeps them fresh in
 the background, and lets any MCP-capable LLM agent query them.

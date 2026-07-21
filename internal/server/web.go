@@ -1,6 +1,4 @@
-// Package web embeds the built Svelte SPA (source in _ui, built into web/dist)
-// and serves it with a client-side routing fallback.
-package web
+package server
 
 import (
 	"embed"
@@ -10,8 +8,10 @@ import (
 	"strings"
 )
 
-// dist embeds the built SPA. Build it with `make ui` (or
-// `cd _ui && pnpm install && pnpm build`) before compiling krabby.
+// dist embeds the built Svelte SPA (source in _ui, built into
+// internal/server/dist). Build it with `make ui` (or `cd _ui && pnpm install &&
+// pnpm build`) before compiling krabby; a .gitkeep placeholder keeps the embed
+// pattern valid when the UI has not been built.
 //
 // The all: prefix embeds files whose names start with _ or . too (Vite may emit
 // such asset names).
@@ -19,22 +19,22 @@ import (
 //go:embed all:dist
 var dist embed.FS
 
-// Handler returns an http.Handler that serves the embedded SPA. Static assets
-// are served directly; any other path falls back to index.html so the client
-// router can handle it. If the UI was never built, it returns a placeholder and
-// ok=false so the caller can decide how to mount it.
-func Handler() (h http.Handler, ok bool) {
+// webHandler returns an http.Handler that serves the embedded SPA. Static
+// assets are served directly; any other path falls back to index.html so the
+// client router can handle it. If the UI was never built, it returns a
+// placeholder and ok=false so the caller can decide how to mount it.
+func webHandler() (h http.Handler, ok bool) {
 	sub, err := fs.Sub(dist, "dist")
 	if err != nil {
-		return placeholder(), false
+		return webPlaceholder(), false
 	}
 
 	if _, err := fs.Stat(sub, "index.html"); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return placeholder(), false
+			return webPlaceholder(), false
 		}
 
-		return placeholder(), false
+		return webPlaceholder(), false
 	}
 
 	fileServer := http.FileServerFS(sub)
@@ -55,7 +55,7 @@ func Handler() (h http.Handler, ok bool) {
 	}), true
 }
 
-func placeholder() http.Handler {
+func webPlaceholder() http.Handler {
 	const page = `<!doctype html><html><head><meta charset="utf-8">` +
 		`<title>krabby</title></head>` +
 		`<body style="font-family:system-ui;max-width:40rem;margin:4rem auto;padding:0 1rem">` +

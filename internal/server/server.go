@@ -34,7 +34,6 @@ import (
 	"github.com/rytsh/krabby/internal/service/lease"
 	"github.com/rytsh/krabby/internal/service/manager"
 	"github.com/rytsh/krabby/internal/service/settings"
-	"github.com/rytsh/krabby/web"
 )
 
 // Start runs the HTTP server until ctx is cancelled.
@@ -93,7 +92,7 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	// Web UI: embedded Svelte SPA served at / with client-side routing fallback.
 	// Concrete routes above (/api, /mcp, /webhook, /healthz) take precedence over
 	// this catch-all wildcard.
-	uiHandler, built := web.Handler()
+	uiHandler, built := webHandler()
 	if !built {
 		slog.Warn("web UI not built; serving placeholder (run `make ui`)")
 	}

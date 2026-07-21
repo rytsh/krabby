@@ -28,6 +28,11 @@
   {:else if name === "book"}
     <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
     <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+  {:else if name === "warehouse"}
+    <path d="M18 21V10a1 1 0 0 0-1-1H7a1 1 0 0 0-1 1v11" />
+    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 1.132-1.803l7.95-3.974a2 2 0 0 1 1.837 0l7.948 3.974A2 2 0 0 1 22 8z" />
+    <path d="M6 13h12" />
+    <path d="M6 17h12" />
   {:else if name === "graph"}
     <circle cx="5" cy="6" r="2" />
     <circle cx="19" cy="6" r="2" />

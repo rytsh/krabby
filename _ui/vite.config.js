@@ -7,10 +7,10 @@ import tailwindcss from "@tailwindcss/vite";
 export default defineConfig({
   plugins: [tailwindcss(), svelte()],
   build: {
-    // Output into the Go-visible web/ package so it can be embedded. _ui itself
-    // is ignored by the go tool (leading underscore), so the dist must live
-    // outside it.
-    outDir: "../web/dist",
+    // Output into the Go-visible internal/server package so it can be embedded.
+    // _ui itself is ignored by the go tool (leading underscore), so the dist
+    // must live outside it.
+    outDir: "../internal/server/dist",
     emptyOutDir: true,
   },
   server: {

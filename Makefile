@@ -7,7 +7,7 @@ DATE    := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
 .PHONY: ui
-ui: ## Build the web UI into web/dist (embedded by the Go build)
+ui: ## Build the web UI into internal/server/dist (embedded by the Go build)
 	cd _ui && pnpm install && pnpm build
 
 .PHONY: build
