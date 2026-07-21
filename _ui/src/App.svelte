@@ -24,7 +24,7 @@
   }
 
   const nav = [
-    { href: "/repos", label: "Repositories", icon: "graph", match: (v) => v === "repos" || v === "repo" },
+    { href: "/repos", label: "Repositories", icon: "boxes", match: (v) => v === "repos" || v === "repo" },
     { href: "/settings", label: "Settings", icon: "settings", match: (v) => v === "settings" },
   ];
 
@@ -32,7 +32,7 @@
 </script>
 
 <div class="flex min-h-screen">
-  <aside class="flex w-60 flex-shrink-0 flex-col border-r border-line bg-surface p-3">
+  <aside class="sticky top-0 flex h-screen w-60 flex-shrink-0 flex-col overflow-y-auto border-r border-line bg-surface p-3">
     <div class="flex items-center gap-2 px-2 pb-5 pt-2">
       <span class="grid h-7 w-7 place-items-center rounded-md bg-accent text-accent-fg">
         <Icon name="warehouse" size={16} />

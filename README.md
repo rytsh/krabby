@@ -1,4 +1,4 @@
-![krabby](./assets/krabby.webp)
+<img src="./assets/krabby.webp" width="360" />
 
 krabby multi-repo [graphify](https://github.com/safishamsi/graphify) knowledge graphs
 served over MCP. Point it at your repositories; it clones them, builds a code

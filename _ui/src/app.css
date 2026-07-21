@@ -33,7 +33,7 @@
   --fg: #e4e4e7;
   --dim: #a1a1aa;
   --faint: #71717a;
-  --accent: #a855f7;
+  --accent: #f43f5e;
   --accent-fg: #ffffff;
   --ok: #4ade80;
   --warn: #fbbf24;
@@ -42,7 +42,7 @@
   --shadow: 0 1px 2px rgb(0 0 0 / 0.4);
 }
 
-/* Light palette: soft neutral with the same violet accent. */
+/* Light palette: soft neutral with the same red accent. */
 :root[data-theme="light"] {
   --bg: #fafafa;
   --surface: #ffffff;
@@ -51,7 +51,7 @@
   --fg: #18181b;
   --dim: #52525b;
   --faint: #a1a1aa;
-  --accent: #9333ea;
+  --accent: #e11d48;
   --accent-fg: #ffffff;
   --ok: #16a34a;
   --warn: #d97706;
