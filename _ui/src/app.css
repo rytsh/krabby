@@ -1,0 +1,116 @@
+@import "tailwindcss";
+
+/* Runtime-switchable palette.
+   The actual color values live in CSS custom properties so we can swap them at
+   runtime (dark/light) by toggling a data-theme attribute on <html>. `@theme
+   inline` binds Tailwind's color utilities (bg-surface, text-dim, …) to those
+   variables instead of baking values in at build time. */
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-line: var(--line);
+  --color-fg: var(--fg);
+  --color-dim: var(--dim);
+  --color-faint: var(--faint);
+  --color-accent: var(--accent);
+  --color-accent-fg: var(--accent-fg);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-err: var(--err);
+  --color-busy: var(--busy);
+
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+}
+
+/* Dark palette (default): muted graphite. */
+:root,
+:root[data-theme="dark"] {
+  --bg: #18181b;
+  --surface: #1f1f23;
+  --surface-2: #27272a;
+  --line: #303035;
+  --fg: #e4e4e7;
+  --dim: #a1a1aa;
+  --faint: #71717a;
+  --accent: #a855f7;
+  --accent-fg: #ffffff;
+  --ok: #4ade80;
+  --warn: #fbbf24;
+  --err: #f87171;
+  --busy: #60a5fa;
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.4);
+}
+
+/* Light palette: soft neutral with the same violet accent. */
+:root[data-theme="light"] {
+  --bg: #fafafa;
+  --surface: #ffffff;
+  --surface-2: #f4f4f5;
+  --line: #e4e4e7;
+  --fg: #18181b;
+  --dim: #52525b;
+  --faint: #a1a1aa;
+  --accent: #9333ea;
+  --accent-fg: #ffffff;
+  --ok: #16a34a;
+  --warn: #d97706;
+  --err: #dc2626;
+  --busy: #2563eb;
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.08);
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+}
+
+/* Smoothly cross-fade colors when the theme toggles. Kept short and scoped to
+   color-ish properties so layout/scroll never animate. */
+html.theme-anim,
+html.theme-anim * {
+  transition:
+    background-color 0.18s ease,
+    border-color 0.18s ease,
+    color 0.18s ease,
+    fill 0.18s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html.theme-anim,
+  html.theme-anim * {
+    transition: none;
+  }
+}
+
+/* A couple of shared component classes to avoid repeating long utility runs. */
+@layer components {
+  .btn {
+    @apply cursor-pointer rounded-md border border-line bg-surface-2 px-3 py-1.5 text-fg transition-colors hover:bg-line disabled:cursor-default disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply border-accent bg-accent text-accent-fg hover:brightness-110;
+  }
+  .btn-danger {
+    @apply hover:border-err hover:text-err;
+  }
+  .btn-sm {
+    @apply px-2.5 py-1 text-[13px];
+  }
+  .icon-btn {
+    @apply inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-md border border-line bg-surface-2 text-dim transition-colors hover:bg-line hover:text-fg;
+  }
+  .input {
+    @apply rounded-md border border-line bg-bg px-2.5 py-1.5 text-fg outline-none focus:border-accent;
+  }
+  .card {
+    @apply rounded-lg border border-line bg-surface;
+  }
+  .err-box {
+    @apply mb-4 rounded-md border border-err bg-err/10 px-3 py-2.5 text-[13px] text-err;
+  }
+}

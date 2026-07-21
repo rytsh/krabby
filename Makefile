@@ -6,9 +6,16 @@ DATE    := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
+.PHONY: ui
+ui: ## Build the web UI into web/dist (embedded by the Go build)
+	cd _ui && pnpm install && pnpm build
+
 .PHONY: build
-build: ## Build the binary
+build: ## Build the binary (run `make ui` first to embed the latest UI)
 	CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o bin/krabby ./cmd/krabby
+
+.PHONY: all
+all: ui build ## Build the UI then the binary
 
 .PHONY: run
 run: ## Run the server

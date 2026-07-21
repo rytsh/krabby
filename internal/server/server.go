@@ -12,8 +12,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,6 +33,8 @@ import (
 	"github.com/rytsh/krabby/internal/service/graphify"
 	"github.com/rytsh/krabby/internal/service/lease"
 	"github.com/rytsh/krabby/internal/service/manager"
+	"github.com/rytsh/krabby/internal/service/settings"
+	"github.com/rytsh/krabby/web"
 )
 
 // Start runs the HTTP server until ctx is cancelled.
@@ -58,6 +62,7 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	server.Handle(cfg.MCP.Path, mcpHandler, apiKeyMiddleware(cfg.MCP.APIKey))
 
 	api := server.Group("/api/v1")
+	api.GET("/settings", server.Wrap(getSettings(cfg)))
 	api.GET("/repos", server.Wrap(listRepos(mgr)))
 	api.POST("/repos", server.Wrap(addRepo(mgr)))
 	api.GET("/repos/{owner}/{name}", server.Wrap(getRepo(mgr)))
@@ -69,12 +74,31 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	api.GET("/repos/{owner}/{name}/graph", repoArtifact(mgr, graphify.GraphPath))
 	api.GET("/repos/{owner}/{name}/report", repoArtifact(mgr, graphify.ReportPath))
 	api.GET("/repos/{owner}/{name}/html", repoArtifact(mgr, graphify.HTMLPath))
+	api.GET("/repos/{owner}/{name}/files", server.Wrap(listRepoFiles(mgr)))
+	api.GET("/repos/{owner}/{name}/file", server.Wrap(readRepoFile(mgr)))
+	api.GET("/repos/{owner}/{name}/docs", server.Wrap(listDocs(mgr)))
+	api.GET("/repos/{owner}/{name}/doc", server.Wrap(getDoc(mgr)))
+	api.GET("/docs/search", server.Wrap(searchDocs(mgr)))
+	api.GET("/docs/config", server.Wrap(getDocsConfig(mgr)))
+	api.PUT("/docs/config", server.Wrap(setDocsConfig(mgr)))
+	api.POST("/docs/config/test/llm", server.Wrap(testLLM(mgr)))
+	api.POST("/docs/config/test/embedder", server.Wrap(testEmbedder(mgr)))
 	api.GET("/graph", mergedGraph(mgr))
 	api.GET("/credentials", server.Wrap(listCredentials(mgr)))
 	api.PUT("/credentials", server.Wrap(setCredential(mgr)))
 	api.DELETE("/credentials", server.Wrap(deleteCredential(mgr)))
 
 	server.POST("/webhook/github", githubWebhook(cfg.Webhook.GithubSecret, mgr))
+
+	// Web UI: embedded Svelte SPA served at / with client-side routing fallback.
+	// Concrete routes above (/api, /mcp, /webhook, /healthz) take precedence over
+	// this catch-all wildcard.
+	uiHandler, built := web.Handler()
+	if !built {
+		slog.Warn("web UI not built; serving placeholder (run `make ui`)")
+	}
+
+	server.HandleWildcard("/", uiHandler)
 
 	return server.StartWithContext(ctx, cfg.Server.Host+":"+cfg.Server.Port)
 }
@@ -101,6 +125,71 @@ func apiKeyMiddleware(apiKey string) func(next http.Handler) http.Handler {
 
 			next.ServeHTTP(w, r)
 		})
+	}
+}
+
+// ---- settings handler -------------------------------------------------------
+
+// settingsResponse is a redacted view of the running config for the UI. Secrets
+// (MCP api key, webhook secret) are deliberately omitted; booleans indicate
+// only whether they are configured.
+type settingsResponse struct {
+	Version  string `json:"version"`
+	LogLevel string `json:"log_level"`
+	DataDir  string `json:"data_dir"`
+
+	Server struct {
+		Host string `json:"host"`
+		Port string `json:"port"`
+	} `json:"server"`
+
+	MCP struct {
+		Path         string `json:"path"`
+		APIKeySet    bool   `json:"api_key_set"`
+	} `json:"mcp"`
+
+	Git struct {
+		SSHKeyPath   string `json:"ssh_key_path,omitempty"`
+		PollInterval string `json:"poll_interval"`
+	} `json:"git"`
+
+	Graphify struct {
+		Bin              string `json:"bin"`
+		Python           string `json:"python,omitempty"`
+		BuildTimeout     string `json:"build_timeout"`
+		ServeIdleTimeout string `json:"serve_idle_timeout"`
+	} `json:"graphify"`
+
+	Webhook struct {
+		GithubSecretSet bool `json:"github_secret_set"`
+	} `json:"webhook"`
+}
+
+func getSettings(cfg *config.Config) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		var s settingsResponse
+
+		s.Version = config.Version
+		s.LogLevel = cfg.LogLevel
+		s.DataDir = cfg.DataDir
+
+		s.Server.Host = cfg.Server.Host
+		s.Server.Port = cfg.Server.Port
+
+		s.MCP.Path = cfg.MCP.Path
+		s.MCP.APIKeySet = cfg.MCP.APIKey != ""
+
+		s.Git.SSHKeyPath = cfg.Git.SSHKeyPath
+		s.Git.PollInterval = cfg.Git.PollInterval.String()
+
+		s.Graphify.Bin = cfg.Graphify.Bin
+		s.Graphify.Python = cfg.Graphify.Python
+		s.Graphify.BuildTimeout = cfg.Graphify.BuildTimeout.String()
+		s.Graphify.ServeIdleTimeout = cfg.Graphify.ServeIdleTimeout.String()
+
+		s.Webhook.GithubSecretSet = cfg.Webhook.GithubSecret != ""
+
+		return c.SendJSON(s)
 	}
 }
 
@@ -296,6 +385,164 @@ func repoArtifact(mgr *manager.Manager, pathFn func(repoPath string) string) htt
 		}
 
 		http.ServeFile(w, r, path)
+	}
+}
+
+// ---- repo file handlers -----------------------------------------------------
+
+func listRepoFiles(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		subdir := c.Request.URL.Query().Get("subdir")
+		recursive := c.Request.URL.Query().Get("recursive") == "true"
+
+		entries, err := mgr.ListRepoFiles(c.Request.Context(), repoID(c.Request), subdir, recursive)
+		if err != nil {
+			return c.SetStatus(http.StatusNotFound).SendJSON(map[string]string{"error": err.Error()})
+		}
+
+		return c.SendJSON(entries)
+	}
+}
+
+func readRepoFile(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		path := c.Request.URL.Query().Get("path")
+		if path == "" {
+			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": "path query param is required"})
+		}
+
+		var offset int64
+		if v := c.Request.URL.Query().Get("offset"); v != "" {
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+				offset = n
+			}
+		}
+
+		var maxBytes int
+		if v := c.Request.URL.Query().Get("max_bytes"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				maxBytes = n
+			}
+		}
+
+		fc, err := mgr.ReadRepoFile(c.Request.Context(), repoID(c.Request), path, offset, maxBytes)
+		if err != nil {
+			return c.SetStatus(http.StatusNotFound).SendJSON(map[string]string{"error": err.Error()})
+		}
+
+		return c.SendJSON(fc)
+	}
+}
+
+// ---- docs + RAG handlers ----------------------------------------------------
+
+func listDocs(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		docs, err := mgr.ListDocs(c.Request.Context(), repoID(c.Request))
+		if err != nil {
+			return c.SetStatus(http.StatusNotFound).SendJSON(map[string]string{"error": err.Error()})
+		}
+
+		return c.SendJSON(docs)
+	}
+}
+
+func getDoc(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		path := c.Request.URL.Query().Get("path")
+		if path == "" {
+			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": "path query param is required"})
+		}
+
+		doc, err := mgr.GetDoc(c.Request.Context(), repoID(c.Request), path)
+		if err != nil {
+			return c.SetStatus(http.StatusNotFound).SendJSON(map[string]string{"error": err.Error()})
+		}
+
+		return c.SendJSON(doc)
+	}
+}
+
+func searchDocs(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		q := c.Request.URL.Query().Get("q")
+		if q == "" {
+			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": "q query param is required"})
+		}
+
+		repo := c.Request.URL.Query().Get("repo") // "" = all repos
+
+		var top int
+		if v := c.Request.URL.Query().Get("top"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				top = n
+			}
+		}
+
+		docs, err := mgr.SearchDocs(c.Request.Context(), repo, q, top)
+		if err != nil {
+			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+		}
+
+		return c.SendJSON(docs)
+	}
+}
+
+func getDocsConfig(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		cfg, err := mgr.GetDocsConfig(c.Request.Context())
+		if err != nil {
+			return c.Err(err)
+		}
+
+		return c.SendJSON(cfg)
+	}
+}
+
+func setDocsConfig(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		var patch settings.Patch
+		if err := c.Bind(&patch); err != nil {
+			return c.SetStatus(http.StatusBadRequest).Err(err)
+		}
+
+		cfg, err := mgr.SetDocsConfig(c.Request.Context(), patch.ToSettings())
+		if err != nil {
+			// Settings were saved but the client rebuild failed: report the
+			// error while still returning the redacted (persisted) config.
+			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]any{
+				"error":  err.Error(),
+				"config": cfg,
+			})
+		}
+
+		return c.SendJSON(cfg)
+	}
+}
+
+func testLLM(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		var patch settings.Patch
+		if c.Request.ContentLength != 0 {
+			if err := c.Bind(&patch); err != nil {
+				return c.SetStatus(http.StatusBadRequest).Err(err)
+			}
+		}
+
+		return c.SendJSON(mgr.TestLLM(c.Request.Context(), patch.ToSettings()))
+	}
+}
+
+func testEmbedder(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		var patch settings.Patch
+		if c.Request.ContentLength != 0 {
+			if err := c.Bind(&patch); err != nil {
+				return c.SetStatus(http.StatusBadRequest).Err(err)
+			}
+		}
+
+		return c.SendJSON(mgr.TestEmbedder(c.Request.Context(), patch.ToSettings()))
 	}
 }
 

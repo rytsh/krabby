@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>krabby</title>
+    <!-- Set the theme before first paint to avoid a flash of the wrong palette. -->
+    <script>
+      (function () {
+        try {
+          var s = localStorage.getItem("krabby-theme");
+          if (s !== "light" && s !== "dark") {
+            s = window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+          }
+          document.documentElement.setAttribute("data-theme", s);
+        } catch (e) {
+          document.documentElement.setAttribute("data-theme", "dark");
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

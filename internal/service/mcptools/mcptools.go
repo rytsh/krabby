@@ -26,6 +26,8 @@ func New(mgr *manager.Manager, version string) *mcp.Server {
 	addLeaseTools(server, mgr)
 	addCredentialTools(server, mgr)
 	addQueryTools(server, mgr)
+	addFileTools(server, mgr)
+	addDocTools(server, mgr)
 
 	return server
 }
@@ -35,10 +37,16 @@ func New(mgr *manager.Manager, version string) *mcp.Server {
 type addRepoArgs struct {
 	URL    string `json:"url" jsonschema:"git URL of the repository (ssh or https)"`
 	Branch string `json:"branch,omitempty" jsonschema:"branch to track (default: repo default branch)"`
+	Wait   bool   `json:"wait,omitempty" jsonschema:"when true, block until the clone and graph build finish and return the final status (ready or error) instead of returning immediately"`
 }
 
 type repoIDArgs struct {
 	Repo string `json:"repo" jsonschema:"repository id in owner/name form"`
+}
+
+type refreshRepoArgs struct {
+	Repo string `json:"repo" jsonschema:"repository id in owner/name form"`
+	Wait bool   `json:"wait,omitempty" jsonschema:"when true, block until the pull and graph rebuild finish and return the final status (ready or error) instead of returning immediately"`
 }
 
 type emptyArgs struct{}
@@ -58,10 +66,16 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "add_repo",
-		Description: "Track a new repository: clones it and builds its knowledge graph in the background. " +
-			"Returns immediately; check status with repo_status.",
+		Description: "Track a new repository: clones it and builds its knowledge graph. " +
+			"By default returns immediately (status 'pending'); check progress with repo_status. " +
+			"Pass wait=true to block until the graph is ready and get the final status directly.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args addRepoArgs) (*mcp.CallToolResult, any, error) {
-		repo, err := mgr.AddRepo(ctx, args.URL, args.Branch)
+		add := mgr.AddRepo
+		if args.Wait {
+			add = mgr.AddRepoWait
+		}
+
+		repo, err := add(ctx, args.URL, args.Branch)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -82,12 +96,23 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "refresh_repo",
-		Description: "Pull the latest commits and rebuild the knowledge graph for a repository " +
-			"in the background. Use when you know the repo changed.",
-	}, func(_ context.Context, _ *mcp.CallToolRequest, args repoIDArgs) (*mcp.CallToolResult, any, error) {
-		mgr.TriggerRefresh(args.Repo)
+		Description: "Pull the latest commits and rebuild the knowledge graph for a repository. " +
+			"By default rebuilds in the background and returns immediately. " +
+			"Pass wait=true to block until the rebuild finishes and get the final status directly. " +
+			"Use when you know the repo changed.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args refreshRepoArgs) (*mcp.CallToolResult, any, error) {
+		if !args.Wait {
+			mgr.TriggerRefresh(args.Repo)
 
-		return textResult("refresh queued for " + args.Repo), nil, nil
+			return textResult("refresh queued for " + args.Repo), nil, nil
+		}
+
+		repo, err := mgr.RefreshWait(ctx, args.Repo)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return jsonResult(repo), nil, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -342,6 +367,50 @@ func addQueryTools(server *mcp.Server, mgr *manager.Manager) {
 		res, err := mgr.CallGraphTool(ctx, args.Repo, "shortest_path", call)
 
 		return res, nil, err
+	})
+}
+
+// ---- file tools (source access from the clone) ------------------------------
+
+type readFileArgs struct {
+	Repo     string `json:"repo" jsonschema:"repository id (owner/name) whose clone to read from"`
+	Path     string `json:"path" jsonschema:"repo-relative file path, e.g. 'listener/processor.go' (as shown in graph node src fields)"`
+	Offset   int64  `json:"offset,omitempty" jsonschema:"byte offset to start reading from (default 0); use with the truncated flag to page through large files"`
+	MaxBytes int    `json:"max_bytes,omitempty" jsonschema:"max bytes to return in this call (default and cap 524288)"`
+}
+
+type listFilesArgs struct {
+	Repo      string `json:"repo" jsonschema:"repository id (owner/name) whose clone to list"`
+	Subdir    string `json:"subdir,omitempty" jsonschema:"repo-relative directory to list (default: repository root)"`
+	Recursive bool   `json:"recursive,omitempty" jsonschema:"when true, walk the whole subtree (skips .git and graphify-out); otherwise list one level"`
+}
+
+func addFileTools(server *mcp.Server, mgr *manager.Manager) {
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "read_file",
+		Description: "Read the source of a file inside a tracked repository's clone. " +
+			"Use this to see the actual code behind a graph node (node 'src' fields give the path). " +
+			"Access is sandboxed to the repo; large files are truncated - page with offset until truncated is false.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args readFileArgs) (*mcp.CallToolResult, any, error) {
+		res, err := mgr.ReadRepoFile(ctx, args.Repo, args.Path, args.Offset, args.MaxBytes)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return jsonResult(res), nil, nil
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "list_files",
+		Description: "List files and directories inside a tracked repository's clone. " +
+			"Use to explore layout before reading files. Set recursive=true for the full tree.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args listFilesArgs) (*mcp.CallToolResult, any, error) {
+		entries, err := mgr.ListRepoFiles(ctx, args.Repo, args.Subdir, args.Recursive)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return jsonResult(entries), nil, nil
 	})
 }
 

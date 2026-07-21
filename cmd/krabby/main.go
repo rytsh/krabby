@@ -20,6 +20,7 @@ import (
 	"github.com/rytsh/krabby/internal/service/registry"
 	"github.com/rytsh/krabby/internal/service/scheduler"
 	"github.com/rytsh/krabby/internal/service/servepool"
+	"github.com/rytsh/krabby/internal/service/settings"
 	"github.com/rytsh/krabby/internal/storage"
 )
 
@@ -84,7 +85,28 @@ func run(ctx context.Context) error {
 		return err
 	}
 
-	mgr := manager.New(ctx, reg, git, gfy, pool, creds, cfg.ReposDir(), cfg.MergedGraphPath())
+	// Runtime-mutable docs/RAG settings, seeded from file/env config on first run
+	// and thereafter configurable live via MCP tools / the UI.
+	settingsStore, err := settings.New(db, seedSettings(cfg))
+	if err != nil {
+		return err
+	}
+
+	mgr := manager.New(ctx, reg, git, gfy, pool, creds, cfg.ReposDir(), cfg.MergedGraphPath(),
+		manager.DocsDeps{
+			DocsDir:    cfg.DocsDir,
+			VectorsDir: cfg.VectorsDir(),
+		},
+	)
+	mgr.SetSettingsStore(settingsStore)
+
+	// Build the initial docs/RAG client bundle from the persisted settings.
+	// A build error here disables the feature but does not abort startup.
+	if s, gerr := settingsStore.Get(ctx); gerr != nil {
+		slog.Error("load docs settings", "error", gerr)
+	} else if cerr := mgr.Configure(ctx, s); cerr != nil {
+		slog.Error("configure docs/rag (disabled until fixed via settings)", "error", cerr)
+	}
 
 	// Seed repos from config; builds run in the background.
 	for _, seed := range cfg.Repos {
@@ -108,4 +130,39 @@ func run(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// seedSettings converts file/env config into the initial persisted docs/RAG
+// settings. It is only used the first time krabby runs against a fresh state DB;
+// afterwards the persisted record (editable via the UI/MCP) is authoritative.
+func seedSettings(cfg *config.Config) settings.Settings {
+	return settings.Settings{
+		DocsEnabled:     cfg.Docs.Enabled,
+		DocsConcurrency: cfg.Docs.Concurrency,
+		DocsInclude:     cfg.Docs.Include,
+		DocsExclude:     cfg.Docs.Exclude,
+
+		LLMBaseURL: cfg.LLM.BaseURL,
+		LLMAPIKey:  cfg.LLM.APIKey,
+		LLMModel:   cfg.LLM.Model,
+		LLMTimeout: cfg.LLM.Timeout,
+
+		EmbedBaseURL: cfg.Embedder.BaseURL,
+		EmbedAPIKey:  cfg.Embedder.APIKey,
+		EmbedModel:   cfg.Embedder.Model,
+		EmbedDim:     cfg.Embedder.Dim,
+		EmbedBatch:   cfg.Embedder.Batch,
+		EmbedTimeout: cfg.Embedder.Timeout,
+
+		RAGEnabled:      cfg.RAG.Enabled,
+		RAGChunkSize:    cfg.RAG.ChunkSize,
+		RAGChunkOverlap: cfg.RAG.ChunkOverlap,
+		RAGTopK:         cfg.RAG.TopK,
+		RAGTopDocs:      cfg.RAG.TopDocs,
+		StoreKind:       cfg.RAG.Store.Kind,
+
+		QdrantURL:        cfg.RAG.Store.Qdrant.URL,
+		QdrantAPIKey:     cfg.RAG.Store.Qdrant.APIKey,
+		QdrantCollection: cfg.RAG.Store.Qdrant.Collection,
+	}
 }

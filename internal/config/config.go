@@ -35,6 +35,15 @@ type Config struct {
 	Graphify Graphify `cfg:"graphify"`
 	Webhook  Webhook  `cfg:"webhook"`
 
+	// Docs configures LLM-generated markdown documentation per repo.
+	Docs Docs `cfg:"docs"`
+	// LLM is the OpenAI-compatible chat client used by docgen and ask_docs.
+	LLM LLM `cfg:"llm"`
+	// Embedder is the OpenAI-compatible embeddings client used by RAG.
+	Embedder Embedder `cfg:"embedder"`
+	// RAG configures chunking, retrieval and the vector store backend.
+	RAG RAG `cfg:"rag"`
+
 	// Repos seeds the registry at startup; repos can also be added at runtime.
 	Repos []RepoSeed `cfg:"repos"`
 
@@ -78,6 +87,78 @@ type Graphify struct {
 type Webhook struct {
 	// GithubSecret verifies X-Hub-Signature-256 on /webhook/github. Empty disables verification.
 	GithubSecret string `cfg:"github_secret" log:"-"`
+}
+
+// Docs configures the repo -> markdown documentation generator.
+type Docs struct {
+	// Enabled turns on doc generation in the refresh pipeline. When false,
+	// no docs are generated even if an LLM is configured.
+	Enabled bool `cfg:"enabled"`
+	// Concurrency bounds parallel per-file LLM doc calls.
+	Concurrency int `cfg:"concurrency" default:"4"`
+	// Include globs select source files to document (repo-relative).
+	Include []string `cfg:"include"`
+	// Exclude globs skip files (evaluated after Include).
+	Exclude []string `cfg:"exclude"`
+}
+
+// LLM configures an OpenAI-compatible chat-completions endpoint.
+type LLM struct {
+	// BaseURL is the API root, e.g. "https://api.openai.com/v1".
+	BaseURL string `cfg:"base_url"`
+	// APIKey is sent as a Bearer token. Empty is allowed for local servers.
+	APIKey string `cfg:"api_key" log:"-"`
+	// Model is the chat model name.
+	Model string `cfg:"model" default:"gpt-4o-mini"`
+	// Timeout bounds a single completion request.
+	Timeout time.Duration `cfg:"timeout" default:"60s"`
+}
+
+// Embedder configures an OpenAI-compatible embeddings endpoint.
+type Embedder struct {
+	// BaseURL is the API root, e.g. "http://localhost:11434/v1" (Ollama).
+	BaseURL string `cfg:"base_url"`
+	// APIKey is sent as a Bearer token. Empty is allowed for local servers.
+	APIKey string `cfg:"api_key" log:"-"`
+	// Model is the embedding model name.
+	Model string `cfg:"model"`
+	// Dim is the expected embedding dimension; 0 = infer from first response.
+	Dim int `cfg:"dim"`
+	// Batch bounds how many inputs are sent per embeddings request.
+	Batch int `cfg:"batch" default:"64"`
+	// Timeout bounds a single embeddings request.
+	Timeout time.Duration `cfg:"timeout" default:"30s"`
+}
+
+// RAG configures chunking, retrieval and the vector store backend.
+type RAG struct {
+	// Enabled turns on indexing + retrieval in the pipeline and tools.
+	Enabled bool `cfg:"enabled"`
+	// ChunkSize is the target chunk length in characters.
+	ChunkSize int `cfg:"chunk_size" default:"1200"`
+	// ChunkOverlap is the character overlap between adjacent chunks.
+	ChunkOverlap int `cfg:"chunk_overlap" default:"200"`
+	// TopK is how many chunk matches to fetch before grouping into docs.
+	TopK int `cfg:"top_k" default:"20"`
+	// TopDocs is how many whole documents to return after grouping.
+	TopDocs int `cfg:"top_docs" default:"5"`
+	// Store selects and configures the vector store backend.
+	Store VectorStore `cfg:"store"`
+}
+
+// VectorStore selects a vector backend and holds per-backend settings.
+type VectorStore struct {
+	// Kind is "embedded" (default, file-backed) or "qdrant".
+	Kind string `cfg:"kind" default:"embedded"`
+	// Qdrant settings apply when Kind == "qdrant".
+	Qdrant Qdrant `cfg:"qdrant"`
+}
+
+// Qdrant configures the Qdrant HTTP backend.
+type Qdrant struct {
+	URL        string `cfg:"url" default:"http://localhost:6333"`
+	APIKey     string `cfg:"api_key" log:"-"`
+	Collection string `cfg:"collection" default:"krabby"`
 }
 
 // RepoSeed is a repository declared in the config file.
@@ -126,6 +207,14 @@ func (c *Config) StateDir() string { return filepath.Join(c.DataDir, "state") }
 
 // KeysDir holds materialized SSH key files for stored credentials.
 func (c *Config) KeysDir() string { return filepath.Join(c.DataDir, "keys") }
+
+// DocsDir is where generated markdown docs live for a given repo clone path.
+func (c *Config) DocsDir(repoPath string) string {
+	return filepath.Join(repoPath, "krabby-docs")
+}
+
+// VectorsDir holds the embedded vector store backend's data.
+func (c *Config) VectorsDir() string { return filepath.Join(c.DataDir, "vectors") }
 
 func expandHome(p string) (string, error) {
 	if p == "~" || strings.HasPrefix(p, "~/") {

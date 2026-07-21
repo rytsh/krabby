@@ -1,26 +1,24 @@
 // Package servepool manages long-lived `python -m graphify.serve` MCP servers,
 // one per graph.json, spawned lazily and killed when idle. The python server
 // hot-reloads graph.json on mtime change, so entries survive graph rebuilds.
+//
+// graphify.serve speaks MCP over stdio and takes the graph path as its sole
+// positional argument, so each server is a child process we talk to over
+// stdin/stdout via mcp.CommandTransport.
 package servepool
 
 import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net"
 	"os/exec"
-	"strconv"
 	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-const (
-	readyTimeout  = 30 * time.Second
-	readyInterval = 300 * time.Millisecond
-	callTimeout   = 60 * time.Second
-)
+const callTimeout = 60 * time.Second
 
 // Pool spawns and reuses graphify MCP servers keyed by graph path.
 type Pool struct {
@@ -35,10 +33,8 @@ type Pool struct {
 }
 
 type entry struct {
-	cmd      *exec.Cmd
 	cancel   context.CancelFunc
 	session  *mcp.ClientSession
-	port     int
 	lastUsed time.Time
 }
 
@@ -70,7 +66,7 @@ func (p *Pool) CallTool(ctx context.Context, graphPath, name string, args map[st
 	res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
 	if err != nil {
 		// Session may be stale (process died); respawn once and retry.
-		p.invalidate(graphPath)
+		p.invalidateStale(graphPath, session)
 
 		session, serr := p.session(ctx, graphPath)
 		if serr != nil {
@@ -107,76 +103,30 @@ func (p *Pool) session(ctx context.Context, graphPath string) (*mcp.ClientSessio
 }
 
 func (p *Pool) spawn(ctx context.Context, graphPath string) (*entry, error) {
-	port, err := freePort()
-	if err != nil {
-		return nil, fmt.Errorf("find free port; %w", err)
-	}
-
+	// baseCtx bounds the process lifetime; cancel kills it via CommandContext.
 	procCtx, cancel := context.WithCancel(p.baseCtx)
 
-	cmd := exec.CommandContext(procCtx, p.python,
-		"-m", "graphify.serve",
-		"--transport", "http",
-		"--host", "127.0.0.1",
-		"--port", strconv.Itoa(port),
-		"--stateless",
-		graphPath,
-	)
-	cmd.Cancel = func() error { return cmd.Process.Kill() }
+	// graphify.serve speaks MCP over stdio and reads the graph path from
+	// argv[1] only; extra flags are rejected, so pass just the path.
+	cmd := exec.CommandContext(procCtx, p.python, "-m", "graphify.serve", graphPath)
 
-	if err := cmd.Start(); err != nil {
-		cancel()
+	client := mcp.NewClient(&mcp.Implementation{Name: "krabby", Version: p.version}, nil)
+	transport := &mcp.CommandTransport{Command: cmd}
 
-		return nil, fmt.Errorf("start graphify serve; %w", err)
-	}
-
-	slog.Info("spawned graphify mcp server", "graph", graphPath, "port", port, "pid", cmd.Process.Pid)
-
-	go func() { _ = cmd.Wait() }()
-
-	session, err := p.connect(ctx, port)
+	session, err := client.Connect(ctx, transport, nil)
 	if err != nil {
 		cancel()
 
 		return nil, fmt.Errorf("connect graphify serve for %s; %w", graphPath, err)
 	}
 
+	slog.Info("spawned graphify mcp server", "graph", graphPath, "pid", cmd.Process.Pid)
+
 	return &entry{
-		cmd:      cmd,
 		cancel:   cancel,
 		session:  session,
-		port:     port,
 		lastUsed: time.Now(),
 	}, nil
-}
-
-func (p *Pool) connect(ctx context.Context, port int) (*mcp.ClientSession, error) {
-	deadline := time.Now().Add(readyTimeout)
-
-	var lastErr error
-
-	for time.Now().Before(deadline) {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-
-		client := mcp.NewClient(&mcp.Implementation{Name: "krabby", Version: p.version}, nil)
-		transport := &mcp.StreamableClientTransport{
-			Endpoint:             fmt.Sprintf("http://127.0.0.1:%d/mcp", port),
-			DisableStandaloneSSE: true,
-		}
-
-		session, err := client.Connect(ctx, transport, nil)
-		if err == nil {
-			return session, nil
-		}
-
-		lastErr = err
-
-		time.Sleep(readyInterval)
-	}
-
-	return nil, fmt.Errorf("server not ready; %w", lastErr)
 }
 
 func (p *Pool) invalidate(graphPath string) {
@@ -184,6 +134,17 @@ func (p *Pool) invalidate(graphPath string) {
 	defer p.mu.Unlock()
 
 	if e, ok := p.entries[graphPath]; ok {
+		p.stop(graphPath, e)
+	}
+}
+
+// invalidateStale kills the entry only if it still holds the given session,
+// preventing concurrent retries from killing each other's freshly spawned replacements.
+func (p *Pool) invalidateStale(graphPath string, stale *mcp.ClientSession) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if e, ok := p.entries[graphPath]; ok && e.session == stale {
 		p.stop(graphPath, e)
 	}
 }
@@ -196,7 +157,7 @@ func (p *Pool) stop(key string, e *entry) {
 	e.cancel()
 	delete(p.entries, key)
 
-	slog.Info("stopped graphify mcp server", "graph", key, "port", e.port)
+	slog.Info("stopped graphify mcp server", "graph", key)
 }
 
 // StopAll terminates every spawned server.
@@ -233,14 +194,4 @@ func (p *Pool) janitor(ctx context.Context) {
 			p.mu.Unlock()
 		}
 	}
-}
-
-func freePort() (int, error) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, err
-	}
-	defer l.Close()
-
-	return l.Addr().(*net.TCPAddr).Port, nil //nolint:forcetypeassert
 }

@@ -29,6 +29,45 @@ graphify:
 webhook:
   # github_secret: change-me  # verifies X-Hub-Signature-256 on /webhook/github
 
+# --- Documentation + RAG (optional) ------------------------------------------
+# Generate markdown docs per repo (LLM), embed them into a vector store, and
+# expose file-level retrieval over MCP (search_docs/list_docs/get_doc) and REST
+# (/api/v1/docs/search, /repos/{o}/{n}/docs). All best-effort: if the LLM /
+# embedder / store is missing or misconfigured, the feature disables itself.
+
+docs:
+  enabled: false            # generate markdown docs in the refresh pipeline
+  concurrency: 4            # parallel per-file LLM calls
+  include: ["**/*"]         # source globs to document (repo-relative)
+  exclude: ["**/*_test.go", "vendor/**", "**/testdata/**"]
+
+llm:                        # OpenAI-compatible chat (doc generation, ask_docs)
+  # base_url: https://api.openai.com/v1
+  # api_key: sk-...
+  model: gpt-4o-mini
+  timeout: 60s
+
+embedder:                   # OpenAI-compatible embeddings (RAG)
+  # base_url: http://localhost:11434/v1   # e.g. ollama
+  # api_key: ""
+  # model: nomic-embed-text
+  # dim: 768                # 0 = infer from first response
+  batch: 64
+  timeout: 30s
+
+rag:
+  enabled: false            # index docs + enable retrieval tools
+  chunk_size: 1200          # target chunk length (chars)
+  chunk_overlap: 200
+  top_k: 20                 # chunk matches fetched before grouping
+  top_docs: 5               # whole documents returned
+  store:
+    kind: embedded          # "embedded" (file-backed) | "qdrant"
+    qdrant:
+      url: http://localhost:6333
+      # api_key: ""
+      collection: krabby
+
 # Repositories to track at startup. More can be added at runtime via the
 # add_repo MCP tool or POST /api/v1/repos.
 repos:
