@@ -35,7 +35,20 @@ async function req(path, opts = {}) {
 
 export const api = {
   settings: () => req("/settings"),
-  repos: () => req("/repos"),
+  // repos returns a paginated envelope: { items, total, page, per_page }.
+  // opts: { page, perPage, q, owner }.
+  repos: ({ page = 1, perPage = 20, q = "", owner = "" } = {}) => {
+    const p = new URLSearchParams();
+    if (page) p.set("page", page);
+    if (perPage) p.set("per_page", perPage);
+    if (q) p.set("q", q);
+    if (owner) p.set("owner", owner);
+    return req(`/repos?${p.toString()}`);
+  },
+  // owners returns [{ owner, count }] for the sidebar tree.
+  owners: () => req("/repos/owners"),
+  // activeRepos returns only repos with running jobs: [{ id, running, status }].
+  activeRepos: () => req("/repos/active"),
   repo: (id) => req(`/repos/${id}`),
   addRepo: (url, branch) =>
     req("/repos", { method: "POST", keepalive: true, body: JSON.stringify({ url, branch: branch || "" }) }),

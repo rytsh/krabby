@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -70,6 +71,8 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	api.PUT("/mcp/api-key", server.Wrap(setMCPKey(mgr)))
 	api.DELETE("/mcp/api-key", server.Wrap(clearMCPKey(mgr)))
 	api.GET("/repos", server.Wrap(listRepos(mgr)))
+	api.GET("/repos/owners", server.Wrap(listRepoOwners(mgr)))
+	api.GET("/repos/active", server.Wrap(listActiveRepos(mgr)))
 	api.POST("/repos", server.Wrap(addRepo(mgr)))
 	api.GET("/repos/{owner}/{name}", server.Wrap(getRepo(mgr)))
 	api.DELETE("/repos/{owner}/{name}", server.Wrap(deleteRepo(mgr)))
@@ -270,9 +273,30 @@ func viewRepo(mgr *manager.Manager, repo *registry.Repo) repoView {
 	return repoView{Repo: repo, Running: mgr.Activity(repo.ID)}
 }
 
+// pagedRepos is the paginated envelope returned by GET /repos.
+type pagedRepos struct {
+	Items   []repoView `json:"items"`
+	Total   int        `json:"total"`
+	Page    int        `json:"page"`
+	PerPage int        `json:"per_page"`
+}
+
 func listRepos(mgr *manager.Manager) ada.HandlerFunc {
 	return func(c *ada.Context) error {
-		repos, err := mgr.Registry().List(c.Request.Context())
+		params := c.Request.URL.Query()
+
+		opts := registry.ListOptions{
+			Search: params.Get("q"),
+			Owner:  params.Get("owner"),
+		}
+		if n, err := strconv.Atoi(params.Get("page")); err == nil && n > 0 {
+			opts.Page = n
+		}
+		if n, err := strconv.Atoi(params.Get("per_page")); err == nil && n > 0 {
+			opts.PerPage = n
+		}
+
+		repos, total, err := mgr.Registry().ListPaged(c.Request.Context(), opts)
 		if err != nil {
 			return c.Err(err)
 		}
@@ -281,6 +305,55 @@ func listRepos(mgr *manager.Manager) ada.HandlerFunc {
 		for _, repo := range repos {
 			views = append(views, viewRepo(mgr, repo))
 		}
+
+		page := opts.Page
+		if page <= 0 {
+			page = 1
+		}
+		perPage := opts.PerPage
+		if perPage <= 0 {
+			perPage = len(views)
+		}
+
+		return c.SendJSON(pagedRepos{Items: views, Total: total, Page: page, PerPage: perPage})
+	}
+}
+
+// listRepoOwners returns the owner groups (prefix + count) for the sidebar tree.
+func listRepoOwners(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		owners, err := mgr.Registry().Owners(c.Request.Context())
+		if err != nil {
+			return c.Err(err)
+		}
+
+		return c.SendJSON(owners)
+	}
+}
+
+// activeRepoView is one repo with currently running pipeline steps.
+type activeRepoView struct {
+	ID      string `json:"id"`
+	Running string `json:"running"`
+	Status  string `json:"status,omitempty"`
+}
+
+// listActiveRepos returns only the repos that have running jobs, so the
+// Activity page never has to scan every tracked repository.
+func listActiveRepos(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		active := mgr.ActiveRepos()
+
+		views := make([]activeRepoView, 0, len(active))
+		for id, running := range active {
+			v := activeRepoView{ID: id, Running: running}
+			if repo, err := mgr.Registry().Get(c.Request.Context(), id); err == nil && repo != nil {
+				v.Status = repo.Status
+			}
+			views = append(views, v)
+		}
+
+		sort.Slice(views, func(i, j int) bool { return views[i].ID < views[j].ID })
 
 		return c.SendJSON(views)
 	}

@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/rakunlabs/bw"
@@ -143,6 +145,130 @@ func (r *Registry) List(ctx context.Context) ([]*Repo, error) {
 	}
 
 	return repos, nil
+}
+
+// ListOptions controls server-side pagination, search and sorting for
+// ListPaged. Page is 1-based; a Page or PerPage <= 0 falls back to sane
+// defaults. Search matches the repo id (owner/name) case-insensitively.
+// Owner, when set, restricts the result to a single owner prefix.
+type ListOptions struct {
+	Page    int
+	PerPage int
+	Search  string
+	Owner   string
+}
+
+const (
+	defaultPerPage = 20
+	maxPerPage     = 200
+)
+
+// buildFilter assembles the shared WHERE clause for search/owner filtering so
+// ListPaged and Count stay in sync.
+//
+// Filtering uses the bw engine's case-insensitive LIKE. bw's LIKE does not
+// support wildcard escaping, so a literal '%' or '_' in user input is treated
+// as a wildcard ('_' matches any single char). This is a harmless usability
+// quirk for repo-id search, never a correctness or safety issue.
+func buildFilter(q *query.Query, opts ListOptions) {
+	if owner := strings.TrimSpace(opts.Owner); owner != "" {
+		// Owner prefix match: "owner/".
+		q.Where = append(q.Where,
+			query.NewExpressionCmp(query.OperatorILike, "id", owner+"/%").Expression())
+	}
+
+	if s := strings.TrimSpace(opts.Search); s != "" {
+		q.Where = append(q.Where,
+			query.NewExpressionCmp(query.OperatorILike, "id", "%"+s+"%").Expression())
+	}
+}
+
+// ListPaged returns one page of repos ordered by id, plus the total number of
+// records matching the same filter (ignoring pagination).
+func (r *Registry) ListPaged(ctx context.Context, opts ListOptions) (repos []*Repo, total int, err error) {
+	perPage := opts.PerPage
+	if perPage <= 0 {
+		perPage = defaultPerPage
+	}
+	if perPage > maxPerPage {
+		perPage = maxPerPage
+	}
+
+	page := opts.Page
+	if page <= 0 {
+		page = 1
+	}
+
+	total, err = r.Count(ctx, opts)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	q := query.New()
+	buildFilter(q, opts)
+	q.Sort = []query.ExpressionSort{{Field: "id"}}
+	q.SetOffset(uint64((page - 1) * perPage))
+	q.SetLimit(uint64(perPage))
+
+	repos, err = r.bucket.Find(ctx, q)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list repos; %w", err)
+	}
+
+	if repos == nil {
+		repos = []*Repo{}
+	}
+
+	return repos, total, nil
+}
+
+// Count returns the number of repos matching the search/owner filter.
+func (r *Registry) Count(ctx context.Context, opts ListOptions) (int, error) {
+	q := query.New()
+	buildFilter(q, opts)
+
+	n, err := r.bucket.Count(ctx, q)
+	if err != nil {
+		return 0, fmt.Errorf("count repos; %w", err)
+	}
+
+	return int(n), nil
+}
+
+// OwnerGroup is one owner prefix and how many repos it holds.
+type OwnerGroup struct {
+	Owner string `json:"owner"`
+	Count int    `json:"count"`
+}
+
+// Owners returns the distinct owner prefixes (the part before the first "/"
+// in each id) with their repo counts, sorted alphabetically. Repos without a
+// "/" are grouped under the empty owner "". Only the ids are scanned, so this
+// stays cheap even with many repositories.
+func (r *Registry) Owners(ctx context.Context) ([]OwnerGroup, error) {
+	counts := map[string]int{}
+
+	q := query.New()
+	q.AddField("id")
+	if err := r.bucket.Walk(ctx, q, func(repo *Repo) error {
+		owner := ""
+		if idx := strings.IndexByte(repo.ID, '/'); idx > 0 {
+			owner = repo.ID[:idx]
+		}
+		counts[owner]++
+
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("scan repo owners; %w", err)
+	}
+
+	groups := make([]OwnerGroup, 0, len(counts))
+	for owner, count := range counts {
+		groups = append(groups, OwnerGroup{Owner: owner, Count: count})
+	}
+	sort.Slice(groups, func(i, j int) bool { return groups[i].Owner < groups[j].Owner })
+
+	return groups, nil
 }
 
 // Upsert inserts or replaces a repo record.

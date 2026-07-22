@@ -2,7 +2,15 @@
   import { onMount } from "svelte";
   import { path, link } from "./lib/router.js";
   import { theme, toggleTheme } from "./lib/theme.js";
-  import { repoGroups, loadRepos } from "./lib/repos.js";
+  import {
+    owners,
+    ownersLoaded,
+    ownerRepos,
+    ownerLoading,
+    loadOwners,
+    loadOwnerRepos,
+    ownerOf,
+  } from "./lib/repos.js";
   import Icon from "./lib/Icon.svelte";
   import BrandIcon from "./lib/BrandIcon.svelte";
   import Status from "./lib/Status.svelte";
@@ -46,18 +54,32 @@
     about: "About",
   };
 
-  // Collapsed state per owner group, persisted so it survives reloads.
-  const COLLAPSE_KEY = "krabby-sidebar-collapsed";
-  let collapsed = $state({});
+  // Expanded state per owner group, persisted so it survives reloads. Groups
+  // default to collapsed: a group's repos are fetched lazily only when it is
+  // expanded, so the sidebar stays cheap with many owners.
+  const EXPANDED_KEY = "krabby-sidebar-expanded";
+  let expanded = $state({});
   try {
-    collapsed = JSON.parse(localStorage.getItem(COLLAPSE_KEY) || "{}") || {};
+    expanded = JSON.parse(localStorage.getItem(EXPANDED_KEY) || "{}") || {};
   } catch {
-    collapsed = {};
+    expanded = {};
+  }
+
+  function persistExpanded() {
+    localStorage.setItem(EXPANDED_KEY, JSON.stringify(expanded));
+  }
+
+  function expandGroup(owner) {
+    expanded = { ...expanded, [owner]: true };
+    persistExpanded();
+    loadOwnerRepos(owner);
   }
 
   function toggleGroup(owner) {
-    collapsed = { ...collapsed, [owner]: !collapsed[owner] };
-    localStorage.setItem(COLLAPSE_KEY, JSON.stringify(collapsed));
+    const next = !expanded[owner];
+    expanded = { ...expanded, [owner]: next };
+    persistExpanded();
+    if (next) loadOwnerRepos(owner);
   }
 
   function repoName(id) {
@@ -98,9 +120,19 @@
     window.addEventListener("pointerup", up);
   }
 
-  // Load once for the global sidebar. The Activity page owns optional live
-  // polling so background requests are not made unless the user enables it.
-  onMount(loadRepos);
+  // Load the owner list once for the sidebar tree. Each owner's repos are
+  // fetched lazily when its group is expanded (see toggleGroup/expandGroup).
+  onMount(loadOwners);
+
+  // When viewing a repo, make sure its owner group is expanded and loaded so
+  // the active repo is visible and highlighted in the sidebar.
+  $effect(() => {
+    if (view === "repo" && repoId) {
+      const owner = ownerOf(repoId);
+      if (!expanded[owner]) expandGroup(owner);
+      else loadOwnerRepos(owner);
+    }
+  });
 </script>
 
 <div class="flex min-h-screen">
@@ -128,34 +160,38 @@
       {/each}
     </nav>
 
-    {#if $repoGroups.length > 0}
+    {#if $owners.length > 0}
       <div class="mt-5 px-2.5 pb-1.5 text-[11px] font-medium uppercase tracking-wider text-faint">Repositories</div>
       <nav class="flex flex-col gap-0.5">
-        {#each $repoGroups as group (group.owner)}
+        {#each $owners as group (group.owner)}
           <button
             class="flex w-full cursor-pointer items-center gap-1.5 rounded-md px-2.5 py-1.5 text-left text-[13px] text-dim transition-colors hover:bg-surface-2 hover:text-fg"
             onclick={() => toggleGroup(group.owner)}
-            aria-expanded={!collapsed[group.owner]}
+            aria-expanded={!!expanded[group.owner]}
           >
-            <Icon name={collapsed[group.owner] ? "chevron-right" : "chevron-down"} size={13} />
+            <Icon name={expanded[group.owner] ? "chevron-down" : "chevron-right"} size={13} />
             <Icon name="folder" size={13} />
             <span class="truncate font-mono">{group.owner || "(root)"}</span>
-            <span class="ml-auto text-[11px] text-faint">{group.repos.length}</span>
+            <span class="ml-auto text-[11px] text-faint">{group.count}</span>
           </button>
-          {#if !collapsed[group.owner]}
-            {#each group.repos as r (r.id)}
-              <a
-                href={`/repos/${r.id}`}
-                use:link
-                title={r.id}
-                class="flex items-center gap-2 rounded-md py-1.5 pl-[34px] pr-2.5 text-[13px] text-dim transition-colors hover:bg-surface-2 hover:text-fg"
-                class:!bg-surface-2={view === "repo" && repoId === r.id}
-                class:!text-fg={view === "repo" && repoId === r.id}
-              >
-                <Status status={r.status} dot />
-                <span class="truncate font-mono">{repoName(r.id)}</span>
-              </a>
-            {/each}
+          {#if expanded[group.owner]}
+            {#if $ownerLoading.has(group.owner) && !($ownerRepos[group.owner]?.length)}
+              <div class="py-1.5 pl-[34px] pr-2.5 text-[12px] text-faint">Loading…</div>
+            {:else}
+              {#each $ownerRepos[group.owner] || [] as r (r.id)}
+                <a
+                  href={`/repos/${r.id}`}
+                  use:link
+                  title={r.id}
+                  class="flex items-center gap-2 rounded-md py-1.5 pl-[34px] pr-2.5 text-[13px] text-dim transition-colors hover:bg-surface-2 hover:text-fg"
+                  class:!bg-surface-2={view === "repo" && repoId === r.id}
+                  class:!text-fg={view === "repo" && repoId === r.id}
+                >
+                  <Status status={r.status} dot />
+                  <span class="truncate font-mono">{repoName(r.id)}</span>
+                </a>
+              {/each}
+            {/if}
           {/if}
         {/each}
       </nav>

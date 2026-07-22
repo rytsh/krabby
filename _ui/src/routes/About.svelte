@@ -48,6 +48,13 @@ ${apiKeySet ? "Authentication: send the API key in the X-Api-Key header. Ask me 
 
 Detect this client's MCP configuration format and update the appropriate project or user configuration. Preserve all existing settings and other MCP servers. After configuring it, verify the connection and confirm that the Krabby tools are available.`);
 
+  const triggerRepoUrl = "https://github.com/owner/repo";
+  let triggerPrompt = $derived(`Using the Krabby MCP tools, track this repository: ${triggerRepoUrl}
+
+If it is already tracked, refresh it to pull the latest commits and rebuild its knowledge graph. Otherwise add it. Then report the final build status.
+
+The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private repos make sure a matching git credential is stored first — a token for HTTPS or an SSH key for SSH URLs.`);
+
   const toolGroups = [
     {
       name: "Repositories",
@@ -179,6 +186,41 @@ Detect this client's MCP configuration format and update the appropriate project
     </div>
     <pre class="m-0 overflow-x-auto rounded-md border border-line bg-bg p-3 font-mono text-[12.5px] leading-relaxed">{genericConfig}</pre>
   </div>
+</div>
+
+<div class="card my-4 p-4">
+  <h2 class="mb-1 text-[15px] font-semibold">Track a repository</h2>
+  <p class="mt-0 text-[13px] text-faint">
+    Hand a git URL — HTTPS or SSH — to your agent and let it add the repo, or refresh it if it already exists.
+  </p>
+
+  <div class="mb-4 mt-3 rounded-md border border-accent/40 bg-accent/5 p-3">
+    <div class="mb-1.5 flex items-center gap-2">
+      <div>
+        <div class="text-[13px] font-medium">Update-or-create prompt</div>
+        <div class="text-[11px] text-faint">
+          Replace the URL with your repo, then paste this into your agent.
+        </div>
+      </div>
+      <button class="btn btn-sm ml-auto" onclick={() => copy(triggerPrompt, "trigger")}>
+        {copied === "trigger" ? "Copied" : "Copy"}
+      </button>
+    </div>
+    <pre class="m-0 whitespace-pre-wrap rounded-md border border-line bg-bg p-3 font-mono text-[12.5px] leading-relaxed">{triggerPrompt}</pre>
+  </div>
+
+  <p class="mt-0 text-[13px] text-dim">
+    Under the hood the agent calls <code class="font-mono text-[12px]">list_repos</code> to check whether
+    the repo exists, then <code class="font-mono text-[12px]">add_repo</code> to clone and build it, or
+    <code class="font-mono text-[12px]">refresh_repo</code> to pull and rebuild an existing one. Poll
+    <code class="font-mono text-[12px]">repo_status</code> until the build state is
+    <code class="font-mono text-[12px]">ready</code>.
+  </p>
+  <p class="mb-0 mt-2 text-[13px] text-faint">
+    Both HTTPS and SSH URLs work. Private repos need a git credential — store a token (HTTPS) or SSH key
+    (SSH) with <code class="font-mono text-[12px]">set_credential</code>; the most specific host or
+    host/path pattern wins.
+  </p>
 </div>
 
 <div class="card my-4 p-4">

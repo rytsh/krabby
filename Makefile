@@ -30,9 +30,10 @@ lint: ## Run linters
 	go vet ./...
 	command -v golangci-lint > /dev/null && golangci-lint run ./... || true
 
-.PHONY: docker
-docker: ## Build docker image
-	docker build -t krabby:$(VERSION) .
+.PHONY: build-container
+build-container: build-ui ## Build the amd64 container image with a test tag
+	GOOS=linux GOARCH=amd64 goreleaser build --snapshot --clean --single-target
+	docker build -t krabby:test -f Dockerfile dist/krabby_linux_amd64_v1/
 
 .PHONY: help
 help: ## Show this help

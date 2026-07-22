@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { api } from "../lib/api.js";
   import { link } from "../lib/router.js";
-  import { repos, reposLoaded, loadRepos } from "../lib/repos.js";
+  import { invalidateOwners } from "../lib/repos.js";
   import { fmtDate } from "../lib/format.js";
   import Icon from "../lib/Icon.svelte";
   import Status from "../lib/Status.svelte";
@@ -12,24 +12,57 @@
   let addBranch = $state("");
   let adding = $state(false);
 
-  // Search + pagination (client side: the API returns the full list).
+  // Server-side pagination + search. The API returns one page at a time.
   let query = $state("");
   let page = $state(1);
   const pageSize = 10;
 
-  let filtered = $derived($repos.filter((r) => {
-    const q = query.trim().toLowerCase();
-    if (!q) return true;
-    return r.id.toLowerCase().includes(q) || (r.url || "").toLowerCase().includes(q);
-  }));
-  let totalPages = $derived(Math.max(1, Math.ceil(filtered.length / pageSize)));
-  // Clamp against filter shrink without writing state from an effect.
-  let current = $derived(Math.min(page, totalPages));
-  let paged = $derived(filtered.slice((current - 1) * pageSize, current * pageSize));
+  let items = $state([]);
+  let total = $state(0);
+  let loaded = $state(false);
+  let loading = $state(false);
+  let loadSeq = 0;
+  let debounceTimer;
+
+  let totalPages = $derived(Math.max(1, Math.ceil(total / pageSize)));
+
+  async function load() {
+    const seq = ++loadSeq;
+    loading = true;
+    try {
+      const res = await api.repos({ page, perPage: pageSize, q: query.trim() });
+      if (seq !== loadSeq) return;
+      items = res?.items || [];
+      total = res?.total || 0;
+      error = "";
+    } catch (e) {
+      if (seq !== loadSeq) return;
+      error = e.message;
+      items = [];
+      total = 0;
+    } finally {
+      if (seq === loadSeq) {
+        loading = false;
+        loaded = true;
+      }
+    }
+  }
 
   function setQuery(v) {
     query = v;
     page = 1;
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(load, 250);
+  }
+
+  function goto(p) {
+    page = Math.min(Math.max(1, p), totalPages);
+    load();
+  }
+
+  // Reload the current page and refresh the sidebar owner tree after a mutation.
+  async function reload() {
+    await Promise.all([load(), invalidateOwners()]);
   }
 
   async function add() {
@@ -40,7 +73,8 @@
       addUrl = "";
       addBranch = "";
       error = "";
-      await loadRepos();
+      page = 1;
+      await reload();
     } catch (e) {
       error = e.message;
     } finally {
@@ -53,7 +87,7 @@
     e.stopPropagation();
     try {
       await api.refreshRepo(id);
-      await loadRepos();
+      await reload();
     } catch (err) {
       error = err.message;
     }
@@ -64,7 +98,7 @@
     e.stopPropagation();
     try {
       await api.cancelRepoJob(id);
-      await loadRepos();
+      await reload();
     } catch (err) {
       error = err.message;
     }
@@ -76,13 +110,15 @@
     if (!confirm(`Stop tracking ${id} and delete its clone?`)) return;
     try {
       await api.deleteRepo(id);
-      await loadRepos();
+      // Stepping back a page if we just emptied the last one.
+      if (items.length === 1 && page > 1) page -= 1;
+      await reload();
     } catch (err) {
       error = err.message;
     }
   }
 
-  onMount(loadRepos);
+  onMount(load);
 </script>
 
 <p class="text-dim">Tracked repositories and their knowledge-graph build status.</p>
@@ -113,16 +149,16 @@
     />
   </div>
   <span class="whitespace-nowrap text-[13px] text-faint">
-    {filtered.length} of {$repos.length}
+    {total} total
   </span>
 </div>
 
 <div class="card overflow-hidden">
-  {#if !$reposLoaded}
+  {#if !loaded}
     <div class="p-6 text-center text-dim">Loading…</div>
-  {:else if $repos.length === 0}
+  {:else if total === 0 && !query.trim()}
     <div class="p-6 text-center text-dim">No repositories tracked yet.</div>
-  {:else if filtered.length === 0}
+  {:else if items.length === 0}
     <div class="p-6 text-center text-dim">No repositories match “{query}”.</div>
   {:else}
     <table class="w-full border-collapse">
@@ -136,7 +172,7 @@
         </tr>
       </thead>
       <tbody>
-        {#each paged as r (r.id)}
+        {#each items as r (r.id)}
           <tr class="hover:bg-surface-2">
             <td class="border-b border-line px-3 py-2.5">
               <a href={`/repos/${r.id}`} use:link class="font-mono text-[13px] hover:text-accent">{r.id}</a>
@@ -167,21 +203,21 @@
     {#if totalPages > 1}
       <div class="flex min-h-8 items-center justify-between border-t border-line px-3 py-1">
         <span class="text-[11px] text-faint">
-          {(current - 1) * pageSize + 1}–{Math.min(current * pageSize, filtered.length)} of {filtered.length}
+          {(page - 1) * pageSize + 1}–{Math.min(page * pageSize, total)} of {total}
         </span>
         <div class="flex items-center gap-1">
           <button
             class="btn inline-flex h-6 w-6 items-center justify-center !p-0 text-sm"
             aria-label="Previous page"
-            disabled={current === 1}
-            onclick={() => (page = current - 1)}
+            disabled={page === 1 || loading}
+            onclick={() => goto(page - 1)}
           >‹</button>
-          <span class="min-w-12 text-center text-[11px] text-dim">{current} / {totalPages}</span>
+          <span class="min-w-12 text-center text-[11px] text-dim">{page} / {totalPages}</span>
           <button
             class="btn inline-flex h-6 w-6 items-center justify-center !p-0 text-sm"
             aria-label="Next page"
-            disabled={current === totalPages}
-            onclick={() => (page = current + 1)}
+            disabled={page === totalPages || loading}
+            onclick={() => goto(page + 1)}
           >›</button>
         </div>
       </div>

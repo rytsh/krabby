@@ -1,10 +1,27 @@
 <script>
   // Code search supports local BM25 and semantic code vectors. Docs search uses
   // the generated-document vector index and returns whole markdown documents.
+  import { onMount } from "svelte";
   import { api } from "../lib/api.js";
   import { navigate } from "../lib/router.js";
-  import { repos } from "../lib/repos.js";
   import Icon from "../lib/Icon.svelte";
+
+  // Repo ids for the filter dropdown, loaded once. Capped so a huge fleet does
+  // not build an enormous native <select>; beyond the cap the user searches all
+  // repositories (the common case) or types the id via the query.
+  const repoOptionCap = 500;
+  let repoOptions = $state([]);
+  let repoOptionsTruncated = $state(false);
+
+  async function loadRepoOptions() {
+    try {
+      const res = await api.repos({ page: 1, perPage: repoOptionCap });
+      repoOptions = (res?.items || []).map((r) => r.id);
+      repoOptionsTruncated = (res?.total || 0) > repoOptions.length;
+    } catch {
+      repoOptions = [];
+    }
+  }
 
   let q = $state("");
   let repoFilter = $state("");
@@ -71,6 +88,8 @@
     const text = (content || "").trim();
     return text.length > 700 ? `${text.slice(0, 700)}…` : text;
   }
+
+  onMount(loadRepoOptions);
 </script>
 
 <div class="mb-3 inline-flex rounded-md border border-line bg-surface p-1" role="group" aria-label="Search target">
@@ -128,9 +147,12 @@
   {/if}
   <select class="input sm:basis-[220px]" bind:value={repoFilter} onchange={resetResults}>
     <option value="">all repositories</option>
-    {#each $repos as r (r.id)}
-      <option value={r.id}>{r.id}</option>
+    {#each repoOptions as id (id)}
+      <option value={id}>{id}</option>
     {/each}
+    {#if repoOptionsTruncated}
+      <option disabled>… more (search all repositories)</option>
+    {/if}
   </select>
   <button class="btn btn-primary" onclick={search} disabled={loading || !q.trim()}>
     {loading ? "Searching…" : "Search"}

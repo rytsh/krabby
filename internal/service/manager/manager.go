@@ -276,6 +276,26 @@ func (m *Manager) Activity(id string) string {
 	return strings.Join(steps, ",")
 }
 
+// ActiveRepos returns the repos that currently have running pipeline steps,
+// mapping each repo id to its comma-joined steps. This lets the UI show live
+// jobs without scanning every tracked repo.
+func (m *Manager) ActiveRepos() map[string]string {
+	m.activityMu.Lock()
+	defer m.activityMu.Unlock()
+
+	out := make(map[string]string, len(m.activity))
+	for id, stepSet := range m.activity {
+		steps := make([]string, 0, len(stepSet))
+		for step := range stepSet {
+			steps = append(steps, step)
+		}
+		sort.Strings(steps)
+		out[id] = strings.Join(steps, ",")
+	}
+
+	return out
+}
+
 // job is the cancellation handle of one running refresh/generate run.
 type job struct {
 	cancel context.CancelFunc

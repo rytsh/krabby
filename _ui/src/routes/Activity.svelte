@@ -1,8 +1,13 @@
 <script>
   import { onDestroy, onMount } from "svelte";
-  import { loadRepos, repos, reposLoaded } from "../lib/repos.js";
+  import { api } from "../lib/api.js";
   import { link } from "../lib/router.js";
   import Icon from "../lib/Icon.svelte";
+
+  // Server-side: only the repos with running jobs, plus the total repo count.
+  let active = $state([]); // [{ id, running, status }]
+  let repoCount = $state(0);
+  let activityLoaded = $state(false);
 
   const jobMeta = {
     sync: {
@@ -32,21 +37,21 @@
     },
   };
 
-  function describe(repo, step) {
+  function describe(id, step) {
     const meta = jobMeta[step] || {
       label: step || "Background work",
       detail: "Krabby is processing this repository.",
       phase: "Worker",
     };
-    return { repo: repo.id, step, ...meta };
+    return { repo: id, step, ...meta };
   }
 
-  // repo.running is comma-joined when several steps run in parallel
+  // active[].running is comma-joined when several steps run in parallel
   // (e.g. "code_index,docs"); show one job entry per step.
   let jobs = $derived(
-    $repos
-      .filter((repo) => repo.running)
-      .flatMap((repo) => repo.running.split(",").map((step) => describe(repo, step)))
+    active
+      .filter((r) => r.running)
+      .flatMap((r) => r.running.split(",").map((step) => describe(r.id, step)))
       .sort((a, b) => a.repo.localeCompare(b.repo) || a.step.localeCompare(b.step)),
   );
   const jobsPageSize = 6;
@@ -67,9 +72,15 @@
   async function refresh() {
     refreshing = true;
     try {
-      await loadRepos();
+      const [activeList, page] = await Promise.all([
+        api.activeRepos(),
+        api.repos({ page: 1, perPage: 1 }),
+      ]);
+      active = Array.isArray(activeList) ? activeList : [];
+      repoCount = page?.total || 0;
     } finally {
       refreshing = false;
+      activityLoaded = true;
     }
   }
 
@@ -126,12 +137,12 @@
     <div class="mt-1.5 text-[12px] text-faint">Active jobs</div>
   </div>
   <div class="card px-4 py-3">
-    <div class="font-mono text-2xl font-semibold leading-none">{$repos.length}</div>
+    <div class="font-mono text-2xl font-semibold leading-none">{repoCount}</div>
     <div class="mt-1.5 text-[12px] text-faint">Tracked repositories</div>
   </div>
 </div>
 
-{#if !$reposLoaded}
+{#if !activityLoaded}
   <div class="card p-8 text-center text-dim">Loading activity…</div>
 {:else if jobs.length === 0}
   <div class="card flex min-h-44 flex-col items-center justify-center border-dashed px-6 text-center">

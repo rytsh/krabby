@@ -17,6 +17,8 @@ builds:
       - -X main.version={{ .Version }}
       - -X main.commit={{ .ShortCommit }}
       - -X main.date={{ .Date }}
+    flags:
+      - -trimpath
 
 archives:
   - formats: [tar.gz]
@@ -24,6 +26,22 @@ archives:
       - LICENSE
       - README.md
       - krabby.example.yaml
+
+dockers:
+  - image_templates:
+      - "ghcr.io/rytsh/krabby:{{ .Version }}"
+      - "ghcr.io/rytsh/krabby:latest"
+    dockerfile: Dockerfile
+    build_flag_templates:
+      - "--pull"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.created={{ .Date }}"
+      - "--label=org.opencontainers.image.source={{ .GitURL }}"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
 
 checksum:
   name_template: "checksums.txt"

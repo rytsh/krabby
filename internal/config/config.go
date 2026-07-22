@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/rakunlabs/chu"
+	_ "github.com/rakunlabs/chu/loader/external/loaderconsul"
+	_ "github.com/rakunlabs/chu/loader/external/loadervault"
 	"github.com/rakunlabs/chu/loader/loaderenv"
 	"github.com/rakunlabs/logi"
 	"github.com/rakunlabs/tell"
