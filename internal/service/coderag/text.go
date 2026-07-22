@@ -60,6 +60,11 @@ func (s *TextStore) ReplaceRepo(ctx context.Context, repo string, items []vector
 		return err
 	}
 
+	return s.InsertItems(ctx, items)
+}
+
+// InsertItems adds (or overwrites by ID) searchable chunks.
+func (s *TextStore) InsertItems(ctx context.Context, items []vectorstore.Item) error {
 	records := make([]*textRecord, 0, len(items))
 	for _, item := range items {
 		records = append(records, &textRecord{
@@ -81,6 +86,31 @@ func (s *TextStore) ReplaceRepo(ctx context.Context, repo string, items []vector
 	}
 
 	return nil
+}
+
+// DeletePaths removes a repo's chunks whose source path is in paths. Used for
+// incremental re-indexing of changed/deleted files.
+func (s *TextStore) DeletePaths(ctx context.Context, repo string, paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+
+	set := make(map[string]struct{}, len(paths))
+	for _, p := range paths {
+		set[p] = struct{}{}
+	}
+
+	var ids []string
+	if err := s.bucket.Walk(ctx, textRepoQuery(repo), func(record *textRecord) error {
+		if _, ok := set[record.Path]; ok {
+			ids = append(ids, record.ID)
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("collect code search chunks; %w", err)
+	}
+
+	return s.deleteIDs(ids)
 }
 
 // Search performs BM25 full-text search over paths, symbols and source chunks.
@@ -215,6 +245,10 @@ func (s *TextStore) DeleteRepo(ctx context.Context, repo string) error {
 		return fmt.Errorf("collect code search chunks; %w", err)
 	}
 
+	return s.deleteIDs(ids)
+}
+
+func (s *TextStore) deleteIDs(ids []string) error {
 	for start := 0; start < len(ids); start += textBatchSize {
 		end := min(start+textBatchSize, len(ids))
 		if err := s.db.Update(func(tx *bw.Tx) error {

@@ -37,12 +37,13 @@ type Settings struct {
 	LLMTimeout time.Duration `bw:"llm_timeout"  json:"llm_timeout"`
 
 	// Embedder (embeddings) for RAG.
-	EmbedBaseURL string        `bw:"embed_base_url" json:"embed_base_url"`
-	EmbedAPIKey  string        `bw:"embed_api_key"  json:"-"` // write-only
-	EmbedModel   string        `bw:"embed_model"    json:"embed_model"`
-	EmbedDim     int           `bw:"embed_dim"      json:"embed_dim"`
-	EmbedBatch   int           `bw:"embed_batch"    json:"embed_batch"`
-	EmbedTimeout time.Duration `bw:"embed_timeout"  json:"embed_timeout"`
+	EmbedBaseURL     string        `bw:"embed_base_url"    json:"embed_base_url"`
+	EmbedAPIKey      string        `bw:"embed_api_key"     json:"-"` // write-only
+	EmbedModel       string        `bw:"embed_model"       json:"embed_model"`
+	EmbedDim         int           `bw:"embed_dim"         json:"embed_dim"`
+	EmbedBatch       int           `bw:"embed_batch"       json:"embed_batch"`
+	EmbedConcurrency int           `bw:"embed_concurrency" json:"embed_concurrency"`
+	EmbedTimeout     time.Duration `bw:"embed_timeout"     json:"embed_timeout"`
 
 	// RAG (retrieval over the embedded vector store).
 	RAGEnabled      bool `bw:"rag_enabled"       json:"rag_enabled"`
@@ -53,12 +54,13 @@ type Settings struct {
 
 	// Code embedder (embeddings) for code RAG. When BaseURL is empty the docs
 	// embedder settings above are used for code as well.
-	CodeEmbedBaseURL string        `bw:"code_embed_base_url" json:"code_embed_base_url"`
-	CodeEmbedAPIKey  string        `bw:"code_embed_api_key"  json:"-"` // write-only
-	CodeEmbedModel   string        `bw:"code_embed_model"    json:"code_embed_model"`
-	CodeEmbedDim     int           `bw:"code_embed_dim"      json:"code_embed_dim"`
-	CodeEmbedBatch   int           `bw:"code_embed_batch"    json:"code_embed_batch"`
-	CodeEmbedTimeout time.Duration `bw:"code_embed_timeout"  json:"code_embed_timeout"`
+	CodeEmbedBaseURL     string        `bw:"code_embed_base_url"    json:"code_embed_base_url"`
+	CodeEmbedAPIKey      string        `bw:"code_embed_api_key"     json:"-"` // write-only
+	CodeEmbedModel       string        `bw:"code_embed_model"       json:"code_embed_model"`
+	CodeEmbedDim         int           `bw:"code_embed_dim"         json:"code_embed_dim"`
+	CodeEmbedBatch       int           `bw:"code_embed_batch"       json:"code_embed_batch"`
+	CodeEmbedConcurrency int           `bw:"code_embed_concurrency" json:"code_embed_concurrency"`
+	CodeEmbedTimeout     time.Duration `bw:"code_embed_timeout"     json:"code_embed_timeout"`
 
 	// Code RAG (source-code semantic search).
 	CodeRAGEnabled      bool     `bw:"code_rag_enabled"       json:"code_rag_enabled"`
@@ -113,12 +115,13 @@ type Patch struct {
 	LLMModel   *string        `json:"llm_model"`
 	LLMTimeout *time.Duration `json:"llm_timeout"`
 
-	EmbedBaseURL *string        `json:"embed_base_url"`
-	EmbedAPIKey  *string        `json:"embed_api_key"`
-	EmbedModel   *string        `json:"embed_model"`
-	EmbedDim     *int           `json:"embed_dim"`
-	EmbedBatch   *int           `json:"embed_batch"`
-	EmbedTimeout *time.Duration `json:"embed_timeout"`
+	EmbedBaseURL     *string        `json:"embed_base_url"`
+	EmbedAPIKey      *string        `json:"embed_api_key"`
+	EmbedModel       *string        `json:"embed_model"`
+	EmbedDim         *int           `json:"embed_dim"`
+	EmbedBatch       *int           `json:"embed_batch"`
+	EmbedConcurrency *int           `json:"embed_concurrency"`
+	EmbedTimeout     *time.Duration `json:"embed_timeout"`
 
 	RAGEnabled      *bool `json:"rag_enabled"`
 	RAGChunkSize    *int  `json:"rag_chunk_size"`
@@ -126,12 +129,13 @@ type Patch struct {
 	RAGTopK         *int  `json:"rag_top_k"`
 	RAGTopDocs      *int  `json:"rag_top_docs"`
 
-	CodeEmbedBaseURL *string        `json:"code_embed_base_url"`
-	CodeEmbedAPIKey  *string        `json:"code_embed_api_key"`
-	CodeEmbedModel   *string        `json:"code_embed_model"`
-	CodeEmbedDim     *int           `json:"code_embed_dim"`
-	CodeEmbedBatch   *int           `json:"code_embed_batch"`
-	CodeEmbedTimeout *time.Duration `json:"code_embed_timeout"`
+	CodeEmbedBaseURL     *string        `json:"code_embed_base_url"`
+	CodeEmbedAPIKey      *string        `json:"code_embed_api_key"`
+	CodeEmbedModel       *string        `json:"code_embed_model"`
+	CodeEmbedDim         *int           `json:"code_embed_dim"`
+	CodeEmbedBatch       *int           `json:"code_embed_batch"`
+	CodeEmbedConcurrency *int           `json:"code_embed_concurrency"`
+	CodeEmbedTimeout     *time.Duration `json:"code_embed_timeout"`
 
 	CodeRAGEnabled      *bool     `json:"code_rag_enabled"`
 	CodeRAGChunkSize    *int      `json:"code_rag_chunk_size"`
@@ -186,6 +190,9 @@ func (p Patch) Apply(base Settings) Settings {
 	if p.EmbedBatch != nil {
 		base.EmbedBatch = *p.EmbedBatch
 	}
+	if p.EmbedConcurrency != nil {
+		base.EmbedConcurrency = *p.EmbedConcurrency
+	}
 	if p.EmbedTimeout != nil {
 		base.EmbedTimeout = *p.EmbedTimeout
 	}
@@ -218,6 +225,9 @@ func (p Patch) Apply(base Settings) Settings {
 	}
 	if p.CodeEmbedBatch != nil {
 		base.CodeEmbedBatch = *p.CodeEmbedBatch
+	}
+	if p.CodeEmbedConcurrency != nil {
+		base.CodeEmbedConcurrency = *p.CodeEmbedConcurrency
 	}
 	if p.CodeEmbedTimeout != nil {
 		base.CodeEmbedTimeout = *p.CodeEmbedTimeout
@@ -258,9 +268,10 @@ type Store struct {
 	mcpBucket *bw.Bucket[MCPKey]
 }
 
-// settingsSchemaVersion v2 removes the obsolete remote-store fields. Bumping
-// the version lets bw migrate existing settings records in place.
-const settingsSchemaVersion = 2
+// settingsSchemaVersion v3 adds the embed_concurrency / code_embed_concurrency
+// fields. Bumping the version lets bw migrate existing settings records in
+// place.
+const settingsSchemaVersion = 3
 
 // New opens the settings bucket. If no record exists yet, seed is persisted as
 // the initial configuration (seeded from file/env config by the caller).

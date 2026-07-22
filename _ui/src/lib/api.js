@@ -41,6 +41,7 @@ export const api = {
     req("/repos", { method: "POST", keepalive: true, body: JSON.stringify({ url, branch: branch || "" }) }),
   deleteRepo: (id) => req(`/repos/${id}`, { method: "DELETE", keepalive: true }),
   refreshRepo: (id) => req(`/repos/${id}/refresh`, { method: "POST", keepalive: true }),
+  cancelRepoJob: (id) => req(`/repos/${id}/cancel`, { method: "POST", keepalive: true }),
   generate: (id, targets) =>
     req(`/repos/${id}/generate`, { method: "POST", keepalive: true, body: JSON.stringify({ targets }) }),
   lockStatus: (id) => req(`/repos/${id}/lock`),

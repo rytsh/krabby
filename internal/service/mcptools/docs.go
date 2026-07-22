@@ -147,15 +147,17 @@ type setDocsConfigArgs struct {
 	EmbedAPIKey  string `json:"embed_api_key,omitempty" jsonschema:"embeddings API key (write-only; leave empty to keep existing)"`
 	EmbedModel   string `json:"embed_model,omitempty" jsonschema:"embedding model name"`
 	EmbedDim     int    `json:"embed_dim,omitempty" jsonschema:"embedding dimension (0 = infer)"`
-	EmbedBatch   int    `json:"embed_batch,omitempty" jsonschema:"inputs per embeddings request"`
-	EmbedTimeout string `json:"embed_timeout,omitempty" jsonschema:"embeddings request timeout as a Go duration, e.g. 30s"`
+	EmbedBatch       int    `json:"embed_batch,omitempty" jsonschema:"inputs per embeddings request"`
+	EmbedConcurrency int    `json:"embed_concurrency,omitempty" jsonschema:"parallel embedding batch requests (default 4)"`
+	EmbedTimeout     string `json:"embed_timeout,omitempty" jsonschema:"embeddings request timeout as a Go duration, e.g. 30s"`
 
 	CodeEmbedBaseURL string `json:"code_embed_base_url,omitempty" jsonschema:"dedicated code embeddings base URL; blank uses the docs embedder"`
 	CodeEmbedAPIKey  string `json:"code_embed_api_key,omitempty" jsonschema:"code embeddings API key (write-only; leave empty to keep existing)"`
 	CodeEmbedModel   string `json:"code_embed_model,omitempty" jsonschema:"code embedding model, e.g. codestral-embed-2505"`
 	CodeEmbedDim     int    `json:"code_embed_dim,omitempty" jsonschema:"code embedding dimension (0 = infer)"`
-	CodeEmbedBatch   int    `json:"code_embed_batch,omitempty" jsonschema:"code inputs per embeddings request"`
-	CodeEmbedTimeout string `json:"code_embed_timeout,omitempty" jsonschema:"code embeddings request timeout as a Go duration, e.g. 30s"`
+	CodeEmbedBatch       int    `json:"code_embed_batch,omitempty" jsonschema:"code inputs per embeddings request"`
+	CodeEmbedConcurrency int    `json:"code_embed_concurrency,omitempty" jsonschema:"parallel code embedding batch requests (default 4)"`
+	CodeEmbedTimeout     string `json:"code_embed_timeout,omitempty" jsonschema:"code embeddings request timeout as a Go duration, e.g. 30s"`
 
 	RAGEnabled      bool `json:"rag_enabled,omitempty" jsonschema:"enable indexing + retrieval"`
 	RAGChunkSize    int  `json:"rag_chunk_size,omitempty" jsonschema:"target chunk length in characters"`

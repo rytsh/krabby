@@ -75,6 +75,7 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	api.DELETE("/repos/{owner}/{name}", server.Wrap(deleteRepo(mgr)))
 	api.POST("/repos/{owner}/{name}/refresh", server.Wrap(refreshRepo(mgr)))
 	api.POST("/repos/{owner}/{name}/generate", server.Wrap(generateRepo(mgr)))
+	api.POST("/repos/{owner}/{name}/cancel", server.Wrap(cancelRepoJob(mgr)))
 	api.POST("/repos/{owner}/{name}/lock", server.Wrap(lockRepo(mgr)))
 	api.GET("/repos/{owner}/{name}/lock", server.Wrap(lockStatus(mgr)))
 	api.DELETE("/repos/{owner}/{name}/lock", server.Wrap(unlockRepo(mgr)))
@@ -391,6 +392,21 @@ func generateRepo(mgr *manager.Manager) ada.HandlerFunc {
 		return c.SetStatus(http.StatusAccepted).SendJSON(map[string]any{
 			"status": "generate queued", "repo": id, "targets": req.Targets,
 		})
+	}
+}
+
+// cancelRepoJob aborts the refresh/generate job currently running for a repo.
+func cancelRepoJob(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		id := repoID(c.Request)
+
+		if !mgr.CancelJob(id) {
+			return c.SetStatus(http.StatusConflict).SendJSON(map[string]string{
+				"error": "no job running for " + id,
+			})
+		}
+
+		return c.SetStatus(http.StatusAccepted).SendJSON(map[string]string{"status": "cancelling", "repo": id})
 	}
 }
 

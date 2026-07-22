@@ -52,6 +52,11 @@ type Manifest struct {
 	// Summaries is the internal per-file summary cache used for incremental
 	// regeneration and as synthesis input. Not exposed by ListDocs.
 	Summaries []DocMeta `json:"summaries,omitempty"`
+
+	// ChangedDocs reports whether this run rewrote any user-facing document.
+	// In-memory only (not persisted): callers use it to skip re-indexing when
+	// documentation is unchanged.
+	ChangedDocs bool `json:"-"`
 }
 
 // ManifestName is the manifest filename inside the docs dir.
@@ -167,7 +172,7 @@ func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir st
 
 	concurrency := g.cfg.Concurrency
 	if concurrency <= 0 {
-		concurrency = 4
+		concurrency = 8
 	}
 
 	var (
@@ -220,7 +225,7 @@ func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir st
 	sort.Slice(summaries, func(i, j int) bool { return summaries[i].Path < summaries[j].Path })
 
 	// Synthesis: skip the LLM call when nothing changed and the doc exists.
-	docMeta, synthErr := g.maybeSynthesize(ctx, repo, docsDir, graph, summaries, priorMan, regen)
+	docMeta, synthesized, synthErr := g.maybeSynthesize(ctx, repo, docsDir, graph, summaries, priorMan, regen)
 
 	var docs []DocMeta
 	if docMeta != nil {
@@ -228,11 +233,12 @@ func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir st
 	}
 
 	man := &Manifest{
-		Repo:      repo,
-		Model:     g.llm.Model(),
-		Generated: time.Now(),
-		Docs:      docs,
-		Summaries: summaries,
+		Repo:        repo,
+		Model:       g.llm.Model(),
+		Generated:   time.Now(),
+		Docs:        docs,
+		Summaries:   summaries,
+		ChangedDocs: synthesized,
 	}
 
 	if err := writeManifest(docsDir, man); err != nil {
@@ -335,7 +341,8 @@ func (g *llmGenerator) summaryForFile(
 }
 
 // maybeSynthesize produces documentation.md from the summaries, reusing the
-// previous document when no summary changed and the file still exists.
+// previous document when no summary changed and the file still exists. The
+// second return reports whether a fresh document was written.
 func (g *llmGenerator) maybeSynthesize(
 	ctx context.Context,
 	repo, docsDir string,
@@ -343,7 +350,7 @@ func (g *llmGenerator) maybeSynthesize(
 	summaries []DocMeta,
 	priorMan *Manifest,
 	regen int,
-) (*DocMeta, error) {
+) (*DocMeta, bool, error) {
 	docAbs := filepath.Join(docsDir, DocName)
 
 	if regen == 0 && priorMan != nil {
@@ -353,13 +360,13 @@ func (g *llmGenerator) maybeSynthesize(
 			}
 
 			if _, err := os.Stat(docAbs); err == nil && len(priorMan.Summaries) == len(summaries) {
-				return &d, nil
+				return &d, false, nil
 			}
 		}
 	}
 
 	if len(summaries) == 0 {
-		return nil, fmt.Errorf("no source files to document")
+		return nil, false, fmt.Errorf("no source files to document")
 	}
 
 	system := g.cfg.Prompt
@@ -384,19 +391,19 @@ func (g *llmGenerator) maybeSynthesize(
 		{Role: "user", Content: user.String()},
 	})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	markdown := strings.TrimSpace(out) + "\n"
 	if err := os.WriteFile(docAbs, []byte(markdown), 0o644); err != nil { //nolint:gosec // docs are non-secret
-		return nil, fmt.Errorf("write %s; %w", DocName, err)
+		return nil, false, fmt.Errorf("write %s; %w", DocName, err)
 	}
 
 	return &DocMeta{
 		Path:      DocName,
 		Title:     "Documentation",
 		Generated: time.Now(),
-	}, nil
+	}, true, nil
 }
 
 // joinSummaries concatenates summary contents within a byte budget. When the

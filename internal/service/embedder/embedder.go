@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rytsh/krabby/internal/config"
@@ -25,9 +26,12 @@ type Client struct {
 	baseURL string
 	apiKey  string
 	model   string
-	dim     int
 	batch   int
+	conc    int
 	http    *http.Client
+
+	dimMu sync.Mutex
+	dim   int
 }
 
 // New builds an embeddings client from config. Returns ErrNotConfigured when no
@@ -47,12 +51,18 @@ func New(cfg config.Embedder) (*Client, error) {
 		batch = 64
 	}
 
+	conc := cfg.Concurrency
+	if conc <= 0 {
+		conc = 4
+	}
+
 	return &Client{
 		baseURL: strings.TrimRight(cfg.BaseURL, "/"),
 		apiKey:  cfg.APIKey,
 		model:   cfg.Model,
 		dim:     cfg.Dim,
 		batch:   batch,
+		conc:    conc,
 		http:    &http.Client{Timeout: timeout},
 	}, nil
 }
@@ -61,7 +71,12 @@ func New(cfg config.Embedder) (*Client, error) {
 func (c *Client) Model() string { return c.model }
 
 // Dim returns the embedding dimension (0 until inferred from a response).
-func (c *Client) Dim() int { return c.dim }
+func (c *Client) Dim() int {
+	c.dimMu.Lock()
+	defer c.dimMu.Unlock()
+
+	return c.dim
+}
 
 type embedRequest struct {
 	Model string   `json:"model"`
@@ -81,27 +96,71 @@ type apiError struct {
 }
 
 // Embed returns one vector per input text, batching requests by the configured
-// batch size and preserving input order. On the first successful response it
-// records the embedding dimension when not already set.
+// batch size and preserving input order. Batches are dispatched concurrently
+// (bounded by the configured concurrency); the first failure cancels the rest.
+// On the first successful response it records the embedding dimension when not
+// already set.
 func (c *Client) Embed(ctx context.Context, texts []string) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
 	}
 
-	out := make([][]float32, 0, len(texts))
+	if len(texts) <= c.batch {
+		return c.embedBatch(ctx, texts)
+	}
 
-	for start := 0; start < len(texts); start += c.batch {
-		end := start + c.batch
-		if end > len(texts) {
-			end = len(texts)
+	parent := ctx
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	out := make([][]float32, len(texts))
+	sem := make(chan struct{}, c.conc)
+
+	var (
+		wg       sync.WaitGroup
+		errMu    sync.Mutex
+		firstErr error
+	)
+
+	for start := 0; start < len(texts) && ctx.Err() == nil; start += c.batch {
+		end := min(start+c.batch, len(texts))
+
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			continue
 		}
 
-		vecs, err := c.embedBatch(ctx, texts[start:end])
-		if err != nil {
-			return nil, err
-		}
+		wg.Add(1)
+		go func(start, end int) {
+			defer wg.Done()
+			defer func() { <-sem }()
 
-		out = append(out, vecs...)
+			vecs, err := c.embedBatch(ctx, texts[start:end])
+			if err != nil {
+				errMu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				errMu.Unlock()
+
+				cancel()
+
+				return
+			}
+
+			copy(out[start:end], vecs)
+		}(start, end)
+	}
+
+	wg.Wait()
+
+	if firstErr != nil {
+		return nil, firstErr
+	}
+
+	if err := parent.Err(); err != nil {
+		return nil, err
 	}
 
 	return out, nil
@@ -154,8 +213,12 @@ func (c *Client) embedBatch(ctx context.Context, batch []string) ([][]float32, e
 		vecs[i] = out.Data[i].Embedding
 	}
 
-	if c.dim == 0 && len(vecs) > 0 {
-		c.dim = len(vecs[0])
+	if len(vecs) > 0 {
+		c.dimMu.Lock()
+		if c.dim == 0 {
+			c.dim = len(vecs[0])
+		}
+		c.dimMu.Unlock()
 	}
 
 	return vecs, nil

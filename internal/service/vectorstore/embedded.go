@@ -198,12 +198,37 @@ func (s *embedded) Search(ctx context.Context, repo string, vec []float32, topK 
 }
 
 func (s *embedded) DeleteRepo(ctx context.Context, repo string) error {
+	return s.deleteWhere(ctx, repo, nil)
+}
+
+func (s *embedded) DeletePaths(ctx context.Context, repo string, paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+
+	set := make(map[string]struct{}, len(paths))
+	for _, p := range paths {
+		set[p] = struct{}{}
+	}
+
+	return s.deleteWhere(ctx, repo, set)
+}
+
+// deleteWhere removes a repo's records, optionally restricted to a DocPath set
+// (nil = all records of the repo).
+func (s *embedded) deleteWhere(ctx context.Context, repo string, paths map[string]struct{}) error {
 	s.h.opMu.RLock()
 	defer s.h.opMu.RUnlock()
 
 	var ids []string
 
 	err := s.h.bucket.Walk(ctx, repoQuery(repo), func(r *chunkRecord) error {
+		if paths != nil {
+			if _, ok := paths[r.DocPath]; !ok {
+				return nil
+			}
+		}
+
 		ids = append(ids, r.ID)
 
 		return nil

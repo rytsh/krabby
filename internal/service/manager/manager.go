@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -64,10 +65,20 @@ type Manager struct {
 	lifecycleMu sync.Mutex
 	closing     bool
 
-	// activity tracks the currently running pipeline step per repo (transient,
-	// in-memory): "sync" or a registry.Stage* name. Empty = idle.
+	// activity tracks the currently running pipeline steps per repo (transient,
+	// in-memory): "sync" or registry.Stage* names. Multiple steps can run at
+	// once (e.g. code_index in parallel with docs). Empty = idle.
 	activityMu sync.Mutex
-	activity   map[string]string
+	activity   map[string]map[string]struct{}
+
+	// stageMu serializes stage-state mutation + persistence on the shared repo
+	// record so stages may run concurrently for the same repo.
+	stageMu sync.Mutex
+
+	// jobs tracks the cancel function of the currently running refresh/generate
+	// job per repo so users can abort long builds manually.
+	jobMu sync.Mutex
+	jobs  map[string]*job
 
 	// Effective MCP API key (runtime override or config), cached for the
 	// per-request auth check. mcpConfigKey is the startup config value used
@@ -134,7 +145,8 @@ func New(
 		},
 		baseCtx:  baseCtx,
 		locks:    map[string]*sync.Mutex{},
-		activity: map[string]string{},
+		activity: map[string]map[string]struct{}{},
+		jobs:     map[string]*job{},
 	}
 	m.leases = lease.New(m.TriggerRefresh)
 
@@ -215,24 +227,102 @@ func (m *Manager) setActivity(id, step string) {
 	m.activityMu.Lock()
 	defer m.activityMu.Unlock()
 
-	m.activity[id] = step
+	steps := m.activity[id]
+	if steps == nil {
+		steps = map[string]struct{}{}
+		m.activity[id] = steps
+	}
+
+	steps[step] = struct{}{}
 }
 
-func (m *Manager) clearActivity(id string) {
+func (m *Manager) clearActivity(id, step string) {
+	m.activityMu.Lock()
+	defer m.activityMu.Unlock()
+
+	delete(m.activity[id], step)
+
+	if len(m.activity[id]) == 0 {
+		delete(m.activity, id)
+	}
+}
+
+// clearRepoActivity removes all running-step markers for a repo. Used as a
+// safety net when a whole pipeline run ends.
+func (m *Manager) clearRepoActivity(id string) {
 	m.activityMu.Lock()
 	defer m.activityMu.Unlock()
 
 	delete(m.activity, id)
 }
 
-// Activity returns the pipeline step currently running for a repo ("sync",
-// "graph", "docs", "docs_index", "code_index") or "" when idle.
+// Activity returns the pipeline steps currently running for a repo ("sync",
+// "graph", "docs", "docs_index", "code_index"), comma-joined when several run
+// in parallel, or "" when idle.
 func (m *Manager) Activity(id string) string {
 	m.activityMu.Lock()
 	defer m.activityMu.Unlock()
 
-	return m.activity[id]
+	steps := make([]string, 0, len(m.activity[id]))
+	for step := range m.activity[id] {
+		steps = append(steps, step)
+	}
+
+	sort.Strings(steps)
+
+	return strings.Join(steps, ",")
 }
+
+// job is the cancellation handle of one running refresh/generate run.
+type job struct {
+	cancel context.CancelFunc
+}
+
+// registerJob derives a cancellable context for a repo's running job and
+// registers its handle so CancelJob can abort it. The returned cleanup must be
+// called when the job finishes; it releases the context and unregisters the
+// handle (unless a newer job already replaced it). Per-repo jobs serialize on
+// the repo lock, so at most one handle exists per id.
+func (m *Manager) registerJob(ctx context.Context, id string) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	j := &job{cancel: cancel}
+
+	m.jobMu.Lock()
+	m.jobs[id] = j
+	m.jobMu.Unlock()
+
+	return ctx, func() {
+		m.jobMu.Lock()
+		if m.jobs[id] == j {
+			delete(m.jobs, id)
+		}
+		m.jobMu.Unlock()
+
+		cancel()
+	}
+}
+
+// CancelJob aborts the refresh/generate job currently running for a repo by
+// cancelling its context; the in-flight git/graphify subprocess is killed and
+// the outcome is recorded as cancelled. It reports whether a job was running.
+func (m *Manager) CancelJob(id string) bool {
+	m.jobMu.Lock()
+	j := m.jobs[id]
+	m.jobMu.Unlock()
+
+	if j == nil {
+		return false
+	}
+
+	slog.Info("cancelling running job", "repo", id)
+	j.cancel()
+
+	return true
+}
+
+// ErrCancelled is recorded as the repo's LastError when a running job is
+// aborted via CancelJob.
+var ErrCancelled = errors.New("cancelled by user")
 
 // ReconcileInterruptedStages marks persisted running stages as failed. Activity
 // is intentionally in-memory, so no work from a previous process can still be
@@ -268,28 +358,43 @@ func (m *Manager) ReconcileInterruptedStages(ctx context.Context) error {
 }
 
 // runStage executes one generation stage, persisting its running/ok/error state
-// on the repo record and exposing it as the current activity while it runs.
+// on the repo record and exposing it as a current activity while it runs.
+// Stage-state mutation and persistence are serialized on stageMu so multiple
+// stages of the same repo may run concurrently.
 func (m *Manager) runStage(ctx context.Context, repo *registry.Repo, name string, fn func() error) error {
+	m.stageMu.Lock()
 	st := repo.Stages.Get(name)
 	if st == nil {
+		m.stageMu.Unlock()
+
 		return fmt.Errorf("unknown stage %q", name)
 	}
 
 	m.setActivity(repo.ID, name)
-	defer m.clearActivity(repo.ID)
+	defer m.clearActivity(repo.ID, name)
 
 	st.Status = registry.StageRunning
 	st.Error = ""
 	if err := m.reg.Upsert(ctx, repo); err != nil {
 		slog.Error("save stage state", "repo", repo.ID, "stage", name, "error", err)
 	}
+	m.stageMu.Unlock()
 
 	start := time.Now()
 	err := fn()
 
+	m.stageMu.Lock()
+	defer m.stageMu.Unlock()
+
 	st.FinishedAt = time.Now()
 	st.Commit = repo.LastCommit
 	if err != nil {
+		// A cancelled job context reads better as "cancelled by user" than the
+		// raw "context canceled" / "signal: killed" subprocess errors.
+		if ctx.Err() != nil {
+			err = ErrCancelled
+		}
+
 		st.Status = registry.StageError
 		st.Error = err.Error()
 
@@ -302,7 +407,8 @@ func (m *Manager) runStage(ctx context.Context, repo *registry.Repo, name string
 			"took", time.Since(start).Round(time.Millisecond).String())
 	}
 
-	if uerr := m.reg.Upsert(ctx, repo); uerr != nil {
+	// Persist even when the job context was cancelled mid-stage.
+	if uerr := m.reg.Upsert(context.WithoutCancel(ctx), repo); uerr != nil {
 		slog.Error("save stage state", "repo", repo.ID, "stage", name, "error", uerr)
 	}
 
@@ -336,41 +442,78 @@ func (m *Manager) AddRepo(ctx context.Context, url, branch string) (*registry.Re
 	return repo, nil
 }
 
-// AddRepoWait registers a repository and clones+builds it synchronously, blocking
-// until the graph is ready (or the build fails). It returns the final repo record
-// so callers get the terminal status directly instead of polling repo_status.
-// The clone/build honours ctx, so a caller timeout cancels the operation.
+// AddRepoWait registers a repository, starts the clone+build in the background
+// and waits for it to finish for as long as ctx allows. The build itself runs
+// detached from ctx, so a caller cancel or timeout never aborts it: when the
+// wait ends early the current in-progress record is returned with done=false
+// and the build keeps running (poll repo_status for the final state).
 //
 // A build failure is reported through the returned record's Status ("error") and
 // LastError, not as a Go error, so callers always get the final state back.
-func (m *Manager) AddRepoWait(ctx context.Context, url, branch string) (*registry.Repo, error) {
+func (m *Manager) AddRepoWait(ctx context.Context, url, branch string) (*registry.Repo, bool, error) {
 	id, _, _, err := m.registerRepo(ctx, url, branch)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	return m.RefreshWait(ctx, id)
 }
 
-// RefreshWait pulls and rebuilds a repository synchronously, blocking until the
-// graph is ready (or the build fails), then returns the final repo record.
+// RefreshWait pulls and rebuilds a repository in the background and waits until
+// the run finishes or ctx is done, then returns the latest repo record. done
+// reports whether the refresh completed within the wait; when false the build
+// continues detached and the record reflects the in-progress state.
 // A build failure is surfaced via the record's Status/LastError rather than a
 // Go error; only unexpected lookup failures return an error.
-func (m *Manager) RefreshWait(ctx context.Context, id string) (*registry.Repo, error) {
-	// Refresh persists StatusError + LastError on failure, so we ignore the
-	// returned error here and read the terminal state back from the registry.
-	_ = m.Refresh(ctx, id)
+func (m *Manager) RefreshWait(ctx context.Context, id string) (*registry.Repo, bool, error) {
+	// The refresh runs on the manager lifecycle context: a client that stops
+	// waiting (client-side tool timeout, ctrl+c, MCP cancellation) must not
+	// kill the clone/build mid-flight.
+	finished := m.refreshAsync(id)
 
-	repo, err := m.reg.Get(ctx, id)
+	done := false
+	select {
+	case <-finished:
+		done = true
+	case <-ctx.Done():
+	}
+
+	// Read the record even after a caller cancel so the in-progress (or
+	// terminal) state is always returned.
+	repo, err := m.reg.Get(context.WithoutCancel(ctx), id)
 	if err != nil {
-		return nil, err
+		return nil, done, err
 	}
 
 	if repo == nil {
-		return nil, fmt.Errorf("repo %s not found", id)
+		return nil, done, fmt.Errorf("repo %s not found", id)
 	}
 
-	return repo, nil
+	return repo, done, nil
+}
+
+// refreshAsync starts a refresh on the manager lifecycle context and returns a
+// channel closed when that refresh attempt completes. Refresh persists
+// StatusError + LastError on failure, so callers read the terminal state back
+// from the registry. During shutdown the channel is closed immediately.
+func (m *Manager) refreshAsync(id string) <-chan struct{} {
+	finished := make(chan struct{})
+	if !m.startWork() {
+		close(finished)
+
+		return finished
+	}
+
+	go func() {
+		defer m.wg.Done()
+		defer close(finished)
+
+		if err := m.Refresh(m.baseCtx, id); err != nil {
+			slog.Error("refresh repo", "repo", id, "error", err)
+		}
+	}()
+
+	return finished
 }
 
 // registerRepo parses the url, upserts a pending record if the repo is new, and
@@ -563,7 +706,12 @@ func (m *Manager) Generate(ctx context.Context, id string, targets []string) err
 		return fmt.Errorf("repo %s has no clone yet; refresh it first", id)
 	}
 
-	defer m.clearActivity(id)
+	// Run the stages on a cancellable job context so CancelJob can abort them.
+	var finish func()
+	ctx, finish = m.registerJob(ctx, id)
+	defer finish()
+
+	defer m.clearRepoActivity(id)
 
 	d, releaseDocs := m.acquireDocs()
 	defer releaseDocs()
@@ -729,11 +877,21 @@ func (m *Manager) Refresh(ctx context.Context, id string) error {
 		return nil
 	}
 
-	if err := m.refresh(ctx, repo); err != nil {
+	jobCtx, finish := m.registerJob(ctx, id)
+	defer finish()
+
+	if err := m.refresh(jobCtx, repo); err != nil {
+		// A manual CancelJob cancels jobCtx while the parent stays alive;
+		// record that distinctly from a real failure or a shutdown.
+		if jobCtx.Err() != nil && ctx.Err() == nil {
+			err = ErrCancelled
+		}
+
 		repo.Status = registry.StatusError
 		repo.LastError = err.Error()
 
-		if uerr := m.reg.Upsert(ctx, repo); uerr != nil {
+		// Persist even when the job context was cancelled.
+		if uerr := m.reg.Upsert(context.WithoutCancel(ctx), repo); uerr != nil {
 			slog.Error("save repo error state", "repo", id, "error", uerr)
 		}
 
@@ -746,13 +904,15 @@ func (m *Manager) Refresh(ctx context.Context, id string) error {
 func (m *Manager) refresh(ctx context.Context, repo *registry.Repo) error {
 	slog.Info("working on repo", "repo", repo.ID, "commit", shortSHA(repo.LastCommit))
 
-	m.setActivity(repo.ID, "sync")
-	defer m.clearActivity(repo.ID)
+	defer m.clearRepoActivity(repo.ID)
 
 	graphPath := graphify.GraphPath(repo.Path)
 	hadGraph := fileExists(graphPath)
 
+	m.setActivity(repo.ID, "sync")
 	changed, err := m.sync(ctx, repo)
+	m.clearActivity(repo.ID, "sync")
+
 	if err != nil {
 		return err
 	}
@@ -816,13 +976,29 @@ func (m *Manager) buildDocsAndIndex(ctx context.Context, repo *registry.Repo) {
 		return
 	}
 
-	// Code index first: it only needs the clone + graph, not the docs.
+	// code_index and docs have no data dependency (both need only the clone +
+	// graph) and hit different backends (embedder vs LLM), so they run in
+	// parallel; runStage serializes their stage-state writes on stageMu.
+	var wg sync.WaitGroup
 	if d.codeRag != nil {
-		//nolint:errcheck // recorded on the stage state; never fails the build
-		_ = m.runStage(ctx, repo, registry.StageCodeIndex, func() error {
-			return d.codeRag.Index(ctx, repo.ID, repo.Path)
-		})
+		// The delta must be captured before runStage mutates the stage state.
+		changed, incremental := m.codeIndexDelta(ctx, repo)
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			//nolint:errcheck // recorded on the stage state; never fails the build
+			_ = m.runStage(ctx, repo, registry.StageCodeIndex, func() error {
+				if incremental {
+					return d.codeRag.IndexChanged(ctx, repo.ID, repo.Path, changed)
+				}
+
+				return d.codeRag.Index(ctx, repo.ID, repo.Path)
+			})
+		}()
 	}
+	defer wg.Wait()
 
 	if d.gen == nil && d.rag == nil {
 		return
@@ -835,22 +1011,72 @@ func (m *Manager) buildDocsAndIndex(ctx context.Context, repo *registry.Repo) {
 		return
 	}
 
+	docsChanged := true
 	if d.gen != nil {
+		var man *docgen.Manifest
 		if err := m.runStage(ctx, repo, registry.StageDocs, func() error {
-			_, err := d.gen.Generate(ctx, repo.ID, repo.Path, docsDir)
+			var gerr error
+			man, gerr = d.gen.Generate(ctx, repo.ID, repo.Path, docsDir)
 
-			return err
+			return gerr
 		}); err != nil {
 			return // no fresh docs -> skip indexing
 		}
+
+		if man != nil {
+			docsChanged = man.ChangedDocs
+		}
 	}
 
-	if d.rag != nil {
-		//nolint:errcheck // recorded on the stage state; never fails the build
-		_ = m.runStage(ctx, repo, registry.StageDocsIndex, func() error {
-			return d.rag.Index(ctx, repo.ID, docsDir)
-		})
+	if d.rag == nil {
+		return
 	}
+
+	// Unchanged documentation with a previously successful index needs no
+	// re-embedding.
+	if st := repo.Stages.Get(registry.StageDocsIndex); !docsChanged && st.Status == registry.StageOK {
+		slog.Info("documentation unchanged, skipping docs index", "repo", repo.ID)
+
+		return
+	}
+
+	//nolint:errcheck // recorded on the stage state; never fails the build
+	_ = m.runStage(ctx, repo, registry.StageDocsIndex, func() error {
+		return d.rag.Index(ctx, repo.ID, docsDir)
+	})
+}
+
+// codeIndexDelta decides whether the code index can be updated incrementally:
+// the previous code_index run must have succeeded at a known commit that still
+// exists, the FTS index must actually hold the repo, and git must be able to
+// name the files changed since. It returns the changed paths (possibly empty:
+// a no-op update) and whether the incremental path applies; on false the caller
+// performs a full rebuild.
+func (m *Manager) codeIndexDelta(ctx context.Context, repo *registry.Repo) ([]string, bool) {
+	st := repo.Stages.Get(registry.StageCodeIndex)
+	if st == nil || st.Status != registry.StageOK || st.Commit == "" || repo.LastCommit == "" {
+		return nil, false
+	}
+
+	if m.codeText != nil {
+		if has, err := m.codeText.HasRepo(ctx, repo.ID); err != nil || !has {
+			return nil, false
+		}
+	}
+
+	if st.Commit == repo.LastCommit {
+		return nil, true // already indexed at this commit: nothing to do
+	}
+
+	changed, err := m.git.DiffNames(ctx, repo.Path, st.Commit, repo.LastCommit)
+	if err != nil {
+		slog.Warn("code index: diff failed, falling back to full reindex",
+			"repo", repo.ID, "from", shortSHA(st.Commit), "to", shortSHA(repo.LastCommit), "error", err)
+
+		return nil, false
+	}
+
+	return changed, true
 }
 
 // MigrateDocs moves generated documentation persisted by older versions from

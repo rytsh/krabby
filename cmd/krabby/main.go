@@ -142,7 +142,7 @@ func run(ctx context.Context) error {
 	// Background poller.
 	go scheduler.Run(ctx, mgr, cfg.Git.PollInterval)
 
-	mcpServer := mcptools.New(mgr, version)
+	mcpServer := mcptools.New(mgr, version, cfg.MCP.WaitTimeout)
 
 	// Server blocks until ctx is cancelled, then shuts down.
 	if err := server.Start(ctx, cfg, mgr, mcpServer); err != nil {
@@ -168,12 +168,13 @@ func seedSettings(cfg *config.Config) settings.Settings {
 		LLMModel:   cfg.LLM.Model,
 		LLMTimeout: cfg.LLM.Timeout,
 
-		EmbedBaseURL: cfg.Embedder.BaseURL,
-		EmbedAPIKey:  cfg.Embedder.APIKey,
-		EmbedModel:   cfg.Embedder.Model,
-		EmbedDim:     cfg.Embedder.Dim,
-		EmbedBatch:   cfg.Embedder.Batch,
-		EmbedTimeout: cfg.Embedder.Timeout,
+		EmbedBaseURL:     cfg.Embedder.BaseURL,
+		EmbedAPIKey:      cfg.Embedder.APIKey,
+		EmbedModel:       cfg.Embedder.Model,
+		EmbedDim:         cfg.Embedder.Dim,
+		EmbedBatch:       cfg.Embedder.Batch,
+		EmbedConcurrency: cfg.Embedder.Concurrency,
+		EmbedTimeout:     cfg.Embedder.Timeout,
 
 		RAGEnabled:      cfg.RAG.Enabled,
 		RAGChunkSize:    cfg.RAG.ChunkSize,
@@ -181,12 +182,13 @@ func seedSettings(cfg *config.Config) settings.Settings {
 		RAGTopK:         cfg.RAG.TopK,
 		RAGTopDocs:      cfg.RAG.TopDocs,
 
-		CodeEmbedBaseURL: cfg.CodeEmbedder.BaseURL,
-		CodeEmbedAPIKey:  cfg.CodeEmbedder.APIKey,
-		CodeEmbedModel:   cfg.CodeEmbedder.Model,
-		CodeEmbedDim:     cfg.CodeEmbedder.Dim,
-		CodeEmbedBatch:   cfg.CodeEmbedder.Batch,
-		CodeEmbedTimeout: cfg.CodeEmbedder.Timeout,
+		CodeEmbedBaseURL:     cfg.CodeEmbedder.BaseURL,
+		CodeEmbedAPIKey:      cfg.CodeEmbedder.APIKey,
+		CodeEmbedModel:       cfg.CodeEmbedder.Model,
+		CodeEmbedDim:         cfg.CodeEmbedder.Dim,
+		CodeEmbedBatch:       cfg.CodeEmbedder.Batch,
+		CodeEmbedConcurrency: cfg.CodeEmbedder.Concurrency,
+		CodeEmbedTimeout:     cfg.CodeEmbedder.Timeout,
 
 		CodeRAGEnabled:      cfg.CodeRAG.Enabled,
 		CodeRAGChunkSize:    cfg.CodeRAG.ChunkSize,

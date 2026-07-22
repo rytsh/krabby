@@ -457,12 +457,13 @@ func llmConfig(s settings.Settings) config.LLM {
 
 func embedderConfig(s settings.Settings) config.Embedder {
 	return config.Embedder{
-		BaseURL: s.EmbedBaseURL,
-		APIKey:  s.EmbedAPIKey,
-		Model:   s.EmbedModel,
-		Dim:     s.EmbedDim,
-		Batch:   s.EmbedBatch,
-		Timeout: s.EmbedTimeout,
+		BaseURL:     s.EmbedBaseURL,
+		APIKey:      s.EmbedAPIKey,
+		Model:       s.EmbedModel,
+		Dim:         s.EmbedDim,
+		Batch:       s.EmbedBatch,
+		Concurrency: s.EmbedConcurrency,
+		Timeout:     s.EmbedTimeout,
 	}
 }
 
@@ -474,12 +475,13 @@ func codeEmbedderConfig(s settings.Settings) config.Embedder {
 	}
 
 	return config.Embedder{
-		BaseURL: s.CodeEmbedBaseURL,
-		APIKey:  s.CodeEmbedAPIKey,
-		Model:   s.CodeEmbedModel,
-		Dim:     s.CodeEmbedDim,
-		Batch:   s.CodeEmbedBatch,
-		Timeout: s.CodeEmbedTimeout,
+		BaseURL:     s.CodeEmbedBaseURL,
+		APIKey:      s.CodeEmbedAPIKey,
+		Model:       s.CodeEmbedModel,
+		Dim:         s.CodeEmbedDim,
+		Batch:       s.CodeEmbedBatch,
+		Concurrency: s.CodeEmbedConcurrency,
+		Timeout:     s.CodeEmbedTimeout,
 	}
 }
 

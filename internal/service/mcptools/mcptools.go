@@ -12,17 +12,21 @@ import (
 
 	"github.com/rytsh/krabby/internal/service/credentials"
 	"github.com/rytsh/krabby/internal/service/manager"
+	"github.com/rytsh/krabby/internal/service/registry"
 )
 
-// New builds the MCP server with all krabby tools registered.
-func New(mgr *manager.Manager, version string) *mcp.Server {
+// New builds the MCP server with all krabby tools registered. waitTimeout caps
+// how long wait=true management calls block before returning the in-progress
+// status (the build keeps running in the background); <=0 means no server-side
+// cap.
+func New(mgr *manager.Manager, version string, waitTimeout time.Duration) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "krabby",
 		Title:   "krabby - multi-repo graphify knowledge graphs",
 		Version: version,
 	}, nil)
 
-	addManagementTools(server, mgr)
+	addManagementTools(server, mgr, waitTimeout)
 	addLeaseTools(server, mgr)
 	addCredentialTools(server, mgr)
 	addQueryTools(server, mgr)
@@ -51,36 +55,61 @@ type refreshRepoArgs struct {
 
 type emptyArgs struct{}
 
-func addManagementTools(server *mcp.Server, mgr *manager.Manager) {
+// repoView decorates a repo record with the transient in-memory activity so
+// callers can see which pipeline step is currently running (empty = idle).
+type repoView struct {
+	*registry.Repo
+	Running string `json:"running,omitempty"`
+}
+
+func viewRepo(mgr *manager.Manager, repo *registry.Repo) repoView {
+	return repoView{Repo: repo, Running: mgr.Activity(repo.ID)}
+}
+
+func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout time.Duration) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list_repos",
-		Description: "List all tracked repositories with build status, last commit and last build time.",
+		Description: "List all tracked repositories with build status, currently running pipeline step, last commit and last build time.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyArgs) (*mcp.CallToolResult, any, error) {
 		repos, err := mgr.Registry().List(ctx)
 		if err != nil {
 			return nil, nil, err
 		}
 
-		return jsonResult(repos), nil, nil
+		views := make([]repoView, 0, len(repos))
+		for _, repo := range repos {
+			views = append(views, viewRepo(mgr, repo))
+		}
+
+		return jsonResult(views), nil, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "add_repo",
 		Description: "Track a new repository: clones it and builds its knowledge graph. " +
 			"By default returns immediately (status 'pending'); check progress with repo_status. " +
-			"Pass wait=true to block until the graph is ready and get the final status directly.",
+			"Pass wait=true to wait for the result: it returns the final status when the build finishes in time, " +
+			"otherwise the in-progress status. The build always continues in the background even if the call " +
+			"times out or is cancelled; poll repo_status until status is 'ready' or 'error'.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args addRepoArgs) (*mcp.CallToolResult, any, error) {
-		add := mgr.AddRepo
-		if args.Wait {
-			add = mgr.AddRepoWait
+		if !args.Wait {
+			repo, err := mgr.AddRepo(ctx, args.URL, args.Branch)
+			if err != nil {
+				return nil, nil, err
+			}
+
+			return jsonResult(repo), nil, nil
 		}
 
-		repo, err := add(ctx, args.URL, args.Branch)
+		wctx, cancel := waitContext(ctx, waitTimeout)
+		defer cancel()
+
+		repo, done, err := mgr.AddRepoWait(wctx, args.URL, args.Branch)
 		if err != nil {
 			return nil, nil, err
 		}
 
-		return jsonResult(repo), nil, nil
+		return waitResult(mgr, repo, done), nil, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -98,7 +127,9 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager) {
 		Name: "refresh_repo",
 		Description: "Pull the latest commits and rebuild the knowledge graph for a repository. " +
 			"By default rebuilds in the background and returns immediately. " +
-			"Pass wait=true to block until the rebuild finishes and get the final status directly. " +
+			"Pass wait=true to wait for the result: it returns the final status when the rebuild finishes in time, " +
+			"otherwise the in-progress status. The rebuild always continues in the background even if the call " +
+			"times out or is cancelled; poll repo_status until status is 'ready' or 'error'. " +
 			"Use when you know the repo changed.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args refreshRepoArgs) (*mcp.CallToolResult, any, error) {
 		if !args.Wait {
@@ -107,17 +138,23 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager) {
 			return textResult("refresh queued for " + args.Repo), nil, nil
 		}
 
-		repo, err := mgr.RefreshWait(ctx, args.Repo)
+		wctx, cancel := waitContext(ctx, waitTimeout)
+		defer cancel()
+
+		repo, done, err := mgr.RefreshWait(wctx, args.Repo)
 		if err != nil {
 			return nil, nil, err
 		}
 
-		return jsonResult(repo), nil, nil
+		return waitResult(mgr, repo, done), nil, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        "repo_status",
-		Description: "Get status of a tracked repository: build state, last commit, last error if any.",
+		Name: "repo_status",
+		Description: "Get status of a tracked repository: build state, last commit, last error if any. " +
+			"The 'running' field shows the pipeline step currently executing (e.g. 'sync', 'graph', 'docs'); " +
+			"empty means no work is in flight. While status is 'pending' or 'building', poll again until it " +
+			"becomes 'ready' or 'error'.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args repoIDArgs) (*mcp.CallToolResult, any, error) {
 		repo, err := mgr.Registry().Get(ctx, args.Repo)
 		if err != nil {
@@ -128,8 +165,46 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager) {
 			return nil, nil, fmt.Errorf("repo %s not found", args.Repo)
 		}
 
-		return jsonResult(repo), nil, nil
+		return jsonResult(viewRepo(mgr, repo)), nil, nil
 	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "cancel_repo_job",
+		Description: "Cancel the refresh/generate job currently running for a repository. " +
+			"The in-flight step is aborted and recorded as 'cancelled by user'; the repo can be " +
+			"refreshed again later. Fails if no job is running (check the 'running' field of repo_status).",
+	}, func(_ context.Context, _ *mcp.CallToolRequest, args repoIDArgs) (*mcp.CallToolResult, any, error) {
+		if !mgr.CancelJob(args.Repo) {
+			return nil, nil, fmt.Errorf("no job running for %s", args.Repo)
+		}
+
+		return textResult("cancelling running job for " + args.Repo), nil, nil
+	})
+}
+
+// waitContext bounds a wait=true call so a build that outlives the caller's
+// patience still yields an in-progress answer instead of blocking forever.
+func waitContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+
+	return context.WithTimeout(ctx, timeout)
+}
+
+// waitResult renders the outcome of a wait=true call. When the build did not
+// finish within the wait, a note explains that it keeps running in the
+// background and how to follow up.
+func waitResult(mgr *manager.Manager, repo *registry.Repo, done bool) *mcp.CallToolResult {
+	res := jsonResult(viewRepo(mgr, repo))
+	if !done {
+		note := &mcp.TextContent{Text: "build still in progress: the wait ended before it finished, " +
+			"but it continues in the background; poll repo_status " + repo.ID +
+			" until status is 'ready' or 'error'"}
+		res.Content = append([]mcp.Content{note}, res.Content...)
+	}
+
+	return res
 }
 
 // ---- lease tools ------------------------------------------------------------

@@ -65,6 +65,11 @@ type Server struct {
 type MCP struct {
 	Path   string `cfg:"path" default:"/mcp"`
 	APIKey string `cfg:"api_key" log:"-"`
+	// WaitTimeout caps how long wait=true add_repo/refresh_repo calls block
+	// before returning the in-progress status. The build keeps running in the
+	// background either way; poll repo_status for the final state. 0 waits
+	// until the build finishes or the client cancels.
+	WaitTimeout time.Duration `cfg:"wait_timeout" default:"300s"`
 }
 
 // Git configures repository access and background polling.
@@ -98,7 +103,7 @@ type Docs struct {
 	// no docs are generated even if an LLM is configured.
 	Enabled bool `cfg:"enabled"`
 	// Concurrency bounds parallel per-file LLM summary calls.
-	Concurrency int `cfg:"concurrency" default:"4"`
+	Concurrency int `cfg:"concurrency" default:"8"`
 	// Include globs select source files to document (repo-relative).
 	Include []string `cfg:"include"`
 	// Exclude globs skip files (evaluated after Include).
@@ -117,8 +122,9 @@ type LLM struct {
 	APIKey string `cfg:"api_key" log:"-"`
 	// Model is the chat model name.
 	Model string `cfg:"model" default:"gpt-4o-mini"`
-	// Timeout bounds a single completion request.
-	Timeout time.Duration `cfg:"timeout" default:"60s"`
+	// Timeout bounds a single completion request. Large synthesis calls can
+	// take minutes, so keep this generous.
+	Timeout time.Duration `cfg:"timeout" default:"300s"`
 }
 
 // Embedder configures an OpenAI-compatible embeddings endpoint.
@@ -133,6 +139,8 @@ type Embedder struct {
 	Dim int `cfg:"dim"`
 	// Batch bounds how many inputs are sent per embeddings request.
 	Batch int `cfg:"batch" default:"64"`
+	// Concurrency bounds how many embedding batch requests run in parallel.
+	Concurrency int `cfg:"concurrency" default:"4"`
 	// Timeout bounds a single embeddings request.
 	Timeout time.Duration `cfg:"timeout" default:"30s"`
 }

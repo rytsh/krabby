@@ -59,6 +59,17 @@
     }
   }
 
+  async function cancel(id, e) {
+    e.preventDefault();
+    e.stopPropagation();
+    try {
+      await api.cancelRepoJob(id);
+      await loadRepos();
+    } catch (err) {
+      error = err.message;
+    }
+  }
+
   async function remove(id, e) {
     e.preventDefault();
     e.stopPropagation();
@@ -130,13 +141,22 @@
             <td class="border-b border-line px-3 py-2.5">
               <a href={`/repos/${r.id}`} use:link class="font-mono text-[13px] hover:text-accent">{r.id}</a>
             </td>
-            <td class="border-b border-line px-3 py-2.5"><Status status={r.status} /></td>
+            <td class="border-b border-line px-3 py-2.5">
+              <Status status={r.status} />
+              {#if r.running}
+                <span class="ml-1.5 text-[11px] text-busy">({r.running})</span>
+              {/if}
+            </td>
             <td class="border-b border-line px-3 py-2.5 font-mono text-[13px] text-faint">
               {r.last_commit ? r.last_commit.slice(0, 8) : "—"}
             </td>
             <td class="border-b border-line px-3 py-2.5 text-[13px] text-faint">{fmtDate(r.last_build_at)}</td>
             <td class="whitespace-nowrap border-b border-line px-3 py-2.5 text-right">
-              <button class="btn btn-sm ml-1.5" onclick={(e) => refresh(r.id, e)}>Refresh</button>
+              {#if r.running}
+                <button class="btn btn-sm btn-danger ml-1.5" onclick={(e) => cancel(r.id, e)}>Cancel</button>
+              {:else}
+                <button class="btn btn-sm ml-1.5" onclick={(e) => refresh(r.id, e)}>Refresh</button>
+              {/if}
               <button class="btn btn-sm btn-danger ml-1.5" onclick={(e) => remove(r.id, e)}>Remove</button>
             </td>
           </tr>

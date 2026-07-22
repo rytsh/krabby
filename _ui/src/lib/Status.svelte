@@ -20,7 +20,7 @@
 
 {#if dot}
   <span
-    class="inline-block h-[7px] w-[7px] flex-shrink-0 rounded-full"
+    class="inline-block h-[7px] w-[7px] flex-shrink-0 rounded-[1px]"
     title={status || "unknown"}
     style="background: {colors[status] || 'var(--color-faint)'}"
   ></span>

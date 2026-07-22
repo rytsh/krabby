@@ -123,6 +123,143 @@ func (s *Service) Index(ctx context.Context, repo, clonePath string) error {
 	return nil
 }
 
+// IndexChanged incrementally updates the code indexes: only the given
+// repo-relative paths are re-read, re-chunked and re-embedded, replacing their
+// prior rows; paths that no longer exist (or fall outside the selection rules)
+// just have their rows dropped. Unchanged files keep their existing FTS rows
+// and vectors, so refreshes touching few files cost a fraction of a full Index.
+func (s *Service) IndexChanged(ctx context.Context, repo, clonePath string, changed []string) error {
+	if len(changed) == 0 {
+		return nil
+	}
+
+	// Normalize to the repo-relative slash form used as DocPath in both stores.
+	paths := make([]string, 0, len(changed))
+	for _, rel := range changed {
+		paths = append(paths, path.Clean(filepath.ToSlash(rel)))
+	}
+
+	var syms map[string][]symbol
+
+	var (
+		items     []vectorstore.Item
+		reindexed int
+	)
+
+	for _, rel := range paths {
+		if !s.selectedFile(clonePath, rel) {
+			continue // deleted/excluded: rows are dropped below, nothing to add
+		}
+
+		fc, err := repofs.ReadFile(clonePath, rel, 0, 0)
+		if err != nil {
+			slog.Warn("coderag: skip unreadable file", "repo", repo, "file", rel, "error", err)
+
+			continue
+		}
+
+		if fc.Truncated || strings.ContainsRune(fc.Content, '\x00') {
+			continue
+		}
+
+		if syms == nil {
+			syms = s.fileSymbols(clonePath)
+		}
+
+		for i, c := range chunkFile(fc.Content, syms[rel], s.cfg.ChunkSize, s.cfg.ChunkOverlap) {
+			items = append(items, vectorstore.Item{
+				ID: fmt.Sprintf("%s/%s#%d", repo, rel, i),
+				Payload: vectorstore.Payload{
+					Repo:      repo,
+					DocPath:   rel,
+					Symbol:    c.Symbol,
+					StartLine: c.StartLine,
+					EndLine:   c.EndLine,
+					Chunk:     c.Text,
+				},
+			})
+		}
+
+		reindexed++
+	}
+
+	if s.text != nil {
+		if err := s.text.DeletePaths(ctx, repo, paths); err != nil {
+			return fmt.Errorf("drop changed code search chunks; %w", err)
+		}
+
+		if err := s.text.InsertItems(ctx, items); err != nil {
+			return fmt.Errorf("insert changed code search chunks; %w", err)
+		}
+	}
+
+	if s.emb == nil || s.store == nil {
+		slog.Info("code text index updated", "repo", repo, "changed", len(changed), "files", reindexed, "chunks", len(items))
+
+		return nil
+	}
+
+	if len(items) > 0 {
+		texts := make([]string, len(items))
+		for i := range items {
+			texts[i] = items[i].Payload.Chunk
+		}
+
+		vecs, err := s.emb.Embed(ctx, texts)
+		if err != nil {
+			return fmt.Errorf("embed %d code chunks; %w", len(texts), err)
+		}
+
+		if len(vecs) != len(items) {
+			return fmt.Errorf("embedder returned %d vectors for %d chunks", len(vecs), len(items))
+		}
+
+		for i := range items {
+			items[i].Vector = vecs[i]
+		}
+	}
+
+	// Drop prior vectors of every changed path (stale chunk counts, deletions),
+	// then upsert the fresh chunks.
+	if err := s.store.DeletePaths(ctx, repo, paths); err != nil {
+		return fmt.Errorf("drop changed code vectors; %w", err)
+	}
+
+	if len(items) > 0 {
+		if err := s.store.Upsert(ctx, items); err != nil {
+			return fmt.Errorf("upsert %d code vectors; %w", len(items), err)
+		}
+	}
+
+	slog.Info("code indexes updated", "repo", repo, "changed", len(changed), "files", reindexed, "chunks", len(items))
+
+	return nil
+}
+
+// selectedFile reports whether rel would be picked by selectFiles: every parent
+// directory passes the skip rules and the file itself is a regular, size-capped,
+// included and not excluded source file.
+func (s *Service) selectedFile(clonePath, rel string) bool {
+	prefix := ""
+	for seg := range strings.SplitSeq(path.Dir(rel), "/") {
+		if seg == "." || seg == "" {
+			continue
+		}
+
+		prefix = path.Join(prefix, seg)
+		if hardSkipDirs[seg] || (len(s.cfg.Include) == 0 && defaultNoiseDirs[seg]) || matchAny(s.cfg.Exclude, prefix+"/") {
+			return false
+		}
+	}
+
+	info, err := os.Lstat(filepath.Join(clonePath, filepath.FromSlash(rel)))
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+
+	return info.Size() <= repofs.MaxFileBytes && s.matchInclude(rel) && !matchAny(s.cfg.Exclude, rel)
+}
+
 // IndexText builds only the local bw FTS index. It is used to bootstrap the
 // normal search index for repositories tracked before this index was added.
 func (s *Service) IndexText(ctx context.Context, repo, clonePath string) error {

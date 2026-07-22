@@ -167,7 +167,7 @@
   ></div>
 
   <div class="flex min-w-0 flex-1 flex-col">
-    <header class="sticky top-0 z-10 flex h-14 items-center justify-between border-b border-line bg-bg/80 px-2 backdrop-blur">
+    <header class="sticky top-0 z-10 flex items-center justify-between border-b border-line bg-bg/80 px-2 py-1 backdrop-blur">
       {#if view === "repo"}
         <div class="flex min-w-0 items-center gap-2 text-[15px]">
           <a href="/repos" use:link class="text-dim transition-colors hover:text-fg">Repositories</a>

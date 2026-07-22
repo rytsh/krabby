@@ -128,6 +128,49 @@ func TestTextStoreReplaceAndDeleteRepo(t *testing.T) {
 	}
 }
 
+func TestTextStoreDeletePaths(t *testing.T) {
+	t.Parallel()
+
+	db, err := bw.Open("", bw.WithInMemory(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	store, err := NewTextStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	if err := store.ReplaceRepo(ctx, "acme/api", []vectorstore.Item{
+		textItem("acme/api", "keep.go", "Keep", 1, "keeper implementation"),
+		textItem("acme/api", "drop.go", "Drop", 1, "dropper implementation"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.DeletePaths(ctx, "acme/api", []string{"drop.go", "missing.go"}); err != nil {
+		t.Fatal(err)
+	}
+
+	dropped, err := store.Search(ctx, "", "dropper", 1, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dropped.Total != 0 {
+		t.Fatalf("dropped path still searchable: %#v", dropped)
+	}
+
+	kept, err := store.Search(ctx, "", "keeper", 1, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kept.Total != 1 || kept.Results[0].Path != "keep.go" {
+		t.Fatalf("kept path lost: %#v", kept)
+	}
+}
+
 func textItem(repo, path, symbol string, line int, snippet string) vectorstore.Item {
 	return vectorstore.Item{
 		ID: repo + "/" + path + "#0",

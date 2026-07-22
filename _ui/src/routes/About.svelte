@@ -39,6 +39,15 @@
   }
 }`);
 
+  let installPrompt = $derived(`Connect this AI client to the Krabby remote MCP server.
+
+Server name: krabby
+Transport: streamable HTTP
+URL: ${mcpUrl}
+${apiKeySet ? "Authentication: send the API key in the X-Api-Key header. Ask me for the key before editing the configuration." : "Authentication: none"}
+
+Detect this client's MCP configuration format and update the appropriate project or user configuration. Preserve all existing settings and other MCP servers. After configuring it, verify the connection and confirm that the Krabby tools are available.`);
+
   const toolGroups = [
     {
       name: "Repositories",
@@ -133,6 +142,19 @@
 
 <div class="card my-4 p-4">
   <h2 class="mb-3 text-[15px] font-semibold">Connect a client</h2>
+
+  <div class="mb-5 rounded-md border border-accent/40 bg-accent/5 p-3">
+    <div class="mb-1.5 flex items-center gap-2">
+      <div>
+        <div class="text-[13px] font-medium">AI-assisted setup prompt</div>
+        <div class="text-[11px] text-faint">Paste this into your LLM and let it configure the current client.</div>
+      </div>
+      <button class="btn btn-sm ml-auto" onclick={() => copy(installPrompt, "prompt")}>
+        {copied === "prompt" ? "Copied" : "Copy"}
+      </button>
+    </div>
+    <pre class="m-0 max-h-64 overflow-auto whitespace-pre-wrap rounded-md border border-line bg-bg p-3 font-mono text-[12.5px] leading-relaxed">{installPrompt}</pre>
+  </div>
 
   <div class="mb-4">
     <div class="mb-1.5 flex items-center gap-2">

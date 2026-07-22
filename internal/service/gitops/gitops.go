@@ -124,6 +124,25 @@ func (g *Git) Pull(ctx context.Context, dir string, auth *credentials.Auth) erro
 	return err
 }
 
+// DiffNames returns the repo-relative paths that differ between two commits
+// (added, modified and deleted). Renames are reported as delete+add so callers
+// can treat every returned path uniformly: drop old data, index what exists.
+func (g *Git) DiffNames(ctx context.Context, dir, from, to string) ([]string, error) {
+	out, err := g.run(ctx, dir, nil, "diff", "--name-only", "--no-renames", from, to)
+	if err != nil {
+		return nil, err
+	}
+
+	var files []string
+	for _, line := range strings.Split(out, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			files = append(files, line)
+		}
+	}
+
+	return files, nil
+}
+
 var repoIDRe = regexp.MustCompile(`^[\w.-]+/[\w.-]+$`)
 
 // ParseRepoID extracts "owner/name" from common git URL forms:

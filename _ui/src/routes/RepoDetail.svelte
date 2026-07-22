@@ -11,6 +11,14 @@
 
   let { repoId } = $props();
 
+  const POLL_INTERVAL_KEY = "krabby-repo-poll-interval";
+  const pollIntervals = [0, 3_000, 5_000, 10_000, 30_000];
+  const savedPollInterval = localStorage.getItem(POLL_INTERVAL_KEY);
+  const initialPollInterval = Number(savedPollInterval);
+  let pollInterval = $state(
+    savedPollInterval !== null && pollIntervals.includes(initialPollInterval) ? initialPollInterval : 5_000,
+  );
+
   let repo = $state(null);
   let error = $state("");
 
@@ -238,21 +246,42 @@
     }
   }
 
+  async function cancelJob() {
+    try {
+      await api.cancelRepoJob(repoId);
+      await loadRepo();
+    } catch (e) {
+      error = e.message;
+    }
+  }
+
   let timer;
+  function startPolling() {
+    clearInterval(timer);
+    timer = pollInterval > 0 ? setInterval(loadRepo, pollInterval) : undefined;
+  }
+
+  function setPollInterval(value) {
+    pollInterval = Number(value);
+    localStorage.setItem(POLL_INTERVAL_KEY, String(pollInterval));
+    startPolling();
+  }
+
   onMount(async () => {
     await loadRepo();
     api.docsConfig().then((c) => (cfg = c)).catch(() => {});
     // Poll so stage states and the running indicator update live.
-    timer = setInterval(loadRepo, 3000);
+    startPolling();
     await loadDocs();
   });
   onDestroy(() => clearInterval(timer));
   // Derived rows so the card re-renders when the polled repo record changes.
   let stageRows = $derived(stageDefs.map((s) => {
     const st = (repo && repo.stages && repo.stages[s.key]) || {};
-    // repo.running is the live in-memory worker state. A persisted "running"
-    // stage can be left behind by an interrupted process and is not active.
-    const running = repo?.running === s.key;
+    // repo.running is the live in-memory worker state (comma-joined when several
+    // steps run in parallel). A persisted "running" stage can be left behind by
+    // an interrupted process and is not active.
+    const running = (repo?.running || "").split(",").includes(s.key);
     return {
       ...s,
       st,
@@ -262,6 +291,7 @@
         st.status === "ok" && st.commit && repo && repo.last_commit && st.commit !== repo.last_commit,
     };
   }));
+  let hasRunningStage = $derived(stageRows.some((s) => s.running));
   $effect(() => {
     const params = new URLSearchParams($routePath.split("?")[1] || "");
     const f = params.get("file");
@@ -434,7 +464,7 @@
     {/if}
   </div>
 
-  <div class="sticky top-16 flex max-h-[calc(100vh-72px)] w-[260px] flex-col gap-3 overflow-y-auto pr-1">
+  <div class="sticky flex max-h-[calc(100vh-72px)] w-[260px] flex-col gap-3 overflow-y-auto pr-1">
     <div class="card grid grid-cols-2 gap-1 p-1">
       <button
         class="flex cursor-pointer items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-[12px] text-faint transition-colors hover:bg-surface-2 hover:text-fg"
@@ -460,13 +490,21 @@
       <div class="card overflow-hidden text-[12px]">
         <div class="flex items-center border-b border-line px-3 py-2">
           <span class="font-medium">Outputs</span>
-          <button
-            class="ml-auto inline-flex cursor-pointer items-center gap-1.5 rounded px-1.5 py-1 text-dim transition-colors hover:bg-surface-2 hover:text-fg"
-            onclick={refresh}
-          >
-            <Icon name="refresh" size={13} />
-            Refresh
-          </button>
+          <label class="ml-auto inline-flex items-center gap-1.5 text-dim">
+            Auto
+            <select
+              class="input !h-7 !w-auto !py-0 text-[12px]"
+              value={pollInterval}
+              onchange={(e) => setPollInterval(e.currentTarget.value)}
+              aria-label="Repository status refresh interval"
+            >
+              <option value={0}>Off</option>
+              <option value={3000}>3s</option>
+              <option value={5000}>5s</option>
+              <option value={10000}>10s</option>
+              <option value={30000}>30s</option>
+            </select>
+          </label>
         </div>
         <div class="grid grid-cols-3 divide-x divide-line">
           <a
@@ -502,11 +540,24 @@
       <div class="card p-3 text-[13px]">
         <div class="mb-2 flex items-center justify-between gap-2">
           <span class="font-medium">Artifacts</span>
-          {#if repo.running}
-            <span class="inline-flex items-center gap-1.5 text-[12px] text-busy">
-              <span class="inline-block h-[7px] w-[7px] animate-pulse rounded-full bg-busy"></span>
-              running: {repo.running}
-            </span>
+          {#if repo.running && !hasRunningStage}
+            <button
+              class="btn btn-sm btn-danger ml-auto !px-2 !py-0.5 text-[12px]"
+              title="Abort the running job"
+              onclick={cancelJob}
+            >
+              Cancel
+            </button>
+          {:else}
+            <button
+              class="btn btn-sm ml-auto inline-flex items-center gap-1.5 !px-2 !py-0.5 text-[12px]"
+              disabled={repo.running}
+              onclick={refresh}
+              title="Pull remote changes and rebuild the repository"
+            >
+              <Icon name="refresh" size={13} />
+              Refresh
+            </button>
           {/if}
         </div>
 
@@ -515,7 +566,7 @@
             <div class="border-t border-line py-2 first:border-t-0">
               <div class="flex items-center gap-2">
                 <span
-                  class="inline-block h-[7px] w-[7px] flex-shrink-0 rounded-full"
+                  class="inline-block h-[7px] w-[7px] flex-shrink-0 rounded-[1px]"
                   class:animate-pulse={s.running}
                   style="background: {s.running
                     ? 'var(--color-busy)'
@@ -526,7 +577,9 @@
                         : 'var(--color-faint)'}"
                 ></span>
                 <span>{s.label}</span>
-                {#if !s.enabled}
+                {#if s.running}
+                  <span class="text-[11px] text-busy">working</span>
+                {:else if !s.enabled}
                   <span class="text-[11px] text-faint">disabled</span>
                 {:else if s.stale}
                   <span
@@ -534,17 +587,27 @@
                     title={`generated for ${s.st.commit.slice(0, 8)}, repo is at ${repo.last_commit.slice(0, 8)}`}
                   >stale</span>
                 {/if}
-                <button
-                  class="btn btn-sm ml-auto !px-2 !py-0.5 text-[12px]"
-                  disabled={s.running || !s.enabled || generating[s.key]}
-                  onclick={() => generate(s.key)}
-                >
-                  {s.running ? "Running…" : "Generate"}
-                </button>
+                {#if s.running}
+                  <button
+                    class="btn btn-sm btn-danger ml-auto !px-2 !py-0.5 text-[12px]"
+                    title="Abort the running job"
+                    onclick={cancelJob}
+                  >
+                    Cancel
+                  </button>
+                {:else}
+                  <button
+                    class="btn btn-sm ml-auto !px-2 !py-0.5 text-[12px]"
+                    disabled={!s.enabled || generating[s.key]}
+                    onclick={() => generate(s.key)}
+                  >
+                    {generating[s.key] ? "Starting…" : "Generate"}
+                  </button>
+                {/if}
               </div>
               <div class="mt-0.5 pl-[15px] text-[11px] text-faint">
                 {#if s.running}
-                  running…
+                  working…
                 {:else if s.st.status === "ok"}
                   {fmtDate(s.st.finished_at)}
                 {:else if s.st.status === "error"}

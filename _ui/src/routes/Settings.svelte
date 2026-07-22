@@ -1,6 +1,7 @@
 <script>
   import { onMount } from "svelte";
   import { api } from "../lib/api.js";
+  import { successToast } from "../lib/toast.js";
 
   let settings = $state(null);
   let creds = $state([]);
@@ -73,6 +74,7 @@
       docsCfg = await api.setDocsConfig(buildPatch());
       llmKey = embedKey = codeEmbedKey = "";
       docsMsg = "Saved. Existing repositories queued for reindex.";
+      successToast("Saved");
     } catch (e) {
       docsErr = e.message;
     } finally {

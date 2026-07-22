@@ -20,3 +20,12 @@ export function errorToast(error) {
     return [...items.slice(-3), { id, type: "error", message }];
   });
 }
+
+export function successToast(message) {
+  toasts.update((items) => {
+    const id = ++nextId;
+    setTimeout(() => dismissToast(id), 3000);
+
+    return [...items.slice(-3), { id, type: "success", message }];
+  });
+}
