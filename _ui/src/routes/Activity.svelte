@@ -151,7 +151,7 @@
   </div>
 {:else}
   <div class="flex flex-col gap-3">
-    {#each visibleJobs as job (job.repo)}
+    {#each visibleJobs as job (job.repo + ":" + job.step)}
       <a
         href={`/repos/${job.repo}`}
         use:link
