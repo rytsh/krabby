@@ -1,11 +1,14 @@
-// Thin fetch wrapper for the krabby REST API. All paths are relative so the
-// same build works whether served from the embedded server or the dev proxy.
+// Thin fetch wrapper for the krabby REST API. The base is relative ("api/v1")
+// so it resolves against the document URL, which the hash router keeps anchored
+// at the server base path (e.g. /krabby/). The same build therefore works at
+// the root or under any prefix, and via the dev proxy.
 import { errorToast } from "./toast.js";
 
-const BASE = "/api/v1";
+const BASE = "api/v1";
 
 async function req(path, opts = {}) {
   try {
+    // path starts with "/"; joining onto the relative BASE keeps it relative.
     const res = await fetch(BASE + path, {
       headers: { "Content-Type": "application/json" },
       ...opts,

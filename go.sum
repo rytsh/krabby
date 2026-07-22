@@ -218,6 +218,8 @@ github.com/prometheus/procfs v0.0.2/go.mod h1:TjEm7ze935MbeOT/UhFTIMYKhuLP4wbCsT
 github.com/prometheus/procfs v0.0.8/go.mod h1:7Qr8sr6344vo1JqZ6HhLceV9o3AJ1Ff+GxbHq6oeK9A=
 github.com/rakunlabs/ada v0.4.7 h1:TocqF/ntq2o3Hv04ZC0xV/lwk3WWCzEk6/UYx8yRRQQ=
 github.com/rakunlabs/ada v0.4.7/go.mod h1:ydvdDjaJd7d7W+JDW0n3cU2vRSlYRwdOIj0g1ZXLYn0=
+github.com/rakunlabs/ada/handler/folder v0.4.7 h1:AHa8XM9oC9tQbn/UWkKWtHELIe7zO/JHQ8rjUJBlIFI=
+github.com/rakunlabs/ada/handler/folder v0.4.7/go.mod h1:6MZISfcOYNmQgmOdnlU6NemvCPgIatTWEZG9HM0nOAE=
 github.com/rakunlabs/ada/middleware/cors v0.4.7 h1:aURSAdg/Oem1U/zDh3QnZsxmbQ84o4ZcWtB4asPQNQU=
 github.com/rakunlabs/ada/middleware/cors v0.4.7/go.mod h1:QnLErCedHN1gzYRRS2Il96SKv2BTIirZhwBKhzyhmdY=
 github.com/rakunlabs/ada/middleware/log v0.4.7 h1:ZTyF5HNmGeVIFTm+WAIfS+6CWi3hOkddnNKULcmKRqg=

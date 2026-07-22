@@ -61,6 +61,11 @@ type Config struct {
 type Server struct {
 	Host string `cfg:"host"`
 	Port string `cfg:"port" default:"8080"`
+	// BasePath serves the whole app (UI, REST API, MCP, webhook) under a URL
+	// prefix, e.g. "/krabby" when running behind a reverse proxy on a subpath.
+	// It is normalized to a leading slash with no trailing slash; empty (the
+	// default) serves everything at the root.
+	BasePath string `cfg:"base_path"`
 }
 
 // MCP configures the model-context-protocol endpoint.
@@ -232,6 +237,8 @@ func Load(ctx context.Context) (*Config, error) {
 	}
 	cfg.DataDir = dir
 
+	cfg.Server.BasePath = NormalizeBasePath(cfg.Server.BasePath)
+
 	slog.Info("loaded configuration", "config", chu.MarshalMap(cfg))
 
 	return &cfg, nil
@@ -262,6 +269,22 @@ func (c *Config) DocsVectorsDir() string { return filepath.Join(c.DataDir, "docs
 // embedding models with different dimensions (a dim change wipes the whole
 // store).
 func (c *Config) CodeVectorsDir() string { return filepath.Join(c.DataDir, "code-vectors") }
+
+// NormalizeBasePath cleans a configured base path into a canonical form: either
+// "" (serve at root) or "/segment[/segment...]" with a leading slash and no
+// trailing slash. Whitespace and redundant slashes are collapsed.
+func NormalizeBasePath(p string) string {
+	p = strings.TrimSpace(p)
+	p = strings.Trim(p, "/")
+	if p == "" {
+		return ""
+	}
+
+	// Collapse any interior duplicate slashes.
+	parts := strings.FieldsFunc(p, func(r rune) bool { return r == '/' })
+
+	return "/" + strings.Join(parts, "/")
+}
 
 func expandHome(p string) (string, error) {
 	if p == "~" || strings.HasPrefix(p, "~/") {

@@ -50,7 +50,12 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 		mtelemetry.Middleware(),
 	)
 
-	server.GET("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+	// base mounts every route (UI, REST, MCP, webhook, healthz) under the
+	// configured base path, e.g. "/krabby". An empty base path serves at root.
+	basePath := cfg.Server.BasePath
+	base := server.Group(basePath)
+
+	base.GET("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("OK"))
 	})
@@ -63,9 +68,9 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	// The MCP key can be overridden at runtime from the UI; resolve it per
 	// request through the manager's cached value.
 	mgr.InitMCPKey(ctx, cfg.MCP.APIKey)
-	server.Handle(cfg.MCP.Path, mcpHandler, apiKeyMiddleware(mgr.MCPAPIKey))
+	base.Handle(cfg.MCP.Path, mcpHandler, apiKeyMiddleware(mgr.MCPAPIKey))
 
-	api := server.Group("/api/v1")
+	api := base.Group("/api/v1")
 	api.GET("/settings", server.Wrap(getSettings(cfg, mgr)))
 	api.GET("/mcp/api-key", server.Wrap(getMCPKey(mgr)))
 	api.PUT("/mcp/api-key", server.Wrap(setMCPKey(mgr)))
@@ -101,17 +106,27 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	api.PUT("/credentials", server.Wrap(setCredential(mgr)))
 	api.DELETE("/credentials", server.Wrap(deleteCredential(mgr)))
 
-	server.POST("/webhook/github", githubWebhook(cfg.Webhook.GithubSecret, mgr))
+	base.POST("/webhook/github", githubWebhook(cfg.Webhook.GithubSecret, mgr))
 
-	// Web UI: embedded Svelte SPA served at / with client-side routing fallback.
-	// Concrete routes above (/api, /mcp, /webhook, /healthz) take precedence over
-	// this catch-all wildcard.
-	uiHandler, built := webHandler()
+	// Web UI: embedded Svelte SPA served at the base path with client-side
+	// routing fallback. Concrete routes above (/api, /mcp, /webhook, /healthz)
+	// take precedence over this catch-all wildcard. The handler is told the
+	// base path so it can strip the prefix before serving assets and inject it
+	// into index.html for the client.
+	uiHandler, built := webHandler(basePath)
 	if !built {
 		slog.Warn("web UI not built; serving placeholder (run `make build-ui`)")
 	}
 
-	server.HandleWildcard("/", uiHandler)
+	// When served under a base path, redirect the bare prefix (e.g. "/krabby")
+	// to "/krabby/" so relative asset URLs resolve correctly.
+	if basePath != "" {
+		server.GET(basePath, func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, basePath+"/", http.StatusMovedPermanently)
+		})
+	}
+
+	base.HandleWildcard("/", uiHandler)
 
 	return server.StartWithContext(ctx, cfg.Server.Host+":"+cfg.Server.Port)
 }
@@ -158,8 +173,9 @@ type settingsResponse struct {
 	DataDir  string `json:"data_dir"`
 
 	Server struct {
-		Host string `json:"host"`
-		Port string `json:"port"`
+		Host     string `json:"host"`
+		Port     string `json:"port"`
+		BasePath string `json:"base_path"`
 	} `json:"server"`
 
 	MCP struct {
@@ -193,6 +209,7 @@ func getSettings(cfg *config.Config, mgr *manager.Manager) ada.HandlerFunc {
 
 		s.Server.Host = cfg.Server.Host
 		s.Server.Port = cfg.Server.Port
+		s.Server.BasePath = cfg.Server.BasePath
 
 		s.MCP.Path = cfg.MCP.Path
 		s.MCP.APIKeySet = mgr.MCPAPIKey() != ""

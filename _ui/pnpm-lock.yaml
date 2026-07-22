@@ -41,6 +41,9 @@ importers:
       svelte:
         specifier: ^5.56.7
         version: 5.56.7
+      svelte-spa-router:
+        specifier: ^5.1.1
+        version: 5.1.1(svelte@5.56.7)
       svg-pan-zoom:
         specifier: ^3.6.2
         version: 3.6.2
@@ -958,6 +961,10 @@ packages:
   regex@6.1.0:
     resolution: {integrity: sha512-6VwtthbV4o/7+OaAF9I5L5V3llLEsoPyq9P1JVXkedTP33c7MfCG0/5NOPcSJn0TzXcG9YUrR0gQSWioew3LDg==}
 
+  regexparam@2.0.2:
+    resolution: {integrity: sha512-A1PeDEYMrkLrfyOwv2jwihXbo9qxdGD3atBYQA9JJgreAx8/7rC6IUkWOw2NQlOxLp2wL0ifQbh1HuidDfYA6w==}
+    engines: {node: '>=8'}
+
   robust-predicates@3.0.3:
     resolution: {integrity: sha512-NS3levdsRIUOmiJ8FZWCP7LG3QpJyrs/TE0Zpf1yvZu8cAJJ6QMW92H1c7kWpdIHo8RvmLxN/o2JXTKHp74lUA==}
 
@@ -995,6 +1002,11 @@ packages:
 
   stylis@4.4.0:
     resolution: {integrity: sha512-5Z9ZpRzfuH6l/UAvCPAPUo3665Nk2wLaZU3x+TLHKVzIz33+sbJqbtrYoC3KD4/uVOr2Zp+L0LySezP9OHV9yA==}
+
+  svelte-spa-router@5.1.1:
+    resolution: {integrity: sha512-/9PiiyS2jQIXlP+NlKRcPl/Bgwm6WTCTmJq8TZw5IShEbozwcfpX2V3YEL4lAVgJJ2Ni+ipAH7aYVEupeNwtHA==}
+    peerDependencies:
+      svelte: ^5.0.0
 
   svelte@5.56.7:
     resolution: {integrity: sha512-5qERUZX80oQj6XrDMUmD2Uhd/cIpCPDWWKBK3ZHmyRUC9apPyamWM8xMo31mbWsIQxwG2hVoSnOJ/EcnhVkkzQ==}
@@ -1984,6 +1996,8 @@ snapshots:
     dependencies:
       regex-utilities: 2.3.0
 
+  regexparam@2.0.2: {}
+
   robust-predicates@3.0.3: {}
 
   rolldown@1.1.5:
@@ -2041,6 +2055,11 @@ snapshots:
       character-entities-legacy: 3.0.0
 
   stylis@4.4.0: {}
+
+  svelte-spa-router@5.1.1(svelte@5.56.7):
+    dependencies:
+      regexparam: 2.0.2
+      svelte: 5.56.7
 
   svelte@5.56.7:
     dependencies:

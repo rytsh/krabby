@@ -11,6 +11,11 @@ data_dir: ~/.krabby
 server:
   host: ""
   port: "8080"
+  # base_path: /krabby   # serve the whole app (UI, REST API, MCP, webhook)
+                         # under a URL prefix, e.g. behind a reverse proxy on a
+                         # subpath. Empty (default) serves everything at root.
+                         # The UI uses a hash router + relative assets, so it is
+                         # base-path agnostic and needs no rebuild.
 
 mcp:
   path: /mcp

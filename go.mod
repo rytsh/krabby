@@ -5,6 +5,7 @@ go 1.26
 require (
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/rakunlabs/ada v0.4.7
+	github.com/rakunlabs/ada/handler/folder v0.4.7
 	github.com/rakunlabs/ada/middleware/cors v0.4.7
 	github.com/rakunlabs/ada/middleware/log v0.4.7
 	github.com/rakunlabs/ada/middleware/recover v0.4.7

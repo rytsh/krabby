@@ -2,10 +2,10 @@ package server
 
 import (
 	"embed"
-	"errors"
 	"io/fs"
 	"net/http"
-	"strings"
+
+	"github.com/rakunlabs/ada/handler/folder"
 )
 
 // dist embeds the built Svelte SPA (source in _ui, built into
@@ -19,40 +19,40 @@ import (
 //go:embed all:dist
 var dist embed.FS
 
-// webHandler returns an http.Handler that serves the embedded SPA. Static
-// assets are served directly; any other path falls back to index.html so the
-// client router can handle it. If the UI was never built, it returns a
-// placeholder and ok=false so the caller can decide how to mount it.
-func webHandler() (h http.Handler, ok bool) {
+// webHandler returns an http.Handler that serves the embedded SPA under the
+// given base path using ada's folder handler in SPA mode. The UI is built with
+// relative asset URLs (Vite base "./") and a hash router, so it is base-path
+// agnostic; the handler's PrefixPath strips the base prefix before looking
+// assets up in the embedded FS, and SPA mode falls back to index.html for any
+// unknown route. If the UI was never built, it returns a placeholder and
+// ok=false so the caller can decide how to mount it.
+func webHandler(basePath string) (h http.Handler, ok bool) {
 	sub, err := fs.Sub(dist, "dist")
 	if err != nil {
 		return webPlaceholder(), false
 	}
 
 	if _, err := fs.Stat(sub, "index.html"); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return webPlaceholder(), false
-		}
-
 		return webPlaceholder(), false
 	}
 
-	fileServer := http.FileServerFS(sub)
+	f, err := folder.New(&folder.Config{
+		PrefixPath:     basePath,
+		SPA:            true,
+		Index:          true,
+		StripIndexName: true,
+		CacheRegex: []*folder.RegexCacheStore{
+			{Regex: `index\.html$`, CacheControl: "no-cache"},
+			{Regex: `.*\.(js|css|wasm|svg|woff2?)$`, CacheControl: "public, max-age=604800, immutable"},
+		},
+	})
+	if err != nil {
+		return webPlaceholder(), false
+	}
 
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		reqPath := strings.TrimPrefix(r.URL.Path, "/")
-		if reqPath == "" {
-			reqPath = "index.html"
-		}
+	f.SetFs(http.FS(sub))
 
-		if _, err := fs.Stat(sub, reqPath); err != nil {
-			// Unknown asset: serve the SPA entrypoint for client-side routing.
-			r = r.Clone(r.Context())
-			r.URL.Path = "/"
-		}
-
-		fileServer.ServeHTTP(w, r)
-	}), true
+	return f, true
 }
 
 func webPlaceholder() http.Handler {
