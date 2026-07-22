@@ -509,6 +509,9 @@ func refreshRepo(mgr *manager.Manager) ada.HandlerFunc {
 type generateRequest struct {
 	// Targets selects the stages to run: graph, docs, docs_index, code_index.
 	Targets []string `json:"targets"`
+	// Force makes the docs stage ignore its incremental caches and regenerate
+	// every summary and documentation.md even when nothing changed.
+	Force bool `json:"force"`
 }
 
 func generateRepo(mgr *manager.Manager) ada.HandlerFunc {
@@ -541,10 +544,10 @@ func generateRepo(mgr *manager.Manager) ada.HandlerFunc {
 			}
 		}
 
-		mgr.TriggerGenerate(id, req.Targets)
+		mgr.TriggerGenerate(id, req.Targets, req.Force)
 
 		return c.SetStatus(http.StatusAccepted).SendJSON(map[string]any{
-			"status": "generate queued", "repo": id, "targets": req.Targets,
+			"status": "generate queued", "repo": id, "targets": req.Targets, "force": req.Force,
 		})
 	}
 }

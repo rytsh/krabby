@@ -79,7 +79,7 @@ func TestSummaryModelUsedForSummariesOnly(t *testing.T) {
 	gen := New(config.Docs{}, synth, summary, nil)
 
 	docsDir := filepath.Join(clone, "krabby-docs")
-	if _, err := gen.Generate(context.Background(), "r", clone, docsDir); err != nil {
+	if _, err := gen.Generate(context.Background(), "r", clone, docsDir, false); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
 
@@ -112,7 +112,7 @@ func TestNilSummaryFallsBackToChat(t *testing.T) {
 
 	gen := New(config.Docs{}, chat, nil, nil) // nil summary -> use chat for both
 
-	if _, err := gen.Generate(context.Background(), "r", clone, filepath.Join(clone, "krabby-docs")); err != nil {
+	if _, err := gen.Generate(context.Background(), "r", clone, filepath.Join(clone, "krabby-docs"), false); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
 
@@ -149,7 +149,7 @@ func TestGenerateWritesDocAndManifest(t *testing.T) {
 	gen := New(config.Docs{}, fakeLLM(t, &calls), nil, nil)
 
 	docsDir := filepath.Join(clone, "krabby-docs")
-	man, err := gen.Generate(context.Background(), "owner/repo", clone, docsDir)
+	man, err := gen.Generate(context.Background(), "owner/repo", clone, docsDir, false)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestGenerateCommunityGroupingReducesCalls(t *testing.T) {
 	gen := New(config.Docs{}, c, nil, graphquery.NewEngine(0))
 
 	docsDir := filepath.Join(clone, "krabby-docs")
-	man, err := gen.Generate(context.Background(), "owner/repo", clone, docsDir)
+	man, err := gen.Generate(context.Background(), "owner/repo", clone, docsDir, false)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
@@ -341,7 +341,7 @@ func TestGenerateIncremental(t *testing.T) {
 	gen := New(config.Docs{}, fakeLLM(t, &calls), nil, nil)
 	docsDir := filepath.Join(clone, "krabby-docs")
 
-	if _, err := gen.Generate(context.Background(), "r", clone, docsDir); err != nil {
+	if _, err := gen.Generate(context.Background(), "r", clone, docsDir, false); err != nil {
 		t.Fatalf("first gen: %v", err)
 	}
 	if calls != 3 {
@@ -350,7 +350,7 @@ func TestGenerateIncremental(t *testing.T) {
 
 	// Change only b.go; a.go summary is reused, b.go + synthesis regenerate.
 	writeSrc(t, clone, "b.go", "package b\nfunc B() {}\n")
-	if _, err := gen.Generate(context.Background(), "r", clone, docsDir); err != nil {
+	if _, err := gen.Generate(context.Background(), "r", clone, docsDir, false); err != nil {
 		t.Fatalf("second gen: %v", err)
 	}
 	if calls != 5 {
@@ -358,11 +358,20 @@ func TestGenerateIncremental(t *testing.T) {
 	}
 
 	// Nothing changed: no LLM calls at all (summaries cached, doc reused).
-	if _, err := gen.Generate(context.Background(), "r", clone, docsDir); err != nil {
+	if _, err := gen.Generate(context.Background(), "r", clone, docsDir, false); err != nil {
 		t.Fatalf("third gen: %v", err)
 	}
 	if calls != 5 {
 		t.Errorf("unchanged run made llm calls: %d, want 5", calls)
+	}
+
+	// force=true ignores every cache even though nothing changed: both
+	// summaries and the synthesis are regenerated (3 more calls).
+	if _, err := gen.Generate(context.Background(), "r", clone, docsDir, true); err != nil {
+		t.Fatalf("forced gen: %v", err)
+	}
+	if calls != 8 {
+		t.Errorf("forced run calls = %d, want 8 (2 summaries + synthesis regenerated)", calls)
 	}
 }
 
@@ -396,7 +405,7 @@ func TestMigratesOldPerFileLayout(t *testing.T) {
 	var calls int32
 	gen := New(config.Docs{}, fakeLLM(t, &calls), nil, nil)
 
-	man, err := gen.Generate(context.Background(), "r", clone, docsDir)
+	man, err := gen.Generate(context.Background(), "r", clone, docsDir, false)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
@@ -437,7 +446,7 @@ func TestIncludeExcludeGlobs(t *testing.T) {
 	}, fakeLLM(t, &calls), nil, nil)
 
 	docsDir := filepath.Join(clone, "krabby-docs")
-	man, err := gen.Generate(context.Background(), "r", clone, docsDir)
+	man, err := gen.Generate(context.Background(), "r", clone, docsDir, false)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
@@ -469,7 +478,7 @@ func TestCustomPromptUsedForSynthesis(t *testing.T) {
 	c, _ := llm.New(config.LLM{BaseURL: srv.URL, Model: "m"})
 	gen := New(config.Docs{Prompt: "CUSTOM PROMPT XYZZY"}, c, nil, nil)
 
-	if _, err := gen.Generate(context.Background(), "r", clone, filepath.Join(clone, "krabby-docs")); err != nil {
+	if _, err := gen.Generate(context.Background(), "r", clone, filepath.Join(clone, "krabby-docs"), false); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
 
@@ -508,7 +517,7 @@ func TestDefaultPromptFallback(t *testing.T) {
 	c, _ := llm.New(config.LLM{BaseURL: srv.URL, Model: "m"})
 	gen := New(config.Docs{Prompt: "   "}, c, nil, nil) // blank -> default
 
-	if _, err := gen.Generate(context.Background(), "r", clone, filepath.Join(clone, "krabby-docs")); err != nil {
+	if _, err := gen.Generate(context.Background(), "r", clone, filepath.Join(clone, "krabby-docs"), false); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
 

@@ -52,6 +52,7 @@ type refreshRepoArgs struct {
 	Repo   string   `json:"repo" jsonschema:"repository id in owner/name form"`
 	Wait   bool     `json:"wait,omitempty" jsonschema:"when true, block until the pull and graph rebuild finish and return the final status (ready or error) instead of returning immediately"`
 	Stages []string `json:"stages,omitempty" jsonschema:"optional subset of pipeline stages to rebuild against the existing clone without pulling git: graph, docs, docs_index, code_index. Empty runs the full pull+rebuild pipeline. Use e.g. ['docs_index'] to re-embed docs after they were regenerated. Missing prerequisites (docs_index needs docs, which needs graph) are built automatically only when their output is absent"`
+	Force  bool     `json:"force,omitempty" jsonschema:"when true, the docs stage ignores its incremental caches and regenerates every per-file summary and documentation.md even if nothing changed. Requires stages to include 'docs' (otherwise docs are reused because unchanged). Ignored by the full pull+rebuild pipeline (empty stages)"`
 }
 
 // validateStages rejects unknown stage names so a typo fails fast with a clear
@@ -155,7 +156,7 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 			}
 
 			if !args.Wait {
-				mgr.TriggerGenerate(args.Repo, args.Stages)
+				mgr.TriggerGenerate(args.Repo, args.Stages, args.Force)
 
 				return textResult(fmt.Sprintf("generate %v queued for %s", args.Stages, args.Repo)), nil, nil
 			}
@@ -163,7 +164,7 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 			wctx, cancel := waitContext(ctx, waitTimeout)
 			defer cancel()
 
-			repo, done, err := mgr.GenerateWait(wctx, args.Repo, args.Stages)
+			repo, done, err := mgr.GenerateWait(wctx, args.Repo, args.Stages, args.Force)
 			if err != nil {
 				return nil, nil, err
 			}

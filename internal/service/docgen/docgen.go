@@ -228,8 +228,10 @@ Rules:
 // Generator produces markdown docs for a repo clone.
 type Generator interface {
 	// Generate (re)builds docs for the repo at clonePath, writing markdown +
-	// manifest into docsDir. It returns the manifest it wrote.
-	Generate(ctx context.Context, repo, clonePath, docsDir string) (*Manifest, error)
+	// manifest into docsDir. It returns the manifest it wrote. When force is
+	// true the incremental caches are ignored: every per-file summary and the
+	// final documentation.md are regenerated even if nothing changed.
+	Generate(ctx context.Context, repo, clonePath, docsDir string, force bool) (*Manifest, error)
 }
 
 // llmGenerator is the default LLM-backed generator.
@@ -256,7 +258,7 @@ func New(cfg config.Docs, chat, summary *llm.Client, engine *graphquery.Engine) 
 
 // Generate implements the two-phase pipeline: incremental per-file summaries,
 // then one comprehensive documentation.md synthesized from them.
-func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir string) (*Manifest, error) {
+func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir string, force bool) (*Manifest, error) {
 	files, err := g.selectFiles(clonePath)
 	if err != nil {
 		return nil, fmt.Errorf("select source files; %w", err)
@@ -264,6 +266,15 @@ func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir st
 
 	priorMan, _ := LoadManifest(docsDir)
 	prior := priorSummaries(priorMan)
+
+	// A forced run ignores every incremental cache: dropping the prior manifest
+	// makes reuseCachedSummary miss for all files (so each summary is
+	// regenerated) and clears maybeSynthesize's reuse path (so documentation.md
+	// is always re-synthesized).
+	if force {
+		priorMan = nil
+		prior = nil
+	}
 
 	graph := g.loadGraph(clonePath)
 

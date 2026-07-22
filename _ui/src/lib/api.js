@@ -61,8 +61,8 @@ export const api = {
   deleteRepo: (id) => req(`/repos/${id}`, { method: "DELETE", keepalive: true }),
   refreshRepo: (id) => req(`/repos/${id}/-/refresh`, { method: "POST", keepalive: true }),
   cancelRepoJob: (id) => req(`/repos/${id}/-/cancel`, { method: "POST", keepalive: true }),
-  generate: (id, targets) =>
-    req(`/repos/${id}/-/generate`, { method: "POST", keepalive: true, body: JSON.stringify({ targets }) }),
+  generate: (id, targets, force = false) =>
+    req(`/repos/${id}/-/generate`, { method: "POST", keepalive: true, body: JSON.stringify({ targets, force }) }),
   lockStatus: (id) => req(`/repos/${id}/-/lock`),
   files: (id, subdir = "", recursive = false) =>
     req(`/repos/${id}/-/files?subdir=${encodeURIComponent(subdir)}&recursive=${recursive}`),

@@ -434,7 +434,7 @@ func (m *Manager) BackfillGraphIgnore(ctx context.Context) {
 	slog.Info("backfilling .graphifyignore and rebuilding graphs", "repos", stale)
 
 	for _, id := range stale {
-		m.TriggerGenerate(id, []string{registry.StageGraph})
+		m.TriggerGenerate(id, []string{registry.StageGraph}, false)
 	}
 }
 
@@ -823,8 +823,10 @@ func (m *Manager) resolveStageDeps(want map[string]bool, repo *registry.Repo, do
 // Generate runs only the selected generation stages for a repo, using the
 // existing clone (no git sync). Valid targets: graph, docs, docs_index,
 // code_index. Stage outcomes are recorded on the repo record; the returned
-// error joins the failed stages.
-func (m *Manager) Generate(ctx context.Context, id string, targets []string) error {
+// error joins the failed stages. When force is true the docs stage ignores its
+// incremental caches and regenerates every summary and documentation.md even if
+// nothing changed.
+func (m *Manager) Generate(ctx context.Context, id string, targets []string, force bool) error {
 	want := map[string]bool{}
 	for _, t := range targets {
 		if !registry.ValidStage(t) {
@@ -933,7 +935,7 @@ func (m *Manager) Generate(ctx context.Context, id string, targets []string) err
 					return docsDirErr
 				}
 
-				_, err := d.gen.Generate(ctx, repo.ID, repo.Path, docsDir)
+				_, err := d.gen.Generate(ctx, repo.ID, repo.Path, docsDir, force)
 
 				return err
 			})
@@ -965,8 +967,9 @@ func (m *Manager) Generate(ctx context.Context, id string, targets []string) err
 	return errors.Join(errs...)
 }
 
-// TriggerGenerate starts a background selective generation for a repo.
-func (m *Manager) TriggerGenerate(id string, targets []string) {
+// TriggerGenerate starts a background selective generation for a repo. When
+// force is true the docs stage ignores its incremental caches.
+func (m *Manager) TriggerGenerate(id string, targets []string, force bool) {
 	if !m.startWork() {
 		return
 	}
@@ -974,7 +977,7 @@ func (m *Manager) TriggerGenerate(id string, targets []string) {
 	go func() {
 		defer m.wg.Done()
 
-		if err := m.Generate(m.baseCtx, id, targets); err != nil {
+		if err := m.Generate(m.baseCtx, id, targets, force); err != nil {
 			slog.Error("generate", "repo", id, "targets", targets, "error", err)
 		}
 	}()
@@ -986,11 +989,11 @@ func (m *Manager) TriggerGenerate(id string, targets []string) {
 // false the run continues detached and the record reflects the in-progress
 // state. Stage failures are surfaced via the record's Status/LastError rather
 // than a Go error; only unexpected lookup failures return an error.
-func (m *Manager) GenerateWait(ctx context.Context, id string, targets []string) (*registry.Repo, bool, error) {
+func (m *Manager) GenerateWait(ctx context.Context, id string, targets []string, force bool) (*registry.Repo, bool, error) {
 	// The generation runs on the manager lifecycle context: a client that stops
 	// waiting (client-side tool timeout, ctrl+c, MCP cancellation) must not
 	// kill the build mid-flight.
-	finished := m.generateAsync(id, targets)
+	finished := m.generateAsync(id, targets, force)
 
 	done := false
 	select {
@@ -1017,7 +1020,7 @@ func (m *Manager) GenerateWait(ctx context.Context, id string, targets []string)
 // and returns a channel closed when that run completes. Generate persists
 // StatusError + LastError on failure, so callers read the terminal state back
 // from the registry. During shutdown the channel is closed immediately.
-func (m *Manager) generateAsync(id string, targets []string) <-chan struct{} {
+func (m *Manager) generateAsync(id string, targets []string, force bool) <-chan struct{} {
 	finished := make(chan struct{})
 	if !m.startWork() {
 		close(finished)
@@ -1029,7 +1032,7 @@ func (m *Manager) generateAsync(id string, targets []string) <-chan struct{} {
 		defer m.wg.Done()
 		defer close(finished)
 
-		if err := m.Generate(m.baseCtx, id, targets); err != nil {
+		if err := m.Generate(m.baseCtx, id, targets, force); err != nil {
 			slog.Error("generate", "repo", id, "targets", targets, "error", err)
 		}
 	}()
@@ -1260,7 +1263,9 @@ func (m *Manager) buildDocsAndIndex(ctx context.Context, repo *registry.Repo) {
 		var man *docgen.Manifest
 		if err := m.runStage(ctx, repo, registry.StageDocs, func() error {
 			var gerr error
-			man, gerr = d.gen.Generate(ctx, repo.ID, repo.Path, docsDir)
+			// A normal refresh stays incremental; force is exposed only via the
+			// explicit Generate path (refresh_repo force flag / API).
+			man, gerr = d.gen.Generate(ctx, repo.ID, repo.Path, docsDir, false)
 
 			return gerr
 		}); err != nil {

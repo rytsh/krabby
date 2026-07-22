@@ -34,6 +34,12 @@
   ];
   let cfg = $state(null);
   let generating = $state({});
+  let forcing = $state({});
+
+  // Stages that support a forced rebuild: docs regeneration is incremental
+  // (unchanged sources reuse cached summaries and documentation.md), so a plain
+  // Generate on an up-to-date repo is a no-op. Force bypasses those caches.
+  const forceable = new Set(["docs", "docs_index"]);
 
   function stageEnabled(key) {
     if (!cfg) return true;
@@ -45,15 +51,17 @@
   }
 
 
-  async function generate(key) {
-    generating = { ...generating, [key]: true };
+  async function generate(key, force = false) {
+    if (force) forcing = { ...forcing, [key]: true };
+    else generating = { ...generating, [key]: true };
     try {
-      await api.generate(repoId, [key]);
+      await api.generate(repoId, [key], force);
       await loadRepo();
     } catch (e) {
       error = e.message;
     } finally {
-      generating = { ...generating, [key]: false };
+      if (force) forcing = { ...forcing, [key]: false };
+      else generating = { ...generating, [key]: false };
     }
   }
 
@@ -598,16 +606,28 @@
                     Cancel
                   </button>
                 {:else}
-                  <button
-                    class="btn btn-sm ml-auto !px-2 !py-0.5 text-[12px]"
-                    disabled={!s.enabled || generating[s.key]}
-                    onclick={() => generate(s.key)}
-                    title={s.needs.length
-                      ? `Rebuild ${s.label}; missing prerequisites (${s.needs.join(", ")}) are built automatically`
-                      : `Rebuild ${s.label}`}
-                  >
-                    {generating[s.key] ? "Starting…" : "Generate"}
-                  </button>
+                  <div class="ml-auto flex gap-1">
+                    {#if forceable.has(s.key)}
+                      <button
+                        class="btn btn-sm !px-2 !py-0.5 text-[12px]"
+                        disabled={!s.enabled || generating[s.key] || forcing[s.key]}
+                        onclick={() => generate(s.key, true)}
+                        title={`Force-rebuild ${s.label}, ignoring the incremental cache (regenerates everything even if nothing changed)`}
+                      >
+                        {forcing[s.key] ? "Starting…" : "Force"}
+                      </button>
+                    {/if}
+                    <button
+                      class="btn btn-sm !px-2 !py-0.5 text-[12px]"
+                      disabled={!s.enabled || generating[s.key] || forcing[s.key]}
+                      onclick={() => generate(s.key)}
+                      title={s.needs.length
+                        ? `Rebuild ${s.label}; missing prerequisites (${s.needs.join(", ")}) are built automatically`
+                        : `Rebuild ${s.label}`}
+                    >
+                      {generating[s.key] ? "Starting…" : "Generate"}
+                    </button>
+                  </div>
                 {/if}
               </div>
               <div class="mt-0.5 pl-[15px] text-[11px] text-faint">
