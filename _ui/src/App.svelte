@@ -4,18 +4,15 @@
   import { theme, toggleTheme } from "./lib/theme.js";
   import {
     owners,
-    ownersLoaded,
-    ownerRepos,
-    ownerLoading,
     loadOwners,
     loadOwnerRepos,
     ownerOf,
   } from "./lib/repos.js";
-  import { shortLabels, nameOf, sidebarPathMode } from "./lib/paths.js";
+  import { buildOwnerTree, collapseTree, sidebarPathMode } from "./lib/paths.js";
   import Icon from "./lib/Icon.svelte";
   import BrandIcon from "./lib/BrandIcon.svelte";
-  import Status from "./lib/Status.svelte";
   import ToastHost from "./lib/ToastHost.svelte";
+  import RepoTree from "./lib/RepoTree.svelte";
   import Repos from "./routes/Repos.svelte";
   import RepoDetail from "./routes/RepoDetail.svelte";
   import Sources from "./routes/Sources.svelte";
@@ -76,26 +73,38 @@
     localStorage.setItem(EXPANDED_KEY, JSON.stringify(expanded));
   }
 
-  function expandGroup(owner) {
-    expanded = { ...expanded, [owner]: true };
-    persistExpanded();
-    loadOwnerRepos(owner);
-  }
-
-  function toggleGroup(owner) {
-    const next = !expanded[owner];
-    expanded = { ...expanded, [owner]: next };
-    persistExpanded();
-    if (next) loadOwnerRepos(owner);
-  }
-
-  // Group display labels: unique path prefixes are trimmed away (keeping one
-  // shared parent segment as context) unless the user prefers full paths.
-  let groupLabels = $derived.by(() => {
-    const keys = $owners.map((g) => g.owner);
-    if ($sidebarPathMode === "full") return Object.fromEntries(keys.map((k) => [k, k]));
-    return shortLabels(keys);
+  // Nested folder tree built from the flat owner list, so that groups like
+  // ".../parser" and ".../parser/poc" nest as parent/child. In "full" mode the
+  // long shared prefix chain (host/org/team/...) is kept as separate levels; in
+  // "smart" mode single-child prefix chains are collapsed into one row.
+  let ownerTree = $derived.by(() => {
+    const tree = buildOwnerTree($owners);
+    return $sidebarPathMode === "full" ? tree : collapseTree(tree);
   });
+
+  // A tree node is expandable by its full path key; when the node is also a real
+  // owner group (node.owner != null) its repos are loaded lazily on expand.
+  function toggleNode(node) {
+    const next = !expanded[node.key];
+    expanded = { ...expanded, [node.key]: next };
+    persistExpanded();
+    if (next && node.owner !== null) loadOwnerRepos(node.owner);
+  }
+
+  // Expand every ancestor folder of an owner path (its own key included) so a
+  // deeply nested active repo is revealed in the sidebar. Keys are the running
+  // "/"-joined prefixes of the owner path.
+  function expandAncestors(owner) {
+    const segs = owner === "" ? [""] : owner.split("/");
+    let path = "";
+    const next = { ...expanded };
+    for (const seg of segs) {
+      path = path ? `${path}/${seg}` : seg;
+      next[path] = true;
+    }
+    expanded = next;
+    persistExpanded();
+  }
 
   const SIDEBAR_WIDTH_KEY = "krabby-sidebar-width";
   const savedSidebarW = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY));
@@ -139,8 +148,8 @@
   $effect(() => {
     if (view === "repo" && repoId) {
       const owner = ownerOf(repoId);
-      if (!expanded[owner]) expandGroup(owner);
-      else loadOwnerRepos(owner);
+      expandAncestors(owner);
+      loadOwnerRepos(owner);
     }
   });
 </script>
@@ -173,38 +182,7 @@
     {#if $owners.length > 0}
       <div class="mt-5 px-2.5 pb-1.5 text-[11px] font-medium uppercase tracking-wider text-faint">Repositories</div>
       <nav class="flex flex-col gap-0.5">
-        {#each $owners as group (group.owner)}
-          <button
-            class="flex w-full cursor-pointer items-center gap-1.5 rounded-md px-2.5 py-1.5 text-left text-[13px] text-dim transition-colors hover:bg-surface-2 hover:text-fg"
-            onclick={() => toggleGroup(group.owner)}
-            aria-expanded={!!expanded[group.owner]}
-            title={group.owner}
-          >
-            <Icon name={expanded[group.owner] ? "chevron-down" : "chevron-right"} size={13} />
-            <Icon name="folder" size={13} />
-            <span class="truncate font-mono">{groupLabels[group.owner] || group.owner || "(root)"}</span>
-            <span class="ml-auto text-[11px] text-faint">{group.count}</span>
-          </button>
-          {#if expanded[group.owner]}
-            {#if $ownerLoading.has(group.owner) && !($ownerRepos[group.owner]?.length)}
-              <div class="py-1.5 pl-[34px] pr-2.5 text-[12px] text-faint">Loading…</div>
-            {:else}
-              {#each $ownerRepos[group.owner] || [] as r (r.id)}
-                <a
-                  href={`/repos/${r.id}`}
-                  use:link
-                  title={r.id}
-                  class="flex items-center gap-2 rounded-md py-1.5 pl-[34px] pr-2.5 text-[13px] text-dim transition-colors hover:bg-surface-2 hover:text-fg"
-                  class:!bg-surface-2={view === "repo" && repoId === r.id}
-                  class:!text-fg={view === "repo" && repoId === r.id}
-                >
-                  <Status status={r.status} dot />
-                  <span class="truncate font-mono">{nameOf(r.id)}</span>
-                </a>
-              {/each}
-            {/if}
-          {/if}
-        {/each}
+        <RepoTree nodes={ownerTree} depth={0} {expanded} onToggle={toggleNode} {view} {repoId} />
       </nav>
     {/if}
 

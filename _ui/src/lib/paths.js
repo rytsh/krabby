@@ -76,6 +76,83 @@ export function shortLabels(keys) {
   return out;
 }
 
+// buildOwnerTree turns the flat list of owner groups ([{ owner, count }])
+// returned by the server into a nested folder tree so that, e.g.,
+// ".../parser" and ".../parser/poc" render as parent/child instead of two
+// siblings. Every "/" segment of an owner path becomes a folder node; a node
+// is a real (loadable) owner group when it appears in the input list (it then
+// carries `owner` + `count`), while purely intermediate segments are folders
+// with no repos of their own. A single node can be both — e.g. "parser" may
+// own repos directly and still contain a "poc" subgroup.
+//
+// Returns an array of root nodes, each shaped as:
+//   { key, label, owner|null, count, children: Node[] }
+// where `key` is the full path to that node, `label` its last segment, and
+// `owner` the group key to pass to loadOwnerRepos (null for folder-only nodes).
+export function buildOwnerTree(groups) {
+  const root = { children: new Map() };
+
+  const ensure = (node, segs) => {
+    let cur = node;
+    let path = "";
+    for (const seg of segs) {
+      path = path ? `${path}/${seg}` : seg;
+      let child = cur.children.get(seg);
+      if (!child) {
+        child = { key: path, label: seg, owner: null, count: 0, children: new Map() };
+        cur.children.set(seg, child);
+      }
+      cur = child;
+    }
+    return cur;
+  };
+
+  for (const g of groups || []) {
+    const owner = g.owner || "";
+    // Bare-name repos (no "/") group under the synthetic root key "".
+    const segs = owner === "" ? [""] : owner.split("/");
+    const node = ensure(root, segs);
+    node.owner = owner;
+    node.count = g.count || 0;
+  }
+
+  const toArray = (node) =>
+    [...node.children.values()]
+      .sort((a, b) => a.label.localeCompare(b.label))
+      .map((n) => ({
+        key: n.key,
+        label: n.label === "" ? "(root)" : n.label,
+        owner: n.owner,
+        count: n.count,
+        children: toArray(n),
+      }));
+
+  return toArray(root);
+}
+
+// collapseTree merges chains of folder-only nodes that have a single child
+// into one node, so long shared prefixes (host/org/team/...) don't waste a
+// level of indentation each. A node is collapsed into its lone child when it
+// owns no repos itself; the labels are then joined with "/". The branch point
+// where paths actually diverge (e.g. "parser", which owns repos AND has the
+// "poc" subgroup) is always preserved.
+export function collapseTree(nodes) {
+  return (nodes || []).map((n) => {
+    let node = { ...n, children: collapseTree(n.children) };
+    while (node.owner === null && node.children.length === 1) {
+      const child = node.children[0];
+      node = {
+        key: child.key,
+        label: `${node.label}/${child.label}`,
+        owner: child.owner,
+        count: child.count,
+        children: child.children,
+      };
+    }
+    return node;
+  });
+}
+
 // sidebarPathMode controls how the sidebar renders repo paths: "smart"
 // (shortened, default) or "full". A pure display preference, persisted per
 // browser in localStorage and configurable from the settings page.
