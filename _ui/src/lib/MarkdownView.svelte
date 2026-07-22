@@ -1,11 +1,9 @@
 <script>
-  // Markdown renderer: comark (https://comark.dev/) for HTML plus mermaid for
-  // fenced ```mermaid diagrams. comark is CommonMark + GFM, so pipe tables,
-  // strikethrough and task lists render (unlike plain commonmark, which dropped
-  // GFM tables to plain text). Both libraries are imported lazily so they stay
-  // out of the main bundle. Raw inline/block HTML is disabled (`html: false`),
-  // so any HTML in the markdown is escaped to text rather than injected — the
-  // same XSS guard commonmark's safe mode gave us.
+  // Markdown renderer: comark (https://comark.dev/) renders CommonMark + GFM to
+  // an HTML string (pipe tables, strikethrough, task lists) and gives each
+  // heading a stable id. Fenced ```mermaid blocks are upgraded to interactive
+  // SVG after the HTML lands in the DOM. Both comark and mermaid are imported
+  // lazily so they stay out of the main bundle.
   import { mount, onDestroy, tick, unmount } from "svelte";
   import MermaidDiagram from "./MermaidDiagram.svelte";
   import { theme } from "./theme.js";
@@ -18,10 +16,22 @@
   /** @type {Props} */
   let { markdown = "", onHeadings = () => {} } = $props();
 
+  // Rendered HTML is the single reactive source of truth for the view. Heading
+  // ids come straight from comark's output, so we never mutate the DOM to build
+  // the table of contents — that keeps the post-render effect side-effect free
+  // on the reactive graph and avoids infinite effect loops.
   let html = $state("");
-  let container = $state();
+
+  // Plain DOM handle (NOT $state) so the mermaid effect can read it without
+  // taking a reactive dependency on it.
+  /** @type {HTMLElement | undefined} */
+  let container;
+
+  // Monotonic token: every new render invalidates in-flight async work from the
+  // previous markdown/theme so stale diagrams never mount into fresh HTML.
   let seq = 0;
   let mermaidId = 0;
+  /** @type {ReturnType<typeof mount>[]} */
   let mountedDiagrams = [];
 
   function clearDiagrams() {
@@ -29,6 +39,24 @@
     mountedDiagrams = [];
   }
 
+  // Extract the heading outline from comark's HTML string without touching the
+  // live DOM. comark already emitted an id on every heading.
+  /** @param {string} source */
+  function extractHeadings(source) {
+    const doc = new DOMParser().parseFromString(source, "text/html");
+    /** @type {Heading[]} */
+    const headings = [];
+    for (const el of doc.querySelectorAll("h1, h2, h3")) {
+      headings.push({
+        id: el.id,
+        text: (el.textContent || "").trim(),
+        level: Number(el.tagName.slice(1)),
+      });
+    }
+    return headings;
+  }
+
+  /** @param {string} src */
   async function render(src) {
     const id = ++seq;
     if (!src) {
@@ -39,51 +67,39 @@
     }
     try {
       const { render: renderMarkdown } = await import("@comark/html");
-      // html:false escapes raw HTML instead of injecting it (XSS guard).
-      const out = await renderMarkdown(src, { html: false });
-      if (id === seq) {
-        clearDiagrams();
-        html = out;
-      }
-    } catch {
-      if (id === seq) html = "";
+      const out = await renderMarkdown(src);
+      if (id !== seq) return;
+      clearDiagrams();
+      html = out;
+      onHeadings(extractHeadings(out));
+    } catch (err) {
+      if (id !== seq) return;
+      console.warn("[krabby] markdown render failed", err);
+      html = "";
+      onHeadings([]);
     }
   }
 
+  // Re-render when the markdown or the app theme changes (theme drives the
+  // mermaid palette). This effect only writes `html`, which the mermaid effect
+  // below reacts to — no cycle.
   $effect(() => {
-    // Re-render diagrams when the Mermaid theme changes with the app theme.
-    $theme;
+    void $theme;
     render(markdown);
   });
 
-  function collectHeadings() {
-    if (!container) return;
-
-    const seen = new Map();
-    const headings = Array.from(container.querySelectorAll("h1, h2, h3")).map((heading, index) => {
-      const text = (heading.textContent || "").trim();
-      const base =
-        text
-          .normalize("NFKD")
-          .replace(/[\u0300-\u036f]/g, "")
-          .toLowerCase()
-          .replace(/[^a-z0-9]+/g, "-")
-          .replace(/^-|-$/g, "") || `section-${index + 1}`;
-      const occurrence = (seen.get(base) || 0) + 1;
-      seen.set(base, occurrence);
-      const id = `doc-${base}${occurrence > 1 ? `-${occurrence}` : ""}`;
-      heading.id = id;
-
-      return { id, text, level: Number(heading.tagName.slice(1)) };
-    });
-
-    onHeadings(headings);
-  }
-
-  // Replace mermaid code blocks with rendered SVG once the HTML is in the DOM.
-  async function renderMermaid() {
-    if (!container) return;
+  // Turn fenced mermaid code blocks into rendered SVG once fresh HTML is in the
+  // DOM. Depends solely on `html`; it reads `container` as a plain DOM handle
+  // and never writes reactive state, so it cannot re-trigger itself.
+  $effect(() => {
+    void html;
     const renderSeq = seq;
+    tick().then(() => renderMermaid(renderSeq));
+  });
+
+  /** @param {number} renderSeq */
+  async function renderMermaid(renderSeq) {
+    if (renderSeq !== seq || !container) return;
     const blocks = container.querySelectorAll("pre > code.language-mermaid");
     if (blocks.length === 0) return;
     try {
@@ -125,8 +141,8 @@
             throw mountErr;
           }
         } catch (rerr) {
-          // Invalid mermaid syntax: keep the plain code block visible, and
-          // drop the temp element mermaid may have left in <body>.
+          // Invalid mermaid syntax: keep the plain code block visible, and drop
+          // the temp element mermaid may have left in <body>.
           console.warn(
             `[krabby] mermaid render failed: ${rerr?.message || rerr}\n--- diagram source ---\n${src}`,
           );
@@ -139,17 +155,8 @@
     }
   }
 
-  // Runs after the DOM has been updated with fresh HTML.
-  $effect(() => {
-    html;
-    container;
-    tick().then(() => {
-      collectHeadings();
-      renderMermaid();
-    });
-  });
-
   onDestroy(() => {
+    seq++;
     clearDiagrams();
     onHeadings([]);
   });

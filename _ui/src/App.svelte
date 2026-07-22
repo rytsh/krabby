@@ -98,10 +98,18 @@
     const segs = owner === "" ? [""] : owner.split("/");
     let path = "";
     const next = { ...expanded };
+    let changed = false;
     for (const seg of segs) {
       path = path ? `${path}/${seg}` : seg;
-      next[path] = true;
+      if (!next[path]) {
+        next[path] = true;
+        changed = true;
+      }
     }
+    // Only write when something actually changed. Reassigning `expanded` with a
+    // fresh object every time would retrigger the ancestor effect (which reads
+    // `expanded`) forever — Svelte 5 effect_update_depth_exceeded.
+    if (!changed) return;
     expanded = next;
     persistExpanded();
   }
