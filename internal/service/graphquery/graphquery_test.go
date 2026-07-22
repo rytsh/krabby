@@ -213,3 +213,106 @@ func TestQueryTermsSearchable(t *testing.T) {
 		t.Errorf("identifier term missing: %v", terms)
 	}
 }
+
+// dupGraph has two distinct nodes sharing the label "Process": p1 in pkgA (calls
+// Helper) and p2 in pkgB (referenced by Runner). It exercises ambiguous-label
+// resolution across GetNode / GetNeighbors and the relation vocabulary.
+const dupGraph = `{
+  "directed": false, "multigraph": false, "nodes": [
+    {"id":"pkga_process","label":"Process","norm_label":"process","source_file":"a.go","source_location":"L1","file_type":"code","community":0},
+    {"id":"pkgb_process","label":"Process","norm_label":"process","source_file":"b.go","source_location":"L2","file_type":"code","community":1},
+    {"id":"helper","label":"Helper","norm_label":"helper","source_file":"a.go","source_location":"L3","file_type":"code","community":0},
+    {"id":"runner","label":"Runner","norm_label":"runner","source_file":"b.go","source_location":"L4","file_type":"code","community":1}
+  ], "links": [
+    {"source":"pkga_process","target":"helper","relation":"calls","confidence":"EXTRACTED","context":"call"},
+    {"source":"runner","target":"pkgb_process","relation":"references","confidence":"INFERRED","context":"field"}
+  ]
+}`
+
+func loadDup(t *testing.T) *Graph {
+	t.Helper()
+	g, err := Load(writeGraph(t, dupGraph))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	return g
+}
+
+// GetNode and GetNeighbors must resolve an ambiguous label to the SAME node
+// (previously GetNode used a divergent substring scan and could pick a different
+// node than GetNeighbors).
+func TestResolutionConsistency(t *testing.T) {
+	g := loadDup(t)
+
+	node := g.GetNode("Process")
+	neigh := g.GetNeighbors("Process", "")
+
+	// The chosen node is findNode's first match: pkga_process (insertion order,
+	// exact tier). GetNode must report that ID and GetNeighbors must show that
+	// node's edge (calls Helper), not pkgb's (referenced by Runner).
+	if !strings.Contains(node, "ID: pkga_process") {
+		t.Errorf("GetNode resolved unexpected node:\n%s", node)
+	}
+	if !strings.Contains(neigh, "Helper") || strings.Contains(neigh, "Runner") {
+		t.Errorf("GetNeighbors resolved a different node than GetNode:\n%s", neigh)
+	}
+}
+
+// Ambiguous labels must be flagged (parity with ShortestPath's warning).
+func TestAmbiguityHint(t *testing.T) {
+	g := loadDup(t)
+
+	if got := g.GetNode("Process"); !strings.Contains(got, "matched 2 nodes") {
+		t.Errorf("GetNode missing ambiguity hint:\n%s", got)
+	}
+	if got := g.GetNeighbors("Process", ""); !strings.Contains(got, "matched 2 nodes") {
+		t.Errorf("GetNeighbors missing ambiguity hint:\n%s", got)
+	}
+
+	// Unambiguous label must NOT carry the hint.
+	if got := g.GetNode("Helper"); strings.Contains(got, "matched") {
+		t.Errorf("unexpected ambiguity hint for unique label:\n%s", got)
+	}
+}
+
+// GetNode surfaces the node's relation vocabulary.
+func TestGetNodeRelations(t *testing.T) {
+	g := loadDup(t)
+	got := g.GetNode("Helper") // helper has one incoming 'calls' edge
+	if !strings.Contains(got, "Relations: calls") {
+		t.Errorf("GetNode missing relations line:\n%s", got)
+	}
+}
+
+// An invalid relation_filter must fail loud and list the valid relations,
+// instead of silently returning an empty neighbour list (the false-negative
+// that made callers look absent).
+func TestRelationFilterInvalidFailsLoud(t *testing.T) {
+	g := loadSmall(t)
+
+	got := g.GetNeighbors("Service", "calledby") // 'calledby' is not a real relation
+	if !strings.Contains(got, "No relation matching 'calledby'") {
+		t.Errorf("invalid filter did not fail loud:\n%s", got)
+	}
+	// Service has 'calls' and 'references' outgoing; both should be offered.
+	if !strings.Contains(got, "calls") || !strings.Contains(got, "references") {
+		t.Errorf("valid relations not listed:\n%s", got)
+	}
+	// Must not masquerade as a normal (empty) neighbour listing.
+	if strings.Contains(got, "Neighbors of") {
+		t.Errorf("invalid filter returned a neighbour header:\n%s", got)
+	}
+}
+
+// A valid relation_filter still works and filters correctly.
+func TestRelationFilterValidStillWorks(t *testing.T) {
+	g := loadSmall(t)
+	got := g.GetNeighbors("Service", "call")
+	if !strings.Contains(got, "handleRequest [calls]") {
+		t.Errorf("valid filter dropped matching edge:\n%s", got)
+	}
+	if strings.Contains(got, "references") {
+		t.Errorf("valid filter leaked non-matching edge:\n%s", got)
+	}
+}

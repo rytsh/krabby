@@ -73,34 +73,51 @@ func (g *Graph) QueryGraph(question string, opts QueryGraphOpts) string {
 	return header + g.subgraphToText(nodes, edges, budget, start)
 }
 
-// GetNode returns full details for the first node matching label (mirrors
-// _tool_get_node: case-insensitive substring on label OR exact id match).
+// GetNode returns full details for the first node matching label. Resolution
+// goes through findNode (exact > prefix > substring, label OR id) so it agrees
+// with GetNeighbors/GetCommunity instead of using a divergent substring scan.
+// The output also lists the node's relation vocabulary and, when the label was
+// ambiguous, hints to disambiguate via the exact node ID.
 func (g *Graph) GetNode(label string) string {
-	lower := strings.ToLower(label)
-	for _, id := range g.nodeList {
-		d := g.Nodes[id]
-		if strings.Contains(strings.ToLower(d.Label), lower) || lower == strings.ToLower(id) {
-			community := ""
-			if d.Community != nil {
-				community = fmt.Sprintf("%d", *d.Community)
-			}
-
-			return strings.Join([]string{
-				"Node: " + sanitize(g.labelOf(id)),
-				"  ID: " + sanitize(id),
-				"  Source: " + sanitize(d.SourceFile) + " " + sanitize(d.SourceLocation),
-				"  Type: " + sanitize(d.FileType),
-				"  Community: " + sanitize(community),
-				fmt.Sprintf("  Degree: %d", g.Degree(id)),
-			}, "\n")
-		}
+	matches := g.findNode(strings.ToLower(label))
+	if len(matches) == 0 {
+		return fmt.Sprintf("No node matching '%s' found.", strings.ToLower(label))
 	}
 
-	return fmt.Sprintf("No node matching '%s' found.", lower)
+	id := matches[0]
+	d := g.Nodes[id]
+
+	community := ""
+	if d.Community != nil {
+		community = fmt.Sprintf("%d", *d.Community)
+	}
+
+	lines := []string{
+		"Node: " + sanitize(g.labelOf(id)),
+		"  ID: " + sanitize(id),
+		"  Source: " + sanitize(d.SourceFile) + " " + sanitize(d.SourceLocation),
+		"  Type: " + sanitize(d.FileType),
+		"  Community: " + sanitize(community),
+		fmt.Sprintf("  Degree: %d", g.Degree(id)),
+	}
+
+	if rels := g.relationsOf(id); len(rels) > 0 {
+		lines = append(lines, "  Relations: "+sanitize(strings.Join(rels, ", ")))
+	}
+
+	if hint := g.ambiguityHint(label, matches); hint != "" {
+		lines = append(lines, hint)
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 // GetNeighbors lists direct successors then predecessors of the first matching
-// node, optionally filtered by relation substring (mirrors _tool_get_neighbors).
+// node, optionally filtered by relation substring. A relation_filter that
+// matches none of the node's actual relations is reported as an error listing
+// the valid relations, instead of silently returning an empty list (which reads
+// as "no neighbours" and produces false negatives such as "this func has no
+// callers"). When the label was ambiguous it also hints to use the node ID.
 func (g *Graph) GetNeighbors(label, relationFilter string) string {
 	matches := g.findNode(strings.ToLower(label))
 	if len(matches) == 0 {
@@ -109,6 +126,31 @@ func (g *Graph) GetNeighbors(label, relationFilter string) string {
 
 	nid := matches[0]
 	rf := strings.ToLower(relationFilter)
+
+	// Fail loud on a filter that cannot match any of this node's relations.
+	if rf != "" {
+		rels := g.relationsOf(nid)
+		matchesAny := false
+		for _, rel := range rels {
+			if strings.Contains(strings.ToLower(rel), rf) {
+				matchesAny = true
+
+				break
+			}
+		}
+
+		if !matchesAny {
+			valid := "(none — this node has no edges)"
+			if len(rels) > 0 {
+				valid = strings.Join(rels, ", ")
+			}
+
+			return fmt.Sprintf(
+				"No relation matching '%s' on node %s. Valid relations: %s",
+				sanitize(relationFilter), sanitize(g.labelOf(nid)), sanitize(valid))
+		}
+	}
+
 	lines := []string{"Neighbors of " + sanitize(g.labelOf(nid)) + ":"}
 
 	for _, r := range g.Successors(nid) {
@@ -127,6 +169,10 @@ func (g *Graph) GetNeighbors(label, relationFilter string) string {
 		}
 		lines = append(lines, fmt.Sprintf("  <-- %s [%s] [%s]",
 			sanitize(g.labelOf(r.other)), sanitize(rel), sanitize(r.edge.Confidence)))
+	}
+
+	if hint := g.ambiguityHint(label, matches); hint != "" {
+		lines = append(lines, hint)
 	}
 
 	return strings.Join(lines, "\n")
@@ -399,6 +445,47 @@ func (g *Graph) isJSONKeyNode(id string) bool {
 	}
 
 	return jsonNoiseLabels[strings.ToLower(strings.TrimSpace(d.Label))]
+}
+
+// relationsOf returns the distinct relation types on a node's edges (both
+// directions), sorted for deterministic output. This is the vocabulary a caller
+// may pass to relation_filter, so it is surfaced by GetNode and in the
+// GetNeighbors "no relation matching" error.
+func (g *Graph) relationsOf(id string) []string {
+	seen := map[string]bool{}
+	for _, r := range g.out[id] {
+		if r.edge.Relation != "" {
+			seen[r.edge.Relation] = true
+		}
+	}
+	for _, r := range g.in[id] {
+		if r.edge.Relation != "" {
+			seen[r.edge.Relation] = true
+		}
+	}
+
+	rels := make([]string, 0, len(seen))
+	for rel := range seen {
+		rels = append(rels, rel)
+	}
+	sort.Strings(rels)
+
+	return rels
+}
+
+// ambiguityHint returns a one-line disambiguation hint when the raw label
+// resolved to more than one candidate node, echoing the chosen node's ID so the
+// caller can re-query precisely. Empty string when the match was unambiguous.
+// This mirrors the ambiguity warning ShortestPath already emits, so all three
+// resolving tools behave consistently.
+func (g *Graph) ambiguityHint(label string, matches []string) string {
+	if len(matches) < 2 {
+		return ""
+	}
+
+	return fmt.Sprintf(
+		"  Note: '%s' matched %d nodes; showing '%s'. Re-query by ID for a specific one.",
+		sanitize(label), len(matches), sanitize(matches[0]))
 }
 
 // ---- small helpers ----------------------------------------------------------

@@ -375,7 +375,7 @@ type nodeArgs struct {
 
 type neighborsArgs struct {
 	Label          string `json:"label" jsonschema:"node label or ID"`
-	RelationFilter string `json:"relation_filter,omitempty" jsonschema:"optional: filter by relation type"`
+	RelationFilter string `json:"relation_filter,omitempty" jsonschema:"optional: filter by relation type (e.g. 'calls', 'references', 'method', 'contains'). Direction is shown by arrows in the output (--> successor, <-- predecessor), not by the filter. An unknown relation returns an error listing the node's valid relations; get_node also lists them under 'Relations:'"`
 	Repo           string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; omit to query the merged cross-repo graph (must be enabled via graphify.merge)"`
 }
 
