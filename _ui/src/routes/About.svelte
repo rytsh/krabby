@@ -4,9 +4,11 @@
 
   let settings = $state(null);
 
+  let basePath = $derived((settings && settings.server && settings.server.base_path) || "");
   let mcpPath = $derived((settings && settings.mcp && settings.mcp.path) || "/mcp");
   let apiKeySet = $derived(!!(settings && settings.mcp && settings.mcp.api_key_set));
-  let mcpUrl = $derived(`${window.location.origin}${mcpPath}`);
+  let mcpUrl = $derived(`${window.location.origin}${basePath}${mcpPath}`);
+  let apiBase = $derived(`${window.location.origin}${basePath}/api/v1`);
 
   let copied = $state("");
   async function copy(text, key) {
@@ -54,6 +56,10 @@ Detect this client's MCP configuration format and update the appropriate project
 If it is already tracked, refresh it to pull the latest commits and rebuild its knowledge graph. Otherwise add it. Then report the final build status.
 
 The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private repos make sure a matching git credential is stored first — a token for HTTPS or an SSH key for SSH URLs.`);
+
+  let curlAddRepo = $derived(`curl -X POST ${apiBase}/repos \\
+  -H "Content-Type: application/json" \\
+  -d '{"url": "https://github.com/owner/repo", "branch": ""}'`);
 
   const toolGroups = [
     {
@@ -221,6 +227,32 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
     (SSH) with <code class="font-mono text-[12px]">set_credential</code>; the most specific host or
     host/path pattern wins.
   </p>
+
+  <div class="mt-5 border-t border-line pt-4">
+    <div class="mb-1 flex items-center gap-2">
+      <h3 class="text-[13px] font-medium">Or call the REST API directly</h3>
+      <code class="rounded border border-line px-1.5 py-0.5 font-mono text-[11px] text-fg">POST /api/v1/repos</code>
+    </div>
+    <p class="mt-0 text-[13px] text-faint">
+      One endpoint does both: it creates the repo if it isn't tracked yet, or refreshes it (pull + rebuild)
+      if it already exists. Send a JSON body with the git <code class="font-mono text-[12px]">url</code>
+      (required) and an optional <code class="font-mono text-[12px]">branch</code> (empty = default branch).
+      Returns <code class="font-mono text-[12px]">202 Accepted</code> with the repo record while the build
+      runs in the background.
+    </p>
+
+    <div class="mb-1.5 mt-3 flex items-center gap-2">
+      <span class="text-[13px] text-dim">Example — <code class="font-mono text-[12px]">curl</code></span>
+      <button class="btn btn-sm ml-auto" onclick={() => copy(curlAddRepo, "curl")}>{copied === "curl" ? "Copied" : "Copy"}</button>
+    </div>
+    <pre class="m-0 overflow-x-auto rounded-md border border-line bg-bg p-3 font-mono text-[12.5px] leading-relaxed">{curlAddRepo}</pre>
+
+    <p class="mb-0 mt-2 text-[13px] text-faint">
+      This is the same endpoint the "Add repo" button uses, so it's safe to call repeatedly — an existing
+      repo is simply queued for a refresh. Note the MCP <code class="font-mono text-[12px]">X-Api-Key</code>
+      only guards the <code class="font-mono text-[12px]">{mcpPath}</code> endpoint, not the REST API.
+    </p>
+  </div>
 </div>
 
 <div class="card my-4 p-4">
