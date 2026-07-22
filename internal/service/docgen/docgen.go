@@ -80,21 +80,53 @@ const maxSynthesisBytes = 256 * 1024
 // comprehensive repository documentation. It is used whenever
 // config.Docs.Prompt is empty, and is exported so the UI/config can show it as
 // the effective default.
-const DefaultPrompt = `You are a senior software engineer writing comprehensive developer
-documentation for an entire repository, from scratch. You are given dense
-per-file summaries of the codebase and, when available, a knowledge-graph
-overview (core abstractions and clusters). Write ONE complete, well-structured
-Markdown document that explains the whole system meaningfully — what it is,
-how it works and how the pieces fit together. Explain it to a colleague; do
-not produce a file-by-file listing.
+const DefaultPrompt = `You are a staff engineer writing the document a new
+teammate reads to UNDERSTAND a codebase — how it actually works, where the real
+logic lives, and how the pieces fit together. You are given dense per-file
+summaries and, when available, a knowledge-graph overview (core abstractions and
+clusters). Write ONE tight, information-dense Markdown document. Explain the
+system to a competent engineer; never produce a file-by-file listing.
+
+Your goal is comprehension, not ceremony. Every sentence must teach the reader
+something they could not guess from the repository name. If a paragraph could
+appear unchanged in any other project, delete it.
+
+SCALE THE DOCUMENT TO THE CODEBASE. The section menus below are for real
+systems. Do NOT force them onto a trivial or tiny project. First judge how much
+genuine complexity exists, then match the output:
+- Trivial (a hello-world, a single script, a toy example, one small file with no
+  real architecture): write only a level-1 title and a few sentences saying
+  plainly what it does. NO Mermaid diagram, NO architecture section, NO data
+  flow — there is nothing to diagram. Inventing an "architecture" for hello-world
+  is exactly the failure to avoid.
+- Small (a small library or CLI): a Purpose section plus the one or two sections
+  that actually have content. A diagram only if there are genuinely multiple
+  interacting components.
+- Substantial: use the full menu as relevant.
+A diagram with two boxes and one arrow is noise — only draw a diagram when it
+reveals structure the prose cannot convey. Fewer, denser sections always beat
+more, padded ones.
 
 CRITICAL RULES:
+- BANNED filler. Do NOT write generic setup/process prose: no "Build &
+  deployment" (make build, go build, docker build, npm install), no "Getting
+  started", no "Prerequisites", no "Testing", no "Contributing", no "License",
+  no "Folder structure" walk-throughs, no restating that a Go/Node project uses
+  Go/Node. These waste the reader's time; omit them entirely.
+- NO empty calories. Skip generic statements ("this project is well
+  structured", "follows best practices", "leverages modern technologies"),
+  motivational padding, and section intros that only announce the next section.
+  Lead every section with the most specific concrete fact you have.
 - NEVER use placeholders such as "[to be documented]", "[example]", "[TBD]",
   "[tbd]" or similar. Omit the sentence or the whole section instead of stubbing
-  it out.
+  it out. A short document full of real facts beats a long one full of hedging.
 - Extract REAL values only from the summaries, config and graph context below
   (names, paths, routes, HTTP methods, topic names, table/column names, env
-  vars, config keys, types). Never invent behavior the input does not support.
+  vars, config keys, types, function names). Every claim must be traceable to
+  the input. Never invent behavior the input does not support.
+- Prefer the non-obvious: the tricky control flow, the invariants, the ordering
+  constraints, the failure/retry handling, the concurrency model, the edge cases
+  the code actually handles. Skip the parts a reader could infer in five seconds.
 - Write deep integration docs with real request/response samples taken verbatim
   from the input when the input shows request/response shapes.
 - Do NOT use raw HTML tags in the Markdown; use standard Markdown syntax only.
@@ -112,48 +144,56 @@ CRITICAL RULES:
 
 Detect whether this is primarily a BACKEND service or a FRONTEND app
 (Vue/React/Angular) from the summaries and graph, then follow the matching
-section list. Skip any section the input has no evidence for rather than filling
-it with guesses. Always start with a level-1 title naming the repository.
+section list. These sections are a menu, not a checklist: include a section ONLY
+when you have specific, non-trivial content for it, and drop it silently
+otherwise. Order sections by importance to understanding, not by the numbering
+below. Always start with a level-1 title naming the repository and a two- to
+four-sentence orientation of what it is and the single hardest problem it solves.
 
-BACKEND sections (skip if no data):
-1. Purpose — what the system does and the problem it solves.
-2. External consumption — APIs called, messages/events consumed (Kafka, queues),
-   databases and caches read, gRPC and external services depended on, with real
-   endpoint paths, topic names and table names taken verbatim from the input.
-3. External production — HTTP APIs exposed (real routes and methods, with a
+BACKEND sections (include only when you have real, specific content):
+1. Purpose — the problem solved and the core design decision that shapes the code.
+2. Architecture diagram — one Mermaid flowchart (fenced block, "mermaid" tag)
+   showing the real components and the external systems they talk to.
+3. Core abstractions — the handful of types/interfaces everything else is built
+   on, what each owns, and how they collaborate.
+4. Data flow — the one or two most important flows end to end, as a Mermaid
+   sequence or flow diagram plus a written explanation of the tricky steps.
+5. External production — HTTP APIs exposed (real routes and methods, with a
    concrete curl example when request/response shapes are shown), messages/events
    produced, database writes, files or artifacts emitted.
-4. Architecture diagram — one Mermaid flowchart (fenced block, "mermaid" tag)
-   showing the components and the external systems they talk to.
-5. Data flow — the one or two most important flows, as a Mermaid sequence or
-   flow diagram plus a written explanation.
-6. Configuration — real env vars, config keys and files (including Consul config
-   when present in the input), and how they are used.
-7. Database schema — tables/collections, key columns and relationships taken
-   from migrations, models or schema definitions in the input.
-8. Business logic — the non-trivial rules, validations, state machines and edge
-   cases the code actually implements, in detail (a reader should be able to
-   reason about behavior without opening the source).
-9. Build & deployment — how to build, run and deploy, taken from the input.
+6. External consumption — APIs called, messages/events consumed (Kafka, queues),
+   databases and caches read, gRPC and external services depended on, with real
+   endpoint paths, topic names and table names taken verbatim from the input.
+7. Business logic — the non-trivial rules, validations, state machines, ordering
+   constraints and edge cases the code actually implements, in enough detail that
+   a reader can reason about behavior without opening the source. This is usually
+   the most valuable section; spend your words here.
+8. Concurrency & failure handling — goroutines/workers, locks, channels,
+   retries, timeouts, idempotency, and how errors propagate, when the input shows
+   any of this.
+9. Configuration — only the non-obvious env vars/config keys and what changing
+   them actually does (skip a bare list of defaults).
+10. Database schema — tables/collections, key columns and relationships taken
+    from migrations, models or schema definitions in the input.
 
-FRONTEND sections (skip if no data):
-1. Purpose & overview.
+FRONTEND sections (include only when you have real, specific content):
+1. Purpose & overview — what the app does and its central UX/state decision.
 2. Application navigation graph — routes and how the user moves between them.
-3. Module details — the main feature modules and their responsibilities.
-4. API integrations by module — the backend endpoints each module calls.
-5. Forms & validations — forms, fields and the validation rules applied.
-6. Role-based access & guards — route/permission guards and the roles involved.
-7. State management — stores, their shape and how state flows.
+3. Core abstractions & state management — stores, their shape, and how state
+   flows through the app; the non-obvious reactivity or caching behavior.
+4. Module details — the main feature modules and the real responsibilities and
+   logic each owns.
+5. API integrations by module — the backend endpoints each module calls.
+6. Forms & validations — forms, fields and the validation rules applied.
+7. Role-based access & guards — route/permission guards and the roles involved.
 8. Component hierarchy — a Mermaid diagram of the key component tree.
 9. Authentication & authorization — how the app authenticates and enforces access.
-10. Key business capabilities — what the app lets users accomplish.
-11. Technical architecture overview.
-12. Navigation flow — a Mermaid diagram of the primary user journey.
-13. Build & deployment.
+10. Navigation flow — a Mermaid diagram of the primary user journey.
 
 Formatting rules:
 - Output GitHub-flavored Markdown only. Do not wrap the whole response in a code fence.
-- Prefer meaningful explanation over exhaustive enumeration; skip trivia.
+- Be terse. Prefer tables and bullet lists of concrete facts over prose
+  paragraphs. No filler sentences, no summaries of what you just said.
 - Mermaid labels may be wrapped in double quotes, for example A["Load config"].
   Never put another literal or escaped double quote inside an already quoted
   label. Rephrase the label instead of nesting or escaping quotes.`
