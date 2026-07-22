@@ -47,6 +47,12 @@ const bucketName = "chunks"
 // large repos do not hit ErrTxnTooBig.
 const deleteBatch = 500
 
+// upsertBatch bounds how many vectors are inserted per Badger transaction.
+// Each record carries a full embedding (often 768-1536 float32s, several KB),
+// so a single InsertMany of a large repo's chunks overflows Badger's
+// transaction size limit (ErrTxnTooBig). Insert in bounded batches instead.
+const upsertBatch = 64
+
 // sharedHandle is a refcounted bw DB. Manager.Configure builds the new bundle
 // (opening the store) before closing the previous one; Badger's directory lock
 // forbids two concurrent opens, so both bundles share one handle and the DB
@@ -117,7 +123,7 @@ func (s *embedded) Upsert(ctx context.Context, items []Item) error {
 	}
 
 	s.h.opMu.RLock()
-	err := s.h.bucket.InsertMany(ctx, records)
+	err := insertBatched(ctx, s.h.bucket, records)
 	s.h.opMu.RUnlock()
 	if err == nil {
 		return nil
@@ -136,7 +142,7 @@ func (s *embedded) Upsert(ctx context.Context, items []Item) error {
 
 	// Another concurrent upsert may have completed the migration while this
 	// call waited. Recheck before wiping so completed repo indexes are not lost.
-	err = s.h.bucket.InsertMany(ctx, records)
+	err = insertBatched(ctx, s.h.bucket, records)
 	if err == nil {
 		return nil
 	}
@@ -152,7 +158,22 @@ func (s *embedded) Upsert(ctx context.Context, items []Item) error {
 		return fmt.Errorf("wipe vector db after dim change; %w", werr)
 	}
 
-	return s.h.bucket.InsertMany(ctx, records)
+	return insertBatched(ctx, s.h.bucket, records)
+}
+
+// insertBatched inserts records in bounded batches so a large upsert never
+// exceeds Badger's per-transaction size limit (ErrTxnTooBig). On a dimension
+// mismatch it returns immediately with that error so the caller's wipe+retry
+// path can run.
+func insertBatched(ctx context.Context, bucket *bw.Bucket[chunkRecord], records []*chunkRecord) error {
+	for start := 0; start < len(records); start += upsertBatch {
+		end := min(start+upsertBatch, len(records))
+		if err := bucket.InsertMany(ctx, records[start:end]); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (s *embedded) Search(ctx context.Context, repo string, vec []float32, topK int) ([]Match, error) {
@@ -200,6 +221,29 @@ func (s *embedded) Search(ctx context.Context, repo string, vec []float32, topK 
 func (s *embedded) DeleteRepo(ctx context.Context, repo string) error {
 	return s.deleteWhere(ctx, repo, nil)
 }
+
+// HasRepo reports whether any vector exists for the repo. It stops at the
+// first matching record via a sentinel error so it does not scan the
+// whole repo partition.
+func (s *embedded) HasRepo(ctx context.Context, repo string) (bool, error) {
+	s.h.opMu.RLock()
+	defer s.h.opMu.RUnlock()
+
+	found := false
+	err := s.h.bucket.Walk(ctx, repoQuery(repo), func(_ *chunkRecord) error {
+		found = true
+
+		return errStopWalk
+	})
+	if err != nil && !errors.Is(err, errStopWalk) {
+		return false, fmt.Errorf("scan repo vectors; %w", err)
+	}
+
+	return found, nil
+}
+
+// errStopWalk short-circuits a bw.Walk once the first record is seen.
+var errStopWalk = errors.New("stop walk")
 
 func (s *embedded) DeletePaths(ctx context.Context, repo string, paths []string) error {
 	if len(paths) == 0 {

@@ -24,6 +24,14 @@ graphify:
   bin: graphify              # graphify CLI (uv tool install graphifyy)
   # python: /path/to/python  # interpreter that can `import graphify` (auto-detected)
   build_timeout: 30m         # graph queries are answered in-process (no serve subprocess)
+  # exclude:                 # extra gitignore-style patterns kept out of the graph
+  #   - "testdata/"          # (defaults already skip testdata/, fixtures/, *.min.js, …)
+  #   - "examples/"
+  # merge: false             # build a cross-repo merged graph (queried when a graph
+                             # tool is called with no repo id). Off by default:
+                             # independent repos share no symbols, so the merge is
+                             # just a costly disjoint union. Enable only for split
+                             # monorepos / interdependent modules.
 
 webhook:
   # github_secret: change-me  # verifies X-Hub-Signature-256 on /webhook/github
@@ -35,7 +43,13 @@ webhook:
 
 docs:
   enabled: false            # generate markdown docs in the refresh pipeline
-  concurrency: 4            # parallel per-file LLM calls
+  concurrency: 8            # parallel per-file summary LLM calls
+  # summary_model: ...      # fast model for the many per-file summary calls
+                            # (e.g. gemini-2.5-flash). Reuses the llm base_url/
+                            # api_key/timeout below; only the model differs. The
+                            # slower main model is used only for final synthesis.
+                            # Blank = use the main model for everything.
+  # max_groups: 40          # cap on grouped summary calls per run
   include: ["**/*"]         # source globs to document (repo-relative)
   exclude: ["**/*_test.go", "vendor/**", "**/testdata/**"]
 

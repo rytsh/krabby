@@ -19,11 +19,14 @@ type Client struct {
 	bin          string
 	python       string
 	buildTimeout time.Duration
+	exclude      []string
 }
 
 // New creates a graphify CLI client. python may be empty; it is derived from
-// the graphify binary shebang, falling back to python3.
-func New(bin, python string, buildTimeout time.Duration) (*Client, error) {
+// the graphify binary shebang, falling back to python3. exclude carries extra
+// gitignore-style patterns written into each clone's managed .graphifyignore
+// block before a build so the graph skips test fixtures and other noise.
+func New(bin, python string, buildTimeout time.Duration, exclude []string) (*Client, error) {
 	binPath, err := exec.LookPath(bin)
 	if err != nil {
 		return nil, fmt.Errorf("graphify binary %q not found; install with `uv tool install graphifyy`; %w", bin, err)
@@ -37,11 +40,19 @@ func New(bin, python string, buildTimeout time.Duration) (*Client, error) {
 		bin:          binPath,
 		python:       python,
 		buildTimeout: buildTimeout,
+		exclude:      exclude,
 	}, nil
 }
 
 // Python returns the interpreter able to `import graphify`.
 func (c *Client) Python() string { return c.python }
+
+// GraphNeedsIgnoreRebuild reports whether the built graph for repoPath still
+// contains nodes that the current exclude rules should drop, so the refresh path
+// can rebuild a stale graph even when git did not change.
+func (c *Client) GraphNeedsIgnoreRebuild(repoPath string) bool {
+	return GraphHasExcludedNodes(repoPath, c.exclude)
+}
 
 func pythonFromShebang(binPath string) string {
 	f, err := os.Open(binPath)
@@ -90,9 +101,27 @@ func (c *Client) run(ctx context.Context, dir string, args ...string) error {
 }
 
 // Update runs an incremental (or initial) AST-only build for repoPath.
-// Code-only extraction needs no LLM key.
+// Code-only extraction needs no LLM key. It first refreshes the clone's managed
+// .graphifyignore block so the graph skips test fixtures and configured noise.
+//
+// The build is forced whenever a krabby-managed ignore block is present. Excluded
+// files (testdata, fixtures, ...) shrink the node count relative to an older
+// graph built without the ignore, and graphify's shrink guard would otherwise
+// refuse to overwrite without --force — leaving stale excluded nodes in the
+// graph forever. Forcing is safe here because krabby only ever runs a
+// deterministic full AST re-extraction (no partial LLM chunks to lose).
 func (c *Client) Update(ctx context.Context, repoPath string) error {
-	return c.run(ctx, repoPath, "update", repoPath)
+	if _, err := WriteIgnore(repoPath, c.exclude); err != nil {
+		// Non-fatal: a graph that includes testdata is still usable.
+		slog.Warn("graphify: could not update .graphifyignore", "path", repoPath, "error", err)
+	}
+
+	args := []string{"update", repoPath}
+	if HasManagedIgnore(repoPath) {
+		args = append(args, "--force")
+	}
+
+	return c.run(ctx, repoPath, args...)
 }
 
 // MergeGraphs merges graph files into out. Requires at least two inputs.

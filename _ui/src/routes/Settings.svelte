@@ -330,6 +330,14 @@
         Doc concurrency
         <input class="input" type="number" bind:value={docsCfg.docs_concurrency} />
       </label>
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Max summary groups
+        <input class="input" type="number" bind:value={docsCfg.docs_max_groups} />
+      </label>
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Summary model (fast; blank = main model)
+        <input class="input" bind:value={docsCfg.docs_summary_model} placeholder="e.g. google-ai/gemini-2.5-flash" />
+      </label>
     </div>
 
     <div class="mt-3 flex flex-col gap-1 text-[13px] text-dim">

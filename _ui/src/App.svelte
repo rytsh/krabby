@@ -71,6 +71,14 @@
     Number.isFinite(savedSidebarW) && savedSidebarW > 0 ? Math.min(420, Math.max(180, savedSidebarW)) : 240,
   );
 
+  const SIDEBAR_OPEN_KEY = "krabby-sidebar-open";
+  let sidebarOpen = $state(localStorage.getItem(SIDEBAR_OPEN_KEY) !== "0");
+
+  function toggleSidebar() {
+    sidebarOpen = !sidebarOpen;
+    localStorage.setItem(SIDEBAR_OPEN_KEY, sidebarOpen ? "1" : "0");
+  }
+
   function startSidebarDrag(e) {
     e.preventDefault();
     const startX = e.clientX;
@@ -96,7 +104,8 @@
 </script>
 
 <div class="flex min-h-screen">
-  <aside class="sticky top-0 flex h-screen flex-shrink-0 flex-col overflow-y-auto bg-surface p-3" style={`width:${sidebarW}px`}>
+  {#if sidebarOpen}
+    <aside class="sticky top-0 flex h-screen flex-shrink-0 flex-col overflow-y-auto bg-surface p-3" style={`width:${sidebarW}px`}>
     <div class="flex items-center gap-2 px-2 pb-5 pt-2">
       <span class="grid h-7 w-7 place-items-center rounded-md bg-accent text-accent-fg">
         <Icon name="warehouse" size={16} />
@@ -165,23 +174,34 @@
     aria-valuenow={sidebarW}
     onpointerdown={startSidebarDrag}
   ></div>
+  {/if}
 
   <div class="flex min-w-0 flex-1 flex-col">
     <header class="sticky top-0 z-10 flex items-center justify-between border-b border-line bg-bg/80 px-2 py-1 backdrop-blur">
-      {#if view === "repo"}
-        <div class="flex min-w-0 items-center gap-2 text-[15px]">
-          <a href="/repos" use:link class="text-dim transition-colors hover:text-fg">Repositories</a>
-          <span class="text-faint">/</span>
-          <span class="truncate font-mono font-semibold">{repoId}</span>
-        </div>
-      {:else}
-        <div class="flex min-w-0 items-baseline gap-3">
-          <h1 class="shrink-0 text-[15px] font-semibold">{title[view] || "krabby"}</h1>
-          {#if view === "search"}
-            <span class="truncate text-[11px] text-faint">source code and generated documentation search</span>
-          {/if}
-        </div>
-      {/if}
+      <div class="flex min-w-0 items-center gap-2">
+        <button
+          class="icon-btn"
+          onclick={toggleSidebar}
+          title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+          aria-label={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+        >
+          <Icon name={sidebarOpen ? "panel-left-close" : "panel-left-open"} />
+        </button>
+        {#if view === "repo"}
+          <div class="flex min-w-0 items-center gap-2 text-[15px]">
+            <a href="/repos" use:link class="text-dim transition-colors hover:text-fg">Repositories</a>
+            <span class="text-faint">/</span>
+            <span class="truncate font-mono font-semibold">{repoId}</span>
+          </div>
+        {:else}
+          <div class="flex min-w-0 items-baseline gap-3">
+            <h1 class="shrink-0 text-[15px] font-semibold">{title[view] || "krabby"}</h1>
+            {#if view === "search"}
+              <span class="truncate text-[11px] text-faint">source code and generated documentation search</span>
+            {/if}
+          </div>
+        {/if}
+      </div>
 
       <div class="flex items-center gap-2">
         <button

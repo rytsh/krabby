@@ -44,6 +44,7 @@ type Manager struct {
 
 	reposDir       string
 	mergedPath     string
+	mergeEnabled   bool
 	docsRootDir    string
 	docsVectorsDir string
 	codeVectorsDir string
@@ -126,6 +127,7 @@ func New(
 	creds *credentials.Store,
 	codeText *coderag.TextStore,
 	reposDir, mergedPath string,
+	mergeEnabled bool,
 	docs DocsDeps,
 ) *Manager {
 	m := &Manager{
@@ -137,6 +139,7 @@ func New(
 		codeText:       codeText,
 		reposDir:       reposDir,
 		mergedPath:     mergedPath,
+		mergeEnabled:   mergeEnabled,
 		docsRootDir:    docs.DocsRootDir,
 		docsVectorsDir: docs.DocsVectorsDir,
 		codeVectorsDir: docs.CodeVectorsDir,
@@ -355,6 +358,64 @@ func (m *Manager) ReconcileInterruptedStages(ctx context.Context) error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// BackfillGraphIgnore rebuilds the graph for every tracked repo whose clone is
+// missing the krabby-managed .graphifyignore block. Repos tracked before the
+// ignore feature keep their pre-existing graph (which still contains testdata /
+// fixture nodes) until something triggers a rebuild; this runs that rebuild once
+// on startup so those stale nodes are pruned. Work happens in the background and
+// never blocks startup.
+func (m *Manager) BackfillGraphIgnore(ctx context.Context) {
+	repos, err := m.reg.List(ctx)
+	if err != nil {
+		slog.Error("list repos for graphignore backfill", "error", err)
+
+		return
+	}
+
+	var stale []string
+	for _, repo := range repos {
+		if repo.Path == "" || !fileExists(filepath.Join(repo.Path, ".git")) {
+			continue
+		}
+
+		// A rebuild only helps once a graph already exists; brand-new repos get
+		// the ignore file on their first build anyway.
+		if !fileExists(graphify.GraphPath(repo.Path)) {
+			continue
+		}
+
+		if graphify.HasManagedIgnore(repo.Path) {
+			continue
+		}
+
+		stale = append(stale, repo.ID)
+	}
+
+	if len(stale) == 0 {
+		return
+	}
+
+	slog.Info("backfilling .graphifyignore and rebuilding graphs", "repos", stale)
+
+	for _, id := range stale {
+		m.TriggerGenerate(id, []string{registry.StageGraph})
+	}
+}
+
+// CleanupMergedGraph removes a stale merged graph file left over from a run that
+// had cross-repo merging enabled. It is a no-op when merging is enabled or no
+// file exists. Prevents serving an outdated merged graph after merge is turned
+// off.
+func (m *Manager) CleanupMergedGraph() {
+	if m.mergeEnabled || m.mergedPath == "" {
+		return
+	}
+
+	if err := os.Remove(m.mergedPath); err != nil && !os.IsNotExist(err) {
+		slog.Warn("remove stale merged graph", "path", m.mergedPath, "error", err)
+	}
 }
 
 // runStage executes one generation stage, persisting its running/ok/error state
@@ -671,6 +732,60 @@ var generateOrder = []string{
 	registry.StageDocsIndex,
 }
 
+// stageDeps declares which stages each stage depends on. A stage's dependency
+// is auto-added to a selective run only when the dependency's output does not
+// already exist (see stageOutputExists), so asking for e.g. docs_index alone
+// stays cheap when docs are already generated but never produces an empty index
+// when they are not. Dependencies are transitive: docs_index -> docs -> graph.
+var stageDeps = map[string][]string{
+	registry.StageCodeIndex: {registry.StageGraph},
+	registry.StageDocs:      {registry.StageGraph},
+	registry.StageDocsIndex: {registry.StageDocs},
+}
+
+// stageOutputExists reports whether the persisted output a stage would produce
+// is already present on disk, so a dependency need not be rebuilt. docsDir may
+// be empty when the docs directory could not be resolved, in which case docs
+// are treated as absent.
+func (m *Manager) stageOutputExists(name string, repo *registry.Repo, docsDir string) bool {
+	switch name {
+	case registry.StageGraph:
+		return fileExists(graphify.GraphPath(repo.Path))
+	case registry.StageDocs:
+		return docsDir != "" && dirHasMarkdown(docsDir)
+	default:
+		// code_index and docs_index are consumed only as targets, never as a
+		// dependency of another stage, so their presence never gates auto-add.
+		return false
+	}
+}
+
+// resolveStageDeps expands want in place so that every requested stage has its
+// missing prerequisites scheduled too. A prerequisite is added only when its
+// output does not already exist; existing outputs are reused. Newly added
+// prerequisites are themselves resolved, so the dependency chain is followed
+// transitively (docs_index pulls in docs, which pulls in graph).
+func (m *Manager) resolveStageDeps(want map[string]bool, repo *registry.Repo, docsDir, id string) {
+	// generateOrder is dependency-topological (deps precede dependents), so a
+	// reverse walk lets a dependent enable its dependency before we reach it.
+	for i := len(generateOrder) - 1; i >= 0; i-- {
+		name := generateOrder[i]
+		if !want[name] {
+			continue
+		}
+
+		for _, dep := range stageDeps[name] {
+			if want[dep] || m.stageOutputExists(dep, repo, docsDir) {
+				continue
+			}
+
+			slog.Info("stage dependency missing; scheduling it first",
+				"repo", id, "stage", name, "dependency", dep)
+			want[dep] = true
+		}
+	}
+}
+
 // Generate runs only the selected generation stages for a repo, using the
 // existing clone (no git sync). Valid targets: graph, docs, docs_index,
 // code_index. Stage outcomes are recorded on the repo record; the returned
@@ -706,6 +821,20 @@ func (m *Manager) Generate(ctx context.Context, id string, targets []string) err
 		return fmt.Errorf("repo %s has no clone yet; refresh it first", id)
 	}
 
+	docsDir, docsDirErr := m.docsDirForRepo(repo)
+
+	// Auto-schedule any missing prerequisites of the requested stages. Each
+	// stage declares its dependencies in stageDeps and they are only added when
+	// their output is absent, so downstream stages never fall back to degraded
+	// output (e.g. graph-less docs) or index nothing (docs_index with no docs),
+	// while a request whose prerequisites already exist stays cheap. The chain
+	// is followed transitively: docs_index -> docs -> graph.
+	resolveDocsDir := docsDir
+	if docsDirErr != nil {
+		resolveDocsDir = ""
+	}
+	m.resolveStageDeps(want, repo, resolveDocsDir, id)
+
 	// Run the stages on a cancellable job context so CancelJob can abort them.
 	var finish func()
 	ctx, finish = m.registerJob(ctx, id)
@@ -715,8 +844,6 @@ func (m *Manager) Generate(ctx context.Context, id string, targets []string) err
 
 	d, releaseDocs := m.acquireDocs()
 	defer releaseDocs()
-
-	docsDir, docsDirErr := m.docsDirForRepo(repo)
 
 	var errs []error
 
@@ -742,6 +869,18 @@ func (m *Manager) Generate(ctx context.Context, id string, targets []string) err
 
 				return nil
 			})
+
+			// The graph underpins symbol-aware code chunking and docs
+			// generation. If it failed there is no graph to build on, so skip
+			// the dependent stages rather than emit graph-less output.
+			if serr != nil {
+				for _, dep := range []string{registry.StageCodeIndex, registry.StageDocs, registry.StageDocsIndex} {
+					if want[dep] {
+						want[dep] = false
+						errs = append(errs, fmt.Errorf("%s skipped: graph build failed", dep))
+					}
+				}
+			}
 		case registry.StageCodeIndex:
 			serr = m.runStage(ctx, repo, name, func() error {
 				if d.codeRag == nil {
@@ -805,6 +944,63 @@ func (m *Manager) TriggerGenerate(id string, targets []string) {
 			slog.Error("generate", "repo", id, "targets", targets, "error", err)
 		}
 	}()
+}
+
+// GenerateWait runs the selected generation stages for a repo in the background
+// and waits until the run finishes or ctx is done, then returns the latest repo
+// record. done reports whether the generation completed within the wait; when
+// false the run continues detached and the record reflects the in-progress
+// state. Stage failures are surfaced via the record's Status/LastError rather
+// than a Go error; only unexpected lookup failures return an error.
+func (m *Manager) GenerateWait(ctx context.Context, id string, targets []string) (*registry.Repo, bool, error) {
+	// The generation runs on the manager lifecycle context: a client that stops
+	// waiting (client-side tool timeout, ctrl+c, MCP cancellation) must not
+	// kill the build mid-flight.
+	finished := m.generateAsync(id, targets)
+
+	done := false
+	select {
+	case <-finished:
+		done = true
+	case <-ctx.Done():
+	}
+
+	// Read the record even after a caller cancel so the in-progress (or
+	// terminal) state is always returned.
+	repo, err := m.reg.Get(context.WithoutCancel(ctx), id)
+	if err != nil {
+		return nil, done, err
+	}
+
+	if repo == nil {
+		return nil, done, fmt.Errorf("repo %s not found", id)
+	}
+
+	return repo, done, nil
+}
+
+// generateAsync starts a selective generation on the manager lifecycle context
+// and returns a channel closed when that run completes. Generate persists
+// StatusError + LastError on failure, so callers read the terminal state back
+// from the registry. During shutdown the channel is closed immediately.
+func (m *Manager) generateAsync(id string, targets []string) <-chan struct{} {
+	finished := make(chan struct{})
+	if !m.startWork() {
+		close(finished)
+
+		return finished
+	}
+
+	go func() {
+		defer m.wg.Done()
+		defer close(finished)
+
+		if err := m.Generate(m.baseCtx, id, targets); err != nil {
+			slog.Error("generate", "repo", id, "targets", targets, "error", err)
+		}
+	}()
+
+	return finished
 }
 
 // TriggerReindexAll rebuilds optional docs/code indexes for every ready repo
@@ -919,7 +1115,13 @@ func (m *Manager) refresh(ctx context.Context, repo *registry.Repo) error {
 
 	repo.LastSyncAt = time.Now()
 
-	if hadGraph && !changed {
+	// A stale graph built before the current .graphifyignore rules still holds
+	// excluded nodes (testdata, fixtures, ...). Rebuild it even when git is
+	// unchanged so a manual refresh actually cleans it; gfy.Update writes the
+	// ignore file and force-rebuilds.
+	staleIgnore := hadGraph && m.gfy.GraphNeedsIgnoreRebuild(repo.Path)
+
+	if hadGraph && !changed && !staleIgnore {
 		// Nothing new; keep current status.
 		repo.Status = registry.StatusReady
 		repo.LastError = ""
@@ -927,6 +1129,10 @@ func (m *Manager) refresh(ctx context.Context, repo *registry.Repo) error {
 		slog.Info("repo already up to date, graph unchanged", "repo", repo.ID, "commit", shortSHA(repo.LastCommit))
 
 		return m.reg.Upsert(ctx, repo)
+	}
+
+	if staleIgnore && !changed {
+		slog.Info("graph contains now-excluded files; rebuilding to apply ignore rules", "repo", repo.ID)
 	}
 
 	repo.Status = registry.StatusBuilding
@@ -1033,11 +1239,22 @@ func (m *Manager) buildDocsAndIndex(ctx context.Context, repo *registry.Repo) {
 	}
 
 	// Unchanged documentation with a previously successful index needs no
-	// re-embedding.
+	// re-embedding — but only when the index actually still holds this
+	// repo. A stage marked OK can outlive its vectors (e.g. the docs were
+	// regenerated by a run that did not re-embed them, or the index was
+	// cleared), which silently drops the repo from docs search. Verify the
+	// index has the repo before trusting the skip.
 	if st := repo.Stages.Get(registry.StageDocsIndex); !docsChanged && st.Status == registry.StageOK {
-		slog.Info("documentation unchanged, skipping docs index", "repo", repo.ID)
+		has, err := d.rag.HasRepo(ctx, repo.ID)
+		if err != nil {
+			slog.Warn("docs index presence check failed; reindexing", "repo", repo.ID, "error", err)
+		} else if has {
+			slog.Info("documentation unchanged, skipping docs index", "repo", repo.ID)
 
-		return
+			return
+		} else {
+			slog.Info("docs index missing for repo despite ok stage; reindexing", "repo", repo.ID)
+		}
 	}
 
 	//nolint:errcheck // recorded on the stage state; never fails the build
@@ -1328,7 +1545,14 @@ func (m *Manager) sync(ctx context.Context, repo *registry.Repo) (bool, error) {
 }
 
 // rebuildMerged regenerates the cross-repo merged graph from all ready repos.
+// It is a no-op when cross-repo merging is disabled (the default): independent
+// repos produce no cross-repo edges, so the merged graph is just a costly
+// disjoint union.
 func (m *Manager) rebuildMerged(ctx context.Context) error {
+	if !m.mergeEnabled {
+		return nil
+	}
+
 	m.mergeMu.Lock()
 	defer m.mergeMu.Unlock()
 
@@ -1368,6 +1592,10 @@ func (m *Manager) rebuildMerged(ctx context.Context) error {
 // GraphPathFor resolves a repo id ("" = merged cross-repo graph) to a graph file.
 func (m *Manager) GraphPathFor(ctx context.Context, repoID string) (string, error) {
 	if repoID == "" {
+		if !m.mergeEnabled {
+			return "", fmt.Errorf("cross-repo merged graph is disabled; pass a repo id (enable it with graphify.merge)")
+		}
+
 		if !fileExists(m.mergedPath) {
 			return "", fmt.Errorf("merged graph not built yet; add repos and wait for builds")
 		}
@@ -1488,9 +1716,10 @@ func (m *Manager) LeaseInfo(id string) *lease.Lease {
 // Registry exposes read access for API handlers.
 func (m *Manager) Registry() *registry.Registry { return m.reg }
 
-// MergedPath returns the merged cross-repo graph location ("" until built).
+// MergedPath returns the merged cross-repo graph location ("" when merging is
+// disabled or the graph is not built yet).
 func (m *Manager) MergedPath() string {
-	if !fileExists(m.mergedPath) {
+	if !m.mergeEnabled || !fileExists(m.mergedPath) {
 		return ""
 	}
 
@@ -1501,6 +1730,23 @@ func fileExists(p string) bool {
 	_, err := os.Stat(p)
 
 	return err == nil
+}
+
+// dirHasMarkdown reports whether dir contains at least one generated markdown
+// document, used to decide whether the docs stage has already produced output.
+func dirHasMarkdown(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+
+	for _, e := range entries {
+		if !e.IsDir() && strings.EqualFold(filepath.Ext(e.Name()), ".md") {
+			return true
+		}
+	}
+
+	return false
 }
 
 // shortSHA trims a git commit hash to its 12-char prefix for readable logs.

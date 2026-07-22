@@ -24,11 +24,13 @@ type Settings struct {
 	ID string `bw:"id,pk" json:"-"` // always recordID
 
 	// Docs (generation).
-	DocsEnabled     bool     `bw:"docs_enabled"     json:"docs_enabled"`
-	DocsConcurrency int      `bw:"docs_concurrency" json:"docs_concurrency"`
-	DocsInclude     []string `bw:"docs_include"     json:"docs_include"`
-	DocsExclude     []string `bw:"docs_exclude"     json:"docs_exclude"`
-	DocsPrompt      string   `bw:"docs_prompt"      json:"docs_prompt"`
+	DocsEnabled      bool     `bw:"docs_enabled"      json:"docs_enabled"`
+	DocsConcurrency  int      `bw:"docs_concurrency"  json:"docs_concurrency"`
+	DocsSummaryModel string   `bw:"docs_summary_model" json:"docs_summary_model"`
+	DocsMaxGroups    int      `bw:"docs_max_groups"   json:"docs_max_groups"`
+	DocsInclude      []string `bw:"docs_include"      json:"docs_include"`
+	DocsExclude      []string `bw:"docs_exclude"      json:"docs_exclude"`
+	DocsPrompt       string   `bw:"docs_prompt"       json:"docs_prompt"`
 
 	// LLM (chat) for doc generation.
 	LLMBaseURL string        `bw:"llm_base_url" json:"llm_base_url"`
@@ -104,11 +106,13 @@ func (s Settings) Redact() Redacted {
 // Unlike Settings, its secret fields DO decode from JSON (write-only on input);
 // they are never present in any response type. Empty secret = keep existing.
 type Patch struct {
-	DocsEnabled     *bool     `json:"docs_enabled"`
-	DocsConcurrency *int      `json:"docs_concurrency"`
-	DocsInclude     *[]string `json:"docs_include"`
-	DocsExclude     *[]string `json:"docs_exclude"`
-	DocsPrompt      *string   `json:"docs_prompt"`
+	DocsEnabled      *bool     `json:"docs_enabled"`
+	DocsConcurrency  *int      `json:"docs_concurrency"`
+	DocsSummaryModel *string   `json:"docs_summary_model"`
+	DocsMaxGroups    *int      `json:"docs_max_groups"`
+	DocsInclude      *[]string `json:"docs_include"`
+	DocsExclude      *[]string `json:"docs_exclude"`
+	DocsPrompt       *string   `json:"docs_prompt"`
 
 	LLMBaseURL *string        `json:"llm_base_url"`
 	LLMAPIKey  *string        `json:"llm_api_key"`
@@ -153,6 +157,12 @@ func (p Patch) Apply(base Settings) Settings {
 	}
 	if p.DocsConcurrency != nil {
 		base.DocsConcurrency = *p.DocsConcurrency
+	}
+	if p.DocsSummaryModel != nil {
+		base.DocsSummaryModel = *p.DocsSummaryModel
+	}
+	if p.DocsMaxGroups != nil {
+		base.DocsMaxGroups = *p.DocsMaxGroups
 	}
 	if p.DocsInclude != nil {
 		base.DocsInclude = *p.DocsInclude
@@ -268,10 +278,11 @@ type Store struct {
 	mcpBucket *bw.Bucket[MCPKey]
 }
 
-// settingsSchemaVersion v3 adds the embed_concurrency / code_embed_concurrency
-// fields. Bumping the version lets bw migrate existing settings records in
-// place.
-const settingsSchemaVersion = 3
+// settingsSchemaVersion v5 adds docs_summary_model (a fast model for the
+// per-file summary phase). v4 added docs_max_groups (community-based doc
+// summarization); v3 added embed_concurrency / code_embed_concurrency. Bumping
+// the version lets bw migrate existing settings records in place.
+const settingsSchemaVersion = 5
 
 // New opens the settings bucket. If no record exists yet, seed is persisted as
 // the initial configuration (seeded from file/env config by the caller).

@@ -72,8 +72,8 @@ github.com/rakunlabs/ada/middleware/server v0.4.7 h1:evc4kc95n3361di0RwQGKTbFU0l
 github.com/rakunlabs/ada/middleware/server v0.4.7/go.mod h1:nAN0tmc1/sBvOywH/QIlGSNpcyGbvEhmawkHGtqcxxI=
 github.com/rakunlabs/ada/middleware/telemetry v0.4.7 h1:AIv8pxD7Ofwup583pLwkjgfZshJ227qp2m4pFwuuIGY=
 github.com/rakunlabs/ada/middleware/telemetry v0.4.7/go.mod h1:edYbp7w6b7GuEx8iwNKxbTzmrAUyu6piXu7T+L1PVM8=
-github.com/rakunlabs/bw v0.3.1 h1:LCqMb6Mk8gtctHl5yXGHIMS+U3IfhQ5d46cQX+2wpOY=
-github.com/rakunlabs/bw v0.3.1/go.mod h1:guF/4gUGwf22HzhWklrWVyF1QisW0MkKoVm0Qx2cHP0=
+github.com/rakunlabs/bw v0.3.2 h1:3n5LeLGp5AUgcoLaAn8tbbyLKdcljstFJqyG6SV+tw4=
+github.com/rakunlabs/bw v0.3.2/go.mod h1:guF/4gUGwf22HzhWklrWVyF1QisW0MkKoVm0Qx2cHP0=
 github.com/rakunlabs/chu v0.4.7 h1:rKdiNPjAOZLMJcdAViPlqYl7VPwy+CeiEzjqFyRyx4M=
 github.com/rakunlabs/chu v0.4.7/go.mod h1:qwnDf9aBSiFL6tFnLRgQLtRckW+bczPtzHa0QJ+rDfA=
 github.com/rakunlabs/into v0.5.3 h1:IkKDfkrolGVZ75rRG+xVLJuTTswUqN/tXB6GoCMF3xk=
@@ -143,10 +143,10 @@ golang.org/x/oauth2 v0.36.0/go.mod h1:YDBUJMTkDnJS+A4BP4eZBjCqtokkg1hODuPjwiGPO7
 golang.org/x/sys v0.6.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
 golang.org/x/sys v0.45.0 h1:dO4czNzziLiiXplLQgBCEpCvXQ3dnkn0SdaZSYdQ+FY=
 golang.org/x/sys v0.45.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=
-golang.org/x/text v0.37.0 h1:Cqjiwd9eSg8e0QAkyCaQTNHFIIzWtidPahFWR83rTrc=
-golang.org/x/text v0.37.0/go.mod h1:a5sjxXGs9hsn/AJVwuElvCAo9v8QYLzvavO5z2PiM38=
-golang.org/x/tools v0.44.0 h1:UP4ajHPIcuMjT1GqzDWRlalUEoY+uzoZKnhOjbIPD2c=
-golang.org/x/tools v0.44.0/go.mod h1:KA0AfVErSdxRZIsOVipbv3rQhVXTnlU6UhKxHd1seDI=
+golang.org/x/text v0.40.0 h1:Ub2Z6/xjgF1WrYQz2nuITOEegKFtiIy+rieRJ5lHZKs=
+golang.org/x/text v0.40.0/go.mod h1:hpnzDAfGV753zIKo+wk3u1bVKCGPbrnF7+7LBF/UHVY=
+golang.org/x/tools v0.47.0 h1:7Kn5x/d1svx/PzryTsqeoZN4TZwqeH5pGWjefhLi/1Q=
+golang.org/x/tools v0.47.0/go.mod h1:dFHnyTvFWY212G+h7ZY4Vsp/K3U4/7W9TyVaAul8uCA=
 gonum.org/v1/gonum v0.17.0 h1:VbpOemQlsSMrYmn7T2OUvQ4dqxQXU+ouZFQsZOx50z4=
 gonum.org/v1/gonum v0.17.0/go.mod h1:El3tOrEuMpv2UdMrbNlKEh9vd86bmQ6vqIcDwxEOc1E=
 google.golang.org/genproto/googleapis/api v0.0.0-20260526163538-3dc84a4a5aaa h1:Kjn0N0tCrDgiAFW+lGO4JZ3ck44CehvJQMAwj9QF0G8=

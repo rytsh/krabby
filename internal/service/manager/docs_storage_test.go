@@ -66,7 +66,7 @@ func TestRemoveRepoRemovesExternalDocs(t *testing.T) {
 	}
 
 	mgr := New(context.Background(), reg, nil, nil, graphquery.NewEngine(), nil, nil,
-		reposDir, filepath.Join(dataDir, "merged", "graph.json"), DocsDeps{DocsRootDir: docsRoot})
+		reposDir, filepath.Join(dataDir, "merged", "graph.json"), false, DocsDeps{DocsRootDir: docsRoot})
 	mgr.docs = &docsBundle{}
 
 	if err := mgr.RemoveRepo(context.Background(), repo.ID); err != nil {
@@ -115,7 +115,7 @@ func TestListDocsNormalizesNullManifestDocs(t *testing.T) {
 	}
 
 	mgr := New(context.Background(), reg, nil, nil, graphquery.NewEngine(), nil, nil,
-		filepath.Join(dataDir, "repos"), filepath.Join(dataDir, "merged", "graph.json"), DocsDeps{DocsRootDir: docsRoot})
+		filepath.Join(dataDir, "repos"), filepath.Join(dataDir, "merged", "graph.json"), false, DocsDeps{DocsRootDir: docsRoot})
 	docs, err := mgr.ListDocs(context.Background(), repo.ID)
 	if err != nil {
 		t.Fatalf("ListDocs: %v", err)

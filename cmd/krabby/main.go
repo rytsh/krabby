@@ -73,7 +73,7 @@ func run(ctx context.Context) error {
 	}
 
 	// graphify CLI + python discovery.
-	gfy, err := graphify.New(cfg.Graphify.Bin, cfg.Graphify.Python, cfg.Graphify.BuildTimeout)
+	gfy, err := graphify.New(cfg.Graphify.Bin, cfg.Graphify.Python, cfg.Graphify.BuildTimeout, cfg.Graphify.Exclude)
 	if err != nil {
 		return err
 	}
@@ -98,6 +98,7 @@ func run(ctx context.Context) error {
 	}
 
 	mgr := manager.New(ctx, reg, git, gfy, engine, creds, codeText, cfg.ReposDir(), cfg.MergedGraphPath(),
+		cfg.Graphify.Merge,
 		manager.DocsDeps{
 			DocsRootDir:    cfg.DocsRootDir(),
 			DocsVectorsDir: cfg.DocsVectorsDir(),
@@ -113,6 +114,11 @@ func run(ctx context.Context) error {
 	if err := mgr.ReconcileInterruptedStages(ctx); err != nil {
 		slog.Error("reconcile interrupted generation stages", "error", err)
 	}
+	// Repos tracked before the .graphifyignore feature keep stale testdata /
+	// fixture nodes until rebuilt; backfill the ignore file and rebuild them.
+	mgr.BackfillGraphIgnore(ctx)
+	// Drop a stale merged graph if cross-repo merging is now disabled.
+	mgr.CleanupMergedGraph()
 	if err := mgr.MigrateDocs(ctx); err != nil {
 		slog.Error("migrate generated docs out of repository clones", "error", err)
 	}
@@ -157,11 +163,13 @@ func run(ctx context.Context) error {
 // afterwards the persisted record (editable via the UI/MCP) is authoritative.
 func seedSettings(cfg *config.Config) settings.Settings {
 	return settings.Settings{
-		DocsEnabled:     cfg.Docs.Enabled,
-		DocsConcurrency: cfg.Docs.Concurrency,
-		DocsInclude:     cfg.Docs.Include,
-		DocsExclude:     cfg.Docs.Exclude,
-		DocsPrompt:      cfg.Docs.Prompt,
+		DocsEnabled:      cfg.Docs.Enabled,
+		DocsConcurrency:  cfg.Docs.Concurrency,
+		DocsSummaryModel: cfg.Docs.SummaryModel,
+		DocsMaxGroups:    cfg.Docs.MaxGroups,
+		DocsInclude:      cfg.Docs.Include,
+		DocsExclude:      cfg.Docs.Exclude,
+		DocsPrompt:       cfg.Docs.Prompt,
 
 		LLMBaseURL: cfg.LLM.BaseURL,
 		LLMAPIKey:  cfg.LLM.APIKey,

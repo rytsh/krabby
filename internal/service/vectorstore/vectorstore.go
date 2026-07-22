@@ -42,6 +42,10 @@ type Store interface {
 	Search(ctx context.Context, repo string, vec []float32, topK int) ([]Match, error)
 	// DeleteRepo removes all vectors belonging to a repo.
 	DeleteRepo(ctx context.Context, repo string) error
+	// HasRepo reports whether the index holds at least one vector for the
+	// repo. Used to detect a missing/empty index so callers can force a
+	// rebuild even when higher-level stage state claims success.
+	HasRepo(ctx context.Context, repo string) (bool, error)
 	// DeletePaths removes a repo's vectors whose payload DocPath is in paths.
 	// Used for incremental re-indexing of changed/deleted files.
 	DeletePaths(ctx context.Context, repo string, paths []string) error

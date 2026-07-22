@@ -89,6 +89,17 @@ type Graphify struct {
 	Python string `cfg:"python"`
 	// BuildTimeout bounds a single extract/update/merge run.
 	BuildTimeout time.Duration `cfg:"build_timeout" default:"30m"`
+	// Exclude lists extra gitignore-style patterns krabby writes into a managed
+	// section of the clone's .graphifyignore before each build, so the graph
+	// skips test fixtures and other non-architectural noise. These are appended
+	// to DefaultGraphIgnore; leave empty to use the defaults alone.
+	Exclude []string `cfg:"exclude"`
+	// Merge builds a cross-repo merged graph (queried when a graph tool is
+	// called with no repo). It only adds value when tracked repos share symbols
+	// directly (a split monorepo, interdependent modules); for independent
+	// services it is a disjoint union with no cross-repo edges, so it defaults
+	// off to avoid the rebuild cost. When off, graph tools require a repo id.
+	Merge bool `cfg:"merge"`
 }
 
 // Webhook configures inbound webhook verification.
@@ -104,6 +115,18 @@ type Docs struct {
 	Enabled bool `cfg:"enabled"`
 	// Concurrency bounds parallel per-file LLM summary calls.
 	Concurrency int `cfg:"concurrency" default:"8"`
+	// SummaryModel is the chat model used for the per-file summary phase (the
+	// bulk of the calls). It is dense factual extraction, so a fast, cheap model
+	// (e.g. gemini-2.5-flash) is a good fit and much faster than a reasoning
+	// model. Empty falls back to the main LLM model. It reuses the main LLM's
+	// base URL, API key and timeout; only the model name differs.
+	SummaryModel string `cfg:"summary_model"`
+	// MaxGroups caps how many grouped summary LLM calls a single run makes.
+	// Files are clustered by graphify community; when a repo has more
+	// communities than this, small communities are packed together so the call
+	// count stays bounded regardless of how fragmented the graph is. 0 uses the
+	// built-in default.
+	MaxGroups int `cfg:"max_groups" default:"40"`
 	// Include globs select source files to document (repo-relative).
 	Include []string `cfg:"include"`
 	// Exclude globs skip files (evaluated after Include).

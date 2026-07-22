@@ -49,8 +49,23 @@ type repoIDArgs struct {
 }
 
 type refreshRepoArgs struct {
-	Repo string `json:"repo" jsonschema:"repository id in owner/name form"`
-	Wait bool   `json:"wait,omitempty" jsonschema:"when true, block until the pull and graph rebuild finish and return the final status (ready or error) instead of returning immediately"`
+	Repo   string   `json:"repo" jsonschema:"repository id in owner/name form"`
+	Wait   bool     `json:"wait,omitempty" jsonschema:"when true, block until the pull and graph rebuild finish and return the final status (ready or error) instead of returning immediately"`
+	Stages []string `json:"stages,omitempty" jsonschema:"optional subset of pipeline stages to rebuild against the existing clone without pulling git: graph, docs, docs_index, code_index. Empty runs the full pull+rebuild pipeline. Use e.g. ['docs_index'] to re-embed docs after they were regenerated. Missing prerequisites (docs_index needs docs, which needs graph) are built automatically only when their output is absent"`
+}
+
+// validateStages rejects unknown stage names so a typo fails fast with a clear
+// message instead of silently doing nothing. An empty stages list is valid and
+// selects the full pull+rebuild pipeline.
+func (a refreshRepoArgs) validateStages() error {
+	for _, s := range a.Stages {
+		if !registry.ValidStage(s) {
+			return fmt.Errorf("unknown stage %q; valid stages are: %s, %s, %s, %s",
+				s, registry.StageGraph, registry.StageDocs, registry.StageDocsIndex, registry.StageCodeIndex)
+		}
+	}
+
+	return nil
 }
 
 type emptyArgs struct{}
@@ -130,8 +145,32 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 			"Pass wait=true to wait for the result: it returns the final status when the rebuild finishes in time, " +
 			"otherwise the in-progress status. The rebuild always continues in the background even if the call " +
 			"times out or is cancelled; poll repo_status until status is 'ready' or 'error'. " +
-			"Use when you know the repo changed.",
+			"Use when you know the repo changed. " +
+			"Pass stages to rebuild only a subset of pipeline stages (graph, docs, docs_index, code_index) " +
+			"against the existing clone WITHOUT pulling git; empty stages runs the full pull+rebuild pipeline.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args refreshRepoArgs) (*mcp.CallToolResult, any, error) {
+		if len(args.Stages) > 0 {
+			if err := args.validateStages(); err != nil {
+				return nil, nil, err
+			}
+
+			if !args.Wait {
+				mgr.TriggerGenerate(args.Repo, args.Stages)
+
+				return textResult(fmt.Sprintf("generate %v queued for %s", args.Stages, args.Repo)), nil, nil
+			}
+
+			wctx, cancel := waitContext(ctx, waitTimeout)
+			defer cancel()
+
+			repo, done, err := mgr.GenerateWait(wctx, args.Repo, args.Stages)
+			if err != nil {
+				return nil, nil, err
+			}
+
+			return waitResult(mgr, repo, done), nil, nil
+		}
+
 		if !args.Wait {
 			mgr.TriggerRefresh(args.Repo)
 
@@ -318,11 +357,11 @@ func addCredentialTools(server *mcp.Server, mgr *manager.Manager) {
 // ---- query tools (proxied to graphify serve) --------------------------------
 
 // repoField documents the shared repo selector on query tools.
-const repoField = "repository id (owner/name) to query; omit to query the merged cross-repo graph"
+const repoField = "repository id (owner/name) to query; omit to query the merged cross-repo graph (must be enabled via graphify.merge)"
 
 type queryGraphArgs struct {
 	Question    string   `json:"question" jsonschema:"natural language question or keyword search"`
-	Repo        string   `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; omit to query the merged cross-repo graph"`
+	Repo        string   `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; omit to query the merged cross-repo graph (must be enabled via graphify.merge)"`
 	Mode        string   `json:"mode,omitempty" jsonschema:"traversal mode: 'bfs' for broad context (default) or 'dfs' to trace a specific path"`
 	Depth       int      `json:"depth,omitempty" jsonschema:"traversal depth 1-6 (default 3)"`
 	TokenBudget int      `json:"token_budget,omitempty" jsonschema:"max output tokens (default 2000)"`
@@ -331,34 +370,34 @@ type queryGraphArgs struct {
 
 type nodeArgs struct {
 	Label string `json:"label" jsonschema:"node label or ID to look up"`
-	Repo  string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; omit to query the merged cross-repo graph"`
+	Repo  string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; omit to query the merged cross-repo graph (must be enabled via graphify.merge)"`
 }
 
 type neighborsArgs struct {
 	Label          string `json:"label" jsonschema:"node label or ID"`
 	RelationFilter string `json:"relation_filter,omitempty" jsonschema:"optional: filter by relation type"`
-	Repo           string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; omit to query the merged cross-repo graph"`
+	Repo           string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; omit to query the merged cross-repo graph (must be enabled via graphify.merge)"`
 }
 
 type communityArgs struct {
 	CommunityID int    `json:"community_id" jsonschema:"community ID (0-indexed by size)"`
-	Repo        string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; omit to query the merged cross-repo graph"`
+	Repo        string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; omit to query the merged cross-repo graph (must be enabled via graphify.merge)"`
 }
 
 type godNodesArgs struct {
 	TopN int    `json:"top_n,omitempty" jsonschema:"number of nodes to return (default 10)"`
-	Repo string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; omit to query the merged cross-repo graph"`
+	Repo string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; omit to query the merged cross-repo graph (must be enabled via graphify.merge)"`
 }
 
 type statsArgs struct {
-	Repo string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; omit to query the merged cross-repo graph"`
+	Repo string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; omit to query the merged cross-repo graph (must be enabled via graphify.merge)"`
 }
 
 type shortestPathArgs struct {
 	Source  string `json:"source" jsonschema:"source concept label or keyword"`
 	Target  string `json:"target" jsonschema:"target concept label or keyword"`
 	MaxHops int    `json:"max_hops,omitempty" jsonschema:"maximum hops to consider (default 8)"`
-	Repo    string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; omit to query the merged cross-repo graph"`
+	Repo    string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; omit to query the merged cross-repo graph (must be enabled via graphify.merge)"`
 }
 
 func addQueryTools(server *mcp.Server, mgr *manager.Manager) {

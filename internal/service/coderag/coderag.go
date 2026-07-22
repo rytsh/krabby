@@ -516,7 +516,8 @@ func (s *Service) selectFiles(clonePath string) ([]string, error) {
 
 func (s *Service) matchInclude(rel string) bool {
 	if len(s.cfg.Include) == 0 {
-		return defaultIncludeExts[strings.ToLower(path.Ext(rel))]
+		return defaultIncludeExts[strings.ToLower(path.Ext(rel))] ||
+			defaultIncludeNames[strings.ToLower(path.Base(rel))]
 	}
 
 	return matchAny(s.cfg.Include, rel)
@@ -594,6 +595,25 @@ var defaultIncludeExts = map[string]bool{
 	".cc": true, ".cpp": true, ".hpp": true, ".cs": true, ".php": true, ".swift": true,
 	".scala": true, ".m": true, ".mm": true, ".sh": true, ".sql": true, ".svelte": true,
 	".vue": true, ".lua": true, ".zig": true, ".ex": true, ".exs": true,
+}
+
+// defaultIncludeNames is the allowlist of extensionless or dotted-suffix source
+// files (matched by base name, case-insensitively) indexed when no Include
+// globs are configured. path.Ext does not classify these usefully — e.g.
+// path.Ext("go.mod") is ".mod" — so they would otherwise be skipped, hiding
+// dependency versions and build config from full-text search.
+var defaultIncludeNames = map[string]bool{
+	"go.mod":           true,
+	"go.sum":           true,
+	"dockerfile":       true,
+	"makefile":         true,
+	"gemfile":          true,
+	"rakefile":         true,
+	"cargo.toml":       true,
+	"cargo.lock":       true,
+	"package.json":     true,
+	"pyproject.toml":   true,
+	"requirements.txt": true,
 }
 
 var hardSkipDirs = map[string]bool{

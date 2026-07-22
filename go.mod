@@ -11,13 +11,13 @@ require (
 	github.com/rakunlabs/ada/middleware/requestid v0.4.7
 	github.com/rakunlabs/ada/middleware/server v0.4.7
 	github.com/rakunlabs/ada/middleware/telemetry v0.4.7
-	github.com/rakunlabs/bw v0.3.1
+	github.com/rakunlabs/bw v0.3.2
 	github.com/rakunlabs/chu v0.4.7
 	github.com/rakunlabs/into v0.5.3
 	github.com/rakunlabs/logi v0.4.5
 	github.com/rakunlabs/query v0.4.6
 	github.com/rakunlabs/tell v0.1.5
-	golang.org/x/text v0.37.0
+	golang.org/x/text v0.40.0
 )
 
 require (

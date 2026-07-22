@@ -132,8 +132,10 @@ func addDocTools(server *mcp.Server, mgr *manager.Manager) {
 // secret fields (the API keys) are write-only and, when empty, keep the existing
 // stored value. Timeouts are Go duration strings (e.g. "60s").
 type setDocsConfigArgs struct {
-	DocsEnabled     bool     `json:"docs_enabled,omitempty" jsonschema:"generate markdown docs in the refresh pipeline"`
-	DocsConcurrency int      `json:"docs_concurrency,omitempty" jsonschema:"parallel per-file LLM summary calls"`
+	DocsEnabled      bool     `json:"docs_enabled,omitempty" jsonschema:"generate markdown docs in the refresh pipeline"`
+	DocsConcurrency  int      `json:"docs_concurrency,omitempty" jsonschema:"parallel per-file LLM summary calls"`
+	DocsSummaryModel string   `json:"docs_summary_model,omitempty" jsonschema:"chat model for the per-file summary phase (the bulk of calls); use a fast model like gemini-2.5-flash. Reuses the main LLM base URL/key/timeout. Empty uses the main model"`
+	DocsMaxGroups    int      `json:"docs_max_groups,omitempty" jsonschema:"max grouped summary LLM calls per run; small graph communities are packed together to stay under this (default 40)"`
 	DocsInclude     []string `json:"docs_include,omitempty" jsonschema:"source globs to document (repo-relative)"`
 	DocsExclude     []string `json:"docs_exclude,omitempty" jsonschema:"source globs to skip"`
 	DocsPrompt      string   `json:"docs_prompt,omitempty" jsonschema:"system prompt for the final documentation synthesis (empty uses the built-in default)"`

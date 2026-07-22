@@ -2,6 +2,7 @@ package vectorstore
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 )
@@ -37,6 +38,34 @@ func openEmbedded(t *testing.T, dir string) *embedded {
 	t.Cleanup(func() { _ = s.Close() })
 
 	return s
+}
+
+func TestEmbeddedHasRepo(t *testing.T) {
+	ctx := context.Background()
+	s := openEmbedded(t, t.TempDir())
+
+	if has, err := s.HasRepo(ctx, "o/a"); err != nil || has {
+		t.Fatalf("empty index: HasRepo(o/a)=%v err=%v, want false", has, err)
+	}
+
+	if err := s.Upsert(ctx, testItems()); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	if has, err := s.HasRepo(ctx, "o/a"); err != nil || !has {
+		t.Errorf("HasRepo(o/a)=%v err=%v, want true", has, err)
+	}
+	if has, err := s.HasRepo(ctx, "o/missing"); err != nil || has {
+		t.Errorf("HasRepo(o/missing)=%v err=%v, want false", has, err)
+	}
+
+	// After deleting the repo, HasRepo must report false again.
+	if err := s.DeleteRepo(ctx, "o/a"); err != nil {
+		t.Fatalf("DeleteRepo: %v", err)
+	}
+	if has, err := s.HasRepo(ctx, "o/a"); err != nil || has {
+		t.Errorf("post-delete HasRepo(o/a)=%v err=%v, want false", has, err)
+	}
 }
 
 func TestEmbeddedSearchRanksAndFilters(t *testing.T) {
@@ -182,6 +211,38 @@ func TestEmbeddedDeleteRepo(t *testing.T) {
 		if m.Payload.Repo == "o/a" {
 			t.Fatalf("deleted repo still in results: %+v", m.Payload)
 		}
+	}
+}
+
+func TestEmbeddedUpsertBatchesLargeInput(t *testing.T) {
+	// A single InsertMany of many vectors overflows Badger's transaction size
+	// limit (ErrTxnTooBig). Upsert must batch internally so a large repo index
+	// succeeds and every record is retrievable.
+	ctx := context.Background()
+	s := openEmbedded(t, t.TempDir())
+
+	const n = upsertBatch*3 + 7 // spans multiple batches, last one partial
+
+	items := make([]Item, n)
+	for i := range items {
+		items[i] = Item{
+			ID:      fmt.Sprintf("o/a/doc.md#%d", i),
+			Vector:  []float32{float32(i), 1, 0},
+			Payload: Payload{Repo: "o/a", DocPath: "doc.md", Title: "A", Chunk: fmt.Sprintf("chunk %d", i)},
+		}
+	}
+
+	if err := s.Upsert(ctx, items); err != nil {
+		t.Fatalf("Upsert %d items: %v", n, err)
+	}
+
+	matches, err := s.Search(ctx, "o/a", []float32{0, 1, 0}, n)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+
+	if len(matches) != n {
+		t.Fatalf("got %d records back, want %d", len(matches), n)
 	}
 }
 

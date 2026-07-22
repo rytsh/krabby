@@ -23,12 +23,14 @@
   let error = $state("");
 
   // Generation stages shown in the Artifacts card. Enabled flags come from the
-  // docs config; graph generation is always available.
+  // docs config; graph generation is always available. `needs` mirrors the
+  // backend stageDeps so the UI can tell the user which prerequisites a stage
+  // will build automatically when their output is missing (see manager.go).
   const stageDefs = [
-    { key: "graph", label: "Graph" },
-    { key: "docs", label: "Docs" },
-    { key: "docs_index", label: "Docs index" },
-    { key: "code_index", label: "Code index" },
+    { key: "graph", label: "Graph", needs: [] },
+    { key: "docs", label: "Docs", needs: ["graph"] },
+    { key: "docs_index", label: "Docs index", needs: ["docs"] },
+    { key: "code_index", label: "Code index", needs: ["graph"] },
   ];
   let cfg = $state(null);
   let generating = $state({});
@@ -465,7 +467,7 @@
   </div>
 
   <div class="sticky flex max-h-[calc(100vh-72px)] w-[260px] flex-col gap-3 overflow-y-auto pr-1">
-    <div class="card grid grid-cols-2 gap-1 p-1">
+    <div class="card shrink-0 grid grid-cols-2 gap-1 p-1">
       <button
         class="flex cursor-pointer items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-[12px] text-faint transition-colors hover:bg-surface-2 hover:text-fg"
         class:!bg-surface-2={mode === "docs"}
@@ -487,7 +489,7 @@
     </div>
 
     {#if repo}
-      <div class="card overflow-hidden text-[12px]">
+      <div class="card shrink-0 overflow-hidden text-[12px]">
         <div class="flex items-center border-b border-line px-3 py-2">
           <span class="font-medium">Outputs</span>
           <label class="ml-auto inline-flex items-center gap-1.5 text-dim">
@@ -537,7 +539,7 @@
         </div>
       </div>
 
-      <div class="card p-3 text-[13px]">
+      <div class="card shrink-0 p-3 text-[13px]">
         <div class="mb-2 flex items-center justify-between gap-2">
           <span class="font-medium">Artifacts</span>
           {#if repo.running && !hasRunningStage}
@@ -600,6 +602,9 @@
                     class="btn btn-sm ml-auto !px-2 !py-0.5 text-[12px]"
                     disabled={!s.enabled || generating[s.key]}
                     onclick={() => generate(s.key)}
+                    title={s.needs.length
+                      ? `Rebuild ${s.label}; missing prerequisites (${s.needs.join(", ")}) are built automatically`
+                      : `Rebuild ${s.label}`}
                   >
                     {generating[s.key] ? "Starting…" : "Generate"}
                   </button>
@@ -621,7 +626,7 @@
         </div>
       </div>
 
-      <div class="card flex flex-col gap-2.5 p-4 text-[13px]">
+      <div class="card shrink-0 flex flex-col gap-2.5 p-4 text-[13px]">
         <div class="flex items-center justify-between gap-2">
           <span class="text-dim">Status</span>
           <Status status={repo.status} />

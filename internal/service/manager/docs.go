@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/rytsh/krabby/internal/config"
@@ -245,7 +246,14 @@ func (m *Manager) buildBundle(s settings.Settings) (*docsBundle, error) {
 		case err != nil:
 			return nil, fmt.Errorf("build llm client; %w", err)
 		default:
-			b.gen = docgen.New(docsConfig(s), chat, m.engine)
+			// A dedicated (usually faster) model for the per-file summary phase;
+			// falls back to the synthesis client when unset or misconfigured.
+			summary := chat
+			if sc, serr := llm.New(summaryLLMConfig(s)); serr == nil {
+				summary = sc
+			}
+
+			b.gen = docgen.New(docsConfig(s), chat, summary, m.engine)
 		}
 	}
 
@@ -438,11 +446,13 @@ func (m *Manager) TestCodeEmbedder(ctx context.Context, patch settings.Settings)
 
 func docsConfig(s settings.Settings) config.Docs {
 	return config.Docs{
-		Enabled:     s.DocsEnabled,
-		Concurrency: s.DocsConcurrency,
-		Include:     s.DocsInclude,
-		Exclude:     s.DocsExclude,
-		Prompt:      s.DocsPrompt,
+		Enabled:      s.DocsEnabled,
+		Concurrency:  s.DocsConcurrency,
+		SummaryModel: s.DocsSummaryModel,
+		MaxGroups:    s.DocsMaxGroups,
+		Include:      s.DocsInclude,
+		Exclude:      s.DocsExclude,
+		Prompt:       s.DocsPrompt,
 	}
 }
 
@@ -453,6 +463,20 @@ func llmConfig(s settings.Settings) config.LLM {
 		Model:   s.LLMModel,
 		Timeout: s.LLMTimeout,
 	}
+}
+
+// summaryLLMConfig returns the LLM config for the per-file summary phase. It
+// reuses the main chat endpoint/credentials/timeout and only overrides the model
+// with the configured (usually faster) summary model. When no summary model is
+// set it falls back to the main model, so the returned client behaves like the
+// synthesis client.
+func summaryLLMConfig(s settings.Settings) config.LLM {
+	cfg := llmConfig(s)
+	if m := strings.TrimSpace(s.DocsSummaryModel); m != "" {
+		cfg.Model = m
+	}
+
+	return cfg
 }
 
 func embedderConfig(s settings.Settings) config.Embedder {
