@@ -62,7 +62,7 @@ func newTestService(t *testing.T, docsDirs map[string]string) *Service {
 
 	cfg := config.RAG{ChunkSize: 200, ChunkOverlap: 40, TopK: 20, TopDocs: 5}
 
-	store, err := vectorstore.New(cfg.Store, t.TempDir(), "", 0)
+	store, err := vectorstore.New(t.TempDir())
 	if err != nil {
 		t.Fatalf("vectorstore.New: %v", err)
 	}

@@ -196,7 +196,10 @@ See [krabby.example.yaml](krabby.example.yaml). Loaded via
 Docs RAG and code RAG are independently switchable in the Settings UI. Code RAG
 can use its own `code_embedder`; when that block is unset it reuses `embedder`.
 The embedded backend keeps docs and code in separate stores so different vector
-dimensions are safe. With Qdrant, code uses `<collection>-code`.
+dimensions are safe.
+Generated markdown is stored outside clones under
+`data_dir/docs/<owner>/<repo>/`; older in-clone `krabby-docs/` trees are moved
+there at startup without regenerating documentation.
 
 ## Docker
 

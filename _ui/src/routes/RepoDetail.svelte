@@ -66,7 +66,8 @@
   // Doc display: rendered HTML or raw markdown.
   let docView = $state("html");
   let docHeadings = $state([]);
-  let docBrowserOpen = $state(true);
+  let docBrowserOpen = $state(false);
+  let docsVersion;
 
   function jumpToHeading(id) {
     document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -97,7 +98,8 @@
   async function loadDocs() {
     docsError = "";
     try {
-      docList = await api.docs(repoId);
+      const docs = await api.docs(repoId);
+      docList = Array.isArray(docs) ? docs : [];
       // Single comprehensive document: open it right away.
       if (docList.length > 0 && !selectedDoc) openDoc(docList[0]);
     } catch (e) {
@@ -127,7 +129,15 @@
 
   async function loadRepo() {
     try {
-      repo = await api.repo(repoId);
+      const next = await api.repo(repoId);
+      const docsStage = next?.stages?.docs;
+      const nextDocsVersion = docsStage?.finished_at || "";
+      const docsFinished =
+        docsVersion !== undefined && docsStage?.status === "ok" && nextDocsVersion !== docsVersion;
+
+      docsVersion = nextDocsVersion;
+      repo = next;
+      if (docsFinished) await loadDocs();
     } catch (e) {
       error = e.message;
     }
@@ -206,10 +216,11 @@
     }
   }
 
-  // Deep link support: /repos/<id>?file=<path>&line=<n> opens the file in the
-  // Files tab at the given line (used by the code search page). lastLink is
-  // intentionally untracked so writing it does not re-trigger the effect.
+  // Deep links from search open either a source file at a line or a generated
+  // document. The last-link keys are intentionally untracked so writes do not
+  // re-trigger the effect.
   let lastLink = "";
+  let lastDocLink = "";
 
   async function openFromLink(file, line) {
     mode = "files";
@@ -239,7 +250,9 @@
   // Derived rows so the card re-renders when the polled repo record changes.
   let stageRows = $derived(stageDefs.map((s) => {
     const st = (repo && repo.stages && repo.stages[s.key]) || {};
-    const running = (repo && repo.running === s.key) || st.status === "running";
+    // repo.running is the live in-memory worker state. A persisted "running"
+    // stage can be left behind by an interrupted process and is not active.
+    const running = repo?.running === s.key;
     return {
       ...s,
       st,
@@ -252,7 +265,14 @@
   $effect(() => {
     const params = new URLSearchParams($routePath.split("?")[1] || "");
     const f = params.get("file");
+    const doc = params.get("doc");
     const ln = Number(params.get("line")) || 0;
+    if (doc && doc !== lastDocLink) {
+      lastDocLink = doc;
+      mode = "docs";
+      openDoc({ path: doc });
+      return;
+    }
     const key = f ? `${f}#${ln}` : "";
     if (f && key !== lastLink) {
       lastLink = key;
@@ -260,10 +280,6 @@
     }
   });
 </script>
-
-{#if error}
-  <div class="err-box">{error}</div>
-{/if}
 
 <div class="grid grid-cols-[minmax(0,1fr)_260px] items-start gap-4">
   <div class="min-w-0">
@@ -273,9 +289,6 @@
           <div class="sticky top-0 z-10 flex items-center gap-2 border-b border-line bg-surface px-3 py-2.5">
             <span class="text-[13px] text-dim">Files</span>
           </div>
-          {#if fileError}
-            <div class="err-box m-2">{fileError}</div>
-          {/if}
           <div class="p-1.5">
             <FileTree
               entries={rootEntries}
@@ -324,9 +337,6 @@
               <span class="text-[13px] text-dim">Docs</span>
               <span class="font-mono text-[13px] text-faint">{docList.length}</span>
             </div>
-            {#if docsError}
-              <div class="err-box m-2">{docsError}</div>
-            {/if}
             <ul class="m-0 list-none p-1.5">
               {#each docList as d}
                 <li>

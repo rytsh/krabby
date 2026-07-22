@@ -1,13 +1,15 @@
 <script>
-  import { onMount, onDestroy } from "svelte";
+  import { onMount } from "svelte";
   import { path, link } from "./lib/router.js";
   import { theme, toggleTheme } from "./lib/theme.js";
   import { repoGroups, loadRepos } from "./lib/repos.js";
   import Icon from "./lib/Icon.svelte";
   import BrandIcon from "./lib/BrandIcon.svelte";
   import Status from "./lib/Status.svelte";
+  import ToastHost from "./lib/ToastHost.svelte";
   import Repos from "./routes/Repos.svelte";
   import RepoDetail from "./routes/RepoDetail.svelte";
+  import Activity from "./routes/Activity.svelte";
   import Search from "./routes/Search.svelte";
   import Settings from "./routes/Settings.svelte";
   import About from "./routes/About.svelte";
@@ -19,6 +21,7 @@
     if (p === "/" || p === "/repos") return { view: "repos" };
     if (p.startsWith("/repos/")) return { view: "repo", repoId: p.slice("/repos/".length) };
     if (p === "/search") return { view: "search" };
+    if (p === "/activity") return { view: "activity" };
     if (p === "/settings") return { view: "settings" };
     if (p === "/about") return { view: "about" };
     return { view: "repos" };
@@ -28,6 +31,7 @@
 
   const nav = [
     { href: "/repos", label: "Repositories", icon: "boxes", match: (v) => v === "repos" || v === "repo" },
+    { href: "/activity", label: "Activity", icon: "activity", match: (v) => v === "activity" },
     { href: "/search", label: "Code search", icon: "search", match: (v) => v === "search" },
     { href: "/settings", label: "Settings", icon: "settings", match: (v) => v === "settings" },
     { href: "/about", label: "About", icon: "book", match: (v) => v === "about" },
@@ -36,6 +40,7 @@
   const title = {
     repos: "Repositories",
     repo: "Repository",
+    activity: "Activity",
     search: "Code search",
     settings: "Settings",
     about: "About",
@@ -85,13 +90,9 @@
     window.addEventListener("pointerup", up);
   }
 
-  // Poll the repo list globally so the sidebar stays live everywhere.
-  let timer;
-  onMount(() => {
-    loadRepos();
-    timer = setInterval(loadRepos, 4000);
-  });
-  onDestroy(() => clearInterval(timer));
+  // Load once for the global sidebar. The Activity page owns optional live
+  // polling so background requests are not made unless the user enables it.
+  onMount(loadRepos);
 </script>
 
 <div class="flex min-h-screen">
@@ -166,7 +167,7 @@
   ></div>
 
   <div class="flex min-w-0 flex-1 flex-col">
-    <header class="sticky top-0 z-10 flex h-14 items-center justify-between border-b border-line bg-bg/80 px-8 backdrop-blur">
+    <header class="sticky top-0 z-10 flex h-14 items-center justify-between border-b border-line bg-bg/80 px-2 backdrop-blur">
       {#if view === "repo"}
         <div class="flex min-w-0 items-center gap-2 text-[15px]">
           <a href="/repos" use:link class="text-dim transition-colors hover:text-fg">Repositories</a>
@@ -177,7 +178,7 @@
         <div class="flex min-w-0 items-baseline gap-3">
           <h1 class="shrink-0 text-[15px] font-semibold">{title[view] || "krabby"}</h1>
           {#if view === "search"}
-            <span class="truncate text-[11px] text-faint">bw full-text and semantic source search</span>
+            <span class="truncate text-[11px] text-faint">source code and generated documentation search</span>
           {/if}
         </div>
       {/if}
@@ -208,7 +209,11 @@
       {#if view === "repos"}
         <Repos />
       {:else if view === "repo"}
-        <RepoDetail {repoId} />
+        {#key repoId}
+          <RepoDetail {repoId} />
+        {/key}
+      {:else if view === "activity"}
+        <Activity />
       {:else if view === "search"}
         <Search />
       {:else if view === "settings"}
@@ -219,3 +224,5 @@
     </main>
   </div>
 </div>
+
+<ToastHost />

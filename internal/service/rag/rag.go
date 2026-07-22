@@ -27,7 +27,7 @@ import (
 // Doc is a whole markdown document returned by retrieval.
 type Doc struct {
 	Repo    string  `json:"repo"`
-	Path    string  `json:"path"`  // repo-relative path under krabby-docs/
+	Path    string  `json:"path"` // path relative to the repo's docs directory
 	Title   string  `json:"title"`
 	Score   float32 `json:"score"` // best chunk score that surfaced this doc
 	Content string  `json:"content"`

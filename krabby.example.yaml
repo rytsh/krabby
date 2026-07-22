@@ -69,12 +69,6 @@ rag:
   chunk_overlap: 200
   top_k: 20                 # chunk matches fetched before grouping
   top_docs: 5               # whole documents returned
-  store:
-    kind: embedded          # "embedded" (file-backed) | "qdrant"
-    qdrant:
-      url: http://localhost:6333
-      # api_key: ""
-      collection: krabby
 
 code_rag:
   enabled: false            # index source + enable search_code

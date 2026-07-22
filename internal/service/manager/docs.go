@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"time"
 
 	"github.com/rytsh/krabby/internal/config"
@@ -226,8 +227,8 @@ func (m *Manager) Configure(_ context.Context, s settings.Settings) error {
 
 // buildBundle constructs docgen/rag clients from settings. A disabled or
 // unconfigured capability yields a nil field rather than an error, so partial
-// configuration (e.g. docs on, rag off) is valid. Only genuine construction
-// failures (bad store kind, unreachable qdrant setup) return an error.
+// configuration (e.g. docs on, rag off) is valid. Store construction failures
+// leave the previous live bundle active.
 func (m *Manager) buildBundle(s settings.Settings) (*docsBundle, error) {
 	b := &docsBundle{}
 	var (
@@ -257,7 +258,7 @@ func (m *Manager) buildBundle(s settings.Settings) (*docsBundle, error) {
 		case err != nil:
 			return nil, fmt.Errorf("build embedder client; %w", err)
 		default:
-			store, serr := vectorstore.New(storeConfig(s), m.docsVectorsDir, "", emb.Dim())
+			store, serr := vectorstore.New(m.docsVectorsDir)
 			if serr != nil {
 				return nil, fmt.Errorf("build vector store; %w", serr)
 			}
@@ -278,7 +279,7 @@ func (m *Manager) buildBundle(s settings.Settings) (*docsBundle, error) {
 		case err != nil:
 			return nil, fmt.Errorf("build code embedder client; %w", err)
 		default:
-			store, serr := vectorstore.New(storeConfig(s), m.codeVectorsDir, codeCollection(s), emb.Dim())
+			store, serr := vectorstore.New(m.codeVectorsDir)
 			if serr != nil {
 				if b.store != nil {
 					_ = b.store.Close()
@@ -296,17 +297,6 @@ func (m *Manager) buildBundle(s settings.Settings) (*docsBundle, error) {
 	b.codeRag = coderag.New(codeRagConfig(s), codeEmb, codeStore, m.engine, m.codeText)
 
 	return b, nil
-}
-
-// codeCollection is the Qdrant collection for the code index: the configured
-// docs collection (default "krabby") with a "-code" suffix.
-func codeCollection(s settings.Settings) string {
-	col := s.QdrantCollection
-	if col == "" {
-		col = "krabby"
-	}
-
-	return col + "-code"
 }
 
 // TestResult reports the outcome of a connectivity/credentials test.
@@ -341,10 +331,6 @@ func (m *Manager) mergeSecrets(ctx context.Context, patch settings.Settings) (se
 
 	if patch.CodeEmbedAPIKey == "" {
 		patch.CodeEmbedAPIKey = cur.CodeEmbedAPIKey
-	}
-
-	if patch.QdrantAPIKey == "" {
-		patch.QdrantAPIKey = cur.QdrantAPIKey
 	}
 
 	return patch, nil
@@ -504,7 +490,6 @@ func ragConfig(s settings.Settings) config.RAG {
 		ChunkOverlap: s.RAGChunkOverlap,
 		TopK:         s.RAGTopK,
 		TopDocs:      s.RAGTopDocs,
-		Store:        storeConfig(s),
 	}
 }
 
@@ -516,17 +501,6 @@ func codeRagConfig(s settings.Settings) config.CodeRAG {
 		TopK:         s.CodeRAGTopK,
 		Include:      s.CodeRAGInclude,
 		Exclude:      s.CodeRAGExclude,
-	}
-}
-
-func storeConfig(s settings.Settings) config.VectorStore {
-	return config.VectorStore{
-		Kind: s.StoreKind,
-		Qdrant: config.Qdrant{
-			URL:        s.QdrantURL,
-			APIKey:     s.QdrantAPIKey,
-			Collection: s.QdrantCollection,
-		},
 	}
 }
 
@@ -571,7 +545,7 @@ func (m *Manager) SearchCodeText(
 
 // ListDocs returns the generated doc metadata for a repo from its manifest.
 func (m *Manager) ListDocs(ctx context.Context, repoID string) ([]docgen.DocMeta, error) {
-	if m.docsDir == nil {
+	if m.docsRootDir == "" {
 		return nil, ErrDocsDisabled
 	}
 
@@ -588,14 +562,17 @@ func (m *Manager) ListDocs(ctx context.Context, repoID string) ([]docgen.DocMeta
 	if man == nil {
 		return []docgen.DocMeta{}, nil
 	}
+	if len(man.Docs) == 0 {
+		return []docgen.DocMeta{}, nil
+	}
 
 	return man.Docs, nil
 }
 
-// GetDoc returns the contents of one generated markdown doc (path is relative to
-// the repo's krabby-docs/ dir). Access is sandboxed to the docs dir.
+// GetDoc returns one generated markdown doc. Path is relative to that repo's
+// external docs directory and access is sandboxed to it.
 func (m *Manager) GetDoc(ctx context.Context, repoID, docPath string) (*repofs.FileContent, error) {
-	if m.docsDir == nil {
+	if m.docsRootDir == "" {
 		return nil, ErrDocsDisabled
 	}
 
@@ -607,13 +584,19 @@ func (m *Manager) GetDoc(ctx context.Context, repoID, docPath string) (*repofs.F
 	return repofs.ReadFile(dir, docPath, 0, 0)
 }
 
-// repoDocsDir resolves a repo id to its docs directory, verifying the repo is
-// tracked and cloned.
+// repoDocsDir resolves a repo id to its external docs directory, verifying the
+// repo is tracked and cloned and migrating legacy in-clone docs when needed.
 func (m *Manager) repoDocsDir(ctx context.Context, repoID string) (string, error) {
-	dir, err := m.repoCloneDir(ctx, repoID)
+	repo, err := m.reg.Get(ctx, repoID)
 	if err != nil {
 		return "", err
 	}
+	if repo == nil {
+		return "", fmt.Errorf("repo %s not found", repoID)
+	}
+	if repo.Path == "" || !fileExists(filepath.Join(repo.Path, ".git")) {
+		return "", fmt.Errorf("repo %s not cloned yet (status: %s)", repoID, repo.Status)
+	}
 
-	return m.docsDir(dir), nil
+	return m.docsDirForRepo(repo)
 }

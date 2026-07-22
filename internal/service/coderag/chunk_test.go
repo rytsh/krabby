@@ -139,7 +139,7 @@ func TestCodeRAGIndexAndRetrieve(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store, err := vectorstore.New(config.VectorStore{Kind: "embedded"}, t.TempDir(), "", 0)
+	store, err := vectorstore.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

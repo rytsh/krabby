@@ -1,15 +1,7 @@
-// Package vectorstore defines the pluggable vector index behind krabby's RAG
-// layer. The default backend is embedded (file-backed, cosine similarity in Go);
-// a Qdrant HTTP backend is available for scale. Additional backends (pgvector,
-// etc.) can implement the Store interface.
+// Package vectorstore defines krabby's embedded bw vector index.
 package vectorstore
 
-import (
-	"context"
-	"fmt"
-
-	"github.com/rytsh/krabby/internal/config"
-)
+import "context"
 
 // Payload is the metadata carried with each stored vector. It is enough to
 // locate and display the source document without re-reading the index.
@@ -40,7 +32,7 @@ type Match struct {
 	Score   float32 `json:"score"`
 }
 
-// Store is the pluggable vector index.
+// Store is the vector index used by docs and code RAG.
 type Store interface {
 	// Upsert inserts or replaces the given items. IDs are stable so re-indexing
 	// a doc overwrites its prior chunks.
@@ -54,23 +46,5 @@ type Store interface {
 	Close() error
 }
 
-// New builds the configured vector store. dir is the embedded backend's data
-// directory and collection overrides the Qdrant collection name when non-empty;
-// together they let docs and code RAG index into separate namespaces. dim is
-// the embedding dimension (used by backends that require it up front, e.g.
-// Qdrant collection creation).
-func New(cfg config.VectorStore, dir, collection string, dim int) (Store, error) {
-	switch cfg.Kind {
-	case "", "embedded":
-		return newEmbedded(dir)
-	case "qdrant":
-		q := cfg.Qdrant
-		if collection != "" {
-			q.Collection = collection
-		}
-
-		return newQdrant(q, dim)
-	default:
-		return nil, fmt.Errorf("unknown vector store kind %q", cfg.Kind)
-	}
-}
+// New opens the embedded bw vector store at dir.
+func New(dir string) (Store, error) { return newEmbedded(dir) }

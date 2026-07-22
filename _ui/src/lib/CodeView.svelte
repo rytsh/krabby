@@ -179,10 +179,10 @@
 
 <div bind:this={container}>
   {#if html}
-    <div class="code-view overflow-x-auto p-3.5 font-mono text-[12.5px] leading-relaxed">
+    <div class="code-view p-3.5 font-mono text-[12.5px] leading-relaxed">
       {@html html}
     </div>
   {:else}
-    <pre class="code-view m-0 overflow-x-auto p-3.5 font-mono text-[12.5px] leading-relaxed"><code>{#each plainLines as l}<span class="line">{l}</span>{"\n"}{/each}</code></pre>
+    <pre class="code-view m-0 p-3.5 font-mono text-[12.5px] leading-relaxed"><code>{#each plainLines as l}<span class="line">{l}</span>{"\n"}{/each}</code></pre>
   {/if}
 </div>

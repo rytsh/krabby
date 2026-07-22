@@ -137,7 +137,7 @@ type Embedder struct {
 	Timeout time.Duration `cfg:"timeout" default:"30s"`
 }
 
-// RAG configures chunking, retrieval and the vector store backend.
+// RAG configures chunking and retrieval over the embedded vector store.
 type RAG struct {
 	// Enabled turns on indexing + retrieval in the pipeline and tools.
 	Enabled bool `cfg:"enabled"`
@@ -149,14 +149,10 @@ type RAG struct {
 	TopK int `cfg:"top_k" default:"20"`
 	// TopDocs is how many whole documents to return after grouping.
 	TopDocs int `cfg:"top_docs" default:"5"`
-	// Store selects and configures the vector store backend.
-	Store VectorStore `cfg:"store"`
 }
 
-// CodeRAG configures semantic search over raw source code. It shares the
-// vector store backend selection with RAG but indexes into its own namespace
-// (separate directory for the embedded store, separate Qdrant collection), so
-// docs and code can use embedding models with different dimensions.
+// CodeRAG configures semantic search over raw source code. It indexes into a
+// separate embedded store so docs and code can use different model dimensions.
 type CodeRAG struct {
 	// Enabled turns on semantic vector indexing. Normal search_code queries use
 	// the always-available local bw full-text index.
@@ -173,21 +169,6 @@ type CodeRAG struct {
 	Include []string `cfg:"include"`
 	// Exclude globs skip files (evaluated after Include).
 	Exclude []string `cfg:"exclude"`
-}
-
-// VectorStore selects a vector backend and holds per-backend settings.
-type VectorStore struct {
-	// Kind is "embedded" (default, file-backed) or "qdrant".
-	Kind string `cfg:"kind" default:"embedded"`
-	// Qdrant settings apply when Kind == "qdrant".
-	Qdrant Qdrant `cfg:"qdrant"`
-}
-
-// Qdrant configures the Qdrant HTTP backend.
-type Qdrant struct {
-	URL        string `cfg:"url" default:"http://localhost:6333"`
-	APIKey     string `cfg:"api_key" log:"-"`
-	Collection string `cfg:"collection" default:"krabby"`
 }
 
 // RepoSeed is a repository declared in the config file.
@@ -237,10 +218,8 @@ func (c *Config) StateDir() string { return filepath.Join(c.DataDir, "state") }
 // KeysDir holds materialized SSH key files for stored credentials.
 func (c *Config) KeysDir() string { return filepath.Join(c.DataDir, "keys") }
 
-// DocsDir is where generated markdown docs live for a given repo clone path.
-func (c *Config) DocsDir(repoPath string) string {
-	return filepath.Join(repoPath, "krabby-docs")
-}
+// DocsRootDir holds generated markdown documentation outside repository clones.
+func (c *Config) DocsRootDir() string { return filepath.Join(c.DataDir, "docs") }
 
 // DocsVectorsDir holds the embedded vector store data for docs RAG.
 func (c *Config) DocsVectorsDir() string { return filepath.Join(c.DataDir, "docs-vectors") }

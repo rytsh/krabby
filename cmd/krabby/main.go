@@ -99,7 +99,7 @@ func run(ctx context.Context) error {
 
 	mgr := manager.New(ctx, reg, git, gfy, engine, creds, codeText, cfg.ReposDir(), cfg.MergedGraphPath(),
 		manager.DocsDeps{
-			DocsDir:        cfg.DocsDir,
+			DocsRootDir:    cfg.DocsRootDir(),
 			DocsVectorsDir: cfg.DocsVectorsDir(),
 			CodeVectorsDir: cfg.CodeVectorsDir(),
 		},
@@ -110,6 +110,12 @@ func run(ctx context.Context) error {
 		}
 	}()
 	mgr.SetSettingsStore(settingsStore)
+	if err := mgr.ReconcileInterruptedStages(ctx); err != nil {
+		slog.Error("reconcile interrupted generation stages", "error", err)
+	}
+	if err := mgr.MigrateDocs(ctx); err != nil {
+		slog.Error("migrate generated docs out of repository clones", "error", err)
+	}
 
 	// Build the initial docs/RAG client bundle from the persisted settings.
 	// A build error here disables the feature but does not abort startup.
@@ -174,7 +180,6 @@ func seedSettings(cfg *config.Config) settings.Settings {
 		RAGChunkOverlap: cfg.RAG.ChunkOverlap,
 		RAGTopK:         cfg.RAG.TopK,
 		RAGTopDocs:      cfg.RAG.TopDocs,
-		StoreKind:       cfg.RAG.Store.Kind,
 
 		CodeEmbedBaseURL: cfg.CodeEmbedder.BaseURL,
 		CodeEmbedAPIKey:  cfg.CodeEmbedder.APIKey,
@@ -189,9 +194,5 @@ func seedSettings(cfg *config.Config) settings.Settings {
 		CodeRAGTopK:         cfg.CodeRAG.TopK,
 		CodeRAGInclude:      cfg.CodeRAG.Include,
 		CodeRAGExclude:      cfg.CodeRAG.Exclude,
-
-		QdrantURL:        cfg.RAG.Store.Qdrant.URL,
-		QdrantAPIKey:     cfg.RAG.Store.Qdrant.APIKey,
-		QdrantCollection: cfg.RAG.Store.Qdrant.Collection,
 	}
 }

@@ -1,5 +1,6 @@
 <script>
   import {
+    Activity,
     BookOpen,
     Boxes,
     Braces,
@@ -27,6 +28,7 @@
   let { name, size = 18 } = $props();
 
   const icons = {
+    activity: Activity,
     book: BookOpen,
     boxes: Boxes,
     braces: Braces,

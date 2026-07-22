@@ -1,29 +1,36 @@
 // Thin fetch wrapper for the krabby REST API. All paths are relative so the
 // same build works whether served from the embedded server or the dev proxy.
+import { errorToast } from "./toast.js";
+
 const BASE = "/api/v1";
 
 async function req(path, opts = {}) {
-  const res = await fetch(BASE + path, {
-    headers: { "Content-Type": "application/json" },
-    ...opts,
-  });
+  try {
+    const res = await fetch(BASE + path, {
+      headers: { "Content-Type": "application/json" },
+      ...opts,
+    });
 
-  const text = await res.text();
-  let body = null;
-  if (text) {
-    try {
-      body = JSON.parse(text);
-    } catch {
-      body = text;
+    const text = await res.text();
+    let body = null;
+    if (text) {
+      try {
+        body = JSON.parse(text);
+      } catch {
+        body = text;
+      }
     }
-  }
 
-  if (!res.ok) {
-    const msg = body && body.error ? body.error : `${res.status} ${res.statusText}`;
-    throw new Error(msg);
-  }
+    if (!res.ok) {
+      const msg = body && body.error ? body.error : `${res.status} ${res.statusText}`;
+      throw new Error(msg);
+    }
 
-  return body;
+    return body;
+  } catch (error) {
+    errorToast(error);
+    throw error;
+  }
 }
 
 export const api = {
@@ -31,11 +38,11 @@ export const api = {
   repos: () => req("/repos"),
   repo: (id) => req(`/repos/${id}`),
   addRepo: (url, branch) =>
-    req("/repos", { method: "POST", body: JSON.stringify({ url, branch: branch || "" }) }),
-  deleteRepo: (id) => req(`/repos/${id}`, { method: "DELETE" }),
-  refreshRepo: (id) => req(`/repos/${id}/refresh`, { method: "POST" }),
+    req("/repos", { method: "POST", keepalive: true, body: JSON.stringify({ url, branch: branch || "" }) }),
+  deleteRepo: (id) => req(`/repos/${id}`, { method: "DELETE", keepalive: true }),
+  refreshRepo: (id) => req(`/repos/${id}/refresh`, { method: "POST", keepalive: true }),
   generate: (id, targets) =>
-    req(`/repos/${id}/generate`, { method: "POST", body: JSON.stringify({ targets }) }),
+    req(`/repos/${id}/generate`, { method: "POST", keepalive: true, body: JSON.stringify({ targets }) }),
   lockStatus: (id) => req(`/repos/${id}/lock`),
   files: (id, subdir = "", recursive = false) =>
     req(`/repos/${id}/files?subdir=${encodeURIComponent(subdir)}&recursive=${recursive}`),

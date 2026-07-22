@@ -44,13 +44,12 @@ type Settings struct {
 	EmbedBatch   int           `bw:"embed_batch"    json:"embed_batch"`
 	EmbedTimeout time.Duration `bw:"embed_timeout"  json:"embed_timeout"`
 
-	// RAG (retrieval + store).
-	RAGEnabled      bool   `bw:"rag_enabled"       json:"rag_enabled"`
-	RAGChunkSize    int    `bw:"rag_chunk_size"    json:"rag_chunk_size"`
-	RAGChunkOverlap int    `bw:"rag_chunk_overlap" json:"rag_chunk_overlap"`
-	RAGTopK         int    `bw:"rag_top_k"         json:"rag_top_k"`
-	RAGTopDocs      int    `bw:"rag_top_docs"      json:"rag_top_docs"`
-	StoreKind       string `bw:"store_kind"        json:"store_kind"`
+	// RAG (retrieval over the embedded vector store).
+	RAGEnabled      bool `bw:"rag_enabled"       json:"rag_enabled"`
+	RAGChunkSize    int  `bw:"rag_chunk_size"    json:"rag_chunk_size"`
+	RAGChunkOverlap int  `bw:"rag_chunk_overlap" json:"rag_chunk_overlap"`
+	RAGTopK         int  `bw:"rag_top_k"         json:"rag_top_k"`
+	RAGTopDocs      int  `bw:"rag_top_docs"      json:"rag_top_docs"`
 
 	// Code embedder (embeddings) for code RAG. When BaseURL is empty the docs
 	// embedder settings above are used for code as well.
@@ -69,11 +68,6 @@ type Settings struct {
 	CodeRAGInclude      []string `bw:"code_rag_include"       json:"code_rag_include"`
 	CodeRAGExclude      []string `bw:"code_rag_exclude"       json:"code_rag_exclude"`
 
-	// Qdrant (used when StoreKind == "qdrant").
-	QdrantURL        string `bw:"qdrant_url"        json:"qdrant_url"`
-	QdrantAPIKey     string `bw:"qdrant_api_key"   json:"-"` // write-only
-	QdrantCollection string `bw:"qdrant_collection" json:"qdrant_collection"`
-
 	UpdatedAt time.Time `bw:"updated_at" json:"updated_at,omitzero"`
 }
 
@@ -85,7 +79,6 @@ type Redacted struct {
 	LLMAPIKeySet       bool   `json:"llm_api_key_set"`
 	EmbedAPIKeySet     bool   `json:"embed_api_key_set"`
 	CodeEmbedAPIKeySet bool   `json:"code_embed_api_key_set"`
-	QdrantAPIKeySet    bool   `json:"qdrant_api_key_set"`
 }
 
 // Redact returns a view with secrets removed and "*_set" booleans populated.
@@ -95,14 +88,12 @@ func (s Settings) Redact() Redacted {
 		LLMAPIKeySet:       s.LLMAPIKey != "",
 		EmbedAPIKeySet:     s.EmbedAPIKey != "",
 		CodeEmbedAPIKeySet: s.CodeEmbedAPIKey != "",
-		QdrantAPIKeySet:    s.QdrantAPIKey != "",
 	}
 	// Defensive: ensure the embedded copy carries no secrets (they have json:"-"
 	// so they never marshal, but zero them to avoid accidental in-process leaks).
 	r.Settings.LLMAPIKey = ""
 	r.Settings.EmbedAPIKey = ""
 	r.Settings.CodeEmbedAPIKey = ""
-	r.Settings.QdrantAPIKey = ""
 
 	return r
 }
@@ -129,12 +120,11 @@ type Patch struct {
 	EmbedBatch   *int           `json:"embed_batch"`
 	EmbedTimeout *time.Duration `json:"embed_timeout"`
 
-	RAGEnabled      *bool   `json:"rag_enabled"`
-	RAGChunkSize    *int    `json:"rag_chunk_size"`
-	RAGChunkOverlap *int    `json:"rag_chunk_overlap"`
-	RAGTopK         *int    `json:"rag_top_k"`
-	RAGTopDocs      *int    `json:"rag_top_docs"`
-	StoreKind       *string `json:"store_kind"`
+	RAGEnabled      *bool `json:"rag_enabled"`
+	RAGChunkSize    *int  `json:"rag_chunk_size"`
+	RAGChunkOverlap *int  `json:"rag_chunk_overlap"`
+	RAGTopK         *int  `json:"rag_top_k"`
+	RAGTopDocs      *int  `json:"rag_top_docs"`
 
 	CodeEmbedBaseURL *string        `json:"code_embed_base_url"`
 	CodeEmbedAPIKey  *string        `json:"code_embed_api_key"`
@@ -149,10 +139,6 @@ type Patch struct {
 	CodeRAGTopK         *int      `json:"code_rag_top_k"`
 	CodeRAGInclude      *[]string `json:"code_rag_include"`
 	CodeRAGExclude      *[]string `json:"code_rag_exclude"`
-
-	QdrantURL        *string `json:"qdrant_url"`
-	QdrantAPIKey     *string `json:"qdrant_api_key"`
-	QdrantCollection *string `json:"qdrant_collection"`
 }
 
 // Apply overlays fields present in p onto base. Pointer fields distinguish an
@@ -218,9 +204,6 @@ func (p Patch) Apply(base Settings) Settings {
 	if p.RAGTopDocs != nil {
 		base.RAGTopDocs = *p.RAGTopDocs
 	}
-	if p.StoreKind != nil {
-		base.StoreKind = *p.StoreKind
-	}
 	if p.CodeEmbedBaseURL != nil {
 		base.CodeEmbedBaseURL = *p.CodeEmbedBaseURL
 	}
@@ -257,16 +240,6 @@ func (p Patch) Apply(base Settings) Settings {
 	if p.CodeRAGExclude != nil {
 		base.CodeRAGExclude = *p.CodeRAGExclude
 	}
-	if p.QdrantURL != nil {
-		base.QdrantURL = *p.QdrantURL
-	}
-	if p.QdrantAPIKey != nil {
-		base.QdrantAPIKey = *p.QdrantAPIKey
-	}
-	if p.QdrantCollection != nil {
-		base.QdrantCollection = *p.QdrantCollection
-	}
-
 	return base
 }
 
@@ -285,10 +258,14 @@ type Store struct {
 	mcpBucket *bw.Bucket[MCPKey]
 }
 
+// settingsSchemaVersion v2 removes the obsolete remote-store fields. Bumping
+// the version lets bw migrate existing settings records in place.
+const settingsSchemaVersion = 2
+
 // New opens the settings bucket. If no record exists yet, seed is persisted as
 // the initial configuration (seeded from file/env config by the caller).
 func New(db *bw.DB, seed Settings) (*Store, error) {
-	bucket, err := bw.RegisterBucket[Settings](db, "settings")
+	bucket, err := bw.RegisterBucket[Settings](db, "settings", bw.WithVersion[Settings](settingsSchemaVersion))
 	if err != nil {
 		return nil, fmt.Errorf("register settings bucket; %w", err)
 	}
@@ -368,10 +345,6 @@ func (s *Store) Set(ctx context.Context, patch Settings) (Settings, error) {
 
 	if next.CodeEmbedAPIKey == "" {
 		next.CodeEmbedAPIKey = cur.CodeEmbedAPIKey
-	}
-
-	if next.QdrantAPIKey == "" {
-		next.QdrantAPIKey = cur.QdrantAPIKey
 	}
 
 	next.UpdatedAt = time.Now()

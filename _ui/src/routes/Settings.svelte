@@ -16,7 +16,6 @@
   let llmKey = $state("");
   let embedKey = $state("");
   let codeEmbedKey = $state("");
-  let qdrantKey = $state("");
 
   // Connection test state.
   let llmTest = $state(null); // { ok, latency_ms, model, error }
@@ -58,13 +57,11 @@
     delete patch.llm_api_key_set;
     delete patch.embed_api_key_set;
     delete patch.code_embed_api_key_set;
-    delete patch.qdrant_api_key_set;
     delete patch.docs_default_prompt;
     delete patch.updated_at;
     patch.llm_api_key = llmKey;
     patch.embed_api_key = embedKey;
     patch.code_embed_api_key = codeEmbedKey;
-    patch.qdrant_api_key = qdrantKey;
     return patch;
   }
 
@@ -74,7 +71,7 @@
     docsMsg = "";
     try {
       docsCfg = await api.setDocsConfig(buildPatch());
-      llmKey = embedKey = codeEmbedKey = qdrantKey = "";
+      llmKey = embedKey = codeEmbedKey = "";
       docsMsg = "Saved. Existing repositories queued for reindex.";
     } catch (e) {
       docsErr = e.message;
@@ -184,10 +181,6 @@
 
 <p class="text-dim">Read-only view of the running configuration. Secrets are never shown.</p>
 
-{#if error}
-  <div class="err-box mt-4">{error}</div>
-{/if}
-
 {#if settings}
   <div class="card mt-4 overflow-hidden">
     <table class="w-full border-collapse">
@@ -251,9 +244,6 @@
       </button>
     </div>
 
-    {#if mcpErr}
-      <div class="err-box mb-0 mt-3">{mcpErr}</div>
-    {/if}
     {#if mcpMsg}
       <p class="mb-0 mt-3 text-[13px] text-ok">{mcpMsg}</p>
     {/if}
@@ -295,9 +285,6 @@
   stored value.
 </p>
 
-{#if docsErr}
-  <div class="err-box mt-4">{docsErr}</div>
-{/if}
 {#if docsMsg}
   <div class="mt-4 rounded-md border border-ok bg-ok/10 px-3 py-2.5 text-[13px] text-ok">{docsMsg}</div>
 {/if}
@@ -484,20 +471,14 @@
       </label>
     </div>
 
-    <!-- Retrieval + store -->
-    <div class="mb-2 mt-6 text-[13px] font-semibold text-dim">Retrieval &amp; vector store</div>
+    <!-- Retrieval -->
+    <div class="mb-2 mt-6 text-[13px] font-semibold text-dim">Retrieval</div>
     <label class="mb-3 flex items-center gap-2 text-[13px]">
       <input type="checkbox" bind:checked={docsCfg.rag_enabled} />
       Enable RAG indexing &amp; retrieval
     </label>
+    <p class="mb-3 text-[12px] text-faint">Vectors are stored locally in embedded bw indexes.</p>
     <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-      <label class="flex flex-col gap-1 text-[13px] text-dim">
-        Vector store
-        <select class="input" bind:value={docsCfg.store_kind}>
-          <option value="embedded">embedded (file-backed)</option>
-          <option value="qdrant">qdrant</option>
-        </select>
-      </label>
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Docs returned (top_docs)
         <input class="input" type="number" bind:value={docsCfg.rag_top_docs} />
@@ -515,24 +496,6 @@
         <input class="input" type="number" bind:value={docsCfg.rag_top_k} />
       </label>
     </div>
-
-    {#if docsCfg.store_kind === "qdrant"}
-      <div class="mb-2 mt-6 text-[13px] font-semibold text-dim">Qdrant</div>
-      <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <label class="flex flex-col gap-1 text-[13px] text-dim">
-          URL
-          <input class="input" bind:value={docsCfg.qdrant_url} placeholder="http://localhost:6333" />
-        </label>
-        <label class="flex flex-col gap-1 text-[13px] text-dim">
-          Collection
-          <input class="input" bind:value={docsCfg.qdrant_collection} placeholder="krabby" />
-        </label>
-        <label class="flex flex-col gap-1 text-[13px] text-dim">
-          API key {docsCfg.qdrant_api_key_set ? "(set)" : "(not set)"}
-          <input class="input" type="password" bind:value={qdrantKey} placeholder="leave blank to keep" />
-        </label>
-      </div>
-    {/if}
 
     <div class="mt-6">
       <button class="btn btn-primary" onclick={saveDocs} disabled={saving}>

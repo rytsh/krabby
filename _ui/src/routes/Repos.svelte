@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { api } from "../lib/api.js";
   import { link } from "../lib/router.js";
-  import { repos, reposError, reposLoaded, loadRepos } from "../lib/repos.js";
+  import { repos, reposLoaded, loadRepos } from "../lib/repos.js";
   import { fmtDate } from "../lib/format.js";
   import Icon from "../lib/Icon.svelte";
   import Status from "../lib/Status.svelte";
@@ -88,10 +88,6 @@
     {adding ? "Adding…" : "Add repo"}
   </button>
 </div>
-
-{#if error || $reposError}
-  <div class="err-box">{error || $reposError}</div>
-{/if}
 
 <div class="mb-3 flex items-center gap-2">
   <div class="relative flex-1">

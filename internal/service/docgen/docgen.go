@@ -1,7 +1,7 @@
 // Package docgen turns a tracked repository into human-readable markdown
 // documentation. The default generator works in two phases: it first builds a
-// dense per-file summary for every source file (cached under
-// krabby-docs/.summaries/ and regenerated only when the source hash changes),
+// dense per-file summary for every source file (cached under the external docs
+// directory's .summaries/ and regenerated only when the source hash changes),
 // then synthesizes ONE comprehensive documentation.md for the whole repository
 // from those summaries plus the knowledge-graph overview.
 //
@@ -35,14 +35,14 @@ import (
 
 // DocMeta describes one generated markdown document (or an internal summary).
 type DocMeta struct {
-	Path       string    `json:"path"`        // repo-relative path under krabby-docs/
+	Path       string    `json:"path"`        // path relative to the repo's docs directory
 	Title      string    `json:"title"`       // human title
 	SourcePath string    `json:"source_path"` // originating source file (empty for the synthesized doc)
 	SourceHash string    `json:"source_hash"` // hash of source used; enables incremental regen
 	Generated  time.Time `json:"generated"`
 }
 
-// Manifest is the docs-index.json written into a repo's krabby-docs/ dir.
+// Manifest is the docs-index.json written into a repo's external docs directory.
 type Manifest struct {
 	Repo      string    `json:"repo"`
 	Model     string    `json:"model"`

@@ -296,7 +296,9 @@ func addRepo(mgr *manager.Manager) ada.HandlerFunc {
 			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": "url is required"})
 		}
 
-		repo, err := mgr.AddRepo(c.Request.Context(), req.URL, req.Branch)
+		// Registration must finish even if the UI navigates away. The clone/build
+		// itself is queued on the manager lifecycle context by AddRepo.
+		repo, err := mgr.AddRepo(context.WithoutCancel(c.Request.Context()), req.URL, req.Branch)
 		if err != nil {
 			return c.Err(err)
 		}
@@ -322,7 +324,7 @@ func getRepo(mgr *manager.Manager) ada.HandlerFunc {
 
 func deleteRepo(mgr *manager.Manager) ada.HandlerFunc {
 	return func(c *ada.Context) error {
-		if err := mgr.RemoveRepo(c.Request.Context(), repoID(c.Request)); err != nil {
+		if err := mgr.RemoveRepo(context.WithoutCancel(c.Request.Context()), repoID(c.Request)); err != nil {
 			return c.Err(err)
 		}
 
@@ -334,7 +336,7 @@ func refreshRepo(mgr *manager.Manager) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		id := repoID(c.Request)
 
-		repo, err := mgr.Registry().Get(c.Request.Context(), id)
+		repo, err := mgr.Registry().Get(context.WithoutCancel(c.Request.Context()), id)
 		if err != nil {
 			return c.Err(err)
 		}
@@ -358,7 +360,7 @@ func generateRepo(mgr *manager.Manager) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		id := repoID(c.Request)
 
-		repo, err := mgr.Registry().Get(c.Request.Context(), id)
+		repo, err := mgr.Registry().Get(context.WithoutCancel(c.Request.Context()), id)
 		if err != nil {
 			return c.Err(err)
 		}

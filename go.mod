@@ -1,6 +1,6 @@
 module github.com/rytsh/krabby
 
-go 1.26.1
+go 1.26
 
 require (
 	github.com/modelcontextprotocol/go-sdk v1.6.1
@@ -11,7 +11,7 @@ require (
 	github.com/rakunlabs/ada/middleware/requestid v0.4.7
 	github.com/rakunlabs/ada/middleware/server v0.4.7
 	github.com/rakunlabs/ada/middleware/telemetry v0.4.7
-	github.com/rakunlabs/bw v0.3.0
+	github.com/rakunlabs/bw v0.3.1
 	github.com/rakunlabs/chu v0.4.7
 	github.com/rakunlabs/into v0.5.3
 	github.com/rakunlabs/logi v0.4.5

@@ -1,8 +1,7 @@
 # Design: Docs + RAG subsystem
 
 Status: **Implemented** — indexing (chunk → embed → upsert), file-level
-retrieval, and both vector store backends (embedded via bw/Badger HNSW,
-Qdrant over HTTP) are in place.
+retrieval, and the embedded bw/Badger HNSW vector store are in place.
 
 ## Goal
 
@@ -36,12 +35,12 @@ Extend krabby beyond code knowledge graphs with a documentation + retrieval laye
 | --- | --- |
 | Doc generation | **LLM-generated** per file/package (chat completion). Pluggable behind a `docgen.Generator` interface so a deterministic fallback can be added. |
 | Embeddings | **Pluggable OpenAI-compatible** HTTP embedder (`/v1/embeddings`). Works with OpenAI, Ollama, LM Studio, TEI, vLLM. |
-| Vector store | **Pluggable `vectorstore.Store` interface.** Default = **embedded**: a dedicated bw (BadgerDB) database under `data_dir/vectors` with an HNSW cosine index; the embedding dimension is auto-detected on first insert and a model/dimension change wipes + rebuilds the derived index. Optional **Qdrant** backend; room for more (pgvector, etc.). |
+| Vector store | **Embedded `vectorstore.Store` implementation:** dedicated bw (BadgerDB) databases under `data_dir/docs-vectors` and `data_dir/code-vectors`, each with an HNSW cosine index. The embedding dimension is auto-detected on first insert and a model/dimension change wipes + rebuilds the derived index. |
 | LLM chat | **OpenAI-compatible** `/v1/chat/completions` client (shared config style with embedder). |
 
 Rationale: mirrors krabby's existing "plain files under `data_dir`, external
-process/HTTP integrations, pluggable" philosophy. Embedded default keeps
-zero-infra promise; Qdrant is opt-in for scale.
+process/HTTP integrations, pluggable" philosophy while preserving the
+zero-infrastructure promise.
 
 ## Architecture
 
@@ -51,7 +50,7 @@ zero-infra promise; Qdrant is opt-in for scale.
                     │
                     ├─► docgen.Generate(repo)                 [NEW]
                     │      graph.json + source ──LLM──► markdown files
-                    │      └─ writes ~/.krabby/repos/<o>/<n>/krabby-docs/**.md
+                    │      └─ writes ~/.krabby/docs/<o>/<n>/**.md
                     │                                    + docs-index.json (manifest)
                     │
                     └─► rag.Index(repo)                        [NEW]
@@ -70,7 +69,7 @@ zero-infra promise; Qdrant is opt-in for scale.
 | --- | --- |
 | `llm` | OpenAI-compatible chat client (`Complete(ctx, messages) (string, error)`). Used by docgen and optional `ask_docs`. |
 | `embedder` | OpenAI-compatible embeddings client (`Embed(ctx, []string) ([][]float32, error)`), exposes `Dim()`, `Model()`. |
-| `vectorstore` | `Store` interface + `embedded` (file-backed, in-memory cosine) + `qdrant` (HTTP) backends. Factory selects by config. |
+| `vectorstore` | `Store` interface + embedded bw/Badger HNSW backend. |
 | `docgen` | `Generator` interface + `llmgen` impl: reads graph + source, prompts the LLM per file/package, writes markdown + a `docs-index.json` manifest. |
 | `rag` | Orchestrates chunk → embed → upsert (indexing) and embed-query → search → whole-file fetch (retrieval). |
 
@@ -78,12 +77,12 @@ zero-infra promise; Qdrant is opt-in for scale.
 
 ```
 ~/.krabby/repos/<owner>/<name>/
-├── graphify-out/                 # existing
-└── krabby-docs/                  # NEW
-    ├── docs-index.json           # manifest: files, titles, source hash, model, generated_at
-    ├── overview.md               # repo-level summary
-    ├── <pkg>/<file>.md           # per file/package docs
-    └── ...
+└── graphify-out/                 # existing; clones contain no generated docs
+~/.krabby/docs/<owner>/<name>/
+├── docs-index.json               # manifest: files, titles, source hash, model, generated_at
+├── documentation.md              # comprehensive repository documentation
+├── .summaries/                   # incremental per-source summary cache
+└── ...
 ~/.krabby/docs-vectors/           # embedded docs store backend
 └── ...                           # bw (BadgerDB) database: chunk records + HNSW vector index
 ```
@@ -112,7 +111,7 @@ type Item struct {
 }
 type Payload struct {
     Repo    string
-    DocPath string   // repo-relative markdown path under krabby-docs/
+    DocPath string   // path relative to the repo's external docs directory
     Title   string
     Chunk   string   // the chunk text (for optional chunk-level display)
 }
@@ -129,7 +128,7 @@ type Match struct {
 1. Embed the question.
 2. `Search` for `topK` chunks (topK larger than the doc count you want, e.g. 20).
 3. Group matches by `DocPath`, score each doc = max (or sum) of its chunk scores.
-4. Take the top N docs; read each **full** markdown file from `krabby-docs/`.
+4. Take the top N docs; read each **full** markdown file from the repo's directory under `data_dir/docs/`.
 5. Return `[]Doc{Repo, Path, Title, Score, Content}`.
 
 This satisfies "hold markdown + RAG for searching which markdown files relate to
@@ -164,15 +163,9 @@ rag:
   chunk_overlap: 200
   top_k: 20               # chunk matches fetched
   top_docs: 5             # whole docs returned
-  store:
-    kind: "embedded"      # "embedded" | "qdrant"
-    qdrant:
-      url: "http://localhost:6333"
-      api_key: ""         # log:"-"
-      collection: "krabby"
 ```
 
-New `Config` helpers: `DocsDir(repoPath)`, `DocsVectorsDir()`.
+New `Config` helpers: `DocsRootDir()`, `DocsDir(repoID)`, `DocsVectorsDir()`.
 
 ## Manager integration
 
@@ -181,7 +174,8 @@ New `Config` helpers: `DocsDir(repoPath)`, `DocsVectorsDir()`.
   `docs.enabled` / `rag.enabled` and run best-effort (log on failure, don't fail
   the graph build). A new repo status value `StatusIndexing` may be added, or we
   reuse `StatusBuilding` with a sub-phase.
-- `RemoveRepo()` also calls `store.DeleteRepo` and removes `krabby-docs/`.
+- `RemoveRepo()` also calls `store.DeleteRepo` and safely removes the repo's
+  external generated-docs directory.
 - New Manager methods (thin, delegate to rag/docgen):
   - `SearchDocs(ctx, repo, question, topDocs) ([]rag.Doc, error)`
   - `GetDoc(ctx, repo, docPath) (content, error)`
@@ -213,7 +207,7 @@ UI consumes these for rendering + search.
 
 ## UI (later pass)
 
-- Docs browser: tree of `krabby-docs/` per repo, markdown render.
+- Docs browser: tree of externally stored generated docs per repo, markdown render.
 - Search box → `/api/v1/docs/search`, show ranked docs, open full doc.
 - Existing Svelte app in `_ui/` (build output in `internal/server/dist`) is the host.
 
@@ -221,6 +215,9 @@ UI consumes these for rendering + search.
 
 - Docs regenerate only for files whose source hash changed (manifest in
   `docs-index.json`) to keep LLM cost bounded.
+- On startup and before docs access/generation, legacy
+  `<clone>/krabby-docs/` trees are moved to `data_dir/docs/<owner>/<repo>/`.
+  This preserves manifests and summary caches, so migration makes no LLM calls.
 - Vector index upsert is per-repo idempotent; `DeleteRepo` + re-`Upsert` on
   full rebuild, or per-doc upsert on incremental.
 - Embedded store persists to disk on change; loads on startup.
@@ -242,10 +239,10 @@ record overrides it and can be changed live.
 ### `internal/service/settings`
 
 - `Settings` struct = the docs/RAG configuration (docs enable/globs/concurrency,
-  llm, embedder, rag/store). Mirrors the config blocks but is **mutable** and
+  llm, embedder, rag). Mirrors the config blocks but is **mutable** and
   **persisted** in the existing `bw` DB (new `settings` bucket, single row).
-- **Secrets are write-only**: `LLM.APIKey`, `Embedder.APIKey`,
-  `Qdrant.APIKey` carry `bw` persistence but `json:"-"`. A redacted view
+- **Secrets are write-only**: `LLM.APIKey` and `Embedder.APIKey` carry `bw`
+  persistence but `json:"-"`. A redacted view
   (`Redacted()`) exposes only `*_key_set` booleans. On update, an empty secret
   means "keep existing" (so the UI never has to re-send secrets).
 - `Store.Get(ctx)` returns the current settings (seeded from file config on
@@ -291,7 +288,7 @@ type docsBundle struct {           // immutable snapshot; swapped atomically
 ### UI
 
 `Settings.svelte` gains a **Docs & RAG** section: a form for enable flags,
-models, base URLs, chunking, store kind + Qdrant fields, and write-only secret
+models, base URLs, chunking, and write-only secret
 inputs (placeholder shows "set"/"not set"). Saving calls `PUT /docs/config` and
 reflects the rebuild result/error inline.
 

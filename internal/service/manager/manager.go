@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -42,15 +43,14 @@ type Manager struct {
 
 	reposDir       string
 	mergedPath     string
+	docsRootDir    string
 	docsVectorsDir string
 	codeVectorsDir string
 
 	// Optional docs+RAG subsystem, held as an atomically swappable bundle so
-	// settings changes rebuild the clients live. docsDir resolves a clone path
-	// to its markdown docs dir. docsMu guards the bundle.
+	// settings changes rebuild the clients live. docsMu guards the bundle.
 	docsMu      sync.RWMutex
 	docs        *docsBundle
-	docsDir     func(repoPath string) string
 	settings    *settings.Store
 	settingsMu  sync.Mutex
 	configureMu sync.Mutex
@@ -93,9 +93,9 @@ type docsBundle struct {
 
 // DocsDeps carries the immutable wiring for the docs/RAG subsystem.
 type DocsDeps struct {
-	// DocsDir resolves a repo clone path to its markdown docs directory
-	// (typically config.Config.DocsDir).
-	DocsDir func(repoPath string) string
+	// DocsRootDir stores generated docs by repo-id path, outside repository
+	// clones (typically config.Config.DocsRootDir()).
+	DocsRootDir string
 	// DocsVectorsDir is the embedded vector store's data directory for docs RAG.
 	DocsVectorsDir string
 	// CodeVectorsDir is the embedded vector store's data directory for code
@@ -126,9 +126,9 @@ func New(
 		codeText:       codeText,
 		reposDir:       reposDir,
 		mergedPath:     mergedPath,
+		docsRootDir:    docs.DocsRootDir,
 		docsVectorsDir: docs.DocsVectorsDir,
 		codeVectorsDir: docs.CodeVectorsDir,
-		docsDir:        docs.DocsDir,
 		docs: &docsBundle{
 			codeRag: coderag.New(config.CodeRAG{}, nil, nil, engine, codeText),
 		},
@@ -232,6 +232,39 @@ func (m *Manager) Activity(id string) string {
 	defer m.activityMu.Unlock()
 
 	return m.activity[id]
+}
+
+// ReconcileInterruptedStages marks persisted running stages as failed. Activity
+// is intentionally in-memory, so no work from a previous process can still be
+// running when a new Manager starts.
+func (m *Manager) ReconcileInterruptedStages(ctx context.Context) error {
+	repos, err := m.reg.List(ctx)
+	if err != nil {
+		return err
+	}
+
+	var errs []error
+	for _, repo := range repos {
+		changed := false
+		for _, name := range generateOrder {
+			st := repo.Stages.Get(name)
+			if st == nil || st.Status != registry.StageRunning {
+				continue
+			}
+
+			st.Status = registry.StageError
+			st.Error = "interrupted by service restart"
+			st.FinishedAt = time.Now()
+			changed = true
+		}
+		if changed {
+			if err := m.reg.Upsert(ctx, repo); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+
+	return errors.Join(errs...)
 }
 
 // runStage executes one generation stage, persisting its running/ok/error state
@@ -368,7 +401,7 @@ func (m *Manager) registerRepo(ctx context.Context, url, branch string) (id stri
 	return id, repo, false, nil
 }
 
-// RemoveRepo deletes the record, the local clone and its serve process.
+// RemoveRepo deletes the record, local clone, generated docs and derived indexes.
 func (m *Manager) RemoveRepo(ctx context.Context, id string) error {
 	l := m.lock(id)
 	l.Lock()
@@ -385,8 +418,7 @@ func (m *Manager) RemoveRepo(ctx context.Context, id string) error {
 
 	m.engine.Invalidate(graphify.GraphPath(repo.Path))
 
-	// Best-effort: drop the repo's vectors from the RAG indexes. The markdown
-	// docs live under repo.Path and are removed with the clone below.
+	// Best-effort: drop the repo's vectors from the RAG indexes.
 	d, releaseDocs := m.acquireDocs()
 	defer releaseDocs()
 	if d.rag != nil {
@@ -399,6 +431,10 @@ func (m *Manager) RemoveRepo(ctx context.Context, id string) error {
 		if err := d.codeRag.DeleteRepo(ctx, id); err != nil {
 			slog.Error("delete repo from code index", "repo", id, "error", err)
 		}
+	}
+
+	if err := m.removeRepoDocs(id); err != nil {
+		return fmt.Errorf("remove generated docs for %s; %w", id, err)
 	}
 
 	if err := m.reg.Delete(ctx, id); err != nil {
@@ -532,10 +568,7 @@ func (m *Manager) Generate(ctx context.Context, id string, targets []string) err
 	d, releaseDocs := m.acquireDocs()
 	defer releaseDocs()
 
-	docsDir := ""
-	if m.docsDir != nil {
-		docsDir = m.docsDir(repo.Path)
-	}
+	docsDir, docsDirErr := m.docsDirForRepo(repo)
 
 	var errs []error
 
@@ -575,8 +608,8 @@ func (m *Manager) Generate(ctx context.Context, id string, targets []string) err
 					return fmt.Errorf("docs generation disabled: enable docs and configure the LLM in settings")
 				}
 
-				if docsDir == "" {
-					return fmt.Errorf("docs directory resolver not configured")
+				if docsDirErr != nil {
+					return docsDirErr
 				}
 
 				_, err := d.gen.Generate(ctx, repo.ID, repo.Path, docsDir)
@@ -595,8 +628,8 @@ func (m *Manager) Generate(ctx context.Context, id string, targets []string) err
 					return fmt.Errorf("docs index disabled: enable RAG and configure an embedder in settings")
 				}
 
-				if docsDir == "" {
-					return fmt.Errorf("docs directory resolver not configured")
+				if docsDirErr != nil {
+					return docsDirErr
 				}
 
 				return d.rag.Index(ctx, repo.ID, docsDir)
@@ -795,13 +828,12 @@ func (m *Manager) buildDocsAndIndex(ctx context.Context, repo *registry.Repo) {
 		return
 	}
 
-	if m.docsDir == nil {
-		slog.Error("docs enabled but docsDir resolver is nil; skipping", "repo", repo.ID)
+	docsDir, err := m.docsDirForRepo(repo)
+	if err != nil {
+		slog.Error("resolve generated docs directory", "repo", repo.ID, "error", err)
 
 		return
 	}
-
-	docsDir := m.docsDir(repo.Path)
 
 	if d.gen != nil {
 		if err := m.runStage(ctx, repo, registry.StageDocs, func() error {
@@ -819,6 +851,170 @@ func (m *Manager) buildDocsAndIndex(ctx context.Context, repo *registry.Repo) {
 			return d.rag.Index(ctx, repo.ID, docsDir)
 		})
 	}
+}
+
+// MigrateDocs moves generated documentation persisted by older versions from
+// each clone's krabby-docs directory into the external docs root. It performs
+// filesystem moves/copies only and never invokes doc generation.
+func (m *Manager) MigrateDocs(ctx context.Context) error {
+	repos, err := m.reg.List(ctx)
+	if err != nil {
+		return err
+	}
+
+	var errs []error
+	for _, repo := range repos {
+		if repo.Path == "" {
+			continue
+		}
+
+		if _, err := m.docsDirForRepo(repo); err != nil {
+			errs = append(errs, fmt.Errorf("migrate docs for %s: %w", repo.ID, err))
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+func (m *Manager) docsDirForRepo(repo *registry.Repo) (string, error) {
+	dir, rel, err := m.repoDocsPath(repo.ID)
+	if err != nil {
+		return "", err
+	}
+
+	legacy := filepath.Join(repo.Path, "krabby-docs")
+	if err := migrateLegacyDocs(legacy, dir); err != nil {
+		return "", fmt.Errorf("move %s to %s: %w", legacy, rel, err)
+	}
+
+	return dir, nil
+}
+
+func (m *Manager) repoDocsPath(repoID string) (dir, rel string, err error) {
+	if m.docsRootDir == "" {
+		return "", "", fmt.Errorf("docs root directory not configured")
+	}
+
+	rel = filepath.Clean(filepath.FromSlash(repoID))
+	if rel == "." || rel == ".." || filepath.IsAbs(rel) || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.ToSlash(rel) != repoID {
+		return "", "", fmt.Errorf("invalid repository id %q", repoID)
+	}
+
+	return filepath.Join(m.docsRootDir, rel), rel, nil
+}
+
+func (m *Manager) removeRepoDocs(repoID string) error {
+	_, rel, err := m.repoDocsPath(repoID)
+	if err != nil {
+		return err
+	}
+
+	root, err := os.OpenRoot(m.docsRootDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+
+		return err
+	}
+	defer root.Close()
+
+	return root.RemoveAll(rel)
+}
+
+func migrateLegacyDocs(src, dst string) error {
+	if filepath.Clean(src) == filepath.Clean(dst) {
+		return nil
+	}
+
+	info, err := os.Stat(src)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("legacy docs path is not a directory")
+	}
+
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+
+	if _, err := os.Stat(dst); errors.Is(err, os.ErrNotExist) {
+		if err := os.Rename(src, dst); err == nil {
+			slog.Info("migrated generated docs", "from", src, "to", dst)
+
+			return nil
+		}
+	} else if err != nil {
+		return err
+	}
+
+	if err := mergeLegacyDocs(src, dst); err != nil {
+		return err
+	}
+
+	slog.Info("migrated generated docs", "from", src, "to", dst)
+
+	return nil
+}
+
+// mergeLegacyDocs handles an existing destination and cross-device migrations.
+// Existing destination files win; unique legacy files are retained.
+func mergeLegacyDocs(src, dst string) error {
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		srcPath := filepath.Join(src, entry.Name())
+		dstPath := filepath.Join(dst, entry.Name())
+
+		if entry.IsDir() {
+			if err := mergeLegacyDocs(srcPath, dstPath); err != nil {
+				return err
+			}
+
+			continue
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("unsupported legacy docs entry %s", srcPath)
+		}
+
+		if _, err := os.Stat(dstPath); err == nil {
+			if err := os.Remove(srcPath); err != nil {
+				return err
+			}
+
+			continue
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+
+		if err := os.Rename(srcPath, dstPath); err != nil {
+			if err := copyFile(srcPath, dstPath); err != nil {
+				return err
+			}
+			if err := os.Remove(srcPath); err != nil {
+				return err
+			}
+		}
+	}
+
+	return os.Remove(src)
 }
 
 // sync makes the local clone current. It returns true when new commits arrived

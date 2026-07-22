@@ -46,7 +46,7 @@ type listDocsArgs struct {
 
 type getDocArgs struct {
 	Repo string `json:"repo" jsonschema:"repository id (owner/name) that owns the document"`
-	Path string `json:"path" jsonschema:"doc path relative to the repo's krabby-docs/ dir, as returned by list_docs/search_docs"`
+	Path string `json:"path" jsonschema:"doc path relative to the repository's generated docs directory, as returned by list_docs/search_docs"`
 }
 
 // addDocTools registers the documentation + RAG tools. They surface even when
@@ -157,12 +157,11 @@ type setDocsConfigArgs struct {
 	CodeEmbedBatch   int    `json:"code_embed_batch,omitempty" jsonschema:"code inputs per embeddings request"`
 	CodeEmbedTimeout string `json:"code_embed_timeout,omitempty" jsonschema:"code embeddings request timeout as a Go duration, e.g. 30s"`
 
-	RAGEnabled      bool   `json:"rag_enabled,omitempty" jsonschema:"enable indexing + retrieval"`
-	RAGChunkSize    int    `json:"rag_chunk_size,omitempty" jsonschema:"target chunk length in characters"`
-	RAGChunkOverlap int    `json:"rag_chunk_overlap,omitempty" jsonschema:"character overlap between chunks"`
-	RAGTopK         int    `json:"rag_top_k,omitempty" jsonschema:"chunk matches fetched before grouping"`
-	RAGTopDocs      int    `json:"rag_top_docs,omitempty" jsonschema:"whole documents returned"`
-	StoreKind       string `json:"store_kind,omitempty" jsonschema:"vector store backend: 'embedded' or 'qdrant'"`
+	RAGEnabled      bool `json:"rag_enabled,omitempty" jsonschema:"enable indexing + retrieval"`
+	RAGChunkSize    int  `json:"rag_chunk_size,omitempty" jsonschema:"target chunk length in characters"`
+	RAGChunkOverlap int  `json:"rag_chunk_overlap,omitempty" jsonschema:"character overlap between chunks"`
+	RAGTopK         int  `json:"rag_top_k,omitempty" jsonschema:"chunk matches fetched before grouping"`
+	RAGTopDocs      int  `json:"rag_top_docs,omitempty" jsonschema:"whole documents returned"`
 
 	CodeRAGEnabled      bool     `json:"code_rag_enabled,omitempty" jsonschema:"enable source-code indexing and semantic search"`
 	CodeRAGChunkSize    int      `json:"code_rag_chunk_size,omitempty" jsonschema:"target code chunk length in characters"`
@@ -170,10 +169,6 @@ type setDocsConfigArgs struct {
 	CodeRAGTopK         int      `json:"code_rag_top_k,omitempty" jsonschema:"source snippets returned by default"`
 	CodeRAGInclude      []string `json:"code_rag_include,omitempty" jsonschema:"source globs to index (empty uses built-in source extensions)"`
 	CodeRAGExclude      []string `json:"code_rag_exclude,omitempty" jsonschema:"source globs to skip"`
-
-	QdrantURL        string `json:"qdrant_url,omitempty" jsonschema:"Qdrant base URL"`
-	QdrantAPIKey     string `json:"qdrant_api_key,omitempty" jsonschema:"Qdrant API key (write-only; leave empty to keep existing)"`
-	QdrantCollection string `json:"qdrant_collection,omitempty" jsonschema:"Qdrant collection name"`
 }
 
 // merge overlays only JSON properties actually sent by the MCP client. The
@@ -249,7 +244,7 @@ func settingsForArgs(ctx context.Context, mgr *manager.Manager, req *mcp.CallToo
 func addDocConfigTools(server *mcp.Server, mgr *manager.Manager) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "get_docs_config",
-		Description: "Return the current docs/RAG configuration (LLM, embedder, vector store, chunking). " +
+		Description: "Return the current docs/RAG configuration (LLM, embedders, chunking). " +
 			"Secrets are never returned; only *_key_set booleans indicate whether each API key is set.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyArgs) (*mcp.CallToolResult, any, error) {
 		cfg, err := mgr.GetDocsConfig(ctx)
