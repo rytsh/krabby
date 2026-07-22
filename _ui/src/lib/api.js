@@ -52,18 +52,21 @@ export const api = {
   owners: () => req("/repos/owners"),
   // activeRepos returns only repos with running jobs: [{ id, running, status }].
   activeRepos: () => req("/repos/active"),
+  // Repo ids are full paths (host/group/.../name) with any number of "/"
+  // segments, so repo actions use a GitLab-style "/-/" separator between the
+  // id and the action.
   repo: (id) => req(`/repos/${id}`),
   addRepo: (url, branch) =>
     req("/repos", { method: "POST", keepalive: true, body: JSON.stringify({ url, branch: branch || "" }) }),
   deleteRepo: (id) => req(`/repos/${id}`, { method: "DELETE", keepalive: true }),
-  refreshRepo: (id) => req(`/repos/${id}/refresh`, { method: "POST", keepalive: true }),
-  cancelRepoJob: (id) => req(`/repos/${id}/cancel`, { method: "POST", keepalive: true }),
+  refreshRepo: (id) => req(`/repos/${id}/-/refresh`, { method: "POST", keepalive: true }),
+  cancelRepoJob: (id) => req(`/repos/${id}/-/cancel`, { method: "POST", keepalive: true }),
   generate: (id, targets) =>
-    req(`/repos/${id}/generate`, { method: "POST", keepalive: true, body: JSON.stringify({ targets }) }),
-  lockStatus: (id) => req(`/repos/${id}/lock`),
+    req(`/repos/${id}/-/generate`, { method: "POST", keepalive: true, body: JSON.stringify({ targets }) }),
+  lockStatus: (id) => req(`/repos/${id}/-/lock`),
   files: (id, subdir = "", recursive = false) =>
-    req(`/repos/${id}/files?subdir=${encodeURIComponent(subdir)}&recursive=${recursive}`),
-  file: (id, path) => req(`/repos/${id}/file?path=${encodeURIComponent(path)}`),
+    req(`/repos/${id}/-/files?subdir=${encodeURIComponent(subdir)}&recursive=${recursive}`),
+  file: (id, path) => req(`/repos/${id}/-/file?path=${encodeURIComponent(path)}`),
   credentials: () => req("/credentials"),
   mcpKey: () => req("/mcp/api-key"),
   setMcpKey: (apiKey) => req("/mcp/api-key", { method: "PUT", body: JSON.stringify({ api_key: apiKey }) }),
@@ -79,6 +82,6 @@ export const api = {
     req(
       `/code/search?q=${encodeURIComponent(q)}&repo=${encodeURIComponent(repo)}&mode=${mode}&page=${page}&per_page=${perPage}&top=${top}`,
     ),
-  docs: (id) => req(`/repos/${id}/docs`),
-  doc: (id, path) => req(`/repos/${id}/doc?path=${encodeURIComponent(path)}`),
+  docs: (id) => req(`/repos/${id}/-/docs`),
+  doc: (id, path) => req(`/repos/${id}/-/doc?path=${encodeURIComponent(path)}`),
 };

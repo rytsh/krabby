@@ -510,7 +510,7 @@
         </div>
         <div class="grid grid-cols-3 divide-x divide-line">
           <a
-            href={`api/v1/repos/${repoId}/html`}
+            href={`api/v1/repos/${repoId}/-/html`}
             target="_blank"
             rel="noreferrer"
             class="flex flex-col items-center gap-1.5 px-2 py-2.5 text-dim transition-colors hover:bg-surface-2 hover:text-fg"
@@ -519,7 +519,7 @@
             Visualize
           </a>
           <a
-            href={`api/v1/repos/${repoId}/report`}
+            href={`api/v1/repos/${repoId}/-/report`}
             target="_blank"
             rel="noreferrer"
             class="flex flex-col items-center gap-1.5 px-2 py-2.5 text-dim transition-colors hover:bg-surface-2 hover:text-fg"
@@ -528,7 +528,7 @@
             Report
           </a>
           <a
-            href={`api/v1/repos/${repoId}/graph`}
+            href={`api/v1/repos/${repoId}/-/graph`}
             target="_blank"
             rel="noreferrer"
             class="flex flex-col items-center gap-1.5 px-2 py-2.5 text-dim transition-colors hover:bg-surface-2 hover:text-fg"

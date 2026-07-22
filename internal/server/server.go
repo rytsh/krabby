@@ -79,21 +79,35 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	api.GET("/repos/owners", server.Wrap(listRepoOwners(mgr)))
 	api.GET("/repos/active", server.Wrap(listActiveRepos(mgr)))
 	api.POST("/repos", server.Wrap(addRepo(mgr)))
-	api.GET("/repos/{owner}/{name}", server.Wrap(getRepo(mgr)))
-	api.DELETE("/repos/{owner}/{name}", server.Wrap(deleteRepo(mgr)))
-	api.POST("/repos/{owner}/{name}/refresh", server.Wrap(refreshRepo(mgr)))
-	api.POST("/repos/{owner}/{name}/generate", server.Wrap(generateRepo(mgr)))
-	api.POST("/repos/{owner}/{name}/cancel", server.Wrap(cancelRepoJob(mgr)))
-	api.POST("/repos/{owner}/{name}/lock", server.Wrap(lockRepo(mgr)))
-	api.GET("/repos/{owner}/{name}/lock", server.Wrap(lockStatus(mgr)))
-	api.DELETE("/repos/{owner}/{name}/lock", server.Wrap(unlockRepo(mgr)))
-	api.GET("/repos/{owner}/{name}/graph", repoArtifact(mgr, graphify.GraphPath))
-	api.GET("/repos/{owner}/{name}/report", repoArtifact(mgr, graphify.ReportPath))
-	api.GET("/repos/{owner}/{name}/html", repoArtifact(mgr, graphify.HTMLPath))
-	api.GET("/repos/{owner}/{name}/files", server.Wrap(listRepoFiles(mgr)))
-	api.GET("/repos/{owner}/{name}/file", server.Wrap(readRepoFile(mgr)))
-	api.GET("/repos/{owner}/{name}/docs", server.Wrap(listDocs(mgr)))
-	api.GET("/repos/{owner}/{name}/doc", server.Wrap(getDoc(mgr)))
+
+	// Repo ids are full paths (host/group/.../name) with any number of "/"
+	// segments, so repo-scoped routes use a greedy wildcard and a GitLab-style
+	// "/-/" separator between the id and the action:
+	//   GET    /repos/<id>                  repo record
+	//   POST   /repos/<id>/-/refresh        queue refresh
+	//   GET    /repos/<id>/-/files          list clone files
+	//   ...
+	api.GET("/repos/{ref...}", server.Wrap(dispatchRepo(mgr, map[string]ada.HandlerFunc{
+		"":       getRepo(mgr),
+		"lock":   lockStatus(mgr),
+		"graph":  repoArtifact(mgr, graphify.GraphPath),
+		"report": repoArtifact(mgr, graphify.ReportPath),
+		"html":   repoArtifact(mgr, graphify.HTMLPath),
+		"files":  listRepoFiles(mgr),
+		"file":   readRepoFile(mgr),
+		"docs":   listDocs(mgr),
+		"doc":    getDoc(mgr),
+	})))
+	api.POST("/repos/{ref...}", server.Wrap(dispatchRepo(mgr, map[string]ada.HandlerFunc{
+		"refresh":  refreshRepo(mgr),
+		"generate": generateRepo(mgr),
+		"cancel":   cancelRepoJob(mgr),
+		"lock":     lockRepo(mgr),
+	})))
+	api.DELETE("/repos/{ref...}", server.Wrap(dispatchRepo(mgr, map[string]ada.HandlerFunc{
+		"":     deleteRepo(mgr),
+		"lock": unlockRepo(mgr),
+	})))
 	api.GET("/docs/search", server.Wrap(searchDocs(mgr)))
 	api.GET("/code/search", server.Wrap(searchCode(mgr)))
 	api.GET("/docs/config", server.Wrap(getDocsConfig(mgr)))
@@ -275,8 +289,59 @@ type addRepoRequest struct {
 	Branch string `json:"branch"`
 }
 
+// repoRef splits the greedy {ref...} path value into the raw repo id and the
+// action after the "/-/" separator ("" when the ref has no action suffix).
+func repoRef(r *http.Request) (id, action string) {
+	ref := strings.Trim(r.PathValue("ref"), "/")
+	if i := strings.Index(ref, "/-/"); i >= 0 {
+		return strings.Trim(ref[:i], "/"), ref[i+3:]
+	}
+
+	return ref, ""
+}
+
+// repoID returns the canonical repo id for the request. dispatchRepo resolves
+// the raw ref (which may be a legacy "owner/name" suffix) once and stores the
+// canonical id as the "repo_id" path value; unresolved refs fall back to the
+// raw id so handlers can produce a useful 404.
 func repoID(r *http.Request) string {
-	return r.PathValue("owner") + "/" + r.PathValue("name")
+	if id := r.PathValue("repo_id"); id != "" {
+		return id
+	}
+
+	id, _ := repoRef(r)
+
+	return id
+}
+
+// dispatchRepo routes /repos/{ref...} requests: it splits "<id>[/-/<action>]",
+// resolves the id (exact match or unique legacy-suffix match) to its canonical
+// form, and invokes the handler registered for the action.
+func dispatchRepo(mgr *manager.Manager, routes map[string]ada.HandlerFunc) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		id, action := repoRef(c.Request)
+		if id == "" {
+			return c.SetStatus(http.StatusNotFound).SendJSON(map[string]string{"error": "repo id is required"})
+		}
+
+		handler, ok := routes[action]
+		if !ok {
+			return c.SetStatus(http.StatusNotFound).SendJSON(map[string]string{"error": fmt.Sprintf("unknown repo action %q", action)})
+		}
+
+		repo, err := mgr.Registry().Resolve(c.Request.Context(), id)
+		if err != nil {
+			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+		}
+
+		if repo != nil {
+			id = repo.ID
+		}
+
+		c.Request.SetPathValue("repo_id", id)
+
+		return handler(c)
+	}
 }
 
 // repoView decorates a repo record with the transient in-memory activity so
@@ -583,29 +648,27 @@ func unlockRepo(mgr *manager.Manager) ada.HandlerFunc {
 // repoArtifact serves a graphify output file (graph.json, GRAPH_REPORT.md,
 // graph.html) for a tracked repository so external tools can consume them
 // without filesystem access.
-func repoArtifact(mgr *manager.Manager, pathFn func(repoPath string) string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		repo, err := mgr.Registry().Get(r.Context(), repoID(r))
+func repoArtifact(mgr *manager.Manager, pathFn func(repoPath string) string) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		repo, err := mgr.Registry().Get(c.Request.Context(), repoID(c.Request))
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-
-			return
+			return c.Err(err)
 		}
 
 		if repo == nil {
-			http.Error(w, "repo not found", http.StatusNotFound)
-
-			return
+			return c.SetStatus(http.StatusNotFound).SendJSON(map[string]string{"error": "repo not found"})
 		}
 
 		path := pathFn(repo.Path)
 		if _, err := os.Stat(path); err != nil {
-			http.Error(w, "artifact not built yet (status: "+repo.Status+")", http.StatusNotFound)
-
-			return
+			return c.SetStatus(http.StatusNotFound).SendJSON(map[string]string{
+				"error": "artifact not built yet (status: " + repo.Status + ")",
+			})
 		}
 
-		http.ServeFile(w, r, path)
+		http.ServeFile(c.Response, c.Request, path)
+
+		return nil
 	}
 }
 
@@ -963,7 +1026,13 @@ func githubWebhook(secret string, mgr *manager.Manager) http.HandlerFunc {
 			return
 		}
 
-		repo, err := mgr.Registry().Get(r.Context(), event.Repository.FullName)
+		// full_name is "owner/name"; ids are full paths (host/owner/name), so
+		// try the exact github.com id first, then a suffix match for
+		// GitHub Enterprise hosts.
+		repo, err := mgr.Registry().Resolve(r.Context(), "github.com/"+event.Repository.FullName)
+		if err == nil && repo == nil {
+			repo, err = mgr.Registry().Resolve(r.Context(), event.Repository.FullName)
+		}
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 

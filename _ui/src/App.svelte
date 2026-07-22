@@ -11,6 +11,7 @@
     loadOwnerRepos,
     ownerOf,
   } from "./lib/repos.js";
+  import { shortLabels, nameOf, sidebarPathMode } from "./lib/paths.js";
   import Icon from "./lib/Icon.svelte";
   import BrandIcon from "./lib/BrandIcon.svelte";
   import Status from "./lib/Status.svelte";
@@ -23,7 +24,8 @@
   import About from "./routes/About.svelte";
 
   // Resolve the current route from the pathname (query string stripped). Repo
-  // ids are owner/name, so /repos/<owner>/<name> maps to the detail view.
+  // ids are full paths (host/group/.../name) with any number of "/" segments,
+  // so everything after /repos/ maps to the detail view.
   let route = $derived.by(() => {
     const p = $path.split("?")[0].replace(/\/$/, "") || "/";
     if (p === "/" || p === "/repos") return { view: "repos" };
@@ -82,10 +84,13 @@
     if (next) loadOwnerRepos(owner);
   }
 
-  function repoName(id) {
-    const idx = id.indexOf("/");
-    return idx > 0 ? id.slice(idx + 1) : id;
-  }
+  // Group display labels: unique path prefixes are trimmed away (keeping one
+  // shared parent segment as context) unless the user prefers full paths.
+  let groupLabels = $derived.by(() => {
+    const keys = $owners.map((g) => g.owner);
+    if ($sidebarPathMode === "full") return Object.fromEntries(keys.map((k) => [k, k]));
+    return shortLabels(keys);
+  });
 
   const SIDEBAR_WIDTH_KEY = "krabby-sidebar-width";
   const savedSidebarW = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY));
@@ -168,10 +173,11 @@
             class="flex w-full cursor-pointer items-center gap-1.5 rounded-md px-2.5 py-1.5 text-left text-[13px] text-dim transition-colors hover:bg-surface-2 hover:text-fg"
             onclick={() => toggleGroup(group.owner)}
             aria-expanded={!!expanded[group.owner]}
+            title={group.owner}
           >
             <Icon name={expanded[group.owner] ? "chevron-down" : "chevron-right"} size={13} />
             <Icon name="folder" size={13} />
-            <span class="truncate font-mono">{group.owner || "(root)"}</span>
+            <span class="truncate font-mono">{groupLabels[group.owner] || group.owner || "(root)"}</span>
             <span class="ml-auto text-[11px] text-faint">{group.count}</span>
           </button>
           {#if expanded[group.owner]}
@@ -188,7 +194,7 @@
                   class:!text-fg={view === "repo" && repoId === r.id}
                 >
                   <Status status={r.status} dot />
-                  <span class="truncate font-mono">{repoName(r.id)}</span>
+                  <span class="truncate font-mono">{nameOf(r.id)}</span>
                 </a>
               {/each}
             {/if}

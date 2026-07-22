@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { api } from "../lib/api.js";
   import { successToast } from "../lib/toast.js";
+  import { sidebarPathMode } from "../lib/paths.js";
 
   let settings = $state(null);
   let creds = $state([]);
@@ -279,6 +280,39 @@
 {:else if !error}
   <div class="mt-4 text-dim">Loading…</div>
 {/if}
+
+<h2 class="mb-1 mt-10 text-[15px] font-semibold">Appearance</h2>
+<p class="text-dim">Display preferences, stored in this browser only.</p>
+
+<div class="card mt-3 p-4">
+  <div class="flex flex-wrap items-center justify-between gap-3 text-[13px]">
+    <div class="flex min-w-0 flex-col gap-0.5">
+      <span>Sidebar repository paths</span>
+      <span class="text-[12px] text-faint">
+        Repos are tracked by their full path (host/group/…/name). Smart hides the parts every group
+        shares and keeps one parent segment for context; full always shows the complete path.
+      </span>
+    </div>
+    <div class="flex shrink-0 gap-1" role="tablist" aria-label="Sidebar path display">
+      <button
+        type="button"
+        class="btn btn-sm"
+        class:btn-primary={$sidebarPathMode === "smart"}
+        role="tab"
+        aria-selected={$sidebarPathMode === "smart"}
+        onclick={() => sidebarPathMode.set("smart")}>Smart</button
+      >
+      <button
+        type="button"
+        class="btn btn-sm"
+        class:btn-primary={$sidebarPathMode === "full"}
+        role="tab"
+        aria-selected={$sidebarPathMode === "full"}
+        onclick={() => sidebarPathMode.set("full")}>Full path</button
+      >
+    </div>
+  </div>
+</div>
 
 <h2 class="mb-1 mt-10 text-[15px] font-semibold">Docs &amp; RAG</h2>
 <p class="text-dim">

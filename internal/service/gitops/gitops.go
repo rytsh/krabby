@@ -143,15 +143,21 @@ func (g *Git) DiffNames(ctx context.Context, dir, from, to string) ([]string, er
 	return files, nil
 }
 
-var repoIDRe = regexp.MustCompile(`^[\w.-]+/[\w.-]+$`)
+// repoIDRe validates a full repo id: two or more "/"-separated segments of
+// word characters, dots and dashes (host/group/.../name).
+var repoIDRe = regexp.MustCompile(`^[\w.-]+(/[\w.-]+)+$`)
 
-// ParseRepoID extracts "owner/name" from common git URL forms:
-// git@host:owner/name.git, ssh://git@host/owner/name.git, https://host/owner/name(.git).
+// ParseRepoID derives the full repository id "host/group/.../name" from
+// common git URL forms: git@host:owner/name.git, ssh://git@host/owner/name.git,
+// https://host/group/sub/name(.git). The host and the whole URL path are
+// preserved (nested GitLab groups included) so repositories on different git
+// servers or in different groups can never collide. A bare "a/b/c" input is
+// kept as-is.
 func ParseRepoID(url string) (string, error) {
 	s := strings.TrimSuffix(strings.TrimSpace(url), "/")
 	s = strings.TrimSuffix(s, ".git")
 
-	var path string
+	var host, path string
 
 	switch {
 	case strings.Contains(s, "://"): // https:// or ssh://
@@ -160,27 +166,36 @@ func ParseRepoID(url string) (string, error) {
 			return "", fmt.Errorf("invalid git url: %s", url)
 		}
 
-		_, p, ok := strings.Cut(rest, "/")
+		h, p, ok := strings.Cut(rest, "/")
 		if !ok {
 			return "", fmt.Errorf("invalid git url: %s", url)
 		}
 
-		path = p
+		host, path = h, p
 	case strings.Contains(s, ":"): // scp-like git@host:owner/name
-		_, p, _ := strings.Cut(s, ":")
-		path = p
+		h, p, _ := strings.Cut(s, ":")
+		host, path = h, p
 	default:
 		path = s
 	}
 
-	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) < 2 {
-		return "", fmt.Errorf("cannot derive owner/name from url: %s", url)
+	// Strip user@ and :port from the host, keeping the bare hostname.
+	if host != "" {
+		if _, h, ok := strings.Cut(host, "@"); ok {
+			host = h
+		}
+		if h, _, ok := strings.Cut(host, ":"); ok {
+			host = h
+		}
 	}
 
-	id := parts[len(parts)-2] + "/" + parts[len(parts)-1]
+	id := strings.Trim(path, "/")
+	if host != "" {
+		id = host + "/" + id
+	}
+
 	if !repoIDRe.MatchString(id) {
-		return "", fmt.Errorf("cannot derive owner/name from url: %s", url)
+		return "", fmt.Errorf("cannot derive repo id from url: %s", url)
 	}
 
 	return id, nil

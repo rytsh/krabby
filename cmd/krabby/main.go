@@ -130,6 +130,12 @@ func run(ctx context.Context) error {
 	} else if cerr := mgr.Configure(ctx, s); cerr != nil {
 		slog.Error("configure docs/rag (disabled until fixed via settings)", "error", cerr)
 	}
+	// Repos tracked before full-path ids used the last two URL segments as id,
+	// which let repos from different (nested) groups collide; re-key them.
+	// Runs after Configure so stale vector entries can be dropped.
+	if err := mgr.MigrateRepoIDs(ctx); err != nil {
+		slog.Error("migrate legacy repo ids", "error", err)
+	}
 	if err := mgr.WarmCodeSearch(ctx); err != nil {
 		slog.Error("warm normal code search index", "error", err)
 	}

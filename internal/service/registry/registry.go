@@ -82,7 +82,7 @@ func (s *Stages) Get(name string) *StageState {
 
 // Repo is a tracked repository record.
 type Repo struct {
-	ID          string    `bw:"id,pk"        json:"id"` // owner/name
+	ID          string    `bw:"id,pk"        json:"id"` // full path: host/group/.../name
 	URL         string    `bw:"url"          json:"url"`
 	Branch      string    `bw:"branch"       json:"branch,omitempty"`
 	Path        string    `bw:"path"         json:"path"`
@@ -149,8 +149,9 @@ func (r *Registry) List(ctx context.Context) ([]*Repo, error) {
 
 // ListOptions controls server-side pagination, search and sorting for
 // ListPaged. Page is 1-based; a Page or PerPage <= 0 falls back to sane
-// defaults. Search matches the repo id (owner/name) case-insensitively.
-// Owner, when set, restricts the result to a single owner prefix.
+// defaults. Search matches the repo id (host/group/.../name)
+// case-insensitively. Owner, when set, restricts the result to the direct
+// children of one directory prefix (everything before the repo name).
 type ListOptions struct {
 	Page    int
 	PerPage int
@@ -172,9 +173,11 @@ const (
 // quirk for repo-id search, never a correctness or safety issue.
 func buildFilter(q *query.Query, opts ListOptions) {
 	if owner := strings.TrimSpace(opts.Owner); owner != "" {
-		// Owner prefix match: "owner/".
+		// Direct children of the owner directory only: "owner/<name>" matches,
+		// "owner/<sub>/<name>" does not (that repo belongs to a deeper group).
 		q.Where = append(q.Where,
-			query.NewExpressionCmp(query.OperatorILike, "id", owner+"/%").Expression())
+			query.NewExpressionCmp(query.OperatorILike, "id", owner+"/%").Expression(),
+			query.NewExpressionCmp(query.OperatorNILike, "id", owner+"/%/%").Expression())
 	}
 
 	if s := strings.TrimSpace(opts.Search); s != "" {
@@ -235,15 +238,16 @@ func (r *Registry) Count(ctx context.Context, opts ListOptions) (int, error) {
 	return int(n), nil
 }
 
-// OwnerGroup is one owner prefix and how many repos it holds.
+// OwnerGroup is one directory prefix (everything before the repo name) and
+// how many repos it holds directly.
 type OwnerGroup struct {
 	Owner string `json:"owner"`
 	Count int    `json:"count"`
 }
 
-// Owners returns the distinct owner prefixes (the part before the first "/"
-// in each id) with their repo counts, sorted alphabetically. Repos without a
-// "/" are grouped under the empty owner "". Only the ids are scanned, so this
+// Owners returns the distinct directory prefixes (the id up to the last "/")
+// with their direct repo counts, sorted alphabetically. Repos without a "/"
+// are grouped under the empty owner "". Only the ids are scanned, so this
 // stays cheap even with many repositories.
 func (r *Registry) Owners(ctx context.Context) ([]OwnerGroup, error) {
 	counts := map[string]int{}
@@ -252,7 +256,7 @@ func (r *Registry) Owners(ctx context.Context) ([]OwnerGroup, error) {
 	q.AddField("id")
 	if err := r.bucket.Walk(ctx, q, func(repo *Repo) error {
 		owner := ""
-		if idx := strings.IndexByte(repo.ID, '/'); idx > 0 {
+		if idx := strings.LastIndexByte(repo.ID, '/'); idx > 0 {
 			owner = repo.ID[:idx]
 		}
 		counts[owner]++
@@ -269,6 +273,50 @@ func (r *Registry) Owners(ctx context.Context) ([]OwnerGroup, error) {
 	sort.Slice(groups, func(i, j int) bool { return groups[i].Owner < groups[j].Owner })
 
 	return groups, nil
+}
+
+// Resolve returns the repo identified by ref. An exact id match wins; when
+// none exists, ref is treated as a path suffix (e.g. the legacy "owner/name"
+// form, a webhook full_name, or a hostless path) and matched against the
+// tracked ids segment-wise. A unique suffix match resolves; an ambiguous one
+// returns an error listing the candidates so callers can be precise.
+func (r *Registry) Resolve(ctx context.Context, ref string) (*Repo, error) {
+	ref = strings.Trim(strings.TrimSpace(ref), "/")
+	if ref == "" {
+		return nil, nil
+	}
+
+	repo, err := r.Get(ctx, ref)
+	if err != nil || repo != nil {
+		return repo, err
+	}
+
+	suffix := "/" + ref
+
+	var matches []string
+
+	q := query.New()
+	q.AddField("id")
+	if err := r.bucket.Walk(ctx, q, func(rec *Repo) error {
+		if strings.HasSuffix(rec.ID, suffix) {
+			matches = append(matches, rec.ID)
+		}
+
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("scan repo ids; %w", err)
+	}
+
+	switch len(matches) {
+	case 0:
+		return nil, nil
+	case 1:
+		return r.Get(ctx, matches[0])
+	default:
+		sort.Strings(matches)
+
+		return nil, fmt.Errorf("ambiguous repo %q: matches %s", ref, strings.Join(matches, ", "))
+	}
 }
 
 // Upsert inserts or replaces a repo record.

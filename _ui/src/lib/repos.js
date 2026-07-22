@@ -63,8 +63,9 @@ export async function invalidateOwners() {
   await Promise.all(loaded.map((owner) => loadOwnerRepos(owner, true)));
 }
 
-// ownerOf returns the owner prefix of a repo id ("" for root-level ids).
+// ownerOf returns the group prefix of a repo id: everything before the last
+// "/" ("" for bare names). Matches the server-side Owners() grouping.
 export function ownerOf(id) {
-  const idx = id.indexOf("/");
+  const idx = id.lastIndexOf("/");
   return idx > 0 ? id.slice(0, idx) : "";
 }

@@ -8,13 +8,17 @@ func TestParseRepoID(t *testing.T) {
 		want    string
 		wantErr bool
 	}{
-		{url: "git@github.com:rytsh/krabby.git", want: "rytsh/krabby"},
-		{url: "git@github.com:rytsh/krabby", want: "rytsh/krabby"},
-		{url: "https://github.com/rakunlabs/ada.git", want: "rakunlabs/ada"},
-		{url: "https://github.com/rakunlabs/ada", want: "rakunlabs/ada"},
-		{url: "https://github.com/rakunlabs/ada/", want: "rakunlabs/ada"},
-		{url: "ssh://git@github.com/owner/name.git", want: "owner/name"},
-		{url: "https://gitlab.example.com/group/sub/project.git", want: "sub/project"},
+		{url: "git@github.com:rytsh/krabby.git", want: "github.com/rytsh/krabby"},
+		{url: "git@github.com:rytsh/krabby", want: "github.com/rytsh/krabby"},
+		{url: "https://github.com/rakunlabs/ada.git", want: "github.com/rakunlabs/ada"},
+		{url: "https://github.com/rakunlabs/ada", want: "github.com/rakunlabs/ada"},
+		{url: "https://github.com/rakunlabs/ada/", want: "github.com/rakunlabs/ada"},
+		{url: "ssh://git@github.com/owner/name.git", want: "github.com/owner/name"},
+		{url: "ssh://git@git.example.com:2222/owner/name.git", want: "git.example.com/owner/name"},
+		// Host + every path segment (nested GitLab groups included) keep repos
+		// on different git servers or groups from colliding.
+		{url: "https://gitlab.example.com/group/sub/project.git", want: "gitlab.example.com/group/sub/project"},
+		{url: "git@gitlab.com:group/sub/deeper/project.git", want: "gitlab.com/group/sub/deeper/project"},
 		{url: "owner/name", want: "owner/name"},
 		{url: "not-a-url", wantErr: true},
 		{url: "", wantErr: true},
