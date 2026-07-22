@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func TestVerifyGithubSignature(t *testing.T) {
+func TestVerifyGitWebhook(t *testing.T) {
 	secret := "topsecret"
 	body := []byte(`{"repository":{"full_name":"rytsh/krabby"}}`)
 
@@ -17,16 +17,38 @@ func TestVerifyGithubSignature(t *testing.T) {
 	mac.Write(body)
 	valid := "sha256=" + hex.EncodeToString(mac.Sum(nil))
 
-	if !verifyGithubSignature(secret, body, valid) {
+	githubHeader := http.Header{"X-Hub-Signature-256": []string{valid}}
+	if !verifyGitWebhook(secret, body, githubHeader) {
 		t.Error("valid signature rejected")
 	}
 
-	if verifyGithubSignature(secret, body, "sha256=deadbeef") {
+	if verifyGitWebhook(secret, body, http.Header{"X-Gitea-Signature": []string{"deadbeef"}}) {
 		t.Error("invalid signature accepted")
 	}
 
-	if verifyGithubSignature(secret, body, "") {
+	if verifyGitWebhook(secret, body, http.Header{}) {
 		t.Error("missing signature accepted")
+	}
+
+	if !verifyGitWebhook(secret, body, http.Header{"X-Gitlab-Token": []string{secret}}) {
+		t.Error("valid gitlab token rejected")
+	}
+	if !verifyGitWebhook(secret, body, http.Header{"Authorization": []string{"Bearer " + secret}}) {
+		t.Error("provider-neutral bearer token rejected")
+	}
+}
+
+func TestGitEventRepoRef(t *testing.T) {
+	var event gitPushEvent
+	event.Project.GitHTTPURL = "https://gitlab.example.com/group/sub/project.git"
+	if got := gitEventRepoRef(event); got != "gitlab.example.com/group/sub/project" {
+		t.Fatalf("gitEventRepoRef() = %q", got)
+	}
+
+	event.Project.GitHTTPURL = ""
+	event.Project.PathWithNamespace = "group/sub/project"
+	if got := gitEventRepoRef(event); got != "group/sub/project" {
+		t.Fatalf("gitEventRepoRef() fallback = %q", got)
 	}
 }
 

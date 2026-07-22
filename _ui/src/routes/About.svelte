@@ -98,7 +98,8 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
       tools: [
         ["list_docs", "List the generated markdown documentation files for a repository."],
         ["get_doc", "Return one whole generated markdown document by its doc path."],
-        ["search_docs", "RAG search over generated markdown documentation."],
+        ["search_docs", "RAG search across repo docs and named web-source collections."],
+        ["list_sources", "List Custom web and Confluence collections and their web:<name> search keys."],
         ["search_code", "Normal bw full-text or semantic source search, with locations and pagination."],
       ],
     },

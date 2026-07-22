@@ -13,6 +13,7 @@
     ready: "var(--color-ok)",
     building: "var(--color-busy)",
     cloning: "var(--color-busy)",
+    fetching: "var(--color-busy)",
     pending: "var(--color-warn)",
     error: "var(--color-err)",
   };

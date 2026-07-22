@@ -110,7 +110,7 @@ func TestIndexAndRetrieveWholeDoc(t *testing.T) {
 		t.Fatalf("Index: %v", err)
 	}
 
-	docs, err := s.Retrieve(ctx, "o/r", "tell me about beta", 1)
+	docs, err := s.Retrieve(ctx, vectorstore.FilterKey("o/r"), "tell me about beta", 1)
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestIndexAndRetrieveWholeDoc(t *testing.T) {
 	}
 
 	// Nested docs are reachable too.
-	docs, err = s.Retrieve(ctx, "o/r", "gamma question", 1)
+	docs, err = s.Retrieve(ctx, vectorstore.FilterKey("o/r"), "gamma question", 1)
 	if err != nil {
 		t.Fatalf("Retrieve gamma: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestIndexRemovesStaleDocs(t *testing.T) {
 		t.Fatalf("re-Index: %v", err)
 	}
 
-	docs, err := s.Retrieve(ctx, "o/r", "beta beta beta", 5)
+	docs, err := s.Retrieve(ctx, vectorstore.FilterKey("o/r"), "beta beta beta", 5)
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestRetrieveAcrossRepos(t *testing.T) {
 	}
 
 	// repo == "" searches all repos.
-	docs, err := s.Retrieve(ctx, "", "beta", 1)
+	docs, err := s.Retrieve(ctx, vectorstore.FilterKey(""), "beta", 1)
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
@@ -209,7 +209,7 @@ func TestRetrieveAcrossRepos(t *testing.T) {
 func TestRetrieveEmptyQuestion(t *testing.T) {
 	s := newTestService(t, nil)
 
-	if _, err := s.Retrieve(context.Background(), "", "  ", 5); err == nil {
+	if _, err := s.Retrieve(context.Background(), vectorstore.FilterKey(""), "  ", 5); err == nil {
 		t.Fatal("expected error for empty question")
 	}
 }

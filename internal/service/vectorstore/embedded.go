@@ -176,14 +176,14 @@ func insertBatched(ctx context.Context, bucket *bw.Bucket[chunkRecord], records 
 	return nil
 }
 
-func (s *embedded) Search(ctx context.Context, repo string, vec []float32, topK int) ([]Match, error) {
+func (s *embedded) Search(ctx context.Context, filter Filter, vec []float32, topK int) ([]Match, error) {
 	if topK <= 0 {
 		return nil, nil
 	}
 
 	opts := bw.SearchVectorOptions{K: topK}
-	if repo != "" {
-		opts.Filter = repoQuery(repo)
+	if q := filterQuery(filter); q != nil {
+		opts.Filter = q
 	}
 
 	s.h.opMu.RLock()
@@ -326,6 +326,38 @@ func (s *embedded) Close() error {
 func repoQuery(repo string) *query.Query {
 	q := query.New()
 	q.Where = append(q.Where, query.NewExpressionCmp(query.OperatorEq, "repo", repo).Expression())
+
+	return q
+}
+
+// filterQuery translates a search Filter into a bw where clause, or nil when
+// the filter matches everything.
+func filterQuery(f Filter) *query.Query {
+	if f.IsZero() {
+		return nil
+	}
+
+	q := query.New()
+
+	switch len(f.Keys) {
+	case 0:
+	case 1:
+		q.Where = append(q.Where,
+			query.NewExpressionCmp(query.OperatorEq, "repo", f.Keys[0]).Expression())
+	default:
+		q.Where = append(q.Where,
+			query.NewExpressionCmp(query.OperatorIn, "repo", f.Keys).Expression())
+	}
+
+	if f.Prefix != "" {
+		q.Where = append(q.Where,
+			query.NewExpressionCmp(query.OperatorLike, "repo", f.Prefix+"%").Expression())
+	}
+
+	if f.ExcludePrefix != "" {
+		q.Where = append(q.Where,
+			query.NewExpressionCmp(query.OperatorNLike, "repo", f.ExcludePrefix+"%").Expression())
+	}
 
 	return q
 }

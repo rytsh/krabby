@@ -32,14 +32,40 @@ type Match struct {
 	Score   float32 `json:"score"`
 }
 
+// Filter restricts a search to a subset of the indexed keys (repo ids or
+// web-source scope keys). The zero value matches everything. All set fields
+// are combined with AND.
+type Filter struct {
+	// Keys restricts matches to these exact keys.
+	Keys []string
+	// Prefix restricts matches to keys starting with this prefix (e.g. the
+	// web-source namespace "web:").
+	Prefix string
+	// ExcludePrefix drops keys starting with this prefix.
+	ExcludePrefix string
+}
+
+// FilterKey builds a single-key filter; an empty key matches everything.
+func FilterKey(key string) Filter {
+	if key == "" {
+		return Filter{}
+	}
+
+	return Filter{Keys: []string{key}}
+}
+
+// IsZero reports whether the filter matches everything.
+func (f Filter) IsZero() bool {
+	return len(f.Keys) == 0 && f.Prefix == "" && f.ExcludePrefix == ""
+}
+
 // Store is the vector index used by docs and code RAG.
 type Store interface {
 	// Upsert inserts or replaces the given items. IDs are stable so re-indexing
 	// a doc overwrites its prior chunks.
 	Upsert(ctx context.Context, items []Item) error
-	// Search returns the topK nearest chunks. repo == "" searches all repos;
-	// otherwise results are restricted to that repo.
-	Search(ctx context.Context, repo string, vec []float32, topK int) ([]Match, error)
+	// Search returns the topK nearest chunks whose key matches the filter.
+	Search(ctx context.Context, filter Filter, vec []float32, topK int) ([]Match, error)
 	// DeleteRepo removes all vectors belonging to a repo.
 	DeleteRepo(ctx context.Context, repo string) error
 	// HasRepo reports whether the index holds at least one vector for the

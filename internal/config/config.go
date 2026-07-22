@@ -25,7 +25,12 @@ var (
 	Version = "v0.0.0"
 )
 
-// Config is the root configuration for krabby.
+// Config is the root file/env configuration for krabby. It intentionally
+// carries only the system-level settings that require a restart (listen
+// address, data directory, tool paths). Everything workload-related — docs
+// generation, LLM/embedder endpoints, RAG tuning, git polling, webhook
+// verification — is runtime-mutable and lives in the persisted settings
+// store, managed via the UI and REST API (see internal/service/settings).
 type Config struct {
 	LogLevel string `cfg:"log_level" default:"info"`
 	// DataDir holds clones, merged graph and registry state. "~" is expanded.
@@ -33,23 +38,7 @@ type Config struct {
 
 	Server   Server   `cfg:"server"`
 	MCP      MCP      `cfg:"mcp"`
-	Git      Git      `cfg:"git"`
 	Graphify Graphify `cfg:"graphify"`
-	Webhook  Webhook  `cfg:"webhook"`
-
-	// Docs configures LLM-generated markdown documentation per repo.
-	Docs Docs `cfg:"docs"`
-	// LLM is the OpenAI-compatible chat client used by docgen and ask_docs.
-	LLM LLM `cfg:"llm"`
-	// Embedder is the OpenAI-compatible embeddings client used by RAG.
-	Embedder Embedder `cfg:"embedder"`
-	// RAG configures chunking, retrieval and the vector store backend.
-	RAG RAG `cfg:"rag"`
-	// CodeEmbedder is a dedicated embeddings client for source-code RAG (e.g.
-	// Codestral Embed). When unset, the docs Embedder is used for code too.
-	CodeEmbedder Embedder `cfg:"code_embedder"`
-	// CodeRAG configures semantic search over raw source code.
-	CodeRAG CodeRAG `cfg:"code_rag"`
 
 	// Repos seeds the registry at startup; repos can also be added at runtime.
 	Repos []RepoSeed `cfg:"repos"`
@@ -79,14 +68,6 @@ type MCP struct {
 	WaitTimeout time.Duration `cfg:"wait_timeout" default:"300s"`
 }
 
-// Git configures repository access and background polling.
-type Git struct {
-	// SSHKeyPath, when set, is used via GIT_SSH_COMMAND for private repos.
-	SSHKeyPath string `cfg:"ssh_key_path"`
-	// PollInterval is how often the scheduler checks remotes for new commits.
-	PollInterval time.Duration `cfg:"poll_interval" default:"1h"`
-}
-
 // Graphify configures the graphify CLI integration.
 type Graphify struct {
 	// Bin is the graphify CLI binary (PATH lookup allowed).
@@ -109,11 +90,9 @@ type Graphify struct {
 	Merge bool `cfg:"merge"`
 }
 
-// Webhook configures inbound webhook verification.
-type Webhook struct {
-	// GithubSecret verifies X-Hub-Signature-256 on /webhook/github. Empty disables verification.
-	GithubSecret string `cfg:"github_secret" log:"-"`
-}
+// The structs below are no longer part of the file/env configuration: they
+// are plain parameter carriers for the internal clients (llm, embedder, rag,
+// docgen, coderag), populated from the runtime settings store.
 
 // Docs configures the repo -> markdown documentation generator.
 type Docs struct {
@@ -269,6 +248,9 @@ func (c *Config) DocsVectorsDir() string { return filepath.Join(c.DataDir, "docs
 // embedding models with different dimensions (a dim change wipes the whole
 // store).
 func (c *Config) CodeVectorsDir() string { return filepath.Join(c.DataDir, "code-vectors") }
+
+// SourcesRootDir holds synced web-source markdown by collection name.
+func (c *Config) SourcesRootDir() string { return filepath.Join(c.DataDir, "sources") }
 
 // NormalizeBasePath cleans a configured base path into a canonical form: either
 // "" (serve at root) or "/segment[/segment...]" with a leading slash and no

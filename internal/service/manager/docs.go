@@ -18,6 +18,7 @@ import (
 	"github.com/rytsh/krabby/internal/service/repofs"
 	"github.com/rytsh/krabby/internal/service/settings"
 	"github.com/rytsh/krabby/internal/service/vectorstore"
+	"github.com/rytsh/krabby/internal/service/websource"
 )
 
 // ErrDocsDisabled is returned by doc/RAG methods when the subsystem is off.
@@ -103,6 +104,49 @@ func (m *Manager) ClearMCPAPIKey(ctx context.Context) error {
 	return nil
 }
 
+// PollInterval returns the repo polling cadence from the runtime settings:
+// the persisted value, one hour when unset, disabled (0) when negative.
+func (m *Manager) PollInterval() time.Duration {
+	const def = time.Hour
+
+	if m.settings == nil {
+		return def
+	}
+
+	s, err := m.settings.Get(context.Background())
+	if err != nil {
+		slog.Error("load poll interval", "error", err)
+
+		return def
+	}
+
+	switch {
+	case s.GitPollInterval < 0:
+		return 0
+	case s.GitPollInterval == 0:
+		return def
+	default:
+		return s.GitPollInterval
+	}
+}
+
+// WebhookSecret returns the provider-neutral git webhook verification secret from the
+// runtime settings ("" disables signature verification).
+func (m *Manager) WebhookSecret() string {
+	if m.settings == nil {
+		return ""
+	}
+
+	s, err := m.settings.Get(context.Background())
+	if err != nil {
+		slog.Error("load webhook secret", "error", err)
+
+		return ""
+	}
+
+	return s.WebhookSecret
+}
+
 // GetDocsConfig returns the current docs/RAG settings with secrets redacted.
 func (m *Manager) GetDocsConfig(ctx context.Context) (settings.Redacted, error) {
 	if m.settings == nil {
@@ -144,7 +188,17 @@ func (m *Manager) PatchDocsConfig(ctx context.Context, patch settings.Patch) (se
 		return settings.Redacted{}, err
 	}
 
-	return m.setDocsConfig(ctx, patch.Apply(current))
+	next := patch.Apply(current)
+	if patch.RuntimeOnly() {
+		saved, err := m.settings.Set(ctx, next)
+		if err != nil {
+			return settings.Redacted{}, err
+		}
+
+		return redactSettings(saved), nil
+	}
+
+	return m.setDocsConfig(ctx, next)
 }
 
 func (m *Manager) setDocsConfig(ctx context.Context, next settings.Settings) (settings.Redacted, error) {
@@ -532,16 +586,50 @@ func codeRagConfig(s settings.Settings) config.CodeRAG {
 
 // ---- docs + RAG query surface ----------------------------------------------
 
+// Docs search scopes: everything, repository docs only, or web sources only.
+const (
+	ScopeAll     = "all"
+	ScopeRepos   = "repos"
+	ScopeSources = "sources"
+)
+
+// docsFilter translates a scope + optional key into a vector-store filter.
+// key may be a repo id or a web-source scope key ("web:<name>"); when set it
+// wins over the scope.
+func docsFilter(scope, key string) (vectorstore.Filter, error) {
+	if key != "" {
+		return vectorstore.FilterKey(key), nil
+	}
+
+	switch scope {
+	case "", ScopeAll:
+		return vectorstore.Filter{}, nil
+	case ScopeRepos:
+		return vectorstore.Filter{ExcludePrefix: websource.ScopePrefix}, nil
+	case ScopeSources:
+		return vectorstore.Filter{Prefix: websource.ScopePrefix}, nil
+	default:
+		return vectorstore.Filter{}, fmt.Errorf("unknown scope %q (want all, repos or sources)", scope)
+	}
+}
+
 // SearchDocs returns the whole markdown documents most relevant to a question.
-// repoID == "" searches across all repos. topDocs <= 0 uses the RAG default.
-func (m *Manager) SearchDocs(ctx context.Context, repoID, question string, topDocs int) ([]rag.Doc, error) {
+// scope selects where to search (all/repos/sources); key restricts to one
+// repo id or web-source key ("web:<name>") and wins over scope. topDocs <= 0
+// uses the RAG default.
+func (m *Manager) SearchDocs(ctx context.Context, scope, key, question string, topDocs int) ([]rag.Doc, error) {
+	filter, err := docsFilter(scope, key)
+	if err != nil {
+		return nil, err
+	}
+
 	d, releaseDocs := m.acquireDocs()
 	defer releaseDocs()
 	if d.rag == nil {
 		return nil, ErrDocsDisabled
 	}
 
-	return d.rag.Retrieve(ctx, repoID, question, topDocs)
+	return d.rag.Retrieve(ctx, filter, question, topDocs)
 }
 
 // SearchCode returns the code snippets most relevant to a query. repoID == ""
@@ -610,9 +698,19 @@ func (m *Manager) GetDoc(ctx context.Context, repoID, docPath string) (*repofs.F
 	return repofs.ReadFile(dir, docPath, 0, 0)
 }
 
-// repoDocsDir resolves a repo id to its external docs directory, verifying the
-// repo is tracked and cloned and migrating legacy in-clone docs when needed.
+// repoDocsDir resolves a docs key to its markdown directory: "web:<name>"
+// keys map to the collection's synced content, repo ids to the repo's
+// external docs directory (verifying the repo is tracked and cloned and
+// migrating legacy in-clone docs when needed).
 func (m *Manager) repoDocsDir(ctx context.Context, repoID string) (string, error) {
+	if name := websource.CollectionName(repoID); name != "" {
+		if m.sourcesRootDir == "" {
+			return "", ErrNoWebSources
+		}
+
+		return m.sourcesDir(name), nil
+	}
+
 	repo, err := m.reg.Get(ctx, repoID)
 	if err != nil {
 		return "", err

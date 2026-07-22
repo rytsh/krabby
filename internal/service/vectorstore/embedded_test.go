@@ -77,7 +77,7 @@ func TestEmbeddedSearchRanksAndFilters(t *testing.T) {
 	}
 
 	// Query near [1,0,0]: best is o/a chunk 0.
-	matches, err := s.Search(ctx, "", []float32{1, 0, 0}, 2)
+	matches, err := s.Search(ctx, FilterKey(""), []float32{1, 0, 0}, 2)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -95,13 +95,59 @@ func TestEmbeddedSearchRanksAndFilters(t *testing.T) {
 	}
 
 	// Repo filter restricts results.
-	matches, err = s.Search(ctx, "o/b", []float32{1, 0, 0}, 10)
+	matches, err = s.Search(ctx, FilterKey("o/b"), []float32{1, 0, 0}, 10)
 	if err != nil {
 		t.Fatalf("Search filtered: %v", err)
 	}
 
 	if len(matches) != 1 || matches[0].Payload.Repo != "o/b" {
 		t.Fatalf("filtered matches = %+v", matches)
+	}
+}
+
+func TestEmbeddedSearchScopeFilters(t *testing.T) {
+	ctx := context.Background()
+	s := openEmbedded(t, t.TempDir())
+
+	items := append(testItems(), Item{
+		ID:      "web:wiki/page.md#0",
+		Vector:  []float32{0.95, 0.05, 0},
+		Payload: Payload{Repo: "web:wiki", DocPath: "page.md", Title: "W", Chunk: "wiki alpha"},
+	})
+	if err := s.Upsert(ctx, items); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	// Prefix keeps only web-source keys.
+	matches, err := s.Search(ctx, Filter{Prefix: "web:"}, []float32{1, 0, 0}, 10)
+	if err != nil {
+		t.Fatalf("Search prefix: %v", err)
+	}
+	if len(matches) != 1 || matches[0].Payload.Repo != "web:wiki" {
+		t.Fatalf("prefix matches = %+v", matches)
+	}
+
+	// ExcludePrefix drops web-source keys.
+	matches, err = s.Search(ctx, Filter{ExcludePrefix: "web:"}, []float32{1, 0, 0}, 10)
+	if err != nil {
+		t.Fatalf("Search exclude prefix: %v", err)
+	}
+	if len(matches) != 3 {
+		t.Fatalf("exclude-prefix matches = %+v", matches)
+	}
+	for _, m := range matches {
+		if m.Payload.Repo == "web:wiki" {
+			t.Fatalf("web key leaked into repos scope: %+v", m.Payload)
+		}
+	}
+
+	// Multi-key filter selects exactly the listed keys.
+	matches, err = s.Search(ctx, Filter{Keys: []string{"o/b", "web:wiki"}}, []float32{1, 0, 0}, 10)
+	if err != nil {
+		t.Fatalf("Search keys: %v", err)
+	}
+	if len(matches) != 2 {
+		t.Fatalf("multi-key matches = %+v", matches)
 	}
 }
 
@@ -123,7 +169,7 @@ func TestEmbeddedUpsertOverwritesByID(t *testing.T) {
 		t.Fatalf("Upsert overwrite: %v", err)
 	}
 
-	matches, err := s.Search(ctx, "o/a", []float32{0, 0, 1}, 1)
+	matches, err := s.Search(ctx, FilterKey("o/a"), []float32{0, 0, 1}, 1)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -152,7 +198,7 @@ func TestEmbeddedPersistsAcrossReopen(t *testing.T) {
 
 	s2 := openEmbedded(t, dir)
 
-	matches, err := s2.Search(ctx, "", []float32{0, 1, 0}, 1)
+	matches, err := s2.Search(ctx, FilterKey(""), []float32{0, 1, 0}, 1)
 	if err != nil {
 		t.Fatalf("Search after reopen: %v", err)
 	}
@@ -180,7 +226,7 @@ func TestEmbeddedSharedHandleAcrossSwap(t *testing.T) {
 		t.Fatalf("close first handle: %v", err)
 	}
 
-	matches, err := s2.Search(ctx, "", []float32{1, 0, 0}, 1)
+	matches, err := s2.Search(ctx, FilterKey(""), []float32{1, 0, 0}, 1)
 	if err != nil {
 		t.Fatalf("Search on surviving handle: %v", err)
 	}
@@ -202,7 +248,7 @@ func TestEmbeddedDeleteRepo(t *testing.T) {
 		t.Fatalf("DeleteRepo: %v", err)
 	}
 
-	matches, err := s.Search(ctx, "", []float32{1, 0, 0}, 10)
+	matches, err := s.Search(ctx, FilterKey(""), []float32{1, 0, 0}, 10)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -236,7 +282,7 @@ func TestEmbeddedUpsertBatchesLargeInput(t *testing.T) {
 		t.Fatalf("Upsert %d items: %v", n, err)
 	}
 
-	matches, err := s.Search(ctx, "o/a", []float32{0, 1, 0}, n)
+	matches, err := s.Search(ctx, FilterKey("o/a"), []float32{0, 1, 0}, n)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -265,7 +311,7 @@ func TestEmbeddedDimChangeWipesAndRebuilds(t *testing.T) {
 		t.Fatalf("Upsert dim=4: %v", err)
 	}
 
-	matches, err := s.Search(ctx, "", []float32{1, 0, 0, 0}, 10)
+	matches, err := s.Search(ctx, FilterKey(""), []float32{1, 0, 0, 0}, 10)
 	if err != nil {
 		t.Fatalf("Search dim=4: %v", err)
 	}
@@ -310,7 +356,7 @@ func TestEmbeddedConcurrentDimChangeWipesOnce(t *testing.T) {
 		}
 	}
 
-	matches, err := s1.Search(ctx, "", []float32{1, 0, 0, 0}, 10)
+	matches, err := s1.Search(ctx, FilterKey(""), []float32{1, 0, 0, 0}, 10)
 	if err != nil {
 		t.Fatal(err)
 	}

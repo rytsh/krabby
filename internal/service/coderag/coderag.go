@@ -367,7 +367,7 @@ func (s *Service) Retrieve(ctx context.Context, repo, query string, topK int) ([
 	// Fetch extra candidates because fallback chunks overlap and are deduplicated
 	// below; this keeps the final result useful without returning near-identical
 	// snippets from the same file region.
-	matches, err := s.store.Search(ctx, repo, vecs[0], topK*3)
+	matches, err := s.store.Search(ctx, vectorstore.FilterKey(repo), vecs[0], topK*3)
 	if err != nil {
 		return nil, fmt.Errorf("vector search; %w", err)
 	}

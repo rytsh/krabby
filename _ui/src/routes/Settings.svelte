@@ -6,6 +6,8 @@
 
   let settings = $state(null);
   let creds = $state([]);
+  let credential = $state({ pattern: "", kind: "token", username: "", secret: "" });
+  let credentialBusy = $state(false);
   let error = $state("");
 
   // Docs & RAG runtime config.
@@ -18,6 +20,10 @@
   let llmKey = $state("");
   let embedKey = $state("");
   let codeEmbedKey = $state("");
+  let webhookSecret = $state("");
+  let runtimeBusy = $state(false);
+  let runtimeMsg = $state("");
+  let runtimeErr = $state("");
 
   // Connection test state.
   let llmTest = $state(null); // { ok, latency_ms, model, error }
@@ -52,6 +58,30 @@
     }
   }
 
+  async function saveCredential() {
+    credentialBusy = true;
+    try {
+      await api.setCredential(credential);
+      creds = await api.credentials();
+      credential = { pattern: "", kind: "token", username: "", secret: "" };
+      successToast("Credential saved");
+    } catch (e) {
+      error = e.message;
+    } finally {
+      credentialBusy = false;
+    }
+  }
+
+  async function removeCredential(pattern) {
+    if (!confirm(`Delete credential for ${pattern}?`)) return;
+    try {
+      await api.deleteCredential(pattern);
+      creds = await api.credentials();
+    } catch (e) {
+      error = e.message;
+    }
+  }
+
   // buildPatch produces the request body from the form. Blank secret fields
   // mean "keep the stored value" (the server merges them).
   function buildPatch() {
@@ -80,6 +110,30 @@
       docsErr = e.message;
     } finally {
       saving = false;
+    }
+  }
+
+  // Git polling and webhook verification are persisted alongside the docs
+  // settings, but saved independently so changing them does not require
+  // editing the larger Docs & RAG form. Durations are Go nanoseconds in the
+  // REST representation; the select keeps those values explicit.
+  async function saveRuntime(clearWebhook = false) {
+    if (!docsCfg) return;
+    runtimeBusy = true;
+    runtimeMsg = "";
+    runtimeErr = "";
+    try {
+      const patch = { git_poll_interval: Number(docsCfg.git_poll_interval) };
+      if (clearWebhook) patch.webhook_secret = "";
+      else if (webhookSecret) patch.webhook_secret = webhookSecret;
+      docsCfg = await api.setDocsConfig(patch);
+      webhookSecret = "";
+      runtimeMsg = clearWebhook ? "Webhook verification disabled." : "Runtime settings saved.";
+      successToast("Saved");
+    } catch (e) {
+      runtimeErr = e.message;
+    } finally {
+      runtimeBusy = false;
     }
   }
 
@@ -171,13 +225,9 @@
       ["Listen", `${s.server.host || "0.0.0.0"}:${s.server.port}`],
       ["MCP path", s.mcp.path],
       ["MCP API key", s.mcp.api_key_set ? "set" : "not set", s.mcp.api_key_set],
-      ["Git SSH key", s.git.ssh_key_path || "—"],
-      ["Poll interval", s.git.poll_interval],
       ["Graphify bin", s.graphify.bin],
       ["Graphify python", s.graphify.python || "auto (shebang)"],
       ["Build timeout", s.graphify.build_timeout],
-      ["Serve idle timeout", s.graphify.serve_idle_timeout],
-      ["Webhook secret", s.webhook.github_secret_set ? "set" : "not set", s.webhook.github_secret_set],
     ];
   }
 </script>
@@ -253,6 +303,34 @@
   </div>
 
   <h2 class="mb-3 mt-8 text-[15px] font-semibold">Git credentials</h2>
+  <p class="mb-3 text-dim">
+    Host or host/path credentials for private git repositories and custom web pages. The most
+    specific pattern wins; secrets are write-only.
+  </p>
+  <div class="card mb-3 grid grid-cols-1 gap-2 p-3 sm:grid-cols-[1fr_120px_180px_1fr_auto]">
+    <input class="input" placeholder="git.example.com/group" bind:value={credential.pattern} />
+    <select class="input" bind:value={credential.kind}>
+      <option value="token">Token</option>
+      <option value="bearer">Bearer (web)</option>
+      <option value="ssh">SSH key</option>
+    </select>
+    <input
+      class="input"
+      placeholder={credential.kind === "token" ? "username (optional)" : "not used"}
+      bind:value={credential.username}
+      disabled={credential.kind !== "token"}
+    />
+    {#if credential.kind !== "ssh"}
+      <input class="input" type="password" placeholder="token / password" bind:value={credential.secret} />
+    {:else}
+      <textarea class="input" placeholder="private key PEM" bind:value={credential.secret} rows="2"></textarea>
+    {/if}
+    <button
+      class="btn btn-primary"
+      onclick={saveCredential}
+      disabled={credentialBusy || !credential.pattern.trim() || !credential.secret}
+    >Save</button>
+  </div>
   <div class="card overflow-hidden">
     {#if creds.length === 0}
       <div class="p-6 text-center text-dim">No credentials stored.</div>
@@ -263,6 +341,7 @@
             <th class="border-b border-line px-4 py-2 text-left font-medium">Pattern</th>
             <th class="border-b border-line px-4 py-2 text-left font-medium">Kind</th>
             <th class="border-b border-line px-4 py-2 text-left font-medium">Username</th>
+            <th class="border-b border-line px-4 py-2"></th>
           </tr>
         </thead>
         <tbody>
@@ -271,6 +350,9 @@
               <td class="border-b border-line px-4 py-2.5 font-mono text-[13px]">{c.pattern}</td>
               <td class="border-b border-line px-4 py-2.5 text-[13px] text-faint">{c.kind}</td>
               <td class="border-b border-line px-4 py-2.5 text-[13px] text-faint">{c.username || "—"}</td>
+              <td class="border-b border-line px-4 py-2.5 text-right">
+                <button class="btn btn-sm btn-danger" onclick={() => removeCredential(c.pattern)}>Delete</button>
+              </td>
             </tr>
           {/each}
         </tbody>
@@ -313,6 +395,49 @@
     </div>
   </div>
 </div>
+
+<h2 class="mb-1 mt-10 text-[15px] font-semibold">Runtime</h2>
+<p class="text-dim">Repository polling and webhook security. Changes apply without a restart.</p>
+
+{#if docsCfg}
+  <div class="card mt-3 p-4">
+    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Repository poll interval
+        <select
+          class="input"
+          value={String(docsCfg.git_poll_interval)}
+          onchange={(e) => (docsCfg.git_poll_interval = Number(e.currentTarget.value))}
+        >
+          <option value="-1">disabled</option>
+          <option value="900000000000">every 15 minutes</option>
+          <option value="3600000000000">every hour</option>
+          <option value="21600000000000">every 6 hours</option>
+          <option value="86400000000000">daily</option>
+        </select>
+      </label>
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Git webhook secret {docsCfg.webhook_secret_set ? "(set)" : "(not set)"}
+        <input
+          class="input"
+          type="password"
+          bind:value={webhookSecret}
+          placeholder="leave blank to keep existing"
+        />
+      </label>
+    </div>
+    <div class="mt-3 flex items-center gap-2">
+      <button class="btn btn-primary" onclick={() => saveRuntime(false)} disabled={runtimeBusy}>Save runtime settings</button>
+      <button
+        class="btn btn-danger"
+        onclick={() => saveRuntime(true)}
+        disabled={runtimeBusy || !docsCfg.webhook_secret_set}
+      >Disable webhook verification</button>
+      {#if runtimeMsg}<span class="text-[12px] text-ok">{runtimeMsg}</span>{/if}
+      {#if runtimeErr}<span class="text-[12px] text-err">{runtimeErr}</span>{/if}
+    </div>
+  </div>
+{/if}
 
 <h2 class="mb-1 mt-10 text-[15px] font-semibold">Docs &amp; RAG</h2>
 <p class="text-dim">

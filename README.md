@@ -9,7 +9,7 @@ the background, and lets any MCP-capable LLM agent query them.
                      ┌───────────────────────────────────────┐
  LLM/Agent ──MCP───► │ krabby (Go)                           │
  (streamable HTTP)   │  ├─ MCP tools (manage + query)        │──► git clone/pull
-                     │  ├─ REST API + GitHub webhook         │──► graphify update
+                     │  ├─ REST API + provider-neutral hook  │──► graphify update
  CI/webhook ──HTTP─► │  ├─ Registry (bw/BadgerDB)            │──► graphify merge-graphs
                      │  ├─ Native graph query engine (Go)    │
                      │  └─ Scheduler (poll interval)         │
@@ -25,6 +25,9 @@ the background, and lets any MCP-capable LLM agent query them.
 - **Docs & RAG (optional)**: with an LLM configured, krabby generates per-file
   Markdown documentation (prompt is configurable in Settings) plus a repo
   overview, browsable in the UI.
+- **Web sources**: named Custom web URL collections and Confluence spaces are
+  converted to Markdown and indexed beside repo docs. Search everything, all
+  repos, all web sources, or one collection such as `web:wine`.
 - **Semantic code search (optional)**: source is chunked at graphify symbol
   boundaries (with line-window fallback), embedded with a dedicated code model
   such as Codestral Embed, and returned as ranked path/line snippets.
@@ -47,7 +50,7 @@ cp krabby.example.yaml krabby.yaml   # edit repos, keys
 Add a repo and query it:
 
 ```sh
-curl -X POST localhost:8080/api/v1/repos -d '{"url":"git@github.com:rakunlabs/ada.git"}'
+curl -X POST localhost:8080/api/v1/repos -d '{"url":"git@git.example.com:team/service.git"}'
 curl localhost:8080/api/v1/repos
 ```
 
@@ -79,12 +82,13 @@ Example opencode config:
 | `query_graph` | BFS/DFS search over one repo or the merged graph |
 | `get_node` / `get_neighbors` / `get_community` | Node-level inspection |
 | `god_nodes` / `graph_stats` / `shortest_path` | Graph-level analysis |
-| `search_docs` / `list_docs` / `get_doc` | Search and read generated Markdown documentation |
+| `search_docs` / `list_docs` / `get_doc` | Search and read generated or synced Markdown documentation |
+| `list_sources` | Discover named Custom web and Confluence collections (`web:<name>`) |
 | `search_code` | Normal bw full-text or semantic source search with locations and pagination |
 | `get_docs_config` / `set_docs_config` | Read or live-update docs and code RAG settings |
 | `test_llm` / `test_embedder` / `test_code_embedder` | Validate model endpoints without saving |
 
-All query tools take an optional `repo` (`owner/name`); omit it to query the
+Graph query tools take an optional full repo id (`host/group/.../name`); omit it to query the
 merged cross-repo graph.
 
 ## REST API
@@ -94,23 +98,27 @@ merged cross-repo graph.
 | `GET /healthz` | Liveness |
 | `GET /api/v1/repos` | List repos |
 | `POST /api/v1/repos` `{"url","branch"}` | Track a repo |
-| `GET /api/v1/repos/{owner}/{name}` | Repo status |
-| `DELETE /api/v1/repos/{owner}/{name}` | Untrack + delete clone |
-| `POST /api/v1/repos/{owner}/{name}/refresh` | "This repo changed" trigger |
-| `POST /api/v1/repos/{owner}/{name}/lock` `{"owner","ttl"}` | Take a read lock (returns token) |
-| `GET /api/v1/repos/{owner}/{name}/lock` | Lock status |
-| `DELETE /api/v1/repos/{owner}/{name}/lock` + `X-Lock-Token` | Release the lock |
-| `GET /api/v1/repos/{owner}/{name}/graph` | Raw `graph.json` of one repo |
-| `GET /api/v1/repos/{owner}/{name}/report` | `GRAPH_REPORT.md` audit report |
-| `GET /api/v1/repos/{owner}/{name}/html` | Interactive graph visualization |
+| `GET /api/v1/repos/{full-path...}` | Repo status |
+| `DELETE /api/v1/repos/{full-path...}` | Untrack + delete clone |
+| `POST /api/v1/repos/{full-path...}/-/refresh` | "This repo changed" trigger |
+| `POST /api/v1/repos/{full-path...}/-/lock` `{"owner","ttl"}` | Take a read lock (returns token) |
+| `GET /api/v1/repos/{full-path...}/-/lock` | Lock status |
+| `DELETE /api/v1/repos/{full-path...}/-/lock` + `X-Lock-Token` | Release the lock |
+| `GET /api/v1/repos/{full-path...}/-/graph` | Raw `graph.json` of one repo |
+| `GET /api/v1/repos/{full-path...}/-/report` | `GRAPH_REPORT.md` audit report |
+| `GET /api/v1/repos/{full-path...}/-/html` | Interactive graph visualization |
 | `GET /api/v1/graph` | Merged cross-repo `graph.json` |
-| `GET /api/v1/docs/search?q=&repo=&top=` | Semantic documentation search |
+| `GET/POST /api/v1/sources` | List/create named Custom web or Confluence collections |
+| `GET/PUT/DELETE /api/v1/sources/{name}` | Read/update/delete a collection |
+| `POST /api/v1/sources/{name}/refresh` | Sync and reindex a collection |
+| `POST/DELETE /api/v1/sources/{name}/pages` | Add/remove Custom web URLs |
+| `GET /api/v1/docs/search?q=&scope=&repo=&top=` | Semantic docs search; `scope=all|repos|sources`, `repo=web:<name>` |
 | `GET /api/v1/code/search?q=&repo=&top=` | Semantic source-code snippet search |
 | `GET/PUT /api/v1/docs/config` | Read/update docs and code RAG settings |
 | `GET /api/v1/credentials` | List credential patterns (secrets never returned) |
 | `PUT /api/v1/credentials` `{"pattern","secret","kind","username"}` | Store a credential |
 | `DELETE /api/v1/credentials?pattern=...` | Remove a credential |
-| `POST /webhook/github` | GitHub push webhook (HMAC verified) |
+| `POST /webhook/git` | Provider-neutral git push webhook; generic bearer/shared-token auth plus common server formats |
 
 ## Data layout & external tools
 
@@ -119,7 +127,7 @@ other tools (doc generators, linters, indexers) are free to read it:
 
 ```
 ~/.krabby/
-├── repos/<owner>/<name>/       # plain git clones
+├── repos/<host>/<group>/.../   # plain git clones
 │   └── graphify-out/
 │       ├── graph.json          # raw graph (GraphRAG-ready)
 │       ├── GRAPH_REPORT.md     # human-readable audit report
@@ -128,6 +136,7 @@ other tools (doc generators, linters, indexers) are free to read it:
 ├── merged/graph.json           # cross-repo merged graph
 ├── keys/                       # materialized credential SSH keys (0600)
 ├── docs-vectors/               # embedded documentation vector index
+├── sources/<name>/*.md         # synced Custom web / Confluence pages
 ├── code-vectors/               # embedded source-code vector index
 └── state/                      # registry + credentials database
 ```
@@ -143,12 +152,12 @@ To avoid racing, take a read lock first — refreshes are deferred while it is
 held and fire automatically on release or TTL expiry (default 10m, max 1h):
 
 ```sh
-TOKEN=$(curl -s -X POST localhost:8080/api/v1/repos/myorg/app/lock \
+TOKEN=$(curl -s -X POST localhost:8080/api/v1/repos/git.example.com/myorg/app/-/lock \
   -H 'Content-Type: application/json' -d '{"owner":"docgen","ttl":"5m"}' | jq -r .token)
 
 # ... walk ~/.krabby/repos/myorg/app safely ...
 
-curl -X DELETE localhost:8080/api/v1/repos/myorg/app/lock -H "X-Lock-Token: $TOKEN"
+curl -X DELETE localhost:8080/api/v1/repos/git.example.com/myorg/app/-/lock -H "X-Lock-Token: $TOKEN"
 ```
 
 Locks never block queries or artifact downloads — only git mutations. A crashed
@@ -164,15 +173,16 @@ most specific match wins when cloning/pulling:
 curl -X PUT localhost:8080/api/v1/credentials \
   -d '{"pattern":"gitlab.example.com","secret":"-----BEGIN OPENSSH PRIVATE KEY-----\n..."}'
 
-# Token for one GitHub org (https clones):
+# Token for one organization (https clones):
 curl -X PUT localhost:8080/api/v1/credentials \
-  -d '{"pattern":"github.com/myorg","secret":"ghp_..."}'
+  -d '{"pattern":"git.example.com/myorg","secret":"token..."}'
 ```
 
 Or let the LLM do it over MCP with `set_credential`. SSH keys are materialized
 under `data_dir/keys/` with 0600 perms; tokens are fed to git via a credential
 helper (never on argv). Secrets are never returned by any API. The global
-`git.ssh_key_path` config remains as a fallback for unmatched ssh URLs.
+Git credentials are persisted by host or host/path pattern through the UI,
+REST API or MCP tools. The most specific pattern wins.
 
 ## Refresh pipeline
 
@@ -185,7 +195,8 @@ webhook / poll / refresh_repo
   → generated docs + docs RAG index (when enabled)
 ```
 
-Repos are also polled every `git.poll_interval` (default 1h).
+Repos are also polled at the runtime interval configured in Settings (default
+1h); changes apply without restarting krabby.
 
 ## Configuration
 
@@ -194,7 +205,7 @@ See [krabby.example.yaml](krabby.example.yaml). Loaded via
 `CONFIG_FILE`) → `KRABBY_*` env vars.
 
 Docs RAG and code RAG are independently switchable in the Settings UI. Code RAG
-can use its own `code_embedder`; when that block is unset it reuses `embedder`.
+can use its own embedder; when unset it reuses the docs embedder.
 The embedded backend keeps docs and code in separate stores so different vector
 dimensions are safe.
 Generated markdown is stored outside clones under

@@ -12,6 +12,8 @@
   const repoOptionCap = 500;
   let repoOptions = $state([]);
   let repoOptionsTruncated = $state(false);
+  // Web-source collections for docs-search scoping (searched as "web:<name>").
+  let sourceOptions = $state([]);
 
   async function loadRepoOptions() {
     try {
@@ -21,9 +23,17 @@
     } catch {
       repoOptions = [];
     }
+    try {
+      sourceOptions = ((await api.sources()) || []).map((s) => s.name);
+    } catch {
+      sourceOptions = [];
+    }
   }
 
   let q = $state("");
+  // where encodes the docs search target: "" (everything), "repos" / "sources"
+  // (whole namespace), a repo id, or "web:<name>". Code search only supports
+  // repo ids, so switching to code resets non-repo selections.
   let repoFilter = $state("");
   let scope = $state("code");
   let mode = $state("normal");
@@ -45,9 +55,13 @@
     loading = true;
     error = "";
     try {
+      // Map the where-selector onto the API params: namespace values become
+      // the scope param, everything else (repo id or web:<name>) is a key.
+      const namespace = repoFilter === "repos" || repoFilter === "sources" ? repoFilter : "";
+      const key = namespace ? "" : repoFilter;
       const response =
         searchScope === "docs"
-          ? await api.searchDocs(query, repoFilter, 10)
+          ? await api.searchDocs(query, key, 10, namespace)
           : await api.searchCode(query, repoFilter, searchMode, nextPage, perPage);
       if (seq !== searchSeq) return;
       results = searchScope === "docs" ? (Array.isArray(response) ? response : []) : response?.results || [];
@@ -74,6 +88,11 @@
 
   function open(r) {
     if (scope === "docs") {
+      // Web-source hits open the synced markdown on the Sources page.
+      if (r.repo.startsWith("web:")) {
+        navigate(`/sources/${r.repo.slice(4)}?doc=${encodeURIComponent(r.path)}`);
+        return;
+      }
       navigate(`/repos/${r.repo}?doc=${encodeURIComponent(r.path)}`);
       return;
     }
@@ -98,6 +117,8 @@
     class:view-toggle-active={scope === "code"}
     onclick={() => {
       scope = "code";
+      // Code search only understands repo ids; drop docs-only selections.
+      if (repoFilter === "repos" || repoFilter === "sources" || repoFilter.startsWith("web:")) repoFilter = "";
       resetResults();
     }}>Code</button
   >
@@ -110,6 +131,9 @@
     }}>Docs</button
   >
 </div>
+{#if scope === "docs"}
+  <span class="ml-2 text-[11px] text-faint">searches generated repo docs and synced web sources</span>
+{/if}
 
 <div class="mb-4 flex flex-col gap-2 sm:flex-row">
   <div class="relative flex-1">
@@ -145,11 +169,29 @@
       Semantic
     </div>
   {/if}
-  <select class="input sm:basis-[220px]" bind:value={repoFilter} onchange={resetResults}>
-    <option value="">all repositories</option>
-    {#each repoOptions as id (id)}
-      <option value={id}>{id}</option>
-    {/each}
+  <select class="input sm:basis-[240px]" bind:value={repoFilter} onchange={resetResults} aria-label="Search scope">
+    {#if scope === "docs"}
+      <option value="">everywhere</option>
+      <option value="repos">all repositories</option>
+      <option value="sources">all web sources</option>
+      {#if sourceOptions.length > 0}
+        <optgroup label="Web sources">
+          {#each sourceOptions as name (name)}
+            <option value={`web:${name}`}>web:{name}</option>
+          {/each}
+        </optgroup>
+      {/if}
+      <optgroup label="Repositories">
+        {#each repoOptions as id (id)}
+          <option value={id}>{id}</option>
+        {/each}
+      </optgroup>
+    {:else}
+      <option value="">all repositories</option>
+      {#each repoOptions as id (id)}
+        <option value={id}>{id}</option>
+      {/each}
+    {/if}
     {#if repoOptionsTruncated}
       <option disabled>… more (search all repositories)</option>
     {/if}

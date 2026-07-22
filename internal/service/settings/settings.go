@@ -1,10 +1,11 @@
-// Package settings holds krabby's runtime-mutable docs/RAG configuration.
+// Package settings holds krabby's runtime-mutable configuration: docs/RAG,
+// LLM/embedder endpoints, git polling and webhook verification.
 //
-// File/env config (see internal/config) seeds this store on first run; from then
-// on the persisted record is authoritative and can be changed live via MCP tools
-// or the REST API. Secrets (API keys) are write-only: they persist but are never
-// returned; a redacted view exposes only "*_key_set" booleans, and an empty
-// secret on update means "keep the existing value".
+// Defaults() seeds this store on first run; from then on the persisted record
+// is authoritative and can be changed live via the UI, MCP tools or the REST
+// API. Secrets (API keys, webhook secret) are write-only: they persist but
+// are never returned; a redacted view exposes only "*_set" booleans, and an
+// empty secret on update means "keep the existing value".
 package settings
 
 import (
@@ -72,7 +73,46 @@ type Settings struct {
 	CodeRAGInclude      []string `bw:"code_rag_include"       json:"code_rag_include"`
 	CodeRAGExclude      []string `bw:"code_rag_exclude"       json:"code_rag_exclude"`
 
+	// System: git polling and webhook verification (previously file/env
+	// config). GitPollInterval semantics: 0 = default (1h), negative =
+	// polling disabled.
+	GitPollInterval time.Duration `bw:"git_poll_interval"     json:"git_poll_interval"`
+	WebhookSecret   string        `bw:"webhook_secret" json:"-"` // write-only
+
 	UpdatedAt time.Time `bw:"updated_at" json:"updated_at,omitzero"`
+}
+
+// Defaults returns the initial settings persisted on first run. All values
+// are safe without any external service configured; enabling docs/RAG happens
+// later through the UI or MCP tools.
+func Defaults() Settings {
+	return Settings{
+		DocsConcurrency: 8,
+		DocsMaxGroups:   40,
+
+		LLMModel:   "gpt-4o-mini",
+		LLMTimeout: 300 * time.Second,
+
+		EmbedBatch:       64,
+		EmbedConcurrency: 4,
+		EmbedTimeout:     30 * time.Second,
+
+		RAGChunkSize:    1200,
+		RAGChunkOverlap: 200,
+		RAGTopK:         20,
+		RAGTopDocs:      5,
+
+		CodeEmbedBatch:       64,
+		CodeEmbedConcurrency: 4,
+		CodeEmbedTimeout:     30 * time.Second,
+
+		// 3000/1000 follow the Codestral Embed retrieval recommendation.
+		CodeRAGChunkSize:    3000,
+		CodeRAGChunkOverlap: 1000,
+		CodeRAGTopK:         10,
+
+		GitPollInterval: time.Hour,
+	}
 }
 
 // Redacted is a safe-to-return view of Settings: secrets are replaced by
@@ -83,6 +123,7 @@ type Redacted struct {
 	LLMAPIKeySet       bool   `json:"llm_api_key_set"`
 	EmbedAPIKeySet     bool   `json:"embed_api_key_set"`
 	CodeEmbedAPIKeySet bool   `json:"code_embed_api_key_set"`
+	WebhookSecretSet   bool   `json:"webhook_secret_set"`
 }
 
 // Redact returns a view with secrets removed and "*_set" booleans populated.
@@ -92,12 +133,14 @@ func (s Settings) Redact() Redacted {
 		LLMAPIKeySet:       s.LLMAPIKey != "",
 		EmbedAPIKeySet:     s.EmbedAPIKey != "",
 		CodeEmbedAPIKeySet: s.CodeEmbedAPIKey != "",
+		WebhookSecretSet:   s.WebhookSecret != "",
 	}
 	// Defensive: ensure the embedded copy carries no secrets (they have json:"-"
 	// so they never marshal, but zero them to avoid accidental in-process leaks).
 	r.Settings.LLMAPIKey = ""
 	r.Settings.EmbedAPIKey = ""
 	r.Settings.CodeEmbedAPIKey = ""
+	r.Settings.WebhookSecret = ""
 
 	return r
 }
@@ -147,6 +190,29 @@ type Patch struct {
 	CodeRAGTopK         *int      `json:"code_rag_top_k"`
 	CodeRAGInclude      *[]string `json:"code_rag_include"`
 	CodeRAGExclude      *[]string `json:"code_rag_exclude"`
+
+	GitPollInterval *time.Duration `json:"git_poll_interval"`
+	WebhookSecret   *string        `json:"webhook_secret"`
+}
+
+// RuntimeOnly reports whether a patch changes only scheduler/webhook fields.
+// Those settings do not affect LLM/embedder clients or vector contents, so
+// callers can persist them without rebuilding clients and reindexing all data.
+func (p Patch) RuntimeOnly() bool {
+	return (p.GitPollInterval != nil || p.WebhookSecret != nil) &&
+		p.DocsEnabled == nil && p.DocsConcurrency == nil &&
+		p.DocsSummaryModel == nil && p.DocsMaxGroups == nil &&
+		p.DocsInclude == nil && p.DocsExclude == nil && p.DocsPrompt == nil &&
+		p.LLMBaseURL == nil && p.LLMAPIKey == nil && p.LLMModel == nil && p.LLMTimeout == nil &&
+		p.EmbedBaseURL == nil && p.EmbedAPIKey == nil && p.EmbedModel == nil &&
+		p.EmbedDim == nil && p.EmbedBatch == nil && p.EmbedConcurrency == nil && p.EmbedTimeout == nil &&
+		p.RAGEnabled == nil && p.RAGChunkSize == nil && p.RAGChunkOverlap == nil &&
+		p.RAGTopK == nil && p.RAGTopDocs == nil &&
+		p.CodeEmbedBaseURL == nil && p.CodeEmbedAPIKey == nil && p.CodeEmbedModel == nil &&
+		p.CodeEmbedDim == nil && p.CodeEmbedBatch == nil && p.CodeEmbedConcurrency == nil &&
+		p.CodeEmbedTimeout == nil && p.CodeRAGEnabled == nil && p.CodeRAGChunkSize == nil &&
+		p.CodeRAGChunkOverlap == nil && p.CodeRAGTopK == nil &&
+		p.CodeRAGInclude == nil && p.CodeRAGExclude == nil
 }
 
 // Apply overlays fields present in p onto base. Pointer fields distinguish an
@@ -260,6 +326,12 @@ func (p Patch) Apply(base Settings) Settings {
 	if p.CodeRAGExclude != nil {
 		base.CodeRAGExclude = *p.CodeRAGExclude
 	}
+	if p.GitPollInterval != nil {
+		base.GitPollInterval = *p.GitPollInterval
+	}
+	if p.WebhookSecret != nil {
+		base.WebhookSecret = *p.WebhookSecret
+	}
 	return base
 }
 
@@ -278,11 +350,12 @@ type Store struct {
 	mcpBucket *bw.Bucket[MCPKey]
 }
 
-// settingsSchemaVersion v5 adds docs_summary_model (a fast model for the
-// per-file summary phase). v4 added docs_max_groups (community-based doc
-// summarization); v3 added embed_concurrency / code_embed_concurrency. Bumping
-// the version lets bw migrate existing settings records in place.
-const settingsSchemaVersion = 5
+// settingsSchemaVersion v6 adds git_poll_interval and webhook_secret
+// (system settings moved out of the file/env config). v5 added
+// docs_summary_model; v4 docs_max_groups; v3 embed_concurrency /
+// code_embed_concurrency. Bumping the version lets bw migrate existing
+// settings records in place.
+const settingsSchemaVersion = 6
 
 // New opens the settings bucket. If no record exists yet, seed is persisted as
 // the initial configuration (seeded from file/env config by the caller).

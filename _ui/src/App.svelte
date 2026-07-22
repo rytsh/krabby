@@ -18,6 +18,7 @@
   import ToastHost from "./lib/ToastHost.svelte";
   import Repos from "./routes/Repos.svelte";
   import RepoDetail from "./routes/RepoDetail.svelte";
+  import Sources from "./routes/Sources.svelte";
   import Activity from "./routes/Activity.svelte";
   import Search from "./routes/Search.svelte";
   import Settings from "./routes/Settings.svelte";
@@ -30,6 +31,8 @@
     const p = $path.split("?")[0].replace(/\/$/, "") || "/";
     if (p === "/" || p === "/repos") return { view: "repos" };
     if (p.startsWith("/repos/")) return { view: "repo", repoId: p.slice("/repos/".length) };
+    if (p === "/sources") return { view: "sources" };
+    if (p.startsWith("/sources/")) return { view: "sources", sourceName: p.slice("/sources/".length) };
     if (p === "/search") return { view: "search" };
     if (p === "/activity") return { view: "activity" };
     if (p === "/settings") return { view: "settings" };
@@ -41,6 +44,7 @@
 
   const nav = [
     { href: "/repos", label: "Repositories", icon: "boxes", match: (v) => v === "repos" || v === "repo" },
+    { href: "/sources", label: "Sources", icon: "book", match: (v) => v === "sources" },
     { href: "/activity", label: "Activity", icon: "activity", match: (v) => v === "activity" },
     { href: "/search", label: "Code search", icon: "search", match: (v) => v === "search" },
     { href: "/settings", label: "Settings", icon: "settings", match: (v) => v === "settings" },
@@ -50,6 +54,7 @@
   const title = {
     repos: "Repositories",
     repo: "Repository",
+    sources: "Sources",
     activity: "Activity",
     search: "Code search",
     settings: "Settings",
@@ -274,6 +279,8 @@
         {#key repoId}
           <RepoDetail {repoId} />
         {/key}
+      {:else if view === "sources"}
+        <Sources sourceName={route.sourceName || ""} />
       {:else if view === "activity"}
         <Activity />
       {:else if view === "search"}

@@ -22,6 +22,9 @@ import (
 	"github.com/rytsh/krabby/internal/service/registry"
 	"github.com/rytsh/krabby/internal/service/scheduler"
 	"github.com/rytsh/krabby/internal/service/settings"
+	"github.com/rytsh/krabby/internal/service/websource"
+	"github.com/rytsh/krabby/internal/service/websource/confluence"
+	"github.com/rytsh/krabby/internal/service/websource/pages"
 	"github.com/rytsh/krabby/internal/storage"
 )
 
@@ -83,16 +86,18 @@ func run(ctx context.Context) error {
 	// Native in-process graph query engine (replaces the python serve pool).
 	engine := graphquery.NewEngine()
 
-	git := gitops.New(cfg.Git.SSHKeyPath)
+	// Per-host SSH/token credentials are managed in the persisted credential
+	// store through the UI/REST API; there is no global file-config fallback.
+	git := gitops.New("")
 
 	creds, err := credentials.New(db, cfg.KeysDir())
 	if err != nil {
 		return err
 	}
 
-	// Runtime-mutable docs/RAG settings, seeded from file/env config on first run
-	// and thereafter configurable live via MCP tools / the UI.
-	settingsStore, err := settings.New(db, seedSettings(cfg))
+	// Runtime-mutable workload settings. Safe defaults are persisted on first
+	// run; thereafter the UI/REST/MCP-managed record is authoritative.
+	settingsStore, err := settings.New(db, settings.Defaults())
 	if err != nil {
 		return err
 	}
@@ -103,6 +108,7 @@ func run(ctx context.Context) error {
 			DocsRootDir:    cfg.DocsRootDir(),
 			DocsVectorsDir: cfg.DocsVectorsDir(),
 			CodeVectorsDir: cfg.CodeVectorsDir(),
+			SourcesRootDir: cfg.SourcesRootDir(),
 		},
 	)
 	defer func() {
@@ -111,6 +117,17 @@ func run(ctx context.Context) error {
 		}
 	}()
 	mgr.SetSettingsStore(settingsStore)
+
+	// Web content sources (wikis, Confluence spaces). Each collection type has
+	// a fetcher; new source types plug in here.
+	webStore, err := websource.New(db)
+	if err != nil {
+		return err
+	}
+	mgr.SetWebSources(webStore, map[string]websource.Fetcher{
+		websource.TypePages:      pages.New(pageCredentials(creds)),
+		websource.TypeConfluence: confluence.New(),
+	})
 	if err := mgr.ReconcileInterruptedStages(ctx); err != nil {
 		slog.Error("reconcile interrupted generation stages", "error", err)
 	}
@@ -151,8 +168,9 @@ func run(ctx context.Context) error {
 		}
 	}
 
-	// Background poller.
-	go scheduler.Run(ctx, mgr, cfg.Git.PollInterval)
+	// Background poller. Repo cadence and per-source intervals are read from
+	// persisted runtime settings, so changes apply without a restart.
+	go scheduler.Run(ctx, mgr)
 
 	mcpServer := mcptools.New(mgr, version, cfg.MCP.WaitTimeout)
 
@@ -164,51 +182,16 @@ func run(ctx context.Context) error {
 	return nil
 }
 
-// seedSettings converts file/env config into the initial persisted docs/RAG
-// settings. It is only used the first time krabby runs against a fresh state DB;
-// afterwards the persisted record (editable via the UI/MCP) is authoritative.
-func seedSettings(cfg *config.Config) settings.Settings {
-	return settings.Settings{
-		DocsEnabled:      cfg.Docs.Enabled,
-		DocsConcurrency:  cfg.Docs.Concurrency,
-		DocsSummaryModel: cfg.Docs.SummaryModel,
-		DocsMaxGroups:    cfg.Docs.MaxGroups,
-		DocsInclude:      cfg.Docs.Include,
-		DocsExclude:      cfg.Docs.Exclude,
-		DocsPrompt:       cfg.Docs.Prompt,
+// pageCredentials adapts the git credential store to web-page fetching: a
+// stored pattern matching the page URL supplies basic-auth or bearer-token
+// material for private wikis.
+func pageCredentials(creds *credentials.Store) pages.CredentialFunc {
+	return func(ctx context.Context, pageURL string) (string, string, error) {
+		auth, err := creds.Resolve(ctx, pageURL)
+		if err != nil || auth == nil {
+			return "", "", err
+		}
 
-		LLMBaseURL: cfg.LLM.BaseURL,
-		LLMAPIKey:  cfg.LLM.APIKey,
-		LLMModel:   cfg.LLM.Model,
-		LLMTimeout: cfg.LLM.Timeout,
-
-		EmbedBaseURL:     cfg.Embedder.BaseURL,
-		EmbedAPIKey:      cfg.Embedder.APIKey,
-		EmbedModel:       cfg.Embedder.Model,
-		EmbedDim:         cfg.Embedder.Dim,
-		EmbedBatch:       cfg.Embedder.Batch,
-		EmbedConcurrency: cfg.Embedder.Concurrency,
-		EmbedTimeout:     cfg.Embedder.Timeout,
-
-		RAGEnabled:      cfg.RAG.Enabled,
-		RAGChunkSize:    cfg.RAG.ChunkSize,
-		RAGChunkOverlap: cfg.RAG.ChunkOverlap,
-		RAGTopK:         cfg.RAG.TopK,
-		RAGTopDocs:      cfg.RAG.TopDocs,
-
-		CodeEmbedBaseURL:     cfg.CodeEmbedder.BaseURL,
-		CodeEmbedAPIKey:      cfg.CodeEmbedder.APIKey,
-		CodeEmbedModel:       cfg.CodeEmbedder.Model,
-		CodeEmbedDim:         cfg.CodeEmbedder.Dim,
-		CodeEmbedBatch:       cfg.CodeEmbedder.Batch,
-		CodeEmbedConcurrency: cfg.CodeEmbedder.Concurrency,
-		CodeEmbedTimeout:     cfg.CodeEmbedder.Timeout,
-
-		CodeRAGEnabled:      cfg.CodeRAG.Enabled,
-		CodeRAGChunkSize:    cfg.CodeRAG.ChunkSize,
-		CodeRAGChunkOverlap: cfg.CodeRAG.ChunkOverlap,
-		CodeRAGTopK:         cfg.CodeRAG.TopK,
-		CodeRAGInclude:      cfg.CodeRAG.Include,
-		CodeRAGExclude:      cfg.CodeRAG.Exclude,
+		return auth.Username, auth.Token, nil
 	}
 }

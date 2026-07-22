@@ -165,9 +165,10 @@ func (s *Service) HasRepo(ctx context.Context, repo string) (bool, error) {
 }
 
 // Retrieve returns up to topDocs whole markdown documents most relevant to the
-// question. repo == "" searches across all repos. topDocs <= 0 uses the
-// configured default (RAG.TopDocs).
-func (s *Service) Retrieve(ctx context.Context, repo string, question string, topDocs int) ([]Doc, error) {
+// question. The filter selects which keys (repos, web-source collections or
+// both) are searched; a zero filter searches everything. topDocs <= 0 uses
+// the configured default (RAG.TopDocs).
+func (s *Service) Retrieve(ctx context.Context, filter vectorstore.Filter, question string, topDocs int) ([]Doc, error) {
 	if strings.TrimSpace(question) == "" {
 		return nil, errors.New("question is empty")
 	}
@@ -199,7 +200,7 @@ func (s *Service) Retrieve(ctx context.Context, repo string, question string, to
 		return nil, fmt.Errorf("embedder returned %d vectors for the question", len(vecs))
 	}
 
-	matches, err := s.store.Search(ctx, repo, vecs[0], topK)
+	matches, err := s.store.Search(ctx, filter, vecs[0], topK)
 	if err != nil {
 		return nil, fmt.Errorf("vector search; %w", err)
 	}

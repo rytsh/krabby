@@ -134,7 +134,12 @@ type Match struct {
 This satisfies "hold markdown + RAG for searching which markdown files relate to
 the question, then use that markdown file directly".
 
-## Config additions (`config.Config`)
+## Runtime settings
+
+These fields originally lived in `config.Config`; they now live in the
+persisted `settings.Settings` record and are managed through the UI, REST API
+or MCP tools. Changing them rebuilds the affected clients without restarting
+krabby. The shape below is conceptual rather than YAML file configuration.
 
 ```yaml
 docs:
@@ -165,7 +170,8 @@ rag:
   top_docs: 5             # whole docs returned
 ```
 
-New `Config` helpers: `DocsRootDir()`, `DocsDir(repoID)`, `DocsVectorsDir()`.
+System-level `Config` helpers still derive storage paths such as
+`DocsRootDir()` and `DocsVectorsDir()` from `data_dir`.
 
 ## Manager integration
 

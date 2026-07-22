@@ -17,8 +17,9 @@ import (
 
 // Credential kinds.
 const (
-	KindSSH   = "ssh"   // Secret is a private key (PEM); used for ssh urls.
-	KindToken = "token" // Secret is an access token (PAT); used for https urls.
+	KindSSH    = "ssh"    // Secret is a private key (PEM); used for ssh urls.
+	KindToken  = "token"  // Secret is an access token (PAT); used for https urls.
+	KindBearer = "bearer" // Secret is an HTTP Bearer token (custom web pages).
 )
 
 // Credential maps a pattern to git auth material.
@@ -70,8 +71,8 @@ func (s *Store) Set(ctx context.Context, cred *Credential) error {
 		cred.Kind = inferKind(cred.Secret)
 	}
 
-	if cred.Kind != KindSSH && cred.Kind != KindToken {
-		return fmt.Errorf("invalid kind %q (want %q or %q)", cred.Kind, KindSSH, KindToken)
+	if cred.Kind != KindSSH && cred.Kind != KindToken && cred.Kind != KindBearer {
+		return fmt.Errorf("invalid kind %q (want %q, %q or %q)", cred.Kind, KindSSH, KindToken, KindBearer)
 	}
 
 	if cred.Kind == KindToken && cred.Username == "" {
@@ -167,7 +168,7 @@ func (s *Store) Resolve(ctx context.Context, repoURL string) (*Auth, error) {
 		return nil, nil
 	}
 
-	if best.Kind == KindToken {
+	if best.Kind == KindToken || best.Kind == KindBearer {
 		return &Auth{Username: best.Username, Token: best.Secret}, nil
 	}
 

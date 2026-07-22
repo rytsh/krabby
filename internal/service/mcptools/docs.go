@@ -16,7 +16,8 @@ import (
 
 type searchDocsArgs struct {
 	Question string `json:"question" jsonschema:"natural language question to find relevant documentation for"`
-	Repo     string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to search; omit to search across all repos"`
+	Repo     string `json:"repo,omitempty" jsonschema:"restrict to one corpus: a repository id (host/group/name) or a web-source key (web:<collection>); omit to use scope"`
+	Scope    string `json:"scope,omitempty" jsonschema:"where to search when repo is omitted: 'all' (default), 'repos' (repository docs only) or 'sources' (web sources: wikis, Confluence)"`
 	TopDocs  int    `json:"top_docs,omitempty" jsonschema:"number of whole documents to return (default 5)"`
 }
 
@@ -54,11 +55,13 @@ type getDocArgs struct {
 func addDocTools(server *mcp.Server, mgr *manager.Manager) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "search_docs",
-		Description: "RAG search over generated markdown documentation. Embeds the question, finds the " +
-			"most relevant documents via the vector index, and returns the WHOLE markdown file(s) " +
-			"so an LLM can answer from full context. Omit repo to search all repos.",
+		Description: "RAG search over generated repository documentation AND synced web sources (wikis, " +
+			"Confluence spaces). Embeds the question, finds the most relevant documents via the vector " +
+			"index, and returns the WHOLE markdown file(s) so an LLM can answer from full context. " +
+			"Scope with 'repo' (a repository id or web:<collection>) or 'scope' (all/repos/sources); " +
+			"defaults to everything. Use list_sources to discover web-source collections.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args searchDocsArgs) (*mcp.CallToolResult, any, error) {
-		docs, err := mgr.SearchDocs(ctx, args.Repo, args.Question, args.TopDocs)
+		docs, err := mgr.SearchDocs(ctx, args.Scope, args.Repo, args.Question, args.TopDocs)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -123,6 +126,19 @@ func addDocTools(server *mcp.Server, mgr *manager.Manager) {
 		return jsonResult(doc), nil, nil
 	})
 
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "list_sources",
+		Description: "List the synced web-source collections (wikis, Confluence spaces). Each collection " +
+			"is searchable via search_docs with repo='web:<name>'.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
+		cols, err := mgr.ListWebCollections(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return jsonResult(cols), nil, nil
+	})
+
 	addDocConfigTools(server, mgr)
 }
 
@@ -136,27 +152,27 @@ type setDocsConfigArgs struct {
 	DocsConcurrency  int      `json:"docs_concurrency,omitempty" jsonschema:"parallel per-file LLM summary calls"`
 	DocsSummaryModel string   `json:"docs_summary_model,omitempty" jsonschema:"chat model for the per-file summary phase (the bulk of calls); use a fast model like gemini-2.5-flash. Reuses the main LLM base URL/key/timeout. Empty uses the main model"`
 	DocsMaxGroups    int      `json:"docs_max_groups,omitempty" jsonschema:"max grouped summary LLM calls per run; small graph communities are packed together to stay under this (default 40)"`
-	DocsInclude     []string `json:"docs_include,omitempty" jsonschema:"source globs to document (repo-relative)"`
-	DocsExclude     []string `json:"docs_exclude,omitempty" jsonschema:"source globs to skip"`
-	DocsPrompt      string   `json:"docs_prompt,omitempty" jsonschema:"system prompt for the final documentation synthesis (empty uses the built-in default)"`
+	DocsInclude      []string `json:"docs_include,omitempty" jsonschema:"source globs to document (repo-relative)"`
+	DocsExclude      []string `json:"docs_exclude,omitempty" jsonschema:"source globs to skip"`
+	DocsPrompt       string   `json:"docs_prompt,omitempty" jsonschema:"system prompt for the final documentation synthesis (empty uses the built-in default)"`
 
 	LLMBaseURL string `json:"llm_base_url,omitempty" jsonschema:"OpenAI-compatible chat base URL, e.g. https://api.openai.com/v1"`
 	LLMAPIKey  string `json:"llm_api_key,omitempty" jsonschema:"chat API key (write-only; leave empty to keep existing)"`
 	LLMModel   string `json:"llm_model,omitempty" jsonschema:"chat model name"`
 	LLMTimeout string `json:"llm_timeout,omitempty" jsonschema:"chat request timeout as a Go duration, e.g. 60s"`
 
-	EmbedBaseURL string `json:"embed_base_url,omitempty" jsonschema:"OpenAI-compatible embeddings base URL, e.g. http://localhost:11434/v1"`
-	EmbedAPIKey  string `json:"embed_api_key,omitempty" jsonschema:"embeddings API key (write-only; leave empty to keep existing)"`
-	EmbedModel   string `json:"embed_model,omitempty" jsonschema:"embedding model name"`
-	EmbedDim     int    `json:"embed_dim,omitempty" jsonschema:"embedding dimension (0 = infer)"`
+	EmbedBaseURL     string `json:"embed_base_url,omitempty" jsonschema:"OpenAI-compatible embeddings base URL, e.g. http://localhost:11434/v1"`
+	EmbedAPIKey      string `json:"embed_api_key,omitempty" jsonschema:"embeddings API key (write-only; leave empty to keep existing)"`
+	EmbedModel       string `json:"embed_model,omitempty" jsonschema:"embedding model name"`
+	EmbedDim         int    `json:"embed_dim,omitempty" jsonschema:"embedding dimension (0 = infer)"`
 	EmbedBatch       int    `json:"embed_batch,omitempty" jsonschema:"inputs per embeddings request"`
 	EmbedConcurrency int    `json:"embed_concurrency,omitempty" jsonschema:"parallel embedding batch requests (default 4)"`
 	EmbedTimeout     string `json:"embed_timeout,omitempty" jsonschema:"embeddings request timeout as a Go duration, e.g. 30s"`
 
-	CodeEmbedBaseURL string `json:"code_embed_base_url,omitempty" jsonschema:"dedicated code embeddings base URL; blank uses the docs embedder"`
-	CodeEmbedAPIKey  string `json:"code_embed_api_key,omitempty" jsonschema:"code embeddings API key (write-only; leave empty to keep existing)"`
-	CodeEmbedModel   string `json:"code_embed_model,omitempty" jsonschema:"code embedding model, e.g. codestral-embed-2505"`
-	CodeEmbedDim     int    `json:"code_embed_dim,omitempty" jsonschema:"code embedding dimension (0 = infer)"`
+	CodeEmbedBaseURL     string `json:"code_embed_base_url,omitempty" jsonschema:"dedicated code embeddings base URL; blank uses the docs embedder"`
+	CodeEmbedAPIKey      string `json:"code_embed_api_key,omitempty" jsonschema:"code embeddings API key (write-only; leave empty to keep existing)"`
+	CodeEmbedModel       string `json:"code_embed_model,omitempty" jsonschema:"code embedding model, e.g. codestral-embed-2505"`
+	CodeEmbedDim         int    `json:"code_embed_dim,omitempty" jsonschema:"code embedding dimension (0 = infer)"`
 	CodeEmbedBatch       int    `json:"code_embed_batch,omitempty" jsonschema:"code inputs per embeddings request"`
 	CodeEmbedConcurrency int    `json:"code_embed_concurrency,omitempty" jsonschema:"parallel code embedding batch requests (default 4)"`
 	CodeEmbedTimeout     string `json:"code_embed_timeout,omitempty" jsonschema:"code embeddings request timeout as a Go duration, e.g. 30s"`

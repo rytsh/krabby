@@ -1,4 +1,4 @@
-// Package server wires the ada HTTP server: REST API, GitHub webhook and the
+// Package server wires the ada HTTP server: REST API, git webhook and the
 // MCP endpoint.
 package server
 
@@ -31,6 +31,7 @@ import (
 
 	"github.com/rytsh/krabby/internal/config"
 	"github.com/rytsh/krabby/internal/service/credentials"
+	"github.com/rytsh/krabby/internal/service/gitops"
 	"github.com/rytsh/krabby/internal/service/graphify"
 	"github.com/rytsh/krabby/internal/service/lease"
 	"github.com/rytsh/krabby/internal/service/manager"
@@ -108,6 +109,18 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 		"":     deleteRepo(mgr),
 		"lock": unlockRepo(mgr),
 	})))
+	// Web content sources (wikis, Confluence spaces): named collections whose
+	// pages are synced to markdown and indexed into the docs RAG.
+	api.GET("/sources", server.Wrap(listSources(mgr)))
+	api.POST("/sources", server.Wrap(addSource(mgr)))
+	api.GET("/sources/{name}", server.Wrap(getSource(mgr)))
+	api.PUT("/sources/{name}", server.Wrap(updateSource(mgr)))
+	api.DELETE("/sources/{name}", server.Wrap(deleteSource(mgr)))
+	api.POST("/sources/{name}/refresh", server.Wrap(refreshSource(mgr)))
+	api.POST("/sources/{name}/pages", server.Wrap(addSourcePage(mgr)))
+	api.DELETE("/sources/{name}/pages", server.Wrap(deleteSourcePage(mgr)))
+	api.GET("/sources/{name}/doc", server.Wrap(getSourceDoc(mgr)))
+
 	api.GET("/docs/search", server.Wrap(searchDocs(mgr)))
 	api.GET("/code/search", server.Wrap(searchCode(mgr)))
 	api.GET("/docs/config", server.Wrap(getDocsConfig(mgr)))
@@ -120,7 +133,7 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	api.PUT("/credentials", server.Wrap(setCredential(mgr)))
 	api.DELETE("/credentials", server.Wrap(deleteCredential(mgr)))
 
-	base.POST("/webhook/github", githubWebhook(cfg.Webhook.GithubSecret, mgr))
+	base.POST("/webhook/git", gitWebhook(mgr))
 
 	// Web UI: embedded Svelte SPA served at the base path with client-side
 	// routing fallback. Concrete routes above (/api, /mcp, /webhook, /healthz)
@@ -197,20 +210,11 @@ type settingsResponse struct {
 		APIKeySet bool   `json:"api_key_set"`
 	} `json:"mcp"`
 
-	Git struct {
-		SSHKeyPath   string `json:"ssh_key_path,omitempty"`
-		PollInterval string `json:"poll_interval"`
-	} `json:"git"`
-
 	Graphify struct {
 		Bin          string `json:"bin"`
 		Python       string `json:"python,omitempty"`
 		BuildTimeout string `json:"build_timeout"`
 	} `json:"graphify"`
-
-	Webhook struct {
-		GithubSecretSet bool `json:"github_secret_set"`
-	} `json:"webhook"`
 }
 
 func getSettings(cfg *config.Config, mgr *manager.Manager) ada.HandlerFunc {
@@ -228,14 +232,9 @@ func getSettings(cfg *config.Config, mgr *manager.Manager) ada.HandlerFunc {
 		s.MCP.Path = cfg.MCP.Path
 		s.MCP.APIKeySet = mgr.MCPAPIKey() != ""
 
-		s.Git.SSHKeyPath = cfg.Git.SSHKeyPath
-		s.Git.PollInterval = cfg.Git.PollInterval.String()
-
 		s.Graphify.Bin = cfg.Graphify.Bin
 		s.Graphify.Python = cfg.Graphify.Python
 		s.Graphify.BuildTimeout = cfg.Graphify.BuildTimeout.String()
-
-		s.Webhook.GithubSecretSet = cfg.Webhook.GithubSecret != ""
 
 		return c.SendJSON(s)
 	}
@@ -754,7 +753,10 @@ func searchDocs(mgr *manager.Manager) ada.HandlerFunc {
 			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": "q query param is required"})
 		}
 
-		repo := c.Request.URL.Query().Get("repo") // "" = all repos
+		// repo may be a repository id or a web-source key ("web:<name>") and
+		// wins over scope; scope selects all/repos/sources when repo is empty.
+		repo := c.Request.URL.Query().Get("repo")
+		scope := c.Request.URL.Query().Get("scope")
 
 		var top int
 		if v := c.Request.URL.Query().Get("top"); v != "" {
@@ -763,7 +765,7 @@ func searchDocs(mgr *manager.Manager) ada.HandlerFunc {
 			}
 		}
 
-		docs, err := mgr.SearchDocs(c.Request.Context(), repo, q, top)
+		docs, err := mgr.SearchDocs(c.Request.Context(), scope, repo, q, top)
 		if err != nil {
 			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
 		}
@@ -994,15 +996,27 @@ func deleteCredential(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-// ---- GitHub webhook ---------------------------------------------------------
+// ---- provider-neutral git webhook ------------------------------------------
 
-type githubPushEvent struct {
+// gitPushEvent covers the repository identity fields used by GitHub, GitLab,
+// Gitea and compatible servers. Unknown fields are intentionally ignored.
+type gitPushEvent struct {
 	Repository struct {
 		FullName string `json:"full_name"`
+		CloneURL string `json:"clone_url"`
+		SSHURL   string `json:"ssh_url"`
+		HTMLURL  string `json:"html_url"`
 	} `json:"repository"`
+	Project struct {
+		PathWithNamespace string `json:"path_with_namespace"`
+		GitHTTPURL        string `json:"git_http_url"`
+		GitSSHURL         string `json:"git_ssh_url"`
+		WebURL            string `json:"web_url"`
+	} `json:"project"`
+	RepositoryURL string `json:"repository_url"`
 }
 
-func githubWebhook(secret string, mgr *manager.Manager) http.HandlerFunc {
+func gitWebhook(mgr *manager.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 		if err != nil {
@@ -1011,28 +1025,31 @@ func githubWebhook(secret string, mgr *manager.Manager) http.HandlerFunc {
 			return
 		}
 
-		if secret != "" {
-			if !verifyGithubSignature(secret, body, r.Header.Get("X-Hub-Signature-256")) {
+		// Resolve per request so a secret changed through UI/REST applies
+		// immediately without rebuilding the HTTP routes or restarting.
+		if secret := mgr.WebhookSecret(); secret != "" {
+			if !verifyGitWebhook(secret, body, r.Header) {
 				http.Error(w, "invalid signature", http.StatusUnauthorized)
 
 				return
 			}
 		}
 
-		var event githubPushEvent
-		if err := json.Unmarshal(body, &event); err != nil || event.Repository.FullName == "" {
+		var event gitPushEvent
+		if err := json.Unmarshal(body, &event); err != nil {
 			http.Error(w, "invalid payload", http.StatusBadRequest)
 
 			return
 		}
 
-		// full_name is "owner/name"; ids are full paths (host/owner/name), so
-		// try the exact github.com id first, then a suffix match for
-		// GitHub Enterprise hosts.
-		repo, err := mgr.Registry().Resolve(r.Context(), "github.com/"+event.Repository.FullName)
-		if err == nil && repo == nil {
-			repo, err = mgr.Registry().Resolve(r.Context(), event.Repository.FullName)
+		ref := gitEventRepoRef(event)
+		if ref == "" {
+			http.Error(w, "payload has no repository identity", http.StatusBadRequest)
+
+			return
 		}
+
+		repo, err := mgr.Registry().Resolve(r.Context(), ref)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 
@@ -1052,15 +1069,63 @@ func githubWebhook(secret string, mgr *manager.Manager) http.HandlerFunc {
 	}
 }
 
-func verifyGithubSignature(secret string, body []byte, header string) bool {
-	sig, ok := strings.CutPrefix(header, "sha256=")
-	if !ok {
-		return false
+// gitEventRepoRef prefers clone/web URLs because ParseRepoID preserves the git
+// server host. Provider path-only fields are a fallback and resolve by unique
+// suffix when the payload does not expose a URL.
+func gitEventRepoRef(event gitPushEvent) string {
+	urls := []string{
+		event.Repository.CloneURL,
+		event.Repository.SSHURL,
+		event.Project.GitHTTPURL,
+		event.Project.GitSSHURL,
+		event.RepositoryURL,
+		event.Repository.HTMLURL,
+		event.Project.WebURL,
+	}
+	for _, raw := range urls {
+		if raw == "" {
+			continue
+		}
+		if id, err := gitops.ParseRepoID(raw); err == nil {
+			return id
+		}
+	}
+
+	if event.Project.PathWithNamespace != "" {
+		return event.Project.PathWithNamespace
+	}
+
+	return event.Repository.FullName
+}
+
+// verifyGitWebhook first accepts provider-neutral shared-token headers, then
+// the common authentication schemes used by popular git servers. A custom git
+// server can always send Authorization: Bearer <secret> or X-Webhook-Token.
+func verifyGitWebhook(secret string, body []byte, header http.Header) bool {
+	tokens := []string{
+		header.Get("X-Webhook-Token"),
+		strings.TrimPrefix(header.Get("Authorization"), "Bearer "),
+		header.Get("X-Gitlab-Token"),
+	}
+	for _, token := range tokens {
+		if token == "" {
+			continue
+		}
+		if subtle.ConstantTimeCompare([]byte(token), []byte(secret)) == 1 {
+			return true
+		}
 	}
 
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write(body)
 	expected := hex.EncodeToString(mac.Sum(nil))
 
-	return hmac.Equal([]byte(expected), []byte(sig))
+	for _, name := range []string{"X-Hub-Signature-256", "X-Gitea-Signature", "X-Gogs-Signature"} {
+		sig := strings.TrimPrefix(header.Get(name), "sha256=")
+		if sig != "" && hmac.Equal([]byte(expected), []byte(sig)) {
+			return true
+		}
+	}
+
+	return false
 }

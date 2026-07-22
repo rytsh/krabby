@@ -30,6 +30,7 @@ import (
 	"github.com/rytsh/krabby/internal/service/repofs"
 	"github.com/rytsh/krabby/internal/service/settings"
 	"github.com/rytsh/krabby/internal/service/vectorstore"
+	"github.com/rytsh/krabby/internal/service/websource"
 )
 
 // Manager coordinates registry, git, graphify builds and the native graph
@@ -48,6 +49,15 @@ type Manager struct {
 	docsRootDir    string
 	docsVectorsDir string
 	codeVectorsDir string
+	sourcesRootDir string
+
+	// Web content sources (wiki pages, Confluence spaces). webFetchers maps a
+	// collection type to its fetcher implementation; new source types register
+	// here (see SetWebSources).
+	webStore    *websource.Store
+	webFetchers map[string]websource.Fetcher
+	webJobMu    sync.Mutex
+	webJobs     map[string]struct{}
 
 	// Optional docs+RAG subsystem, held as an atomically swappable bundle so
 	// settings changes rebuild the clients live. docsMu guards the bundle.
@@ -114,6 +124,8 @@ type DocsDeps struct {
 	// RAG. Separate from DocsVectorsDir because the indexes may use embedding
 	// models with different dimensions.
 	CodeVectorsDir string
+	// SourcesRootDir stores synced web-source markdown by collection name.
+	SourcesRootDir string
 }
 
 // New creates a Manager. baseCtx bounds background refresh jobs. docs carries the
@@ -143,6 +155,7 @@ func New(
 		docsRootDir:    docs.DocsRootDir,
 		docsVectorsDir: docs.DocsVectorsDir,
 		codeVectorsDir: docs.CodeVectorsDir,
+		sourcesRootDir: docs.SourcesRootDir,
 		docs: &docsBundle{
 			codeRag: coderag.New(config.CodeRAG{}, nil, nil, engine, codeText),
 		},
@@ -150,6 +163,7 @@ func New(
 		locks:    map[string]*sync.Mutex{},
 		activity: map[string]map[string]struct{}{},
 		jobs:     map[string]*job{},
+		webJobs:  map[string]struct{}{},
 	}
 	m.leases = lease.New(m.TriggerRefresh)
 
@@ -1066,6 +1080,10 @@ func (m *Manager) TriggerReindexAll() {
 
 			l.Unlock()
 		}
+
+		// Web-source vectors live in the same docs index and follow the same
+		// embedder settings, so they are rebuilt from the on-disk markdown too.
+		m.reindexAllWebSources(m.baseCtx)
 	}()
 }
 
