@@ -38,6 +38,7 @@ type Snippet struct {
 	Symbol    string  `json:"symbol,omitempty"`
 	StartLine int     `json:"start_line"`
 	EndLine   int     `json:"end_line"`
+	Line      int     `json:"line,omitempty"` // exact text match; semantic hits may omit it
 	Score     float32 `json:"score"`
 	Snippet   string  `json:"snippet"`
 }
@@ -48,31 +49,108 @@ type Service struct {
 	emb    *embedder.Client
 	store  vectorstore.Store
 	engine *graphquery.Engine
+	text   *TextStore
 }
 
 const maxSearchResults = 100
 
-// New builds a code RAG service. emb and store must be non-nil; engine may be
-// nil (chunking then always falls back to line windows).
-func New(cfg config.CodeRAG, emb *embedder.Client, store vectorstore.Store, engine *graphquery.Engine) *Service {
-	return &Service{cfg: cfg, emb: emb, store: store, engine: engine}
+// New builds the shared code indexing service. text provides normal BM25
+// search; emb and store may be nil when semantic search is disabled. engine may
+// be nil (chunking then always falls back to line windows).
+func New(
+	cfg config.CodeRAG,
+	emb *embedder.Client,
+	store vectorstore.Store,
+	engine *graphquery.Engine,
+	text *TextStore,
+) *Service {
+	return &Service{cfg: cfg, emb: emb, store: store, engine: engine, text: text}
 }
 
 // Index (re)builds the code vector index for a repo clone. It selects source
 // files, chunks them (symbol-aware via the repo's graph when available), embeds
 // the chunks and upserts them, replacing any prior vectors for the repo.
 func (s *Service) Index(ctx context.Context, repo, clonePath string) error {
+	items, fileCount, err := s.indexItems(clonePath, repo)
+	if err != nil {
+		return err
+	}
+
+	if s.text != nil {
+		if err := s.text.ReplaceRepo(ctx, repo, items); err != nil {
+			return fmt.Errorf("replace normal code index; %w", err)
+		}
+	}
+
+	if s.emb == nil || s.store == nil {
+		slog.Info("code text index rebuilt", "repo", repo, "files", fileCount, "chunks", len(items))
+		return nil
+	}
+
+	if len(items) == 0 {
+		return s.store.DeleteRepo(ctx, repo)
+	}
+
+	texts := make([]string, len(items))
+	for i := range items {
+		texts[i] = items[i].Payload.Chunk
+	}
+
+	vecs, err := s.emb.Embed(ctx, texts)
+	if err != nil {
+		return fmt.Errorf("embed %d code chunks; %w", len(texts), err)
+	}
+
+	if len(vecs) != len(items) {
+		return fmt.Errorf("embedder returned %d vectors for %d chunks", len(vecs), len(items))
+	}
+
+	for i := range items {
+		items[i].Vector = vecs[i]
+	}
+
+	// Full rebuild: drop prior vectors so deleted files disappear, then upsert.
+	if err := s.store.DeleteRepo(ctx, repo); err != nil {
+		return fmt.Errorf("clear prior code vectors; %w", err)
+	}
+
+	if err := s.store.Upsert(ctx, items); err != nil {
+		return fmt.Errorf("upsert %d code vectors; %w", len(items), err)
+	}
+
+	slog.Info("code indexes rebuilt", "repo", repo, "files", fileCount, "chunks", len(items))
+
+	return nil
+}
+
+// IndexText builds only the local bw FTS index. It is used to bootstrap the
+// normal search index for repositories tracked before this index was added.
+func (s *Service) IndexText(ctx context.Context, repo, clonePath string) error {
+	if s.text == nil {
+		return nil
+	}
+
+	items, fileCount, err := s.indexItems(clonePath, repo)
+	if err != nil {
+		return err
+	}
+	if err := s.text.ReplaceRepo(ctx, repo, items); err != nil {
+		return fmt.Errorf("replace normal code index; %w", err)
+	}
+
+	slog.Info("code text index rebuilt", "repo", repo, "files", fileCount, "chunks", len(items))
+	return nil
+}
+
+func (s *Service) indexItems(clonePath, repo string) ([]vectorstore.Item, int, error) {
 	files, err := s.selectFiles(clonePath)
 	if err != nil {
-		return fmt.Errorf("select source files; %w", err)
+		return nil, 0, fmt.Errorf("select source files; %w", err)
 	}
 
 	symsByFile := s.fileSymbols(clonePath)
 
-	var (
-		items []vectorstore.Item
-		texts []string
-	)
+	var items []vectorstore.Item
 
 	for _, rel := range files {
 		fc, err := repofs.ReadFile(clonePath, rel, 0, 0)
@@ -99,44 +177,27 @@ func (s *Service) Index(ctx context.Context, repo, clonePath string) error {
 					Chunk:     c.Text,
 				},
 			})
-			texts = append(texts, c.Text)
 		}
 	}
 
-	if len(items) == 0 {
-		return s.store.DeleteRepo(ctx, repo)
-	}
-
-	vecs, err := s.emb.Embed(ctx, texts)
-	if err != nil {
-		return fmt.Errorf("embed %d code chunks; %w", len(texts), err)
-	}
-
-	if len(vecs) != len(items) {
-		return fmt.Errorf("embedder returned %d vectors for %d chunks", len(vecs), len(items))
-	}
-
-	for i := range items {
-		items[i].Vector = vecs[i]
-	}
-
-	// Full rebuild: drop prior vectors so deleted files disappear, then upsert.
-	if err := s.store.DeleteRepo(ctx, repo); err != nil {
-		return fmt.Errorf("clear prior code vectors; %w", err)
-	}
-
-	if err := s.store.Upsert(ctx, items); err != nil {
-		return fmt.Errorf("upsert %d code vectors; %w", len(items), err)
-	}
-
-	slog.Info("code index rebuilt", "repo", repo, "files", len(files), "chunks", len(items))
-
-	return nil
+	return items, len(files), nil
 }
 
 // DeleteRepo removes a repo's vectors from the code index (on repo removal).
 func (s *Service) DeleteRepo(ctx context.Context, repo string) error {
-	return s.store.DeleteRepo(ctx, repo)
+	var errs []error
+	if s.text != nil {
+		if err := s.text.DeleteRepo(ctx, repo); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if s.store != nil {
+		if err := s.store.DeleteRepo(ctx, repo); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	return errors.Join(errs...)
 }
 
 // Retrieve returns up to topK code snippets most relevant to the query.

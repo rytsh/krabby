@@ -37,3 +37,31 @@ func TestSetDocsConfigArgsMergePresence(t *testing.T) {
 		t.Errorf("omitted fields changed: %#v", got)
 	}
 }
+
+func TestSearchCodeArgsMode(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		mode    string
+		want    string
+		wantErr bool
+	}{
+		{name: "default", want: "normal"},
+		{name: "normal", mode: "normal", want: "normal"},
+		{name: "semantic", mode: "semantic", want: "semantic"},
+		{name: "invalid", mode: "hybrid", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := (searchCodeArgs{Mode: tt.mode}).searchMode()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("searchMode() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("searchMode() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

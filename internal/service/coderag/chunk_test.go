@@ -149,7 +149,7 @@ func TestCodeRAGIndexAndRetrieve(t *testing.T) {
 		}
 	})
 
-	svc := New(cfg, emb, store, nil)
+	svc := New(cfg, emb, store, nil, nil)
 	if err := svc.Index(context.Background(), "acme/app", root); err != nil {
 		t.Fatal(err)
 	}

@@ -12,6 +12,7 @@ import (
 
 	"github.com/rytsh/krabby/internal/config"
 	"github.com/rytsh/krabby/internal/server"
+	"github.com/rytsh/krabby/internal/service/coderag"
 	"github.com/rytsh/krabby/internal/service/credentials"
 	"github.com/rytsh/krabby/internal/service/gitops"
 	"github.com/rytsh/krabby/internal/service/graphify"
@@ -66,6 +67,11 @@ func run(ctx context.Context) error {
 		return err
 	}
 
+	codeText, err := coderag.NewTextStore(db)
+	if err != nil {
+		return err
+	}
+
 	// graphify CLI + python discovery.
 	gfy, err := graphify.New(cfg.Graphify.Bin, cfg.Graphify.Python, cfg.Graphify.BuildTimeout)
 	if err != nil {
@@ -91,7 +97,7 @@ func run(ctx context.Context) error {
 		return err
 	}
 
-	mgr := manager.New(ctx, reg, git, gfy, engine, creds, cfg.ReposDir(), cfg.MergedGraphPath(),
+	mgr := manager.New(ctx, reg, git, gfy, engine, creds, codeText, cfg.ReposDir(), cfg.MergedGraphPath(),
 		manager.DocsDeps{
 			DocsDir:        cfg.DocsDir,
 			DocsVectorsDir: cfg.DocsVectorsDir(),
@@ -111,6 +117,9 @@ func run(ctx context.Context) error {
 		slog.Error("load docs settings", "error", gerr)
 	} else if cerr := mgr.Configure(ctx, s); cerr != nil {
 		slog.Error("configure docs/rag (disabled until fixed via settings)", "error", cerr)
+	}
+	if err := mgr.WarmCodeSearch(ctx); err != nil {
+		slog.Error("warm normal code search index", "error", err)
 	}
 
 	// Seed repos from config; builds run in the background.

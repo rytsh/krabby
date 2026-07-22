@@ -9,11 +9,20 @@
     "preview": "vite preview"
   },
   "devDependencies": {
-    "@sveltejs/vite-plugin-svelte": "^3.1.2",
+    "@iconify-json/vscode-icons": "^1.2.67",
+    "@iconify/svelte": "^5.2.2",
+    "@lucide/svelte": "^1.25.0",
+    "@sveltejs/vite-plugin-svelte": "^7.2.0",
     "@tailwindcss/oxide-linux-x64-gnu": "4.3.3",
     "@tailwindcss/vite": "^4.0.0",
-    "svelte": "^4.2.19",
+    "commonmark": "^0.31.2",
+    "mermaid": "^11.16.0",
+    "shiki": "^4.3.1",
+    "simple-icons": "^16.27.0",
+    "svelte": "^5.56.7",
+    "svg-pan-zoom": "^3.6.2",
     "tailwindcss": "^4.0.0",
-    "vite": "^5.4.10"
+    "vite": "^8.1.5",
+    "vscode-icons-js": "^11.6.1"
   }
 }

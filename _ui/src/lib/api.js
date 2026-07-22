@@ -34,11 +34,16 @@ export const api = {
     req("/repos", { method: "POST", body: JSON.stringify({ url, branch: branch || "" }) }),
   deleteRepo: (id) => req(`/repos/${id}`, { method: "DELETE" }),
   refreshRepo: (id) => req(`/repos/${id}/refresh`, { method: "POST" }),
+  generate: (id, targets) =>
+    req(`/repos/${id}/generate`, { method: "POST", body: JSON.stringify({ targets }) }),
   lockStatus: (id) => req(`/repos/${id}/lock`),
   files: (id, subdir = "", recursive = false) =>
     req(`/repos/${id}/files?subdir=${encodeURIComponent(subdir)}&recursive=${recursive}`),
   file: (id, path) => req(`/repos/${id}/file?path=${encodeURIComponent(path)}`),
   credentials: () => req("/credentials"),
+  mcpKey: () => req("/mcp/api-key"),
+  setMcpKey: (apiKey) => req("/mcp/api-key", { method: "PUT", body: JSON.stringify({ api_key: apiKey }) }),
+  clearMcpKey: () => req("/mcp/api-key", { method: "DELETE" }),
   docsConfig: () => req("/docs/config"),
   setDocsConfig: (cfg) => req("/docs/config", { method: "PUT", body: JSON.stringify(cfg) }),
   testLLM: (cfg) => req("/docs/config/test/llm", { method: "POST", body: JSON.stringify(cfg) }),
@@ -46,8 +51,10 @@ export const api = {
   testCodeEmbedder: (cfg) => req("/docs/config/test/code-embedder", { method: "POST", body: JSON.stringify(cfg) }),
   searchDocs: (q, repo = "", top = 0) =>
     req(`/docs/search?q=${encodeURIComponent(q)}&repo=${encodeURIComponent(repo)}&top=${top}`),
-  searchCode: (q, repo = "", top = 0) =>
-    req(`/code/search?q=${encodeURIComponent(q)}&repo=${encodeURIComponent(repo)}&top=${top}`),
+  searchCode: (q, repo = "", mode = "normal", page = 1, perPage = 20, top = 0) =>
+    req(
+      `/code/search?q=${encodeURIComponent(q)}&repo=${encodeURIComponent(repo)}&mode=${mode}&page=${page}&per_page=${perPage}&top=${top}`,
+    ),
   docs: (id) => req(`/repos/${id}/docs`),
   doc: (id, path) => req(`/repos/${id}/doc?path=${encodeURIComponent(path)}`),
 };

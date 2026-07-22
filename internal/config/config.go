@@ -97,15 +97,15 @@ type Docs struct {
 	// Enabled turns on doc generation in the refresh pipeline. When false,
 	// no docs are generated even if an LLM is configured.
 	Enabled bool `cfg:"enabled"`
-	// Concurrency bounds parallel per-file LLM doc calls.
+	// Concurrency bounds parallel per-file LLM summary calls.
 	Concurrency int `cfg:"concurrency" default:"4"`
 	// Include globs select source files to document (repo-relative).
 	Include []string `cfg:"include"`
 	// Exclude globs skip files (evaluated after Include).
 	Exclude []string `cfg:"exclude"`
-	// Prompt is the system prompt sent to the LLM for per-file documentation.
-	// Empty falls back to docgen.DefaultPrompt. The file content and its graph
-	// neighborhood are appended as the user message.
+	// Prompt is the system prompt for the final synthesis of the comprehensive
+	// repository documentation. Empty falls back to docgen.DefaultPrompt. The
+	// per-file summaries and graph overview are appended as the user message.
 	Prompt string `cfg:"prompt"`
 }
 
@@ -158,8 +158,8 @@ type RAG struct {
 // (separate directory for the embedded store, separate Qdrant collection), so
 // docs and code can use embedding models with different dimensions.
 type CodeRAG struct {
-	// Enabled turns on code indexing + the search_code tool. Off by default so
-	// the (potentially large) code corpus is only embedded when wanted.
+	// Enabled turns on semantic vector indexing. Normal search_code queries use
+	// the always-available local bw full-text index.
 	Enabled bool `cfg:"enabled"`
 	// ChunkSize is the target chunk length in characters. The 3000/1000
 	// defaults follow the Codestral Embed retrieval recommendation.

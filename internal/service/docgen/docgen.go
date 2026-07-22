@@ -1,10 +1,13 @@
 // Package docgen turns a tracked repository into human-readable markdown
-// documentation. The default generator prompts an LLM per file using the
-// graphify graph neighborhood plus source content, and writes markdown under
-// krabby-docs/ alongside a docs-index.json manifest.
+// documentation. The default generator works in two phases: it first builds a
+// dense per-file summary for every source file (cached under
+// krabby-docs/.summaries/ and regenerated only when the source hash changes),
+// then synthesizes ONE comprehensive documentation.md for the whole repository
+// from those summaries plus the knowledge-graph overview.
 //
-// Generation is incremental: each source file's hash is recorded in the
-// manifest, so unchanged files reuse their existing markdown on the next run.
+// Only documentation.md is listed in the manifest and indexed for RAG; the
+// summaries are an internal cache (stored without a .md extension so the docs
+// indexer ignores them).
 package docgen
 
 import (
@@ -13,6 +16,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path"
@@ -29,11 +33,11 @@ import (
 	"github.com/rytsh/krabby/internal/service/repofs"
 )
 
-// DocMeta describes one generated markdown document.
+// DocMeta describes one generated markdown document (or an internal summary).
 type DocMeta struct {
-	Path       string    `json:"path"`        // repo-relative path under krabby-docs/, e.g. "exporter/exporter.go.md"
+	Path       string    `json:"path"`        // repo-relative path under krabby-docs/
 	Title      string    `json:"title"`       // human title
-	SourcePath string    `json:"source_path"` // originating source file (empty for overview)
+	SourcePath string    `json:"source_path"` // originating source file (empty for the synthesized doc)
 	SourceHash string    `json:"source_hash"` // hash of source used; enables incremental regen
 	Generated  time.Time `json:"generated"`
 }
@@ -43,48 +47,85 @@ type Manifest struct {
 	Repo      string    `json:"repo"`
 	Model     string    `json:"model"`
 	Generated time.Time `json:"generated"`
-	Docs      []DocMeta `json:"docs"`
+	// Docs are the user-facing documents (the synthesized documentation.md).
+	Docs []DocMeta `json:"docs"`
+	// Summaries is the internal per-file summary cache used for incremental
+	// regeneration and as synthesis input. Not exposed by ListDocs.
+	Summaries []DocMeta `json:"summaries,omitempty"`
 }
 
 // ManifestName is the manifest filename inside the docs dir.
 const ManifestName = "docs-index.json"
 
-// OverviewName is the repo overview document filename.
-const OverviewName = "overview.md"
+// DocName is the single comprehensive documentation file.
+const DocName = "documentation.md"
+
+// summariesDir holds the internal per-file summary cache inside the docs dir.
+// Files use a .sum extension so the RAG doc indexer (which walks *.md) skips them.
+const summariesDir = ".summaries"
 
 // maxSourceBytes caps how much of a source file is sent to the LLM.
 const maxSourceBytes = 48 * 1024
 
-// DefaultPrompt is the built-in system prompt for per-file documentation. It is
-// used whenever config.Docs.Prompt is empty, and is exported so the UI/config
-// can show it as the effective default.
-const DefaultPrompt = `You are a senior software engineer writing developer documentation.
-Given a source file and its knowledge-graph neighborhood (the symbols it defines
-and how they connect to the rest of the codebase), write concise, accurate
-Markdown documentation for the file.
+// maxSynthesisBytes caps the total summary input for the synthesis call. When
+// exceeded, each summary is truncated to an equal share.
+const maxSynthesisBytes = 256 * 1024
 
-Cover:
-- A one-paragraph summary of the file's purpose and responsibility.
-- The key types, functions, and their roles.
-- Important relationships to other parts of the codebase (callers, dependencies).
-- Any notable behavior, side effects, or gotchas evident from the code.
+// DefaultPrompt is the built-in system prompt for the final synthesis of the
+// comprehensive repository documentation. It is used whenever
+// config.Docs.Prompt is empty, and is exported so the UI/config can show it as
+// the effective default.
+const DefaultPrompt = `You are a senior software engineer writing comprehensive developer
+documentation for an entire repository. You are given dense per-file summaries
+of the codebase and, when available, a knowledge-graph overview (core
+abstractions and clusters). Write ONE complete, well-structured Markdown
+document that explains the whole system meaningfully — what it is, how it works
+and how the pieces fit together. Explain it to a colleague; do not produce a
+file-by-file listing.
+
+Structure (adapt to the codebase):
+- Level-1 title naming the repository.
+- Purpose: what the system does and the problem it solves.
+- Architecture: the main components/modules, their responsibilities and how
+  they interact. Include one Mermaid architecture diagram (a fenced code block
+  with the "mermaid" language tag, flowchart syntax) showing the components and
+  the external systems they talk to.
+- How it works end to end: the most important flows (request handling, message
+  processing, data pipelines, background jobs). Use a small Mermaid sequence or
+  flow diagram for the one or two most important flows.
+- Integrations and I/O: HTTP APIs served and called (routes, where requests
+  go), message topics (Kafka etc.) consumed/produced, databases, caches, files
+  and external services — what comes in, what goes out, and where it goes.
+- Configuration and operations, when evident: env vars, config files, how to
+  run and deploy.
+- Notable behaviors, invariants and gotchas.
 
 Rules:
 - Output GitHub-flavored Markdown only. Do not wrap the whole response in a code fence.
-- Start with a level-1 heading naming the file.
-- Be precise; do not invent behavior that is not supported by the code or graph.
-- Keep it focused and skimmable. Prefer short paragraphs and bullet lists.`
+- Be precise; do not invent behavior that is not supported by the input.
+- Prefer meaningful explanation over exhaustive enumeration; skip trivia.
+- Keep every Mermaid diagram small and syntactically valid, and label the edges.
+- Mermaid labels may be wrapped in double quotes, for example A["Load config"].
+  Never put another literal or escaped double quote inside an already quoted
+  label. Rephrase the label instead of nesting or escaping quotes.`
 
-// overviewPrompt is used for the repo-level overview document.
-const overviewPrompt = `You are a senior software engineer writing a high-level
-architecture overview for a codebase. Given knowledge-graph statistics, the most
-connected core abstractions, and the largest clusters of related symbols, write a
-concise Markdown overview that helps a new engineer orient quickly.
+// summaryPrompt is the fixed internal prompt for the per-file summary phase.
+// Summaries are intermediate material for the synthesis step, never shown to
+// users directly.
+const summaryPrompt = `You are building an internal knowledge base that will later be
+synthesized into whole-repository documentation. Summarize the given source
+file accurately and densely.
 
-Cover the system's purpose (as far as it can be inferred), the core abstractions
-and how they relate, and the main functional areas (clusters). Output
-GitHub-flavored Markdown only, starting with a level-1 heading. Be precise and do
-not invent specifics that are not supported by the provided data.`
+Include, when present: the file's purpose and responsibility; key types and
+functions and their roles; dependencies and callers; HTTP endpoints served or
+called; message topics (Kafka etc.) consumed or produced; databases, caches,
+files or external services read/written; notable side effects or gotchas.
+
+Rules:
+- Output Markdown starting with a level-2 heading that is exactly the file path.
+- Be factual and dense: roughly 150-300 words, bullet lists preferred.
+- No introductions, conclusions or code fences.
+- Do not invent behavior that is not supported by the code.`
 
 // Generator produces markdown docs for a repo clone.
 type Generator interface {
@@ -101,20 +142,22 @@ type llmGenerator struct {
 }
 
 // New builds the default generator. The llm client is required. engine may be
-// nil, in which case per-file docs are generated from source content alone
+// nil, in which case summaries are generated from source content alone
 // (without graph neighborhood context).
 func New(cfg config.Docs, chat *llm.Client, engine *graphquery.Engine) Generator {
 	return &llmGenerator{cfg: cfg, llm: chat, engine: engine}
 }
 
-// Generate implements the incremental documentation pipeline.
+// Generate implements the two-phase pipeline: incremental per-file summaries,
+// then one comprehensive documentation.md synthesized from them.
 func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir string) (*Manifest, error) {
 	files, err := g.selectFiles(clonePath)
 	if err != nil {
 		return nil, fmt.Errorf("select source files; %w", err)
 	}
 
-	prior := loadPriorHashes(docsDir)
+	priorMan, _ := LoadManifest(docsDir)
+	prior := priorSummaries(priorMan)
 
 	graph := g.loadGraph(clonePath)
 
@@ -128,11 +171,12 @@ func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir st
 	}
 
 	var (
-		mu     sync.Mutex
-		docs   []DocMeta
-		sem    = make(chan struct{}, concurrency)
-		wg     sync.WaitGroup
-		genErr error
+		mu        sync.Mutex
+		summaries []DocMeta
+		regen     int
+		sem       = make(chan struct{}, concurrency)
+		wg        sync.WaitGroup
+		genErr    error
 	)
 
 	for _, rel := range files {
@@ -149,9 +193,9 @@ func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir st
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			meta, err := g.docForFile(ctx, clonePath, docsDir, rel, graph, prior)
+			meta, reused, err := g.summaryForFile(ctx, clonePath, docsDir, rel, graph, prior)
 			if err != nil {
-				slog.Error("generate doc for file", "repo", repo, "file", rel, "error", err)
+				slog.Error("summarize file", "repo", repo, "file", rel, "error", err)
 
 				mu.Lock()
 				if genErr == nil {
@@ -162,105 +206,100 @@ func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir st
 				return
 			}
 
-			if meta != nil {
-				mu.Lock()
-				docs = append(docs, *meta)
-				mu.Unlock()
+			mu.Lock()
+			summaries = append(summaries, *meta)
+			if !reused {
+				regen++
 			}
+			mu.Unlock()
 		}(rel)
 	}
 
 	wg.Wait()
 
-	// Overview document (best-effort; failure does not abort the run).
-	if graph != nil {
-		if meta, err := g.overviewDoc(ctx, docsDir, graph); err != nil {
-			slog.Warn("generate overview doc", "repo", repo, "error", err)
-		} else if meta != nil {
-			docs = append(docs, *meta)
-		}
-	}
+	sort.Slice(summaries, func(i, j int) bool { return summaries[i].Path < summaries[j].Path })
 
-	sort.Slice(docs, func(i, j int) bool { return docs[i].Path < docs[j].Path })
+	// Synthesis: skip the LLM call when nothing changed and the doc exists.
+	docMeta, synthErr := g.maybeSynthesize(ctx, repo, docsDir, graph, summaries, priorMan, regen)
+
+	var docs []DocMeta
+	if docMeta != nil {
+		docs = append(docs, *docMeta)
+	}
 
 	man := &Manifest{
 		Repo:      repo,
 		Model:     g.llm.Model(),
 		Generated: time.Now(),
 		Docs:      docs,
+		Summaries: summaries,
 	}
 
 	if err := writeManifest(docsDir, man); err != nil {
 		return nil, fmt.Errorf("write manifest; %w", err)
 	}
 
-	// If any per-file generation failed, surface it after writing what we have.
+	// Drop stale user-facing markdown (old per-file docs, old overview.md).
+	cleanupStaleDocs(docsDir, docs)
+
+	if synthErr != nil {
+		return man, fmt.Errorf("synthesize documentation; %w", synthErr)
+	}
+
 	if genErr != nil {
-		return man, fmt.Errorf("one or more files failed to generate; first error: %w", genErr)
+		return man, fmt.Errorf("one or more files failed to summarize; first error: %w", genErr)
 	}
 
 	return man, nil
 }
 
-// docForFile generates (or reuses) the doc for one source file. It returns nil
-// only when the file is skipped without producing metadata (should not happen).
-func (g *llmGenerator) docForFile(
+// summaryPath returns the docs-dir-relative cache path for a source file.
+func summaryPath(rel string) string {
+	return path.Join(summariesDir, rel+".sum")
+}
+
+// summaryForFile generates (or reuses) the internal summary for one source
+// file. reused reports whether the cached summary was still valid.
+func (g *llmGenerator) summaryForFile(
 	ctx context.Context,
 	clonePath, docsDir, rel string,
 	graph *graphquery.Graph,
 	prior map[string]DocMeta,
-) (*DocMeta, error) {
+) (meta *DocMeta, reused bool, err error) {
 	fc, err := repofs.ReadFile(clonePath, rel, 0, maxSourceBytes)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	hash := hashString(fc.Content)
-	docRel := rel + ".md"
-	docAbs := filepath.Join(docsDir, filepath.FromSlash(docRel))
+	sumRel := summaryPath(rel)
+	sumAbs := filepath.Join(docsDir, filepath.FromSlash(sumRel))
 
-	// Incremental: reuse existing markdown when the source hash is unchanged and
-	// the markdown file still exists on disk.
-	if p, ok := prior[docRel]; ok && p.SourceHash == hash {
-		if _, statErr := os.Stat(docAbs); statErr == nil {
-			p.Path = docRel
+	// Incremental: reuse the cached summary when the source hash is unchanged.
+	// Older manifests stored per-file docs at "<rel>.md"; migrate their content
+	// into the cache so an upgrade does not re-summarize the whole repo.
+	if p, ok := prior[rel]; ok && p.SourceHash == hash {
+		oldAbs := filepath.Join(docsDir, filepath.FromSlash(p.Path))
+		if b, rerr := os.ReadFile(oldAbs); rerr == nil {
+			if p.Path != sumRel {
+				if err := writeFileMkdir(sumAbs, b); err != nil {
+					return nil, false, err
+				}
+			}
 
-			return &p, nil
+			return &DocMeta{
+				Path:       sumRel,
+				Title:      rel,
+				SourcePath: rel,
+				SourceHash: hash,
+				Generated:  p.Generated,
+			}, true, nil
 		}
 	}
 
 	var graphCtx string
 	if graph != nil {
 		graphCtx = graph.FileContext(rel, 0)
-	}
-
-	markdown, err := g.generateMarkdown(ctx, rel, fc.Content, graphCtx)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := os.MkdirAll(filepath.Dir(docAbs), 0o755); err != nil {
-		return nil, fmt.Errorf("mkdir doc dir; %w", err)
-	}
-
-	if err := os.WriteFile(docAbs, []byte(markdown), 0o644); err != nil { //nolint:gosec // docs are non-secret
-		return nil, fmt.Errorf("write doc %s; %w", docRel, err)
-	}
-
-	return &DocMeta{
-		Path:       docRel,
-		Title:      rel,
-		SourcePath: rel,
-		SourceHash: hash,
-		Generated:  time.Now(),
-	}, nil
-}
-
-// generateMarkdown prompts the LLM for one file's documentation.
-func (g *llmGenerator) generateMarkdown(ctx context.Context, rel, content, graphCtx string) (string, error) {
-	system := g.cfg.Prompt
-	if strings.TrimSpace(system) == "" {
-		system = DefaultPrompt
 	}
 
 	var user strings.Builder
@@ -271,42 +310,181 @@ func (g *llmGenerator) generateMarkdown(ctx context.Context, rel, content, graph
 		user.WriteString("\n\n")
 	}
 	user.WriteString("Source:\n```\n")
-	user.WriteString(content)
+	user.WriteString(fc.Content)
 	user.WriteString("\n```\n")
+
+	out, err := g.llm.Complete(ctx, []llm.Message{
+		{Role: "system", Content: summaryPrompt},
+		{Role: "user", Content: user.String()},
+	})
+	if err != nil {
+		return nil, false, err
+	}
+
+	if err := writeFileMkdir(sumAbs, []byte(strings.TrimSpace(out)+"\n")); err != nil {
+		return nil, false, err
+	}
+
+	return &DocMeta{
+		Path:       sumRel,
+		Title:      rel,
+		SourcePath: rel,
+		SourceHash: hash,
+		Generated:  time.Now(),
+	}, false, nil
+}
+
+// maybeSynthesize produces documentation.md from the summaries, reusing the
+// previous document when no summary changed and the file still exists.
+func (g *llmGenerator) maybeSynthesize(
+	ctx context.Context,
+	repo, docsDir string,
+	graph *graphquery.Graph,
+	summaries []DocMeta,
+	priorMan *Manifest,
+	regen int,
+) (*DocMeta, error) {
+	docAbs := filepath.Join(docsDir, DocName)
+
+	if regen == 0 && priorMan != nil {
+		for _, d := range priorMan.Docs {
+			if d.Path != DocName {
+				continue
+			}
+
+			if _, err := os.Stat(docAbs); err == nil && len(priorMan.Summaries) == len(summaries) {
+				return &d, nil
+			}
+		}
+	}
+
+	if len(summaries) == 0 {
+		return nil, fmt.Errorf("no source files to document")
+	}
+
+	system := g.cfg.Prompt
+	if strings.TrimSpace(system) == "" {
+		system = DefaultPrompt
+	}
+
+	var user strings.Builder
+	fmt.Fprintf(&user, "Repository: %s\n\n", repo)
+
+	if graph != nil {
+		user.WriteString("Knowledge-graph overview:\n")
+		user.WriteString(graph.OverviewContext(0, 0))
+		user.WriteString("\n\n")
+	}
+
+	user.WriteString("Per-file summaries:\n\n")
+	user.WriteString(joinSummaries(docsDir, summaries, maxSynthesisBytes))
 
 	out, err := g.llm.Complete(ctx, []llm.Message{
 		{Role: "system", Content: system},
 		{Role: "user", Content: user.String()},
 	})
 	if err != nil {
-		return "", err
-	}
-
-	return strings.TrimSpace(out) + "\n", nil
-}
-
-// overviewDoc generates the repo-level overview from graph structure.
-func (g *llmGenerator) overviewDoc(ctx context.Context, docsDir string, graph *graphquery.Graph) (*DocMeta, error) {
-	overviewCtx := graph.OverviewContext(0, 0)
-
-	out, err := g.llm.Complete(ctx, []llm.Message{
-		{Role: "system", Content: overviewPrompt},
-		{Role: "user", Content: "Knowledge-graph summary:\n\n" + overviewCtx},
-	})
-	if err != nil {
 		return nil, err
 	}
 
 	markdown := strings.TrimSpace(out) + "\n"
-	if err := os.WriteFile(filepath.Join(docsDir, OverviewName), []byte(markdown), 0o644); err != nil { //nolint:gosec // docs are non-secret
-		return nil, fmt.Errorf("write overview; %w", err)
+	if err := os.WriteFile(docAbs, []byte(markdown), 0o644); err != nil { //nolint:gosec // docs are non-secret
+		return nil, fmt.Errorf("write %s; %w", DocName, err)
 	}
 
 	return &DocMeta{
-		Path:      OverviewName,
-		Title:     "Overview",
+		Path:      DocName,
+		Title:     "Documentation",
 		Generated: time.Now(),
 	}, nil
+}
+
+// joinSummaries concatenates summary contents within a byte budget. When the
+// total exceeds the budget every summary is truncated to an equal share so the
+// synthesis still sees the whole repository.
+func joinSummaries(docsDir string, summaries []DocMeta, budget int) string {
+	contents := make([]string, 0, len(summaries))
+	total := 0
+
+	for _, s := range summaries {
+		b, err := os.ReadFile(filepath.Join(docsDir, filepath.FromSlash(s.Path)))
+		if err != nil {
+			slog.Warn("read summary", "path", s.Path, "error", err)
+
+			continue
+		}
+
+		c := strings.TrimSpace(string(b))
+		contents = append(contents, c)
+		total += len(c)
+	}
+
+	if total > budget && len(contents) > 0 {
+		share := budget / len(contents)
+		if share < 400 {
+			share = 400
+		}
+
+		for i, c := range contents {
+			if len(c) > share {
+				contents[i] = c[:share] + "\n(truncated)"
+			}
+		}
+	}
+
+	return strings.Join(contents, "\n\n---\n\n")
+}
+
+// cleanupStaleDocs removes user-facing markdown files that are not referenced
+// by the manifest (e.g. per-file docs and overview.md from older layouts). The
+// internal summaries cache is left untouched; emptied directories are pruned.
+func cleanupStaleDocs(docsDir string, docs []DocMeta) {
+	keep := map[string]bool{}
+	for _, d := range docs {
+		keep[d.Path] = true
+	}
+
+	var dirs []string
+
+	_ = filepath.WalkDir(docsDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil //nolint:nilerr // best-effort cleanup
+		}
+
+		rel, rerr := filepath.Rel(docsDir, p)
+		if rerr != nil {
+			return nil //nolint:nilerr // best-effort cleanup
+		}
+
+		slashRel := filepath.ToSlash(rel)
+		if slashRel == "." || slashRel == summariesDir || strings.HasPrefix(slashRel, summariesDir+"/") {
+			if d.IsDir() && slashRel == summariesDir {
+				return filepath.SkipDir
+			}
+
+			return nil
+		}
+
+		if d.IsDir() {
+			dirs = append(dirs, p)
+
+			return nil
+		}
+
+		if strings.HasSuffix(d.Name(), ".md") && !keep[slashRel] {
+			if err := os.Remove(p); err != nil {
+				slog.Warn("remove stale doc", "path", slashRel, "error", err)
+			}
+		}
+
+		return nil
+	})
+
+	// Prune emptied directories bottom-up.
+	sort.Sort(sort.Reverse(sort.StringSlice(dirs)))
+	for _, dir := range dirs {
+		_ = os.Remove(dir) // fails (kept) when non-empty
+	}
 }
 
 // selectFiles walks the clone and returns repo-relative slash paths that match
@@ -430,17 +608,25 @@ func LoadManifest(docsDir string) (*Manifest, error) {
 	return &m, nil
 }
 
-// loadPriorHashes returns the previous run's docs keyed by doc path, for
-// incremental regeneration. Missing/corrupt manifests yield an empty map.
-func loadPriorHashes(docsDir string) map[string]DocMeta {
+// priorSummaries indexes the previous run's summary cache by source path. Docs
+// entries with a SourcePath are included too so pre-synthesis (per-file)
+// layouts keep their cache across the upgrade.
+func priorSummaries(man *Manifest) map[string]DocMeta {
 	out := map[string]DocMeta{}
-	man, err := LoadManifest(docsDir)
-	if err != nil || man == nil {
+	if man == nil {
 		return out
 	}
 
 	for _, d := range man.Docs {
-		out[d.Path] = d
+		if d.SourcePath != "" {
+			out[d.SourcePath] = d
+		}
+	}
+
+	for _, d := range man.Summaries {
+		if d.SourcePath != "" {
+			out[d.SourcePath] = d
+		}
 	}
 
 	return out
@@ -453,6 +639,18 @@ func writeManifest(docsDir string, man *Manifest) error {
 	}
 
 	return os.WriteFile(filepath.Join(docsDir, ManifestName), b, 0o644) //nolint:gosec // manifest is non-secret
+}
+
+func writeFileMkdir(abs string, b []byte) error {
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		return fmt.Errorf("mkdir %s; %w", filepath.Dir(abs), err)
+	}
+
+	if err := os.WriteFile(abs, b, 0o644); err != nil { //nolint:gosec // docs are non-secret
+		return fmt.Errorf("write %s; %w", abs, err)
+	}
+
+	return nil
 }
 
 func hashString(s string) string {

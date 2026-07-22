@@ -21,9 +21,23 @@ type searchDocsArgs struct {
 }
 
 type searchCodeArgs struct {
-	Query string `json:"query" jsonschema:"natural language or code query to find relevant source snippets for"`
-	Repo  string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to search; omit to search across all repos"`
-	TopK  int    `json:"top_k,omitempty" jsonschema:"number of source snippets to return (default 10)"`
+	Query   string `json:"query" jsonschema:"text, symbol, path, natural-language or code query"`
+	Repo    string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to search; omit to search across all repos"`
+	Mode    string `json:"mode,omitempty" jsonschema:"search mode: 'normal' for bw full-text search (default) or 'semantic' for vector search"`
+	Page    int    `json:"page,omitempty" jsonschema:"normal mode page number (default 1)"`
+	PerPage int    `json:"per_page,omitempty" jsonschema:"normal mode results per page (default 20, max 100)"`
+	TopK    int    `json:"top_k,omitempty" jsonschema:"semantic mode source snippets to return (default 10)"`
+}
+
+func (a searchCodeArgs) searchMode() (string, error) {
+	if a.Mode == "" {
+		return "normal", nil
+	}
+	if a.Mode != "normal" && a.Mode != "semantic" {
+		return "", fmt.Errorf("mode must be normal or semantic")
+	}
+
+	return a.Mode, nil
 }
 
 type listDocsArgs struct {
@@ -54,15 +68,35 @@ func addDocTools(server *mcp.Server, mgr *manager.Manager) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "search_code",
-		Description: "Semantic search over raw source code. Returns ranked snippets with repository, " +
-			"path, symbol and line range. Use read_file for broader context. Omit repo to search all repos.",
+		Description: "Search raw source code using normal bw full-text search (default) or semantic vector search. " +
+			"Returns ranked snippets with repository, path, symbol and line location. Normal mode supports exact " +
+			"totals and pagination. Use read_file for broader context. Omit repo to search all repos.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args searchCodeArgs) (*mcp.CallToolResult, any, error) {
+		mode, err := args.searchMode()
+		if err != nil {
+			return nil, nil, err
+		}
+
+		if mode == "normal" {
+			result, err := mgr.SearchCodeText(ctx, args.Repo, args.Query, args.Page, args.PerPage)
+			if err != nil {
+				return nil, nil, err
+			}
+
+			return jsonResult(result), nil, nil
+		}
+
 		snippets, err := mgr.SearchCode(ctx, args.Repo, args.Query, args.TopK)
 		if err != nil {
 			return nil, nil, err
 		}
 
-		return jsonResult(snippets), nil, nil
+		return jsonResult(map[string]any{
+			"results":  snippets,
+			"total":    len(snippets),
+			"page":     1,
+			"per_page": len(snippets),
+		}), nil, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -99,10 +133,10 @@ func addDocTools(server *mcp.Server, mgr *manager.Manager) {
 // stored value. Timeouts are Go duration strings (e.g. "60s").
 type setDocsConfigArgs struct {
 	DocsEnabled     bool     `json:"docs_enabled,omitempty" jsonschema:"generate markdown docs in the refresh pipeline"`
-	DocsConcurrency int      `json:"docs_concurrency,omitempty" jsonschema:"parallel per-file LLM doc calls"`
+	DocsConcurrency int      `json:"docs_concurrency,omitempty" jsonschema:"parallel per-file LLM summary calls"`
 	DocsInclude     []string `json:"docs_include,omitempty" jsonschema:"source globs to document (repo-relative)"`
 	DocsExclude     []string `json:"docs_exclude,omitempty" jsonschema:"source globs to skip"`
-	DocsPrompt      string   `json:"docs_prompt,omitempty" jsonschema:"system prompt for per-file doc generation (empty uses the built-in default)"`
+	DocsPrompt      string   `json:"docs_prompt,omitempty" jsonschema:"system prompt for the final documentation synthesis (empty uses the built-in default)"`
 
 	LLMBaseURL string `json:"llm_base_url,omitempty" jsonschema:"OpenAI-compatible chat base URL, e.g. https://api.openai.com/v1"`
 	LLMAPIKey  string `json:"llm_api_key,omitempty" jsonschema:"chat API key (write-only; leave empty to keep existing)"`

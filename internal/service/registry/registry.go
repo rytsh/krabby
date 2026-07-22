@@ -20,6 +20,64 @@ const (
 	StatusError    = "error"
 )
 
+// Generation stage names. Each stage produces one artifact and can be run
+// selectively via Manager.Generate.
+const (
+	StageGraph     = "graph"
+	StageDocs      = "docs"
+	StageDocsIndex = "docs_index"
+	StageCodeIndex = "code_index"
+)
+
+// Stage status values. An empty status means the stage never ran.
+const (
+	StageRunning = "running"
+	StageOK      = "ok"
+	StageError   = "error"
+)
+
+// ValidStage reports whether name is a known generation stage.
+func ValidStage(name string) bool {
+	switch name {
+	case StageGraph, StageDocs, StageDocsIndex, StageCodeIndex:
+		return true
+	}
+
+	return false
+}
+
+// StageState records the last outcome of one generation stage.
+type StageState struct {
+	Status     string    `bw:"status"      json:"status,omitempty"` // "", running, ok, error
+	Error      string    `bw:"error"       json:"error,omitempty"`
+	Commit     string    `bw:"commit"      json:"commit,omitempty"` // commit the stage last ran against
+	FinishedAt time.Time `bw:"finished_at" json:"finished_at,omitzero"`
+}
+
+// Stages groups the per-artifact generation states of a repo.
+type Stages struct {
+	Graph     StageState `bw:"graph"      json:"graph"`
+	Docs      StageState `bw:"docs"       json:"docs"`
+	DocsIndex StageState `bw:"docs_index" json:"docs_index"`
+	CodeIndex StageState `bw:"code_index" json:"code_index"`
+}
+
+// Get returns a mutable pointer to the named stage, or nil for unknown names.
+func (s *Stages) Get(name string) *StageState {
+	switch name {
+	case StageGraph:
+		return &s.Graph
+	case StageDocs:
+		return &s.Docs
+	case StageDocsIndex:
+		return &s.DocsIndex
+	case StageCodeIndex:
+		return &s.CodeIndex
+	}
+
+	return nil
+}
+
 // Repo is a tracked repository record.
 type Repo struct {
 	ID          string    `bw:"id,pk"        json:"id"` // owner/name
@@ -31,6 +89,7 @@ type Repo struct {
 	LastBuildAt time.Time `bw:"last_build"   json:"last_build_at,omitzero"`
 	Status      string    `bw:"status,index" json:"status"`
 	LastError   string    `bw:"last_error"   json:"last_error,omitempty"`
+	Stages      Stages    `bw:"stages"       json:"stages"`
 }
 
 // Registry stores Repo records.
@@ -38,9 +97,14 @@ type Registry struct {
 	bucket *bw.Bucket[Repo]
 }
 
+// repoSchemaVersion must be bumped whenever the Repo struct changes shape so
+// bw auto-migrates existing buckets instead of failing with a fingerprint
+// mismatch at startup. v2: added per-stage generation states (Stages).
+const repoSchemaVersion = 2
+
 // New opens the repos bucket on the given database.
 func New(db *bw.DB) (*Registry, error) {
-	bucket, err := bw.RegisterBucket[Repo](db, "repos")
+	bucket, err := bw.RegisterBucket[Repo](db, "repos", bw.WithVersion[Repo](repoSchemaVersion))
 	if err != nil {
 		return nil, fmt.Errorf("register repos bucket; %w", err)
 	}

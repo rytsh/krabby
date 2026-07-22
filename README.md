@@ -80,7 +80,7 @@ Example opencode config:
 | `get_node` / `get_neighbors` / `get_community` | Node-level inspection |
 | `god_nodes` / `graph_stats` / `shortest_path` | Graph-level analysis |
 | `search_docs` / `list_docs` / `get_doc` | Search and read generated Markdown documentation |
-| `search_code` | Semantic source search returning snippets with path, symbol and line range |
+| `search_code` | Normal bw full-text or semantic source search with locations and pagination |
 | `get_docs_config` / `set_docs_config` | Read or live-update docs and code RAG settings |
 | `test_llm` / `test_embedder` / `test_code_embedder` | Validate model endpoints without saving |
 

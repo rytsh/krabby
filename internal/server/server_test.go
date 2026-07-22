@@ -35,7 +35,8 @@ func TestAPIKeyMiddleware(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	handler := apiKeyMiddleware("secret-key")(next)
+	key := "secret-key"
+	handler := apiKeyMiddleware(func() string { return key })(next)
 
 	tests := []struct {
 		name   string
@@ -63,12 +64,32 @@ func TestAPIKeyMiddleware(t *testing.T) {
 	}
 
 	// Empty key disables auth.
-	open := apiKeyMiddleware("")(next)
+	open := apiKeyMiddleware(func() string { return "" })(next)
 	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
 	rec := httptest.NewRecorder()
 	open.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("empty api key should disable auth, got %d", rec.Code)
+	}
+
+	// The key is resolved per request: a runtime change applies immediately.
+	key = "rotated"
+	req = httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	req.Header.Set("X-Api-Key", "secret-key")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("old key should be rejected after rotation, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	req.Header.Set("X-Api-Key", "rotated")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("rotated key should be accepted, got %d", rec.Code)
 	}
 }

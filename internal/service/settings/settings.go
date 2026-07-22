@@ -271,8 +271,18 @@ func (p Patch) Apply(base Settings) Settings {
 }
 
 // Store persists a single Settings record.
+// MCPKey is the runtime override for the MCP endpoint API key. When a record
+// exists it is authoritative (an empty Key means the endpoint is open); when
+// absent the file/env config value applies.
+type MCPKey struct {
+	ID        string    `bw:"id,pk"      json:"-"`
+	Key       string    `bw:"key"        json:"-"`
+	UpdatedAt time.Time `bw:"updated_at" json:"updated_at"`
+}
+
 type Store struct {
-	bucket *bw.Bucket[Settings]
+	bucket    *bw.Bucket[Settings]
+	mcpBucket *bw.Bucket[MCPKey]
 }
 
 // New opens the settings bucket. If no record exists yet, seed is persisted as
@@ -283,7 +293,12 @@ func New(db *bw.DB, seed Settings) (*Store, error) {
 		return nil, fmt.Errorf("register settings bucket; %w", err)
 	}
 
-	s := &Store{bucket: bucket}
+	mcpBucket, err := bw.RegisterBucket[MCPKey](db, "mcp_key")
+	if err != nil {
+		return nil, fmt.Errorf("register mcp_key bucket; %w", err)
+	}
+
+	s := &Store{bucket: bucket, mcpBucket: mcpBucket}
 
 	existing, err := s.getRaw(context.Background())
 	if err != nil {
@@ -366,4 +381,39 @@ func (s *Store) Set(ctx context.Context, patch Settings) (Settings, error) {
 	}
 
 	return next, nil
+}
+
+// MCPKey returns the runtime MCP key override, or nil when none is stored.
+func (s *Store) MCPKey(ctx context.Context) (*MCPKey, error) {
+	rec, err := s.mcpBucket.Get(ctx, recordID)
+	if err != nil {
+		if errors.Is(err, bw.ErrNotFound) {
+			return nil, nil
+		}
+
+		return nil, fmt.Errorf("get mcp key; %w", err)
+	}
+
+	return rec, nil
+}
+
+// SetMCPKey stores the runtime MCP key override. An empty key is a valid
+// override meaning "no auth".
+func (s *Store) SetMCPKey(ctx context.Context, key string) error {
+	rec := &MCPKey{ID: recordID, Key: key, UpdatedAt: time.Now()}
+	if err := s.mcpBucket.Insert(ctx, rec); err != nil {
+		return fmt.Errorf("save mcp key; %w", err)
+	}
+
+	return nil
+}
+
+// ClearMCPKey removes the runtime override so the file/env config value
+// applies again.
+func (s *Store) ClearMCPKey(ctx context.Context) error {
+	if err := s.mcpBucket.Delete(ctx, recordID); err != nil && !errors.Is(err, bw.ErrNotFound) {
+		return fmt.Errorf("clear mcp key; %w", err)
+	}
+
+	return nil
 }

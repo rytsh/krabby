@@ -1,17 +1,18 @@
 import { writable } from "svelte/store";
 
-// Minimal History-API router. path is the current pathname; navigate() pushes
-// state and updates the store. Anchor clicks with data-link are intercepted.
-export const path = writable(window.location.pathname);
+// Minimal History-API router. path is the current pathname plus query string;
+// navigate() pushes state and updates the store. Anchor clicks with use:link
+// are intercepted.
+export const path = writable(window.location.pathname + window.location.search);
 
 export function navigate(to) {
-  if (to === window.location.pathname) return;
+  if (to === window.location.pathname + window.location.search) return;
   window.history.pushState({}, "", to);
   path.set(to);
 }
 
 window.addEventListener("popstate", () => {
-  path.set(window.location.pathname);
+  path.set(window.location.pathname + window.location.search);
 });
 
 // Use as: <a href="/repos" use:link>. Intercepts same-origin navigation.

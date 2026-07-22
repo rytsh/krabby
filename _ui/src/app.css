@@ -39,6 +39,8 @@
   --warn: #fbbf24;
   --err: #f87171;
   --busy: #60a5fa;
+  --scrollbar-thumb: #3f3f46;
+  --scrollbar-thumb-hover: #52525b;
   --shadow: 0 1px 2px rgb(0 0 0 / 0.4);
 }
 
@@ -57,7 +59,36 @@
   --warn: #d97706;
   --err: #dc2626;
   --busy: #2563eb;
+  --scrollbar-thumb: #d4d4d8;
+  --scrollbar-thumb-hover: #a1a1aa;
   --shadow: 0 1px 2px rgb(0 0 0 / 0.08);
+}
+
+* {
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+  scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: var(--scrollbar-thumb);
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+  background-clip: content-box;
 }
 
 html,
@@ -101,6 +132,12 @@ html.theme-anim * {
   .btn-sm {
     @apply px-2.5 py-1 text-[13px];
   }
+  .view-toggle {
+    @apply cursor-pointer rounded border border-transparent bg-transparent px-2 py-0.5 text-[11px] text-faint transition-colors hover:bg-surface-2 hover:text-fg;
+  }
+  .view-toggle-active {
+    @apply border-line bg-surface-2 text-fg hover:bg-surface-2 hover:text-fg;
+  }
   .icon-btn {
     @apply inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-md border border-line bg-surface-2 text-dim transition-colors hover:bg-line hover:text-fg;
   }
@@ -113,4 +150,184 @@ html.theme-anim * {
   .err-box {
     @apply mb-4 rounded-md border border-err bg-err/10 px-3 py-2.5 text-[13px] text-err;
   }
+}
+
+/* Rendered markdown (Docs tab). Tailwind preflight strips element defaults, so
+   restore a small typographic scale scoped to .md-view. */
+.md-view {
+  max-width: 860px;
+}
+
+.md-view h1 {
+  font-size: 1.6em;
+  font-weight: 650;
+  margin: 0.4em 0 0.6em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--line);
+}
+
+.md-view h2 {
+  font-size: 1.3em;
+  font-weight: 600;
+  margin: 1.4em 0 0.5em;
+  padding-bottom: 0.2em;
+  border-bottom: 1px solid var(--line);
+}
+
+.md-view h3 {
+  font-size: 1.1em;
+  font-weight: 600;
+  margin: 1.2em 0 0.4em;
+}
+
+.md-view h4,
+.md-view h5,
+.md-view h6 {
+  font-weight: 600;
+  margin: 1em 0 0.4em;
+}
+
+.md-view h1,
+.md-view h2,
+.md-view h3 {
+  scroll-margin-top: 3.25rem;
+}
+
+.md-view p {
+  margin: 0.6em 0;
+}
+
+.md-view ul,
+.md-view ol {
+  margin: 0.6em 0;
+  padding-left: 1.6em;
+}
+
+.md-view ul {
+  list-style: square;
+}
+
+.md-view ol {
+  list-style: decimal;
+}
+
+.md-view li {
+  margin: 0.25em 0;
+}
+
+.md-view a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.md-view code {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+}
+
+.md-view pre {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.9em 1em;
+  margin: 0.8em 0;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.md-view pre code {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  font-size: inherit;
+}
+
+.md-view blockquote {
+  border-left: 3px solid var(--line);
+  margin: 0.8em 0;
+  padding: 0.1em 1em;
+  color: var(--dim);
+}
+
+.md-view table {
+  border-collapse: collapse;
+  margin: 0.8em 0;
+  font-size: 13px;
+}
+
+.md-view th,
+.md-view td {
+  border: 1px solid var(--line);
+  padding: 0.4em 0.8em;
+  text-align: left;
+}
+
+.md-view th {
+  background: var(--surface-2);
+  font-weight: 600;
+}
+
+.md-view hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 1.4em 0;
+}
+
+.md-view img {
+  max-width: 100%;
+}
+
+.md-view .mermaid-diagram {
+  margin: 0.8em 0;
+}
+
+.md-view .mermaid-diagram svg {
+  max-width: none;
+}
+
+/* Source viewer: always dark (github-dark), independent of the app theme.
+   The colors match Shiki's github-dark palette so the plain-text fallback and
+   the highlighted output look identical. */
+.code-view {
+  background: #24292e;
+  color: #e1e4e8;
+}
+
+.code-view pre.shiki {
+  margin: 0;
+  background: transparent !important;
+  font: inherit;
+}
+
+/* Line numbers via a CSS counter on Shiki's .line spans (and the identically
+   structured plain-text fallback). ::before content stays out of copy/paste. */
+.code-view code {
+  counter-reset: line;
+}
+
+/* Highlighted target line for deep links from code search. */
+.code-view .line-target {
+  display: inline-block;
+  width: 100%;
+  background: rgb(250 204 21 / 0.2);
+  box-shadow: inset 3px 0 #facc15;
+  border-radius: 3px;
+}
+
+.code-view code .line::before {
+  counter-increment: line;
+  content: counter(line);
+  display: inline-block;
+  width: 2.25rem;
+  margin-right: 1rem;
+  text-align: right;
+  color: #6e7681;
+  user-select: none;
 }

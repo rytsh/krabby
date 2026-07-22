@@ -38,6 +38,69 @@ func (m *Manager) SetSettingsStore(s *settings.Store) {
 	m.settings = s
 }
 
+// InitMCPKey resolves the effective MCP API key at startup: a persisted
+// runtime override wins over the file/env config value.
+func (m *Manager) InitMCPKey(ctx context.Context, configKey string) {
+	key := configKey
+
+	if m.settings != nil {
+		if rec, err := m.settings.MCPKey(ctx); err != nil {
+			slog.Error("load mcp key override", "error", err)
+		} else if rec != nil {
+			key = rec.Key
+		}
+	}
+
+	m.mcpKeyMu.Lock()
+	m.mcpKey = key
+	m.mcpConfigKey = configKey
+	m.mcpKeyMu.Unlock()
+}
+
+// MCPAPIKey returns the currently effective MCP API key ("" = open endpoint).
+func (m *Manager) MCPAPIKey() string {
+	m.mcpKeyMu.RLock()
+	defer m.mcpKeyMu.RUnlock()
+
+	return m.mcpKey
+}
+
+// SetMCPAPIKey persists a runtime MCP key override and applies it immediately.
+// An empty key disables authentication.
+func (m *Manager) SetMCPAPIKey(ctx context.Context, key string) error {
+	if m.settings == nil {
+		return ErrNoSettingsStore
+	}
+
+	if err := m.settings.SetMCPKey(ctx, key); err != nil {
+		return err
+	}
+
+	m.mcpKeyMu.Lock()
+	m.mcpKey = key
+	m.mcpKeyMu.Unlock()
+
+	return nil
+}
+
+// ClearMCPAPIKey removes the runtime override; the file/env config value (as
+// captured at startup) applies again.
+func (m *Manager) ClearMCPAPIKey(ctx context.Context) error {
+	if m.settings == nil {
+		return ErrNoSettingsStore
+	}
+
+	if err := m.settings.ClearMCPKey(ctx); err != nil {
+		return err
+	}
+
+	m.mcpKeyMu.Lock()
+	m.mcpKey = m.mcpConfigKey
+	m.mcpKeyMu.Unlock()
+
+	return nil
+}
+
 // GetDocsConfig returns the current docs/RAG settings with secrets redacted.
 func (m *Manager) GetDocsConfig(ctx context.Context) (settings.Redacted, error) {
 	if m.settings == nil {
@@ -155,7 +218,7 @@ func (m *Manager) Configure(_ context.Context, s settings.Settings) error {
 	slog.Info("docs/rag reconfigured",
 		"docgen", bundle.gen != nil,
 		"rag", bundle.rag != nil,
-		"code_rag", bundle.codeRag != nil,
+		"code_semantic", bundle.codeStore != nil,
 	)
 
 	return nil
@@ -167,6 +230,10 @@ func (m *Manager) Configure(_ context.Context, s settings.Settings) error {
 // failures (bad store kind, unreachable qdrant setup) return an error.
 func (m *Manager) buildBundle(s settings.Settings) (*docsBundle, error) {
 	b := &docsBundle{}
+	var (
+		codeEmb   *embedder.Client
+		codeStore vectorstore.Store
+	)
 
 	// Doc generation needs a chat LLM.
 	if s.DocsEnabled {
@@ -220,10 +287,13 @@ func (m *Manager) buildBundle(s settings.Settings) (*docsBundle, error) {
 				return nil, fmt.Errorf("build code vector store; %w", serr)
 			}
 
-			b.codeStore = store
-			b.codeRag = coderag.New(codeRagConfig(s), emb, store, m.engine)
+			codeEmb = emb
+			codeStore = store
 		}
 	}
+
+	b.codeStore = codeStore
+	b.codeRag = coderag.New(codeRagConfig(s), codeEmb, codeStore, m.engine, m.codeText)
 
 	return b, nil
 }
@@ -479,11 +549,24 @@ func (m *Manager) SearchDocs(ctx context.Context, repoID, question string, topDo
 func (m *Manager) SearchCode(ctx context.Context, repoID, query string, topK int) ([]coderag.Snippet, error) {
 	d, releaseDocs := m.acquireDocs()
 	defer releaseDocs()
-	if d.codeRag == nil {
+	if d.codeRag == nil || d.codeStore == nil {
 		return nil, ErrCodeRAGDisabled
 	}
 
 	return d.codeRag.Retrieve(ctx, repoID, query, topK)
+}
+
+// SearchCodeText performs normal BM25 full-text search over the local bw index.
+func (m *Manager) SearchCodeText(
+	ctx context.Context,
+	repoID, query string,
+	page, perPage int,
+) (coderag.SearchPage, error) {
+	if m.codeText == nil {
+		return coderag.SearchPage{}, errors.New("normal code search is not configured")
+	}
+
+	return m.codeText.Search(ctx, repoID, query, page, perPage)
 }
 
 // ListDocs returns the generated doc metadata for a repo from its manifest.

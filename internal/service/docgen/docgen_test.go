@@ -45,7 +45,7 @@ func writeSrc(t *testing.T, root, rel, content string) {
 	}
 }
 
-func TestGenerateWritesDocsAndManifest(t *testing.T) {
+func TestGenerateWritesDocAndManifest(t *testing.T) {
 	clone := t.TempDir()
 	writeSrc(t, clone, "main.go", "package main\nfunc main() {}\n")
 	writeSrc(t, clone, "pkg/util.go", "package pkg\nfunc Util() {}\n")
@@ -60,15 +60,22 @@ func TestGenerateWritesDocsAndManifest(t *testing.T) {
 		t.Fatalf("Generate: %v", err)
 	}
 
-	// Two .go files documented (README.md excluded); no overview (nil engine).
-	if len(man.Docs) != 2 {
-		t.Fatalf("docs = %d, want 2: %+v", len(man.Docs), man.Docs)
+	// One user-facing doc (documentation.md); two internal summaries.
+	if len(man.Docs) != 1 || man.Docs[0].Path != DocName {
+		t.Fatalf("docs = %+v, want single %s", man.Docs, DocName)
+	}
+	if len(man.Summaries) != 2 {
+		t.Fatalf("summaries = %d, want 2: %+v", len(man.Summaries), man.Summaries)
 	}
 
-	for _, rel := range []string{"main.go.md", "pkg/util.go.md"} {
-		p := filepath.Join(docsDir, filepath.FromSlash(rel))
+	if _, err := os.Stat(filepath.Join(docsDir, DocName)); err != nil {
+		t.Errorf("expected %s: %v", DocName, err)
+	}
+
+	for _, rel := range []string{"main.go.sum", "pkg/util.go.sum"} {
+		p := filepath.Join(docsDir, summariesDir, filepath.FromSlash(rel))
 		if _, err := os.Stat(p); err != nil {
-			t.Errorf("expected doc %s: %v", rel, err)
+			t.Errorf("expected summary %s: %v", rel, err)
 		}
 	}
 
@@ -85,8 +92,9 @@ func TestGenerateWritesDocsAndManifest(t *testing.T) {
 		t.Errorf("manifest meta wrong: %+v", parsed)
 	}
 
-	if calls != 2 {
-		t.Errorf("llm calls = %d, want 2", calls)
+	// Two summaries + one synthesis.
+	if calls != 3 {
+		t.Errorf("llm calls = %d, want 3", calls)
 	}
 }
 
@@ -102,17 +110,83 @@ func TestGenerateIncremental(t *testing.T) {
 	if _, err := gen.Generate(context.Background(), "r", clone, docsDir); err != nil {
 		t.Fatalf("first gen: %v", err)
 	}
-	if calls != 2 {
-		t.Fatalf("first run calls = %d, want 2", calls)
+	if calls != 3 {
+		t.Fatalf("first run calls = %d, want 3 (2 summaries + synthesis)", calls)
 	}
 
-	// Change only b.go; a.go should be reused, b.go regenerated.
+	// Change only b.go; a.go summary is reused, b.go + synthesis regenerate.
 	writeSrc(t, clone, "b.go", "package b\nfunc B() {}\n")
 	if _, err := gen.Generate(context.Background(), "r", clone, docsDir); err != nil {
 		t.Fatalf("second gen: %v", err)
 	}
-	if calls != 3 {
-		t.Errorf("after change, calls = %d, want 3 (only b.go regenerated)", calls)
+	if calls != 5 {
+		t.Errorf("after change, calls = %d, want 5 (b.go + synthesis)", calls)
+	}
+
+	// Nothing changed: no LLM calls at all (summaries cached, doc reused).
+	if _, err := gen.Generate(context.Background(), "r", clone, docsDir); err != nil {
+		t.Fatalf("third gen: %v", err)
+	}
+	if calls != 5 {
+		t.Errorf("unchanged run made llm calls: %d, want 5", calls)
+	}
+}
+
+func TestMigratesOldPerFileLayout(t *testing.T) {
+	clone := t.TempDir()
+	writeSrc(t, clone, "a.go", "package a\n")
+
+	docsDir := filepath.Join(clone, "krabby-docs")
+
+	// Simulate the pre-synthesis layout: per-file doc listed in Docs with its
+	// markdown at "<rel>.md".
+	srcHash := func() string {
+		b, _ := os.ReadFile(filepath.Join(clone, "a.go"))
+		return hashString(string(b))
+	}()
+
+	writeSrc(t, docsDir, "a.go.md", "## a.go\nold per-file doc\n")
+	writeSrc(t, docsDir, "overview.md", "# old overview\n")
+	oldMan := &Manifest{
+		Repo:  "r",
+		Model: "test",
+		Docs: []DocMeta{
+			{Path: "a.go.md", Title: "a.go", SourcePath: "a.go", SourceHash: srcHash},
+			{Path: "overview.md", Title: "Overview"},
+		},
+	}
+	if err := writeManifest(docsDir, oldMan); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls int32
+	gen := New(config.Docs{}, fakeLLM(t, &calls), nil)
+
+	man, err := gen.Generate(context.Background(), "r", clone, docsDir)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	// Cached per-file content migrated: only the synthesis call runs.
+	if calls != 1 {
+		t.Errorf("llm calls = %d, want 1 (summary reused from old layout)", calls)
+	}
+
+	if len(man.Docs) != 1 || man.Docs[0].Path != DocName {
+		t.Fatalf("docs = %+v, want single %s", man.Docs, DocName)
+	}
+
+	// Old user-facing markdown cleaned up.
+	if _, err := os.Stat(filepath.Join(docsDir, "a.go.md")); !os.IsNotExist(err) {
+		t.Errorf("old per-file doc not cleaned up")
+	}
+	if _, err := os.Stat(filepath.Join(docsDir, "overview.md")); !os.IsNotExist(err) {
+		t.Errorf("old overview not cleaned up")
+	}
+
+	// Migrated summary exists.
+	if _, err := os.Stat(filepath.Join(docsDir, summariesDir, "a.go.sum")); err != nil {
+		t.Errorf("migrated summary missing: %v", err)
 	}
 }
 
@@ -134,16 +208,16 @@ func TestIncludeExcludeGlobs(t *testing.T) {
 		t.Fatalf("Generate: %v", err)
 	}
 
-	if len(man.Docs) != 1 || man.Docs[0].SourcePath != "keep.go" {
-		t.Fatalf("expected only keep.go, got %+v", man.Docs)
+	if len(man.Summaries) != 1 || man.Summaries[0].SourcePath != "keep.go" {
+		t.Fatalf("expected only keep.go summarized, got %+v", man.Summaries)
 	}
 }
 
-func TestCustomPromptUsed(t *testing.T) {
+func TestCustomPromptUsedForSynthesis(t *testing.T) {
 	clone := t.TempDir()
 	writeSrc(t, clone, "x.go", "package x\n")
 
-	var gotSystem string
+	var systems []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Messages []llm.Message `json:"messages"`
@@ -151,7 +225,7 @@ func TestCustomPromptUsed(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		for _, m := range req.Messages {
 			if m.Role == "system" {
-				gotSystem = m.Content
+				systems = append(systems, m.Content)
 			}
 		}
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"# d"}}]}`))
@@ -165,8 +239,16 @@ func TestCustomPromptUsed(t *testing.T) {
 		t.Fatalf("Generate: %v", err)
 	}
 
-	if !strings.Contains(gotSystem, "XYZZY") {
-		t.Errorf("custom prompt not used; system = %q", gotSystem)
+	// The custom prompt applies to the synthesis call (the last one); the
+	// summary phase always uses the fixed internal prompt.
+	if len(systems) != 2 {
+		t.Fatalf("system prompts = %d, want 2", len(systems))
+	}
+	if systems[0] != summaryPrompt {
+		t.Errorf("summary phase should use the internal prompt, got %q", systems[0])
+	}
+	if !strings.Contains(systems[1], "XYZZY") {
+		t.Errorf("custom prompt not used for synthesis; got %q", systems[1])
 	}
 }
 
@@ -174,7 +256,7 @@ func TestDefaultPromptFallback(t *testing.T) {
 	clone := t.TempDir()
 	writeSrc(t, clone, "y.go", "package y\n")
 
-	var gotSystem string
+	var systems []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Messages []llm.Message `json:"messages"`
@@ -182,7 +264,7 @@ func TestDefaultPromptFallback(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		for _, m := range req.Messages {
 			if m.Role == "system" {
-				gotSystem = m.Content
+				systems = append(systems, m.Content)
 			}
 		}
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"# d"}}]}`))
@@ -196,7 +278,13 @@ func TestDefaultPromptFallback(t *testing.T) {
 		t.Fatalf("Generate: %v", err)
 	}
 
-	if gotSystem != DefaultPrompt {
-		t.Errorf("expected default prompt, got %q", gotSystem)
+	if len(systems) == 0 || systems[len(systems)-1] != DefaultPrompt {
+		t.Errorf("expected default synthesis prompt as last system message")
+	}
+}
+
+func TestDefaultPromptForbidsNestedMermaidDoubleQuotes(t *testing.T) {
+	if !strings.Contains(DefaultPrompt, "Never put another literal or escaped double quote inside an already quoted") {
+		t.Fatal("default prompt must prevent nested-quote Mermaid parse failures")
 	}
 }

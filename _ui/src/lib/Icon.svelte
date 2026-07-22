@@ -1,53 +1,59 @@
 <script>
-  // Minimal inline icon set (stroke-based, inherits currentColor). Keeps the UI
-  // dependency-free. size is in px; name selects the glyph.
-  export let name;
-  export let size = 18;
+  import {
+    BookOpen,
+    Boxes,
+    Braces,
+    ChartNetwork,
+    ChevronDown,
+    ChevronRight,
+    FileCode2,
+    FileText,
+    Folder,
+    Maximize,
+    Minimize,
+    Minus,
+    Moon,
+    PanelLeftClose,
+    PanelLeftOpen,
+    Plus,
+    RefreshCw,
+    RotateCcw,
+    Search,
+    Settings,
+    Sun,
+    Warehouse,
+  } from "@lucide/svelte";
+
+  let { name, size = 18 } = $props();
+
+  const icons = {
+    book: BookOpen,
+    boxes: Boxes,
+    braces: Braces,
+    graph: ChartNetwork,
+    "chevron-down": ChevronDown,
+    "chevron-right": ChevronRight,
+    "file-code": FileCode2,
+    "file-text": FileText,
+    folder: Folder,
+    maximize: Maximize,
+    minimize: Minimize,
+    minus: Minus,
+    moon: Moon,
+    "panel-left-close": PanelLeftClose,
+    "panel-left-open": PanelLeftOpen,
+    plus: Plus,
+    refresh: RefreshCw,
+    reset: RotateCcw,
+    search: Search,
+    settings: Settings,
+    sun: Sun,
+    warehouse: Warehouse,
+  };
+
+  let Component = $derived(icons[name]);
 </script>
 
-<svg
-  width={size}
-  height={size}
-  viewBox="0 0 24 24"
-  fill="none"
-  stroke="currentColor"
-  stroke-width="1.8"
-  stroke-linecap="round"
-  stroke-linejoin="round"
-  aria-hidden="true"
->
-  {#if name === "sun"}
-    <circle cx="12" cy="12" r="4" />
-    <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
-  {:else if name === "moon"}
-    <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-  {:else if name === "github"}
-    <path
-      d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"
-    />
-  {:else if name === "book"}
-    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
-    <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
-  {:else if name === "warehouse"}
-    <path d="M18 21V10a1 1 0 0 0-1-1H7a1 1 0 0 0-1 1v11" />
-    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 1.132-1.803l7.95-3.974a2 2 0 0 1 1.837 0l7.948 3.974A2 2 0 0 1 22 8z" />
-    <path d="M6 13h12" />
-    <path d="M6 17h12" />
-  {:else if name === "boxes"}
-    <path d="M2.97 12.92A2 2 0 0 0 2 14.63v3.24a2 2 0 0 0 .97 1.71l3 1.8a2 2 0 0 0 2.06 0L12 19v-5.5l-5-3-4.03 2.42Z" />
-    <path d="m7 16.5-4.74-2.85" />
-    <path d="m7 16.5 5-3" />
-    <path d="M7 16.5v5.17" />
-    <path d="M12 13.5V19l3.97 2.38a2 2 0 0 0 2.06 0l3-1.8a2 2 0 0 0 .97-1.71v-3.24a2 2 0 0 0-.97-1.71L17 10.5l-5 3Z" />
-    <path d="m17 16.5-5-3" />
-    <path d="m17 16.5 4.74-2.85" />
-    <path d="M17 16.5v5.17" />
-    <path d="M7.97 4.42A2 2 0 0 0 7 6.13v4.37l5 3 5-3V6.13a2 2 0 0 0-.97-1.71l-3-1.8a2 2 0 0 0-2.06 0l-3 1.8Z" />
-    <path d="M12 8 7.26 5.15" />
-    <path d="m12 8 4.74-2.85" />
-    <path d="M12 13.5V8" />
-  {:else if name === "settings"}
-    <circle cx="12" cy="12" r="3" />
-    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-  {/if}
-</svg>
+{#if Component}
+  <Component {size} strokeWidth={1.8} aria-hidden="true" />
+{/if}

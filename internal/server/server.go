@@ -33,6 +33,7 @@ import (
 	"github.com/rytsh/krabby/internal/service/graphify"
 	"github.com/rytsh/krabby/internal/service/lease"
 	"github.com/rytsh/krabby/internal/service/manager"
+	"github.com/rytsh/krabby/internal/service/registry"
 	"github.com/rytsh/krabby/internal/service/settings"
 )
 
@@ -58,15 +59,22 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 		func(*http.Request) *mcp.Server { return mcpServer },
 		&mcp.StreamableHTTPOptions{},
 	)
-	server.Handle(cfg.MCP.Path, mcpHandler, apiKeyMiddleware(cfg.MCP.APIKey))
+	// The MCP key can be overridden at runtime from the UI; resolve it per
+	// request through the manager's cached value.
+	mgr.InitMCPKey(ctx, cfg.MCP.APIKey)
+	server.Handle(cfg.MCP.Path, mcpHandler, apiKeyMiddleware(mgr.MCPAPIKey))
 
 	api := server.Group("/api/v1")
-	api.GET("/settings", server.Wrap(getSettings(cfg)))
+	api.GET("/settings", server.Wrap(getSettings(cfg, mgr)))
+	api.GET("/mcp/api-key", server.Wrap(getMCPKey(mgr)))
+	api.PUT("/mcp/api-key", server.Wrap(setMCPKey(mgr)))
+	api.DELETE("/mcp/api-key", server.Wrap(clearMCPKey(mgr)))
 	api.GET("/repos", server.Wrap(listRepos(mgr)))
 	api.POST("/repos", server.Wrap(addRepo(mgr)))
 	api.GET("/repos/{owner}/{name}", server.Wrap(getRepo(mgr)))
 	api.DELETE("/repos/{owner}/{name}", server.Wrap(deleteRepo(mgr)))
 	api.POST("/repos/{owner}/{name}/refresh", server.Wrap(refreshRepo(mgr)))
+	api.POST("/repos/{owner}/{name}/generate", server.Wrap(generateRepo(mgr)))
 	api.POST("/repos/{owner}/{name}/lock", server.Wrap(lockRepo(mgr)))
 	api.GET("/repos/{owner}/{name}/lock", server.Wrap(lockStatus(mgr)))
 	api.DELETE("/repos/{owner}/{name}/lock", server.Wrap(unlockRepo(mgr)))
@@ -106,13 +114,19 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 
 // ---- middleware -------------------------------------------------------------
 
-func apiKeyMiddleware(apiKey string) func(next http.Handler) http.Handler {
+// apiKeyMiddleware guards a handler with an API key resolved per request, so
+// runtime changes (UI-managed MCP key) apply without a restart. An empty key
+// means the endpoint is open.
+func apiKeyMiddleware(getKey func() string) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
-		if apiKey == "" {
-			return next
-		}
-
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			apiKey := getKey()
+			if apiKey == "" {
+				next.ServeHTTP(w, r)
+
+				return
+			}
+
 			got := r.Header.Get("X-Api-Key")
 			if got == "" {
 				got = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -165,7 +179,7 @@ type settingsResponse struct {
 	} `json:"webhook"`
 }
 
-func getSettings(cfg *config.Config) ada.HandlerFunc {
+func getSettings(cfg *config.Config, mgr *manager.Manager) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var s settingsResponse
 
@@ -177,7 +191,7 @@ func getSettings(cfg *config.Config) ada.HandlerFunc {
 		s.Server.Port = cfg.Server.Port
 
 		s.MCP.Path = cfg.MCP.Path
-		s.MCP.APIKeySet = cfg.MCP.APIKey != ""
+		s.MCP.APIKeySet = mgr.MCPAPIKey() != ""
 
 		s.Git.SSHKeyPath = cfg.Git.SSHKeyPath
 		s.Git.PollInterval = cfg.Git.PollInterval.String()
@@ -192,6 +206,47 @@ func getSettings(cfg *config.Config) ada.HandlerFunc {
 	}
 }
 
+// ---- MCP api key handlers ---------------------------------------------------
+
+type mcpKeyRequest struct {
+	APIKey string `json:"api_key"`
+}
+
+func getMCPKey(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		return c.SendJSON(map[string]bool{"api_key_set": mgr.MCPAPIKey() != ""})
+	}
+}
+
+// setMCPKey stores a runtime override for the MCP API key and applies it
+// immediately. An empty api_key disables authentication.
+func setMCPKey(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		var req mcpKeyRequest
+		if err := c.Bind(&req); err != nil {
+			return c.SetStatus(http.StatusBadRequest).Err(err)
+		}
+
+		if err := mgr.SetMCPAPIKey(c.Request.Context(), strings.TrimSpace(req.APIKey)); err != nil {
+			return c.Err(err)
+		}
+
+		return c.SendJSON(map[string]bool{"api_key_set": mgr.MCPAPIKey() != ""})
+	}
+}
+
+// clearMCPKey removes the runtime override so the file/env config value
+// applies again.
+func clearMCPKey(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		if err := mgr.ClearMCPAPIKey(c.Request.Context()); err != nil {
+			return c.Err(err)
+		}
+
+		return c.SendJSON(map[string]bool{"api_key_set": mgr.MCPAPIKey() != ""})
+	}
+}
+
 // ---- REST handlers ----------------------------------------------------------
 
 type addRepoRequest struct {
@@ -203,6 +258,17 @@ func repoID(r *http.Request) string {
 	return r.PathValue("owner") + "/" + r.PathValue("name")
 }
 
+// repoView decorates a repo record with the transient in-memory activity so
+// the UI can show what is currently running.
+type repoView struct {
+	*registry.Repo
+	Running string `json:"running,omitempty"`
+}
+
+func viewRepo(mgr *manager.Manager, repo *registry.Repo) repoView {
+	return repoView{Repo: repo, Running: mgr.Activity(repo.ID)}
+}
+
 func listRepos(mgr *manager.Manager) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		repos, err := mgr.Registry().List(c.Request.Context())
@@ -210,7 +276,12 @@ func listRepos(mgr *manager.Manager) ada.HandlerFunc {
 			return c.Err(err)
 		}
 
-		return c.SendJSON(repos)
+		views := make([]repoView, 0, len(repos))
+		for _, repo := range repos {
+			views = append(views, viewRepo(mgr, repo))
+		}
+
+		return c.SendJSON(views)
 	}
 }
 
@@ -245,7 +316,7 @@ func getRepo(mgr *manager.Manager) ada.HandlerFunc {
 			return c.SetStatus(http.StatusNotFound).SendJSON(map[string]string{"error": "not found"})
 		}
 
-		return c.SendJSON(repo)
+		return c.SendJSON(viewRepo(mgr, repo))
 	}
 }
 
@@ -275,6 +346,49 @@ func refreshRepo(mgr *manager.Manager) ada.HandlerFunc {
 		mgr.TriggerRefresh(id)
 
 		return c.SetStatus(http.StatusAccepted).SendJSON(map[string]string{"status": "refresh queued", "repo": id})
+	}
+}
+
+type generateRequest struct {
+	// Targets selects the stages to run: graph, docs, docs_index, code_index.
+	Targets []string `json:"targets"`
+}
+
+func generateRepo(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		id := repoID(c.Request)
+
+		repo, err := mgr.Registry().Get(c.Request.Context(), id)
+		if err != nil {
+			return c.Err(err)
+		}
+
+		if repo == nil {
+			return c.SetStatus(http.StatusNotFound).SendJSON(map[string]string{"error": "not found"})
+		}
+
+		var req generateRequest
+		if err := c.Bind(&req); err != nil {
+			return c.SetStatus(http.StatusBadRequest).Err(err)
+		}
+
+		if len(req.Targets) == 0 {
+			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": "targets is required"})
+		}
+
+		for _, t := range req.Targets {
+			if !registry.ValidStage(t) {
+				return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{
+					"error": fmt.Sprintf("unknown target %q (valid: graph, docs, docs_index, code_index)", t),
+				})
+			}
+		}
+
+		mgr.TriggerGenerate(id, req.Targets)
+
+		return c.SetStatus(http.StatusAccepted).SendJSON(map[string]any{
+			"status": "generate queued", "repo": id, "targets": req.Targets,
+		})
 	}
 }
 
@@ -489,26 +603,58 @@ func searchDocs(mgr *manager.Manager) ada.HandlerFunc {
 
 func searchCode(mgr *manager.Manager) ada.HandlerFunc {
 	return func(c *ada.Context) error {
-		q := c.Request.URL.Query().Get("q")
+		q := strings.TrimSpace(c.Request.URL.Query().Get("q"))
 		if q == "" {
 			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": "q query param is required"})
 		}
 
-		repo := c.Request.URL.Query().Get("repo") // "" = all repos
+		params := c.Request.URL.Query()
+		repo := params.Get("repo") // "" = all repos
+		mode := params.Get("mode")
+		if mode == "" {
+			mode = "normal"
+		}
 
-		var top int
-		if v := c.Request.URL.Query().Get("top"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil {
-				top = n
+		switch mode {
+		case "normal":
+			page, perPage := 1, 20
+			if n, err := strconv.Atoi(params.Get("page")); err == nil && n > 0 {
+				page = n
 			}
-		}
+			if n, err := strconv.Atoi(params.Get("per_page")); err == nil && n > 0 {
+				perPage = n
+			}
 
-		snippets, err := mgr.SearchCode(c.Request.Context(), repo, q, top)
-		if err != nil {
-			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
-		}
+			result, err := mgr.SearchCodeText(c.Request.Context(), repo, q, page, perPage)
+			if err != nil {
+				return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+			}
 
-		return c.SendJSON(snippets)
+			return c.SendJSON(result)
+		case "semantic":
+			var top int
+			if v := params.Get("top"); v != "" {
+				if n, err := strconv.Atoi(v); err == nil {
+					top = n
+				}
+			}
+
+			snippets, err := mgr.SearchCode(c.Request.Context(), repo, q, top)
+			if err != nil {
+				return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+			}
+
+			return c.SendJSON(map[string]any{
+				"results":  snippets,
+				"total":    len(snippets),
+				"page":     1,
+				"per_page": len(snippets),
+			})
+		default:
+			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{
+				"error": "mode must be normal or semantic",
+			})
+		}
 	}
 }
 

@@ -1,30 +1,105 @@
 <script>
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { api } from "../lib/api.js";
-  import { link } from "../lib/router.js";
+  import { path as routePath } from "../lib/router.js";
+  import { fmtDate } from "../lib/format.js";
   import Status from "../lib/Status.svelte";
+  import CodeView from "../lib/CodeView.svelte";
+  import FileTree from "../lib/FileTree.svelte";
+  import MarkdownView from "../lib/MarkdownView.svelte";
+  import Icon from "../lib/Icon.svelte";
 
-  export let repoId;
+  let { repoId } = $props();
 
-  let repo = null;
-  let error = "";
-  let entries = [];
-  let cwd = "";
-  let selected = null;
-  let fileContent = null;
-  let fileError = "";
+  let repo = $state(null);
+  let error = $state("");
 
-  // Browser mode: "files" (source tree) or "docs" (generated markdown).
-  let mode = "files";
-  let docList = [];
-  let docsError = "";
-  let selectedDoc = null;
-  let docContent = null;
+  // Generation stages shown in the Artifacts card. Enabled flags come from the
+  // docs config; graph generation is always available.
+  const stageDefs = [
+    { key: "graph", label: "Graph" },
+    { key: "docs", label: "Docs" },
+    { key: "docs_index", label: "Docs index" },
+    { key: "code_index", label: "Code index" },
+  ];
+  let cfg = $state(null);
+  let generating = $state({});
+
+  function stageEnabled(key) {
+    if (!cfg) return true;
+    if (key === "graph") return true;
+    if (key === "docs") return cfg.docs_enabled;
+    if (key === "docs_index") return cfg.rag_enabled;
+    if (key === "code_index") return true;
+    return true;
+  }
+
+
+  async function generate(key) {
+    generating = { ...generating, [key]: true };
+    try {
+      await api.generate(repoId, [key]);
+      await loadRepo();
+    } catch (e) {
+      error = e.message;
+    } finally {
+      generating = { ...generating, [key]: false };
+    }
+  }
+
+  let selected = $state(null);
+  let fileContent = $state(null);
+  let fileError = $state("");
+
+  // File tree state: root entries plus lazily-loaded children per directory.
+  let rootEntries = $state([]);
+  let rootLoaded = false;
+  let expanded = $state({});
+  let children = $state({});
+
+  // Browser mode: "docs" (default: comprehensive markdown) or "files".
+  let mode = $state("docs");
+  let docList = $state([]);
+  let docsError = $state("");
+  let selectedDoc = $state(null);
+  let docContent = $state(null);
+  // Doc display: rendered HTML or raw markdown.
+  let docView = $state("html");
+  let docHeadings = $state([]);
+  let docBrowserOpen = $state(true);
+
+  function jumpToHeading(id) {
+    document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  // Resizable split: left pane width in px, persisted.
+  let paneW = $state(Number(localStorage.getItem("krabby-pane-w")) || 260);
+
+  function startDrag(e) {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = paneW;
+
+    function move(ev) {
+      paneW = Math.min(640, Math.max(160, startW + ev.clientX - startX));
+    }
+
+    function up() {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      localStorage.setItem("krabby-pane-w", String(paneW));
+    }
+
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
 
   async function loadDocs() {
     docsError = "";
     try {
       docList = await api.docs(repoId);
+      // Single comprehensive document: open it right away.
+      if (docList.length > 0 && !selectedDoc) openDoc(docList[0]);
     } catch (e) {
       docsError = e.message;
       docList = [];
@@ -34,6 +109,7 @@
   async function openDoc(d) {
     selectedDoc = d.path;
     docContent = null;
+    docHeadings = [];
     docsError = "";
     try {
       const res = await api.doc(repoId, d.path);
@@ -46,6 +122,7 @@
   function setMode(m) {
     mode = m;
     if (m === "docs" && docList.length === 0 && !docsError) loadDocs();
+    if (m === "files" && !rootLoaded) loadRoot();
   }
 
   async function loadRepo() {
@@ -56,24 +133,42 @@
     }
   }
 
-  async function loadDir(dir) {
+  function sortEntries(list) {
+    // Directories first, then files, both alphabetical.
+    return [...list].sort((a, b) => b.is_dir - a.is_dir || a.path.localeCompare(b.path));
+  }
+
+  async function loadRoot() {
     fileError = "";
+    rootLoaded = true;
     try {
-      entries = await api.files(repoId, dir, false);
-      cwd = dir;
+      rootEntries = sortEntries(await api.files(repoId, "", false));
     } catch (e) {
       fileError = e.message;
-      entries = [];
+      rootEntries = [];
     }
   }
 
-  async function open(entry) {
-    if (entry.is_dir) {
-      selected = null;
-      fileContent = null;
-      await loadDir(entry.path);
+  // Expand/collapse a directory in place; fetch its children on first expand.
+  async function toggleDir(entry) {
+    const p = entry.path;
+    if (expanded[p]) {
+      expanded = { ...expanded, [p]: false };
       return;
     }
+    expanded = { ...expanded, [p]: true };
+    if (!children[p]) {
+      try {
+        const list = sortEntries(await api.files(repoId, p, false));
+        children = { ...children, [p]: list };
+      } catch (e) {
+        fileError = e.message;
+        expanded = { ...expanded, [p]: false };
+      }
+    }
+  }
+
+  async function openFile(entry) {
     selected = entry.path;
     fileContent = null;
     fileError = "";
@@ -84,12 +179,43 @@
     }
   }
 
-  function up() {
-    if (!cwd) return;
-    const parent = cwd.includes("/") ? cwd.slice(0, cwd.lastIndexOf("/")) : "";
-    selected = null;
-    fileContent = null;
-    loadDir(parent);
+  // Line to scroll to in the viewer (deep links from code search).
+  let targetLine = $state(0);
+
+  function openFromTree(entry) {
+    targetLine = 0;
+    openFile(entry);
+  }
+
+  // Expand every ancestor directory of a file so it is visible in the tree.
+  async function revealFile(file) {
+    if (!rootLoaded) await loadRoot();
+    const parts = file.split("/");
+    let prefix = "";
+    for (let i = 0; i < parts.length - 1; i++) {
+      prefix = prefix ? `${prefix}/${parts[i]}` : parts[i];
+      if (!children[prefix]) {
+        try {
+          const list = sortEntries(await api.files(repoId, prefix, false));
+          children = { ...children, [prefix]: list };
+        } catch {
+          break;
+        }
+      }
+      expanded = { ...expanded, [prefix]: true };
+    }
+  }
+
+  // Deep link support: /repos/<id>?file=<path>&line=<n> opens the file in the
+  // Files tab at the given line (used by the code search page). lastLink is
+  // intentionally untracked so writing it does not re-trigger the effect.
+  let lastLink = "";
+
+  async function openFromLink(file, line) {
+    mode = "files";
+    targetLine = line;
+    await revealFile(file);
+    await openFile({ path: file, is_dir: false });
   }
 
   async function refresh() {
@@ -101,162 +227,359 @@
     }
   }
 
-  function fmt(ts) {
-    if (!ts || ts.startsWith("0001")) return "—";
-    return new Date(ts).toLocaleString();
-  }
-
-  function baseName(p) {
-    return p.includes("/") ? p.slice(p.lastIndexOf("/") + 1) : p;
-  }
-
+  let timer;
   onMount(async () => {
     await loadRepo();
-    await loadDir("");
+    api.docsConfig().then((c) => (cfg = c)).catch(() => {});
+    // Poll so stage states and the running indicator update live.
+    timer = setInterval(loadRepo, 3000);
+    await loadDocs();
+  });
+  onDestroy(() => clearInterval(timer));
+  // Derived rows so the card re-renders when the polled repo record changes.
+  let stageRows = $derived(stageDefs.map((s) => {
+    const st = (repo && repo.stages && repo.stages[s.key]) || {};
+    const running = (repo && repo.running === s.key) || st.status === "running";
+    return {
+      ...s,
+      st,
+      running,
+      enabled: cfg ? stageEnabled(s.key) : true,
+      stale:
+        st.status === "ok" && st.commit && repo && repo.last_commit && st.commit !== repo.last_commit,
+    };
+  }));
+  $effect(() => {
+    const params = new URLSearchParams($routePath.split("?")[1] || "");
+    const f = params.get("file");
+    const ln = Number(params.get("line")) || 0;
+    const key = f ? `${f}#${ln}` : "";
+    if (f && key !== lastLink) {
+      lastLink = key;
+      openFromLink(f, ln);
+    }
   });
 </script>
-
-<div class="mb-4">
-  <a href="/repos" use:link class="mb-2 inline-block text-[13px] text-dim hover:text-fg">← Repositories</a>
-  <h1 class="font-mono text-xl font-semibold">{repoId}</h1>
-</div>
 
 {#if error}
   <div class="err-box">{error}</div>
 {/if}
 
-{#if repo}
-  <div class="card mb-3 grid grid-cols-2 gap-x-6 gap-y-3 p-4">
-    <div><span class="inline-block w-24 text-[13px] text-dim">Status</span><Status status={repo.status} /></div>
-    <div>
-      <span class="inline-block w-24 text-[13px] text-dim">Commit</span>
-      <span class="font-mono text-[13px] text-faint">{repo.last_commit ? repo.last_commit.slice(0, 12) : "—"}</span>
-    </div>
-    <div>
-      <span class="inline-block w-24 text-[13px] text-dim">Branch</span>
-      <span class="text-[13px] text-faint">{repo.branch || "default"}</span>
-    </div>
-    <div>
-      <span class="inline-block w-24 text-[13px] text-dim">Last build</span>
-      <span class="text-[13px] text-faint">{fmt(repo.last_build_at)}</span>
-    </div>
-    <div>
-      <span class="inline-block w-24 text-[13px] text-dim">Last sync</span>
-      <span class="text-[13px] text-faint">{fmt(repo.last_sync_at)}</span>
-    </div>
-    <div class="col-span-2">
-      <span class="inline-block w-24 text-[13px] text-dim">URL</span>
-      <span class="font-mono text-[13px] text-faint">{repo.url}</span>
-    </div>
-    {#if repo.last_error}
-      <div class="col-span-2">
-        <span class="inline-block w-24 text-[13px] text-dim align-top">Error</span>
-        <span class="text-[13px] text-err">{repo.last_error}</span>
+<div class="grid grid-cols-[minmax(0,1fr)_260px] items-start gap-4">
+  <div class="min-w-0">
+    {#if mode === "files"}
+      <div class="card flex h-[calc(100vh-72px)] overflow-hidden">
+        <div class="flex h-full flex-shrink-0 flex-col overflow-auto" style={`width:${paneW}px`}>
+          <div class="sticky top-0 z-10 flex items-center gap-2 border-b border-line bg-surface px-3 py-2.5">
+            <span class="text-[13px] text-dim">Files</span>
+          </div>
+          {#if fileError}
+            <div class="err-box m-2">{fileError}</div>
+          {/if}
+          <div class="p-1.5">
+            <FileTree
+              entries={rootEntries}
+              {selected}
+              {expanded}
+              {children}
+              onToggle={toggleDir}
+              onOpen={openFromTree}
+            />
+            {#if rootEntries.length === 0 && !fileError}
+              <div class="p-4 text-dim">empty</div>
+            {/if}
+          </div>
+        </div>
+
+        <div
+          class="h-full w-[3px] flex-shrink-0 cursor-col-resize bg-line transition-colors hover:bg-accent"
+          role="separator"
+          aria-orientation="vertical"
+          onpointerdown={startDrag}
+        ></div>
+
+        <div class="flex h-full min-w-0 flex-1 flex-col">
+          {#if selected}
+            <div class="flex-shrink-0 border-b border-line bg-surface px-3.5 py-2.5 font-mono text-xs text-faint">
+              {selected}
+              {#if fileContent && fileContent.truncated}<span class="ml-2 text-warn">truncated</span>{/if}
+            </div>
+            <div class="min-h-0 flex-1 overflow-auto" style={fileContent ? "background:#24292e" : ""}>
+              {#if fileContent}
+                <CodeView code={fileContent.content} path={selected} scrollTo={targetLine} />
+              {:else if !fileError}
+                <div class="p-4 text-dim">Loading…</div>
+              {/if}
+            </div>
+          {:else}
+            <div class="p-4 text-dim">Select a file to view its source.</div>
+          {/if}
+        </div>
+      </div>
+    {:else}
+      <div class="card flex h-[calc(100vh-72px)] overflow-hidden">
+        {#if docBrowserOpen}
+          <div class="flex h-full flex-shrink-0 flex-col overflow-auto" style={`width:${paneW}px`}>
+            <div class="sticky top-0 z-10 flex items-center gap-2 border-b border-line bg-surface px-3 py-2.5">
+              <span class="text-[13px] text-dim">Docs</span>
+              <span class="font-mono text-[13px] text-faint">{docList.length}</span>
+            </div>
+            {#if docsError}
+              <div class="err-box m-2">{docsError}</div>
+            {/if}
+            <ul class="m-0 list-none p-1.5">
+              {#each docList as d}
+                <li>
+                  <button
+                    class="flex w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-left text-[13px] text-dim hover:bg-surface-2 hover:text-fg"
+                    class:!bg-surface-2={selectedDoc === d.path}
+                    class:!text-fg={selectedDoc === d.path}
+                    onclick={() => openDoc(d)}
+                  >
+                    <span class="font-mono">{d.title || d.path}</span>
+                    {#if d.source_path}<span class="text-[11px] text-faint">{d.source_path}</span>{/if}
+                  </button>
+                </li>
+              {/each}
+              {#if docList.length === 0 && !docsError}
+                <li class="p-4 text-dim">
+                  No documentation yet. Enable docs in Settings, then hit Generate on the Docs artifact.
+                </li>
+              {/if}
+            </ul>
+          </div>
+
+          <div
+            class="h-full w-[3px] flex-shrink-0 cursor-col-resize bg-line transition-colors hover:bg-accent"
+            role="separator"
+            aria-orientation="vertical"
+            onpointerdown={startDrag}
+          ></div>
+        {/if}
+
+        <div class="flex h-full min-w-0 flex-1 flex-col">
+          <div class="z-10 flex flex-shrink-0 items-center gap-2 border-b border-line bg-surface px-3.5 py-2 font-mono text-xs text-faint">
+            <button
+              class="inline-flex h-6 w-6 flex-shrink-0 cursor-pointer items-center justify-center rounded text-faint transition-colors hover:bg-surface-2 hover:text-fg"
+              title={docBrowserOpen ? "Hide document list" : "Show document list"}
+              aria-label={docBrowserOpen ? "Hide document list" : "Show document list"}
+              aria-expanded={docBrowserOpen}
+              onclick={() => (docBrowserOpen = !docBrowserOpen)}
+            >
+              <Icon name={docBrowserOpen ? "panel-left-close" : "panel-left-open"} size={15} />
+            </button>
+            {#if selectedDoc}
+              <span class="truncate">{selectedDoc}</span>
+              <span class="ml-auto flex gap-1">
+                <button class="view-toggle" class:view-toggle-active={docView === "html"} onclick={() => (docView = "html")}>
+                  Rendered
+                </button>
+                <button class="view-toggle" class:view-toggle-active={docView === "md"} onclick={() => (docView = "md")}>
+                  Markdown
+                </button>
+              </span>
+            {/if}
+          </div>
+
+          <div class="flex min-h-0 min-w-0 flex-1 overflow-y-auto">
+            <div class="min-w-0 flex-1">
+              {#if selectedDoc}
+                {#if docContent !== null}
+                  {#if docView === "html"}
+                    <MarkdownView markdown={docContent} onHeadings={(headings) => (docHeadings = headings)} />
+                  {:else}
+                    <pre class="m-0 overflow-x-auto whitespace-pre-wrap p-3.5 font-mono text-[12.5px] leading-relaxed">{docContent}</pre>
+                  {/if}
+                {:else if !docsError}
+                  <div class="p-4 text-dim">Loading…</div>
+                {/if}
+              {:else}
+                <div class="p-4 text-dim">Select a document to view it.</div>
+              {/if}
+            </div>
+
+            {#if docView === "html" && docHeadings.length > 0}
+              <aside class="sticky top-0 flex h-fit w-[220px] flex-shrink-0 flex-col self-start border-l border-line bg-surface/40 text-[12px]">
+                <div class="flex items-center border-b border-line px-3 py-2.5">
+                  <span class="font-medium">On this page</span>
+                  <span class="ml-auto font-mono text-[11px] text-faint">{docHeadings.length}</span>
+                </div>
+                <nav class="py-1.5">
+                  {#each docHeadings as heading (heading.id)}
+                    <button
+                      class="block w-full cursor-pointer truncate border-l-2 border-transparent py-1.5 pr-3 text-left text-dim transition-colors hover:border-accent hover:bg-surface-2 hover:text-fg"
+                      style={`padding-left:${12 + (heading.level - 1) * 10}px`}
+                      title={heading.text}
+                      onclick={() => jumpToHeading(heading.id)}
+                    >
+                      {heading.text}
+                    </button>
+                  {/each}
+                </nav>
+              </aside>
+            {/if}
+          </div>
+        </div>
       </div>
     {/if}
   </div>
 
-  <div class="mb-5 flex gap-2">
-    <a href={`/api/v1/repos/${repoId}/html`} target="_blank" rel="noreferrer"><button class="btn">Open graph HTML</button></a>
-    <a href={`/api/v1/repos/${repoId}/report`} target="_blank" rel="noreferrer"><button class="btn">Report</button></a>
-    <a href={`/api/v1/repos/${repoId}/graph`} target="_blank" rel="noreferrer"><button class="btn">graph.json</button></a>
-    <button class="btn" on:click={refresh}>Refresh</button>
+  <div class="sticky top-16 flex max-h-[calc(100vh-72px)] w-[260px] flex-col gap-3 overflow-y-auto pr-1">
+    <div class="card grid grid-cols-2 gap-1 p-1">
+      <button
+        class="flex cursor-pointer items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-[12px] text-faint transition-colors hover:bg-surface-2 hover:text-fg"
+        class:!bg-surface-2={mode === "docs"}
+        class:!text-fg={mode === "docs"}
+        onclick={() => setMode("docs")}
+      >
+        <Icon name="book" size={14} />
+        Docs
+      </button>
+      <button
+        class="flex cursor-pointer items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-[12px] text-faint transition-colors hover:bg-surface-2 hover:text-fg"
+        class:!bg-surface-2={mode === "files"}
+        class:!text-fg={mode === "files"}
+        onclick={() => setMode("files")}
+      >
+        <Icon name="file-code" size={14} />
+        Files
+      </button>
+    </div>
+
+    {#if repo}
+      <div class="card overflow-hidden text-[12px]">
+        <div class="flex items-center border-b border-line px-3 py-2">
+          <span class="font-medium">Outputs</span>
+          <button
+            class="ml-auto inline-flex cursor-pointer items-center gap-1.5 rounded px-1.5 py-1 text-dim transition-colors hover:bg-surface-2 hover:text-fg"
+            onclick={refresh}
+          >
+            <Icon name="refresh" size={13} />
+            Refresh
+          </button>
+        </div>
+        <div class="grid grid-cols-3 divide-x divide-line">
+          <a
+            href={`/api/v1/repos/${repoId}/html`}
+            target="_blank"
+            rel="noreferrer"
+            class="flex flex-col items-center gap-1.5 px-2 py-2.5 text-dim transition-colors hover:bg-surface-2 hover:text-fg"
+          >
+            <Icon name="graph" size={15} />
+            Visualize
+          </a>
+          <a
+            href={`/api/v1/repos/${repoId}/report`}
+            target="_blank"
+            rel="noreferrer"
+            class="flex flex-col items-center gap-1.5 px-2 py-2.5 text-dim transition-colors hover:bg-surface-2 hover:text-fg"
+          >
+            <Icon name="file-text" size={15} />
+            Report
+          </a>
+          <a
+            href={`/api/v1/repos/${repoId}/graph`}
+            target="_blank"
+            rel="noreferrer"
+            class="flex flex-col items-center gap-1.5 px-2 py-2.5 text-dim transition-colors hover:bg-surface-2 hover:text-fg"
+          >
+            <Icon name="braces" size={15} />
+            JSON
+          </a>
+        </div>
+      </div>
+
+      <div class="card p-3 text-[13px]">
+        <div class="mb-2 flex items-center justify-between gap-2">
+          <span class="font-medium">Artifacts</span>
+          {#if repo.running}
+            <span class="inline-flex items-center gap-1.5 text-[12px] text-busy">
+              <span class="inline-block h-[7px] w-[7px] animate-pulse rounded-full bg-busy"></span>
+              running: {repo.running}
+            </span>
+          {/if}
+        </div>
+
+        <div class="flex flex-col">
+          {#each stageRows as s (s.key)}
+            <div class="border-t border-line py-2 first:border-t-0">
+              <div class="flex items-center gap-2">
+                <span
+                  class="inline-block h-[7px] w-[7px] flex-shrink-0 rounded-full"
+                  class:animate-pulse={s.running}
+                  style="background: {s.running
+                    ? 'var(--color-busy)'
+                    : s.st.status === 'ok'
+                      ? 'var(--color-ok)'
+                      : s.st.status === 'error'
+                        ? 'var(--color-err)'
+                        : 'var(--color-faint)'}"
+                ></span>
+                <span>{s.label}</span>
+                {#if !s.enabled}
+                  <span class="text-[11px] text-faint">disabled</span>
+                {:else if s.stale}
+                  <span
+                    class="rounded border border-warn/40 px-1 text-[11px] text-warn"
+                    title={`generated for ${s.st.commit.slice(0, 8)}, repo is at ${repo.last_commit.slice(0, 8)}`}
+                  >stale</span>
+                {/if}
+                <button
+                  class="btn btn-sm ml-auto !px-2 !py-0.5 text-[12px]"
+                  disabled={s.running || !s.enabled || generating[s.key]}
+                  onclick={() => generate(s.key)}
+                >
+                  {s.running ? "Running…" : "Generate"}
+                </button>
+              </div>
+              <div class="mt-0.5 pl-[15px] text-[11px] text-faint">
+                {#if s.running}
+                  running…
+                {:else if s.st.status === "ok"}
+                  {fmtDate(s.st.finished_at)}
+                {:else if s.st.status === "error"}
+                  <span class="text-err" title={s.st.error}>{s.st.error}</span>
+                {:else}
+                  not generated
+                {/if}
+              </div>
+            </div>
+          {/each}
+        </div>
+      </div>
+
+      <div class="card flex flex-col gap-2.5 p-4 text-[13px]">
+        <div class="flex items-center justify-between gap-2">
+          <span class="text-dim">Status</span>
+          <Status status={repo.status} />
+        </div>
+        <div class="flex items-center justify-between gap-2">
+          <span class="text-dim">Commit</span>
+          <span class="font-mono text-faint">{repo.last_commit ? repo.last_commit.slice(0, 12) : "—"}</span>
+        </div>
+        <div class="flex items-center justify-between gap-2">
+          <span class="text-dim">Branch</span>
+          <span class="text-faint">{repo.branch || "default"}</span>
+        </div>
+        <div class="flex items-center justify-between gap-2">
+          <span class="text-dim">Last build</span>
+          <span class="text-right text-faint">{fmtDate(repo.last_build_at)}</span>
+        </div>
+        <div class="flex items-center justify-between gap-2">
+          <span class="text-dim">Last sync</span>
+          <span class="text-right text-faint">{fmtDate(repo.last_sync_at)}</span>
+        </div>
+        <div class="flex flex-col gap-1">
+          <span class="text-dim">URL</span>
+          <span class="break-all font-mono text-faint">{repo.url}</span>
+        </div>
+        {#if repo.last_error}
+          <div class="flex flex-col gap-1">
+            <span class="text-dim">Error</span>
+            <span class="break-words text-err">{repo.last_error}</span>
+          </div>
+        {/if}
+      </div>
+    {/if}
   </div>
-{/if}
-
-<div class="mb-3 flex gap-1">
-  <button class="btn btn-sm" class:btn-primary={mode === "files"} on:click={() => setMode("files")}>Files</button>
-  <button class="btn btn-sm" class:btn-primary={mode === "docs"} on:click={() => setMode("docs")}>Docs</button>
-</div>
-
-<div class="grid grid-cols-[280px_1fr] items-start gap-3">
-  {#if mode === "files"}
-    <div class="card max-h-[70vh] overflow-auto">
-      <div class="sticky top-0 flex items-center gap-2 border-b border-line bg-surface px-3 py-2.5">
-        <span class="text-[13px] text-dim">Files</span>
-        <span class="font-mono text-[13px] text-faint">/{cwd}</span>
-        {#if cwd}<button class="btn btn-sm ml-auto" on:click={up}>up</button>{/if}
-      </div>
-      {#if fileError}
-        <div class="err-box m-2">{fileError}</div>
-      {/if}
-      <ul class="m-0 list-none p-1.5">
-        {#each entries as e}
-          <li>
-            <button
-              class="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[13px] text-dim hover:bg-surface-2 hover:text-fg"
-              class:!bg-surface-2={selected === e.path}
-              class:!text-fg={selected === e.path}
-              on:click={() => open(e)}
-            >
-              <span class="w-3 text-faint">{e.is_dir ? "▸" : ""}</span>
-              <span class="font-mono">{baseName(e.path)}</span>
-            </button>
-          </li>
-        {/each}
-        {#if entries.length === 0 && !fileError}
-          <li class="p-4 text-dim">empty</li>
-        {/if}
-      </ul>
-    </div>
-
-    <div class="card max-h-[70vh] min-h-[200px] overflow-auto">
-      {#if selected}
-        <div class="sticky top-0 border-b border-line bg-surface px-3.5 py-2.5 font-mono text-xs text-faint">
-          {selected}
-          {#if fileContent && fileContent.truncated}<span class="ml-2 text-warn">truncated</span>{/if}
-        </div>
-        {#if fileContent}
-          <pre class="m-0 overflow-x-auto p-3.5 font-mono text-[12.5px] leading-relaxed">{fileContent.content}</pre>
-        {:else if !fileError}
-          <div class="p-4 text-dim">Loading…</div>
-        {/if}
-      {:else}
-        <div class="p-4 text-dim">Select a file to view its source.</div>
-      {/if}
-    </div>
-  {:else}
-    <div class="card max-h-[70vh] overflow-auto">
-      <div class="sticky top-0 flex items-center gap-2 border-b border-line bg-surface px-3 py-2.5">
-        <span class="text-[13px] text-dim">Generated docs</span>
-        <span class="font-mono text-[13px] text-faint">{docList.length}</span>
-      </div>
-      {#if docsError}
-        <div class="err-box m-2">{docsError}</div>
-      {/if}
-      <ul class="m-0 list-none p-1.5">
-        {#each docList as d}
-          <li>
-            <button
-              class="flex w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-left text-[13px] text-dim hover:bg-surface-2 hover:text-fg"
-              class:!bg-surface-2={selectedDoc === d.path}
-              class:!text-fg={selectedDoc === d.path}
-              on:click={() => openDoc(d)}
-            >
-              <span class="font-mono">{d.title || d.path}</span>
-              {#if d.source_path}<span class="text-[11px] text-faint">{d.source_path}</span>{/if}
-            </button>
-          </li>
-        {/each}
-        {#if docList.length === 0 && !docsError}
-          <li class="p-4 text-dim">No generated docs. Enable doc generation in Settings, then refresh the repo.</li>
-        {/if}
-      </ul>
-    </div>
-
-    <div class="card max-h-[70vh] min-h-[200px] overflow-auto">
-      {#if selectedDoc}
-        <div class="sticky top-0 border-b border-line bg-surface px-3.5 py-2.5 font-mono text-xs text-faint">
-          {selectedDoc}
-        </div>
-        {#if docContent !== null}
-          <pre class="m-0 overflow-x-auto whitespace-pre-wrap p-3.5 text-[13px] leading-relaxed">{docContent}</pre>
-        {:else if !docsError}
-          <div class="p-4 text-dim">Loading…</div>
-        {/if}
-      {:else}
-        <div class="p-4 text-dim">Select a document to view it.</div>
-      {/if}
-    </div>
-  {/if}
 </div>

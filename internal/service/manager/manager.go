@@ -15,6 +15,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/rytsh/krabby/internal/config"
 	"github.com/rytsh/krabby/internal/service/coderag"
 	"github.com/rytsh/krabby/internal/service/credentials"
 	"github.com/rytsh/krabby/internal/service/docgen"
@@ -32,11 +33,12 @@ import (
 // Manager coordinates registry, git, graphify builds and the native graph
 // query engine.
 type Manager struct {
-	reg    *registry.Registry
-	git    *gitops.Git
-	gfy    *graphify.Client
-	engine *graphquery.Engine
-	creds  *credentials.Store
+	reg      *registry.Registry
+	git      *gitops.Git
+	gfy      *graphify.Client
+	engine   *graphquery.Engine
+	creds    *credentials.Store
+	codeText *coderag.TextStore
 
 	reposDir       string
 	mergedPath     string
@@ -61,6 +63,18 @@ type Manager struct {
 	wg          sync.WaitGroup
 	lifecycleMu sync.Mutex
 	closing     bool
+
+	// activity tracks the currently running pipeline step per repo (transient,
+	// in-memory): "sync" or a registry.Stage* name. Empty = idle.
+	activityMu sync.Mutex
+	activity   map[string]string
+
+	// Effective MCP API key (runtime override or config), cached for the
+	// per-request auth check. mcpConfigKey is the startup config value used
+	// when the override is cleared.
+	mcpKeyMu     sync.RWMutex
+	mcpKey       string
+	mcpConfigKey string
 
 	leases *lease.Manager
 }
@@ -99,6 +113,7 @@ func New(
 	gfy *graphify.Client,
 	engine *graphquery.Engine,
 	creds *credentials.Store,
+	codeText *coderag.TextStore,
 	reposDir, mergedPath string,
 	docs DocsDeps,
 ) *Manager {
@@ -108,14 +123,18 @@ func New(
 		gfy:            gfy,
 		engine:         engine,
 		creds:          creds,
+		codeText:       codeText,
 		reposDir:       reposDir,
 		mergedPath:     mergedPath,
 		docsVectorsDir: docs.DocsVectorsDir,
 		codeVectorsDir: docs.CodeVectorsDir,
 		docsDir:        docs.DocsDir,
-		docs:           &docsBundle{}, // empty bundle: docs/rag disabled until Configure
-		baseCtx:        baseCtx,
-		locks:          map[string]*sync.Mutex{},
+		docs: &docsBundle{
+			codeRag: coderag.New(config.CodeRAG{}, nil, nil, engine, codeText),
+		},
+		baseCtx:  baseCtx,
+		locks:    map[string]*sync.Mutex{},
+		activity: map[string]string{},
 	}
 	m.leases = lease.New(m.TriggerRefresh)
 
@@ -190,6 +209,71 @@ func (m *Manager) startWork() bool {
 	m.wg.Add(1)
 
 	return true
+}
+
+func (m *Manager) setActivity(id, step string) {
+	m.activityMu.Lock()
+	defer m.activityMu.Unlock()
+
+	m.activity[id] = step
+}
+
+func (m *Manager) clearActivity(id string) {
+	m.activityMu.Lock()
+	defer m.activityMu.Unlock()
+
+	delete(m.activity, id)
+}
+
+// Activity returns the pipeline step currently running for a repo ("sync",
+// "graph", "docs", "docs_index", "code_index") or "" when idle.
+func (m *Manager) Activity(id string) string {
+	m.activityMu.Lock()
+	defer m.activityMu.Unlock()
+
+	return m.activity[id]
+}
+
+// runStage executes one generation stage, persisting its running/ok/error state
+// on the repo record and exposing it as the current activity while it runs.
+func (m *Manager) runStage(ctx context.Context, repo *registry.Repo, name string, fn func() error) error {
+	st := repo.Stages.Get(name)
+	if st == nil {
+		return fmt.Errorf("unknown stage %q", name)
+	}
+
+	m.setActivity(repo.ID, name)
+	defer m.clearActivity(repo.ID)
+
+	st.Status = registry.StageRunning
+	st.Error = ""
+	if err := m.reg.Upsert(ctx, repo); err != nil {
+		slog.Error("save stage state", "repo", repo.ID, "stage", name, "error", err)
+	}
+
+	start := time.Now()
+	err := fn()
+
+	st.FinishedAt = time.Now()
+	st.Commit = repo.LastCommit
+	if err != nil {
+		st.Status = registry.StageError
+		st.Error = err.Error()
+
+		slog.Error("stage failed", "repo", repo.ID, "stage", name, "error", err)
+	} else {
+		st.Status = registry.StageOK
+		st.Error = ""
+
+		slog.Info("stage finished", "repo", repo.ID, "stage", name,
+			"took", time.Since(start).Round(time.Millisecond).String())
+	}
+
+	if uerr := m.reg.Upsert(ctx, repo); uerr != nil {
+		slog.Error("save stage state", "repo", repo.ID, "stage", name, "error", uerr)
+	}
+
+	return err
 }
 
 func (m *Manager) lock(id string) *sync.Mutex {
@@ -341,6 +425,48 @@ func (m *Manager) RemoveRepo(ctx context.Context, id string) error {
 	return nil
 }
 
+// WarmCodeSearch creates missing bw FTS indexes for repositories that were
+// tracked before normal code search was introduced. Existing indexes are left
+// untouched; regular refreshes keep them current afterwards.
+func (m *Manager) WarmCodeSearch(ctx context.Context) error {
+	if m.codeText == nil {
+		return nil
+	}
+
+	repos, err := m.reg.List(ctx)
+	if err != nil {
+		return err
+	}
+
+	d, releaseDocs := m.acquireDocs()
+	defer releaseDocs()
+	if d.codeRag == nil {
+		return nil
+	}
+
+	var errs []error
+	for _, repo := range repos {
+		if repo.Path == "" || !fileExists(filepath.Join(repo.Path, ".git")) {
+			continue
+		}
+
+		hasIndex, err := m.codeText.HasRepo(ctx, repo.ID)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("check code index for %s: %w", repo.ID, err))
+			continue
+		}
+		if hasIndex {
+			continue
+		}
+
+		if err := d.codeRag.IndexText(ctx, repo.ID, repo.Path); err != nil {
+			errs = append(errs, fmt.Errorf("warm code index for %s: %w", repo.ID, err))
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
 // TriggerRefresh starts a background refresh for a repo. Concurrent triggers
 // for the same repo serialize on the per-repo lock.
 func (m *Manager) TriggerRefresh(id string) {
@@ -353,6 +479,149 @@ func (m *Manager) TriggerRefresh(id string) {
 
 		if err := m.Refresh(m.baseCtx, id); err != nil {
 			slog.Error("refresh repo", "repo", id, "error", err)
+		}
+	}()
+}
+
+// generateOrder is the canonical stage execution order for selective runs:
+// graph first (docs/code chunking can use it), then indexes and docs.
+var generateOrder = []string{
+	registry.StageGraph,
+	registry.StageCodeIndex,
+	registry.StageDocs,
+	registry.StageDocsIndex,
+}
+
+// Generate runs only the selected generation stages for a repo, using the
+// existing clone (no git sync). Valid targets: graph, docs, docs_index,
+// code_index. Stage outcomes are recorded on the repo record; the returned
+// error joins the failed stages.
+func (m *Manager) Generate(ctx context.Context, id string, targets []string) error {
+	want := map[string]bool{}
+	for _, t := range targets {
+		if !registry.ValidStage(t) {
+			return fmt.Errorf("unknown generate target %q", t)
+		}
+
+		want[t] = true
+	}
+
+	if len(want) == 0 {
+		return fmt.Errorf("no generate targets given")
+	}
+
+	l := m.lock(id)
+	l.Lock()
+	defer l.Unlock()
+
+	repo, err := m.reg.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+
+	if repo == nil {
+		return fmt.Errorf("repo %s not found", id)
+	}
+
+	if !fileExists(filepath.Join(repo.Path, ".git")) {
+		return fmt.Errorf("repo %s has no clone yet; refresh it first", id)
+	}
+
+	defer m.clearActivity(id)
+
+	d, releaseDocs := m.acquireDocs()
+	defer releaseDocs()
+
+	docsDir := ""
+	if m.docsDir != nil {
+		docsDir = m.docsDir(repo.Path)
+	}
+
+	var errs []error
+
+	for _, name := range generateOrder {
+		if !want[name] {
+			continue
+		}
+
+		var serr error
+
+		switch name {
+		case registry.StageGraph:
+			serr = m.runStage(ctx, repo, name, func() error {
+				if err := m.gfy.Update(ctx, repo.Path); err != nil {
+					return err
+				}
+
+				repo.LastBuildAt = time.Now()
+
+				if err := m.rebuildMerged(ctx); err != nil {
+					slog.Error("rebuild merged graph", "error", err)
+				}
+
+				return nil
+			})
+		case registry.StageCodeIndex:
+			serr = m.runStage(ctx, repo, name, func() error {
+				if d.codeRag == nil {
+					return fmt.Errorf("code index is not configured")
+				}
+
+				return d.codeRag.Index(ctx, repo.ID, repo.Path)
+			})
+		case registry.StageDocs:
+			serr = m.runStage(ctx, repo, name, func() error {
+				if d.gen == nil {
+					return fmt.Errorf("docs generation disabled: enable docs and configure the LLM in settings")
+				}
+
+				if docsDir == "" {
+					return fmt.Errorf("docs directory resolver not configured")
+				}
+
+				_, err := d.gen.Generate(ctx, repo.ID, repo.Path, docsDir)
+
+				return err
+			})
+
+			// A failed docs run leaves no fresh markdown to index.
+			if serr != nil && want[registry.StageDocsIndex] {
+				want[registry.StageDocsIndex] = false
+				errs = append(errs, fmt.Errorf("docs_index skipped: docs generation failed"))
+			}
+		case registry.StageDocsIndex:
+			serr = m.runStage(ctx, repo, name, func() error {
+				if d.rag == nil {
+					return fmt.Errorf("docs index disabled: enable RAG and configure an embedder in settings")
+				}
+
+				if docsDir == "" {
+					return fmt.Errorf("docs directory resolver not configured")
+				}
+
+				return d.rag.Index(ctx, repo.ID, docsDir)
+			})
+		}
+
+		if serr != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, serr))
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+// TriggerGenerate starts a background selective generation for a repo.
+func (m *Manager) TriggerGenerate(id string, targets []string) {
+	if !m.startWork() {
+		return
+	}
+
+	go func() {
+		defer m.wg.Done()
+
+		if err := m.Generate(m.baseCtx, id, targets); err != nil {
+			slog.Error("generate", "repo", id, "targets", targets, "error", err)
 		}
 	}()
 }
@@ -444,6 +713,9 @@ func (m *Manager) Refresh(ctx context.Context, id string) error {
 func (m *Manager) refresh(ctx context.Context, repo *registry.Repo) error {
 	slog.Info("working on repo", "repo", repo.ID, "commit", shortSHA(repo.LastCommit))
 
+	m.setActivity(repo.ID, "sync")
+	defer m.clearActivity(repo.ID)
+
 	graphPath := graphify.GraphPath(repo.Path)
 	hadGraph := fileExists(graphPath)
 
@@ -466,15 +738,14 @@ func (m *Manager) refresh(ctx context.Context, repo *registry.Repo) error {
 
 	repo.Status = registry.StatusBuilding
 	repo.LastError = ""
-	if err := m.reg.Upsert(ctx, repo); err != nil {
-		return err
-	}
 
 	slog.Info("building graph", "repo", repo.ID, "path", repo.Path, "commit", shortSHA(repo.LastCommit))
 
 	buildStart := time.Now()
 
-	if err := m.gfy.Update(ctx, repo.Path); err != nil {
+	if err := m.runStage(ctx, repo, registry.StageGraph, func() error {
+		return m.gfy.Update(ctx, repo.Path)
+	}); err != nil {
 		return fmt.Errorf("graphify update; %w", err)
 	}
 
@@ -514,9 +785,10 @@ func (m *Manager) buildDocsAndIndex(ctx context.Context, repo *registry.Repo) {
 
 	// Code index first: it only needs the clone + graph, not the docs.
 	if d.codeRag != nil {
-		if err := d.codeRag.Index(ctx, repo.ID, repo.Path); err != nil {
-			slog.Error("index code for rag", "repo", repo.ID, "error", err)
-		}
+		//nolint:errcheck // recorded on the stage state; never fails the build
+		_ = m.runStage(ctx, repo, registry.StageCodeIndex, func() error {
+			return d.codeRag.Index(ctx, repo.ID, repo.Path)
+		})
 	}
 
 	if d.gen == nil && d.rag == nil {
@@ -532,17 +804,20 @@ func (m *Manager) buildDocsAndIndex(ctx context.Context, repo *registry.Repo) {
 	docsDir := m.docsDir(repo.Path)
 
 	if d.gen != nil {
-		if _, err := d.gen.Generate(ctx, repo.ID, repo.Path, docsDir); err != nil {
-			slog.Error("generate docs", "repo", repo.ID, "error", err)
+		if err := m.runStage(ctx, repo, registry.StageDocs, func() error {
+			_, err := d.gen.Generate(ctx, repo.ID, repo.Path, docsDir)
 
+			return err
+		}); err != nil {
 			return // no fresh docs -> skip indexing
 		}
 	}
 
 	if d.rag != nil {
-		if err := d.rag.Index(ctx, repo.ID, docsDir); err != nil {
-			slog.Error("index docs for rag", "repo", repo.ID, "error", err)
-		}
+		//nolint:errcheck // recorded on the stage state; never fails the build
+		_ = m.runStage(ctx, repo, registry.StageDocsIndex, func() error {
+			return d.rag.Index(ctx, repo.ID, docsDir)
+		})
 	}
 }
 
