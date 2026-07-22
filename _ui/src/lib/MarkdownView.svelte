@@ -1,8 +1,11 @@
 <script>
-  // Markdown renderer: commonmark (https://commonmark.org/) for HTML plus
-  // mermaid for fenced ```mermaid diagrams. Both libraries are imported lazily
-  // so they stay out of the main bundle. Raw HTML in the markdown is stripped
-  // (commonmark safe mode).
+  // Markdown renderer: comark (https://comark.dev/) for HTML plus mermaid for
+  // fenced ```mermaid diagrams. comark is CommonMark + GFM, so pipe tables,
+  // strikethrough and task lists render (unlike plain commonmark, which dropped
+  // GFM tables to plain text). Both libraries are imported lazily so they stay
+  // out of the main bundle. Raw inline/block HTML is disabled (`html: false`),
+  // so any HTML in the markdown is escaped to text rather than injected — the
+  // same XSS guard commonmark's safe mode gave us.
   import { mount, onDestroy, tick, unmount } from "svelte";
   import MermaidDiagram from "./MermaidDiagram.svelte";
   import { theme } from "./theme.js";
@@ -35,9 +38,9 @@
       return;
     }
     try {
-      const { Parser, HtmlRenderer } = await import("commonmark");
-      const doc = new Parser().parse(src);
-      const out = new HtmlRenderer({ safe: true }).render(doc);
+      const { render: renderMarkdown } = await import("@comark/html");
+      // html:false escapes raw HTML instead of injecting it (XSS guard).
+      const out = await renderMarkdown(src, { html: false });
       if (id === seq) {
         clearDiagrams();
         html = out;

@@ -33,6 +33,12 @@ graphify:
                              # independent repos share no symbols, so the merge is
                              # just a costly disjoint union. Enable only for split
                              # monorepos / interdependent modules.
+  # cache_max_bytes: 536870912  # cap (bytes) on parsed graphs kept in memory by the
+                             # query engine. Each tracked repo's graph is parsed once
+                             # and cached; past this budget the least-recently-used
+                             # graphs are evicted (reloaded on next query). Lower it
+                             # to reduce RSS when tracking many/large repos; 0 disables
+                             # eviction (unbounded). Default: 512 MiB.
 
 # Docs, LLM/embedder, RAG/code-RAG, repository polling, git credentials and
 # webhook security are persisted runtime settings. Configure them from the UI

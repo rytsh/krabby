@@ -165,7 +165,7 @@ func TestGodNodes(t *testing.T) {
 
 func TestEngineCallAndReload(t *testing.T) {
 	p := writeGraph(t, smallGraph)
-	e := NewEngine()
+	e := NewEngine(0)
 
 	out, err := e.Call(p, "graph_stats", nil)
 	if err != nil {
@@ -186,6 +186,112 @@ func TestEngineCallAndReload(t *testing.T) {
 	}
 	if !strings.Contains(q, "Traversal: BFS depth=2") {
 		t.Errorf("depth arg not honoured:\n%s", q)
+	}
+}
+
+func TestEngineEvictsLRUOverBudget(t *testing.T) {
+	p1 := writeGraph(t, smallGraph)
+	p2 := writeGraph(t, smallGraph)
+	p3 := writeGraph(t, smallGraph)
+
+	// Budget large enough for exactly two graphs (each est = fileSize*factor).
+	fi, err := os.Stat(p1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	perGraph := fi.Size() * parsedSizeFactor
+	e := NewEngine(perGraph*2 + 1)
+
+	if _, err := e.Graph(p1); err != nil {
+		t.Fatalf("load p1: %v", err)
+	}
+	if _, err := e.Graph(p2); err != nil {
+		t.Fatalf("load p2: %v", err)
+	}
+
+	// Touch p1 so p2 becomes least-recently-used.
+	if _, err := e.Graph(p1); err != nil {
+		t.Fatalf("touch p1: %v", err)
+	}
+
+	// Loading p3 exceeds the budget and must evict the LRU entry (p2).
+	if _, err := e.Graph(p3); err != nil {
+		t.Fatalf("load p3: %v", err)
+	}
+
+	e.mu.Lock()
+	_, hasP1 := e.entries[p1]
+	_, hasP2 := e.entries[p2]
+	_, hasP3 := e.entries[p3]
+	n := e.lru.Len()
+	e.mu.Unlock()
+
+	if n != 2 {
+		t.Fatalf("expected 2 cached graphs after eviction, got %d", n)
+	}
+	if !hasP1 || !hasP3 {
+		t.Errorf("expected p1 and p3 resident, got p1=%v p3=%v", hasP1, hasP3)
+	}
+	if hasP2 {
+		t.Errorf("expected LRU entry p2 to be evicted")
+	}
+}
+
+func TestEngineOversizedGraphStillServed(t *testing.T) {
+	p := writeGraph(t, smallGraph)
+	// Budget smaller than a single graph: it must never be evicted while it is
+	// the sole (most-recently-used) entry, so queries keep working.
+	e := NewEngine(1)
+
+	g, err := e.Graph(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if g == nil {
+		t.Fatal("expected graph, got nil")
+	}
+
+	e.mu.Lock()
+	n := e.lru.Len()
+	e.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("expected sole oversized graph to stay resident, len=%d", n)
+	}
+}
+
+func TestEngineUnboundedWhenBudgetZero(t *testing.T) {
+	e := NewEngine(0)
+	for i := 0; i < 5; i++ {
+		if _, err := e.Graph(writeGraph(t, smallGraph)); err != nil {
+			t.Fatalf("load %d: %v", i, err)
+		}
+	}
+
+	e.mu.Lock()
+	n := e.lru.Len()
+	e.mu.Unlock()
+	if n != 5 {
+		t.Fatalf("expected all 5 graphs cached with eviction disabled, got %d", n)
+	}
+}
+
+func TestEngineInvalidateFreesBudget(t *testing.T) {
+	p := writeGraph(t, smallGraph)
+	e := NewEngine(0)
+	if _, err := e.Graph(p); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	e.Invalidate(p)
+
+	e.mu.Lock()
+	_, ok := e.entries[p]
+	cur := e.curBytes
+	n := e.lru.Len()
+	e.mu.Unlock()
+
+	if ok || n != 0 || cur != 0 {
+		t.Fatalf("expected empty cache after invalidate, ok=%v len=%d bytes=%d", ok, n, cur)
 	}
 }
 

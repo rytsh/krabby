@@ -256,7 +256,7 @@ func TestGenerateCommunityGroupingReducesCalls(t *testing.T) {
 		t.Fatalf("llm.New: %v", err)
 	}
 
-	gen := New(config.Docs{}, c, nil, graphquery.NewEngine())
+	gen := New(config.Docs{}, c, nil, graphquery.NewEngine(0))
 
 	docsDir := filepath.Join(clone, "krabby-docs")
 	man, err := gen.Generate(context.Background(), "owner/repo", clone, docsDir)
@@ -299,7 +299,7 @@ func TestBuildGroupsCapsGroupCount(t *testing.T) {
 	sort.Strings(files)
 	writeGraph(t, clone, community)
 
-	gen := New(config.Docs{MaxGroups: 40}, nil, nil, graphquery.NewEngine()).(*llmGenerator)
+	gen := New(config.Docs{MaxGroups: 40}, nil, nil, graphquery.NewEngine(0)).(*llmGenerator)
 
 	graph := gen.loadGraph(clone)
 	if graph == nil {

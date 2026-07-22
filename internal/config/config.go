@@ -88,6 +88,13 @@ type Graphify struct {
 	// services it is a disjoint union with no cross-repo edges, so it defaults
 	// off to avoid the rebuild cost. When off, graph tools require a repo id.
 	Merge bool `cfg:"merge"`
+	// CacheMaxBytes caps the estimated in-memory size of parsed graphs held by
+	// the query engine. Each tracked repo's graph.json is parsed once and cached;
+	// without a cap every graph stays resident forever, so tracking many repos
+	// drives RSS up until the container OOM-kills. When the budget is exceeded
+	// the least-recently-used graphs are evicted (and transparently reloaded on
+	// the next query). 0 disables eviction (unbounded, the old behaviour).
+	CacheMaxBytes int64 `cfg:"cache_max_bytes" default:"536870912"`
 }
 
 // The structs below are no longer part of the file/env configuration: they

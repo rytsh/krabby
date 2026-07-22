@@ -84,7 +84,9 @@ func run(ctx context.Context) error {
 	slog.Info("graphify resolved", "python", gfy.Python())
 
 	// Native in-process graph query engine (replaces the python serve pool).
-	engine := graphquery.NewEngine()
+	// Bounded by an estimated-memory budget so tracking many repos cannot pin
+	// every parsed graph in RAM and OOM-kill the process.
+	engine := graphquery.NewEngine(cfg.Graphify.CacheMaxBytes)
 
 	// Per-host SSH/token credentials are managed in the persisted credential
 	// store through the UI/REST API; there is no global file-config fallback.
