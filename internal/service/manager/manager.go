@@ -561,9 +561,11 @@ func (m *Manager) lock(id string) *sync.Mutex {
 }
 
 // AddRepo registers a repository and starts a background clone+build.
-// If the repo already exists, it just triggers a refresh.
-func (m *Manager) AddRepo(ctx context.Context, url, branch string) (*registry.Repo, error) {
-	id, repo, _, err := m.registerRepo(ctx, url, branch)
+// If the repo already exists, it just triggers a refresh. namespace assigns the
+// new repo to a namespace ("" == default); it is ignored for an existing repo
+// (use SetRepoNamespace to move one).
+func (m *Manager) AddRepo(ctx context.Context, url, branch, namespace string) (*registry.Repo, error) {
+	id, repo, _, err := m.registerRepo(ctx, url, branch, namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -581,8 +583,8 @@ func (m *Manager) AddRepo(ctx context.Context, url, branch string) (*registry.Re
 //
 // A build failure is reported through the returned record's Status ("error") and
 // LastError, not as a Go error, so callers always get the final state back.
-func (m *Manager) AddRepoWait(ctx context.Context, url, branch string) (*registry.Repo, bool, error) {
-	id, _, _, err := m.registerRepo(ctx, url, branch)
+func (m *Manager) AddRepoWait(ctx context.Context, url, branch, namespace string) (*registry.Repo, bool, error) {
+	id, _, _, err := m.registerRepo(ctx, url, branch, namespace)
 	if err != nil {
 		return nil, false, err
 	}
@@ -654,10 +656,14 @@ func (m *Manager) refreshAsync(id string) <-chan struct{} {
 
 // registerRepo parses the url, upserts a pending record if the repo is new, and
 // reports whether it already existed. It performs no clone/build itself.
-func (m *Manager) registerRepo(ctx context.Context, url, branch string) (id string, repo *registry.Repo, existed bool, err error) {
+func (m *Manager) registerRepo(ctx context.Context, url, branch, namespace string) (id string, repo *registry.Repo, existed bool, err error) {
 	id, err = gitops.ParseRepoID(url)
 	if err != nil {
 		return "", nil, false, err
+	}
+
+	if strings.TrimSpace(namespace) == registry.NamespaceAll {
+		return "", nil, false, fmt.Errorf("namespace %q is reserved", registry.NamespaceAll)
 	}
 
 	if existing, gerr := m.reg.Get(ctx, id); gerr != nil {
@@ -667,17 +673,44 @@ func (m *Manager) registerRepo(ctx context.Context, url, branch string) (id stri
 	}
 
 	repo = &registry.Repo{
-		ID:     id,
-		URL:    url,
-		Branch: branch,
-		Path:   filepath.Join(m.reposDir, filepath.FromSlash(id)),
-		Status: registry.StatusPending,
+		ID:        id,
+		URL:       url,
+		Branch:    branch,
+		Path:      filepath.Join(m.reposDir, filepath.FromSlash(id)),
+		Status:    registry.StatusPending,
+		Namespace: registry.NormalizeNamespace(namespace),
 	}
 	if err := m.reg.Upsert(ctx, repo); err != nil {
 		return "", nil, false, err
 	}
 
 	return id, repo, false, nil
+}
+
+// SetRepoNamespace moves a tracked repo into a namespace. ref is resolved the
+// same way as other repo refs (exact id or unique suffix). Passing an empty
+// namespace (or "default") returns the repo to the default bucket; NamespaceAll
+// is rejected. The change does not touch the pipeline, so no rebuild is needed.
+func (m *Manager) SetRepoNamespace(ctx context.Context, ref, namespace string) (*registry.Repo, error) {
+	repo, err := m.reg.Resolve(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	if repo == nil {
+		return nil, fmt.Errorf("repo %s not found", ref)
+	}
+
+	return m.reg.SetNamespace(ctx, repo.ID, namespace)
+}
+
+// UpsertNamespace creates or updates the description metadata for a namespace.
+func (m *Manager) UpsertNamespace(ctx context.Context, name, description string) (*registry.NamespaceRecord, error) {
+	return m.reg.UpsertNamespace(ctx, name, description)
+}
+
+// DeleteNamespace removes a namespace's description record. Repos keep their tag.
+func (m *Manager) DeleteNamespace(ctx context.Context, name string) error {
+	return m.reg.DeleteNamespace(ctx, name)
 }
 
 // RemoveRepo deletes the record, local clone, generated docs and derived indexes.
@@ -1835,24 +1868,26 @@ func (m *Manager) GraphPathFor(ctx context.Context, repoID string) (string, erro
 }
 
 // CallGraphTool answers a graph query tool call against the resolved graph using
-// the in-process native engine (no python serve process is spawned).
-func (m *Manager) CallGraphTool(ctx context.Context, repoID, tool string, args map[string]any) (*mcp.CallToolResult, error) {
+// the in-process native engine (no python serve process is spawned). When repoID
+// is empty the candidate graphs are restricted to namespace (empty or "default"
+// selects the default bucket; NamespaceAll searches every namespace).
+func (m *Manager) CallGraphTool(ctx context.Context, repoID, namespace, tool string, args map[string]any) (*mcp.CallToolResult, error) {
 	if repoID == "" && !m.mergeEnabled {
-		repoIDs, err := m.graphRepoIDs(ctx)
+		repoIDs, err := m.graphRepoIDs(ctx, namespace)
 		if err != nil {
 			return nil, err
 		}
 
 		switch len(repoIDs) {
 		case 0:
-			return nil, errors.New("no repository graph is ready; add a repository or wait for its build to finish")
+			return nil, fmt.Errorf("no repository graph is ready in namespace %s; add a repository, wait for its build to finish, or retry with namespace \"*\"", displayNamespace(namespace))
 		case 1:
 			repoID = repoIDs[0]
 		default:
 			if inferred := inferRepoID(repoIDs, args); inferred != "" {
 				repoID = inferred
 			} else {
-				return graphRepoSelectionResult(tool, repoIDs), nil
+				return graphRepoSelectionResult(tool, namespace, repoIDs), nil
 			}
 		}
 	}
@@ -1870,7 +1905,7 @@ func (m *Manager) CallGraphTool(ctx context.Context, repoID, tool string, args m
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}, nil
 }
 
-func (m *Manager) graphRepoIDs(ctx context.Context) ([]string, error) {
+func (m *Manager) graphRepoIDs(ctx context.Context, namespace string) ([]string, error) {
 	repos, err := m.reg.List(ctx)
 	if err != nil {
 		return nil, err
@@ -1878,6 +1913,9 @@ func (m *Manager) graphRepoIDs(ctx context.Context) ([]string, error) {
 
 	ids := make([]string, 0, len(repos))
 	for _, repo := range repos {
+		if !repoInNamespace(repo, namespace) {
+			continue
+		}
 		if fileExists(graphify.GraphPath(repo.Path)) {
 			ids = append(ids, repo.ID)
 		}
@@ -1885,6 +1923,32 @@ func (m *Manager) graphRepoIDs(ctx context.Context) ([]string, error) {
 	sort.Strings(ids)
 
 	return ids, nil
+}
+
+// repoInNamespace reports whether repo falls within the query namespace.
+// NamespaceAll matches every repo; an empty or "default" query matches repos
+// with no stored namespace; otherwise the stored namespace must match exactly.
+func repoInNamespace(repo *registry.Repo, namespace string) bool {
+	ns := strings.ToLower(strings.TrimSpace(namespace))
+	if ns == registry.NamespaceAll {
+		return true
+	}
+	if ns == "" || ns == registry.NamespaceDefault {
+		return repo.Namespace == ""
+	}
+
+	return repo.Namespace == ns
+}
+
+// displayNamespace renders a namespace for messages, showing the default bucket
+// as "default" rather than the empty stored form.
+func displayNamespace(namespace string) string {
+	ns := strings.ToLower(strings.TrimSpace(namespace))
+	if ns == "" {
+		return registry.NamespaceDefault
+	}
+
+	return ns
 }
 
 func inferRepoID(repoIDs []string, args map[string]any) string {
@@ -1925,7 +1989,7 @@ func normalizedMatchText(value string) string {
 	}, value)
 }
 
-func graphRepoSelectionResult(tool string, repoIDs []string) *mcp.CallToolResult {
+func graphRepoSelectionResult(tool, namespace string, repoIDs []string) *mcp.CallToolResult {
 	const maxShown = 20
 	shown := repoIDs
 	if len(shown) > maxShown {
@@ -1933,8 +1997,8 @@ func graphRepoSelectionResult(tool string, repoIDs []string) *mcp.CallToolResult
 	}
 
 	text := fmt.Sprintf(
-		"Repository selection required: cross-repository merge is disabled and %d repository graphs are available. Retry %s with repo set to one of: %s.",
-		len(repoIDs), tool, strings.Join(shown, ", "))
+		"Repository selection required: cross-repository merge is disabled and %d repository graphs are available in namespace %s. Retry %s with repo set to one of: %s.",
+		len(repoIDs), displayNamespace(namespace), tool, strings.Join(shown, ", "))
 	if len(repoIDs) > len(shown) {
 		text += " Use list_repos with search to find additional repository ids."
 	}

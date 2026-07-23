@@ -81,9 +81,17 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	api.DELETE("/mcp/api-key", server.Wrap(clearMCPKey(mgr)))
 	api.GET("/repos", server.Wrap(listRepos(mgr)))
 	api.GET("/repos/owners", server.Wrap(listRepoOwners(mgr)))
+	api.GET("/repos/namespaces", server.Wrap(listRepoNamespaces(mgr)))
 	api.GET("/repos/active", server.Wrap(listActiveRepos(mgr)))
 	api.GET("/tasks", server.Wrap(listTasks(mgr)))
 	api.POST("/repos", server.Wrap(addRepo(mgr)))
+
+	// Namespace metadata (name + description). The repo tags themselves live on
+	// the repo records; these routes only manage the human/LLM-facing
+	// descriptions. GET reuses /repos/namespaces above (count + description).
+	api.GET("/namespaces", server.Wrap(listRepoNamespaces(mgr)))
+	api.POST("/namespaces", server.Wrap(upsertNamespace(mgr)))
+	api.DELETE("/namespaces/{name}", server.Wrap(deleteNamespace(mgr)))
 
 	// Repo ids are full paths (host/group/.../name) with any number of "/"
 	// segments, so repo-scoped routes use a greedy wildcard and a GitLab-style
@@ -104,10 +112,11 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 		"doc":    getDoc(mgr),
 	})))
 	api.POST("/repos/{ref...}", server.Wrap(dispatchRepo(mgr, map[string]ada.HandlerFunc{
-		"refresh":  refreshRepo(mgr),
-		"generate": generateRepo(mgr),
-		"cancel":   cancelRepoJob(mgr),
-		"lock":     lockRepo(mgr),
+		"refresh":   refreshRepo(mgr),
+		"generate":  generateRepo(mgr),
+		"cancel":    cancelRepoJob(mgr),
+		"lock":      lockRepo(mgr),
+		"namespace": setRepoNamespace(mgr),
 	})))
 	api.DELETE("/repos/{ref...}", server.Wrap(dispatchRepo(mgr, map[string]ada.HandlerFunc{
 		"":     deleteRepo(mgr),
@@ -300,8 +309,9 @@ func clearMCPKey(mgr *manager.Manager) ada.HandlerFunc {
 // ---- REST handlers ----------------------------------------------------------
 
 type addRepoRequest struct {
-	URL    string `json:"url"`
-	Branch string `json:"branch"`
+	URL       string `json:"url"`
+	Branch    string `json:"branch"`
+	Namespace string `json:"namespace"`
 }
 
 // repoRef splits the greedy {ref...} path value into the raw repo id and the
@@ -327,6 +337,18 @@ func repoID(r *http.Request) string {
 	id, _ := repoRef(r)
 
 	return id
+}
+
+// namespaceParam reads the optional "namespace" query param for the web UI
+// search endpoints. Unlike the MCP tools (which default to the "default"
+// bucket), the UI searches every namespace by default, so an absent param maps
+// to NamespaceAll.
+func namespaceParam(r *http.Request) string {
+	if ns := r.URL.Query().Get("namespace"); ns != "" {
+		return ns
+	}
+
+	return registry.NamespaceAll
 }
 
 // dispatchRepo routes /repos/{ref...} requests: it splits "<id>[/-/<action>]",
@@ -382,10 +404,19 @@ func listRepos(mgr *manager.Manager) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		params := c.Request.URL.Query()
 
+		// The web UI lists every namespace by default (unlike the MCP tools,
+		// which default to the 'default' bucket); a namespace query param
+		// narrows it. NamespaceAll ("*") is the explicit "all" value.
+		namespace := params.Get("namespace")
+		if namespace == "" {
+			namespace = registry.NamespaceAll
+		}
+
 		opts := registry.ListOptions{
-			Search: params.Get("q"),
-			Owner:  params.Get("owner"),
-			Status: params.Get("status"),
+			Search:    params.Get("q"),
+			Owner:     params.Get("owner"),
+			Status:    params.Get("status"),
+			Namespace: namespace,
 		}
 		if n, err := strconv.Atoi(params.Get("page")); err == nil && n > 0 {
 			opts.Page = n
@@ -426,6 +457,77 @@ func listRepoOwners(mgr *manager.Manager) ada.HandlerFunc {
 		}
 
 		return c.SendJSON(owners)
+	}
+}
+
+// listRepoNamespaces returns the namespace groups (namespace + count +
+// description). Untagged repos are reported under "default".
+func listRepoNamespaces(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		namespaces, err := mgr.Registry().Namespaces(c.Request.Context())
+		if err != nil {
+			return c.Err(err)
+		}
+
+		return c.SendJSON(namespaces)
+	}
+}
+
+type upsertNamespaceRequest struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+// upsertNamespace creates or updates a namespace's description record.
+func upsertNamespace(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		var req upsertNamespaceRequest
+		if err := c.Bind(&req); err != nil {
+			return c.SetStatus(http.StatusBadRequest).Err(err)
+		}
+
+		rec, err := mgr.UpsertNamespace(context.WithoutCancel(c.Request.Context()), req.Name, req.Description)
+		if err != nil {
+			return c.Err(err)
+		}
+
+		return c.SendJSON(rec)
+	}
+}
+
+// deleteNamespace removes a namespace's description record (repos keep the tag).
+func deleteNamespace(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		name := c.Request.PathValue("name")
+		if err := mgr.DeleteNamespace(context.WithoutCancel(c.Request.Context()), name); err != nil {
+			return c.Err(err)
+		}
+
+		return c.SetStatus(http.StatusNoContent).SendJSON(nil)
+	}
+}
+
+type setRepoNamespaceRequest struct {
+	Namespace string `json:"namespace"`
+}
+
+// setRepoNamespace moves a repo into a namespace ("" / "default" returns it to
+// the default bucket). It only re-tags the record; no rebuild is triggered.
+func setRepoNamespace(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		id := repoID(c.Request)
+
+		var req setRepoNamespaceRequest
+		if err := c.Bind(&req); err != nil {
+			return c.SetStatus(http.StatusBadRequest).Err(err)
+		}
+
+		repo, err := mgr.SetRepoNamespace(context.WithoutCancel(c.Request.Context()), id, req.Namespace)
+		if err != nil {
+			return c.Err(err)
+		}
+
+		return c.SendJSON(repo)
 	}
 }
 
@@ -479,7 +581,7 @@ func addRepo(mgr *manager.Manager) ada.HandlerFunc {
 
 		// Registration must finish even if the UI navigates away. The clone/build
 		// itself is queued on the manager lifecycle context by AddRepo.
-		repo, err := mgr.AddRepo(context.WithoutCancel(c.Request.Context()), req.URL, req.Branch)
+		repo, err := mgr.AddRepo(context.WithoutCancel(c.Request.Context()), req.URL, req.Branch, req.Namespace)
 		if err != nil {
 			return c.Err(err)
 		}
@@ -786,6 +888,7 @@ func searchDocs(mgr *manager.Manager) ada.HandlerFunc {
 		// wins over scope; scope selects all/repos/sources when repo is empty.
 		repo := c.Request.URL.Query().Get("repo")
 		scope := c.Request.URL.Query().Get("scope")
+		namespace := namespaceParam(c.Request)
 
 		var top int
 		if v := c.Request.URL.Query().Get("top"); v != "" {
@@ -794,7 +897,7 @@ func searchDocs(mgr *manager.Manager) ada.HandlerFunc {
 			}
 		}
 
-		docs, err := mgr.SearchDocs(c.Request.Context(), scope, repo, q, top)
+		docs, err := mgr.SearchDocs(c.Request.Context(), scope, repo, namespace, q, top)
 		if err != nil {
 			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
 		}
@@ -812,6 +915,7 @@ func searchCode(mgr *manager.Manager) ada.HandlerFunc {
 
 		params := c.Request.URL.Query()
 		repo := params.Get("repo") // "" = all repos
+		namespace := namespaceParam(c.Request)
 		mode := params.Get("mode")
 		if mode == "" {
 			mode = "normal"
@@ -827,7 +931,7 @@ func searchCode(mgr *manager.Manager) ada.HandlerFunc {
 				perPage = n
 			}
 
-			result, err := mgr.SearchCodeText(c.Request.Context(), repo, q, page, perPage)
+			result, err := mgr.SearchCodeText(c.Request.Context(), repo, namespace, q, page, perPage)
 			if err != nil {
 				return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
 			}
@@ -841,7 +945,7 @@ func searchCode(mgr *manager.Manager) ada.HandlerFunc {
 				}
 			}
 
-			snippets, err := mgr.SearchCode(c.Request.Context(), repo, q, top)
+			snippets, err := mgr.SearchCode(c.Request.Context(), repo, namespace, q, top)
 			if err != nil {
 				return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
 			}

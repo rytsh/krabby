@@ -111,29 +111,55 @@
   onMount(loadRepoOptions);
 </script>
 
-<div class="mb-3 inline-flex rounded-md border border-line bg-surface p-1" role="group" aria-label="Search target">
-  <button
-    class="view-toggle px-3 py-1"
-    class:view-toggle-active={scope === "code"}
-    onclick={() => {
-      scope = "code";
-      // Code search only understands repo ids; drop docs-only selections.
-      if (repoFilter === "repos" || repoFilter === "sources" || repoFilter.startsWith("web:")) repoFilter = "";
-      resetResults();
-    }}>Code</button
-  >
-  <button
-    class="view-toggle px-3 py-1"
-    class:view-toggle-active={scope === "docs"}
-    onclick={() => {
-      scope = "docs";
-      resetResults();
-    }}>Docs</button
-  >
+<div class="mb-3 flex flex-wrap items-center gap-2">
+  <div class="inline-flex rounded-md border border-line bg-surface p-1" role="group" aria-label="Search target">
+    <button
+      class="view-toggle px-3 py-1"
+      class:view-toggle-active={scope === "code"}
+      onclick={() => {
+        scope = "code";
+        // Code search only understands repo ids; drop docs-only selections.
+        if (repoFilter === "repos" || repoFilter === "sources" || repoFilter.startsWith("web:")) repoFilter = "";
+        resetResults();
+      }}>Code</button
+    >
+    <button
+      class="view-toggle px-3 py-1"
+      class:view-toggle-active={scope === "docs"}
+      onclick={() => {
+        scope = "docs";
+        resetResults();
+      }}>Docs</button
+    >
+  </div>
+  <select class="input flex-1" bind:value={repoFilter} onchange={resetResults} aria-label="Search scope">
+    {#if scope === "docs"}
+      <option value="">everywhere</option>
+      <option value="repos">all repositories</option>
+      <option value="sources">all web sources</option>
+      {#if sourceOptions.length > 0}
+        <optgroup label="Web sources">
+          {#each sourceOptions as name (name)}
+            <option value={`web:${name}`}>web:{name}</option>
+          {/each}
+        </optgroup>
+      {/if}
+      <optgroup label="Repositories">
+        {#each repoOptions as id (id)}
+          <option value={id}>{id}</option>
+        {/each}
+      </optgroup>
+    {:else}
+      <option value="">all repositories</option>
+      {#each repoOptions as id (id)}
+        <option value={id}>{id}</option>
+      {/each}
+    {/if}
+    {#if repoOptionsTruncated}
+      <option disabled>… more (search all repositories)</option>
+    {/if}
+  </select>
 </div>
-{#if scope === "docs"}
-  <span class="ml-2 text-[11px] text-faint">searches generated repo docs and synced web sources</span>
-{/if}
 
 <div class="mb-4 flex flex-col gap-2 sm:flex-row">
   <div class="relative flex-1">
@@ -169,33 +195,6 @@
       Semantic
     </div>
   {/if}
-  <select class="input sm:basis-[240px]" bind:value={repoFilter} onchange={resetResults} aria-label="Search scope">
-    {#if scope === "docs"}
-      <option value="">everywhere</option>
-      <option value="repos">all repositories</option>
-      <option value="sources">all web sources</option>
-      {#if sourceOptions.length > 0}
-        <optgroup label="Web sources">
-          {#each sourceOptions as name (name)}
-            <option value={`web:${name}`}>web:{name}</option>
-          {/each}
-        </optgroup>
-      {/if}
-      <optgroup label="Repositories">
-        {#each repoOptions as id (id)}
-          <option value={id}>{id}</option>
-        {/each}
-      </optgroup>
-    {:else}
-      <option value="">all repositories</option>
-      {#each repoOptions as id (id)}
-        <option value={id}>{id}</option>
-      {/each}
-    {/if}
-    {#if repoOptionsTruncated}
-      <option disabled>… more (search all repositories)</option>
-    {/if}
-  </select>
   <button class="btn btn-primary" onclick={search} disabled={loading || !q.trim()}>
     {loading ? "Searching…" : "Search"}
   </button>

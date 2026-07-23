@@ -18,19 +18,21 @@ import (
 // ---- docs + RAG tools -------------------------------------------------------
 
 type searchDocsArgs struct {
-	Question string `json:"question" jsonschema:"natural language question to find relevant documentation for"`
-	Repo     string `json:"repo,omitempty" jsonschema:"one repository id or web:<collection>; always provide when known, omit only for explicit broad search"`
-	Scope    string `json:"scope,omitempty" jsonschema:"when repo is unknown: 'all' (default), 'repos', or 'sources'"`
-	TopDocs  int    `json:"top_docs,omitempty" jsonschema:"number of ranked documents to return (default 3, max 5)"`
+	Question  string `json:"question" jsonschema:"natural language question to find relevant documentation for"`
+	Repo      string `json:"repo,omitempty" jsonschema:"one repository id or web:<collection>; always provide when known, omit only for explicit broad search"`
+	Namespace string `json:"namespace,omitempty" jsonschema:"when repo is omitted, scope repo docs to this namespace; empty means the 'default' namespace, '*' searches all namespaces. Web sources are never namespaced and always participate"`
+	Scope     string `json:"scope,omitempty" jsonschema:"when repo is unknown: 'all' (default), 'repos', or 'sources'"`
+	TopDocs   int    `json:"top_docs,omitempty" jsonschema:"number of ranked documents to return (default 3, max 5)"`
 }
 
 type searchCodeArgs struct {
-	Query   string `json:"query" jsonschema:"text, symbol, path, natural-language or code query"`
-	Repo    string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to search; always provide when known, omit only for explicit cross-repository search"`
-	Mode    string `json:"mode,omitempty" jsonschema:"search mode: 'normal' for bw full-text search (default) or 'semantic' for vector search"`
-	Page    int    `json:"page,omitempty" jsonschema:"normal mode page number (default 1)"`
-	PerPage int    `json:"per_page,omitempty" jsonschema:"normal mode results per page (default 10, max 50)"`
-	TopK    int    `json:"top_k,omitempty" jsonschema:"semantic mode source snippets to return (default 8, max 20)"`
+	Query     string `json:"query" jsonschema:"text, symbol, path, natural-language or code query"`
+	Repo      string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to search; always provide when known, omit only for explicit cross-repository search"`
+	Namespace string `json:"namespace,omitempty" jsonschema:"when repo is omitted, scope the search to this namespace; empty means the 'default' namespace, '*' searches all namespaces"`
+	Mode      string `json:"mode,omitempty" jsonschema:"search mode: 'normal' for bw full-text search (default) or 'semantic' for vector search"`
+	Page      int    `json:"page,omitempty" jsonschema:"normal mode page number (default 1)"`
+	PerPage   int    `json:"per_page,omitempty" jsonschema:"normal mode results per page (default 10, max 50)"`
+	TopK      int    `json:"top_k,omitempty" jsonschema:"semantic mode source snippets to return (default 8, max 20)"`
 }
 
 func (a searchCodeArgs) searchMode() (string, error) {
@@ -139,9 +141,9 @@ func viewSourceMCP(mgr *manager.Manager, col *websource.Collection) sourceResult
 func addDocTools(server *mcp.Server, mgr *manager.Manager, includeAdmin bool) {
 	addTool(server, &mcp.Tool{
 		Name:        "search_docs",
-		Description: "Search generated documentation, wikis, and Confluence content. Returns bounded ranked excerpts; use get_doc only when a result needs more context. Always scope with repo or web:<collection> when known. Use list_sources only when the collection name is unknown.",
+		Description: "Search generated documentation, wikis, and Confluence content. Returns bounded ranked excerpts; use get_doc only when a result needs more context. Always scope with repo or web:<collection> when known. When repo is omitted the repo docs searched are limited to the 'default' namespace; pass namespace:'*' to search all namespaces (web sources always participate). Use list_sources only when the collection name is unknown.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args searchDocsArgs) (*mcp.CallToolResult, any, error) {
-		docs, err := mgr.SearchDocs(ctx, args.Scope, args.Repo, args.Question, args.TopDocs)
+		docs, err := mgr.SearchDocs(ctx, args.Scope, args.Repo, args.Namespace, args.Question, args.TopDocs)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -151,7 +153,7 @@ func addDocTools(server *mcp.Server, mgr *manager.Manager, includeAdmin bool) {
 
 	addTool(server, &mcp.Tool{
 		Name:        "search_code",
-		Description: "Preferred first tool for symbols, paths, literals, definitions, usages, and implementation locations. Normal mode performs exact full-text search; semantic mode handles conceptual source queries. Returns located snippets; use read_file only for needed surrounding context. Always provide repo when known.",
+		Description: "Preferred first tool for symbols, paths, literals, definitions, usages, and implementation locations. Normal mode performs exact full-text search; semantic mode handles conceptual source queries. Returns located snippets; use read_file only for needed surrounding context. Always provide repo when known. When repo is omitted the search is scoped to the 'default' namespace; pass namespace:'*' to search all namespaces.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args searchCodeArgs) (*mcp.CallToolResult, any, error) {
 		mode, err := args.searchMode()
 		if err != nil {
@@ -159,7 +161,7 @@ func addDocTools(server *mcp.Server, mgr *manager.Manager, includeAdmin bool) {
 		}
 
 		if mode == "normal" {
-			result, err := mgr.SearchCodeText(ctx, args.Repo, args.Query, args.Page, boundedCount(args.PerPage, 10, 50))
+			result, err := mgr.SearchCodeText(ctx, args.Repo, args.Namespace, args.Query, args.Page, boundedCount(args.PerPage, 10, 50))
 			if err != nil {
 				return nil, nil, err
 			}
@@ -168,7 +170,7 @@ func addDocTools(server *mcp.Server, mgr *manager.Manager, includeAdmin bool) {
 			return jsonResult(result), nil, nil
 		}
 
-		snippets, err := mgr.SearchCode(ctx, args.Repo, args.Query, boundedCount(args.TopK, 8, 20))
+		snippets, err := mgr.SearchCode(ctx, args.Repo, args.Namespace, args.Query, boundedCount(args.TopK, 8, 20))
 		if err != nil {
 			return nil, nil, err
 		}

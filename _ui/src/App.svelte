@@ -17,6 +17,7 @@
   import Repos from "./routes/Repos.svelte";
   import RepoDetail from "./routes/RepoDetail.svelte";
   import Sources from "./routes/Sources.svelte";
+  import Namespaces from "./routes/Namespaces.svelte";
   import Activity from "./routes/Activity.svelte";
   import Search from "./routes/Search.svelte";
   import Settings from "./routes/Settings.svelte";
@@ -31,6 +32,7 @@
     if (p.startsWith("/repos/")) return { view: "repo", repoId: p.slice("/repos/".length) };
     if (p === "/sources") return { view: "sources" };
     if (p.startsWith("/sources/")) return { view: "sources", sourceName: p.slice("/sources/".length) };
+    if (p === "/namespaces") return { view: "namespaces" };
     if (p === "/search") return { view: "search" };
     if (p === "/activity") return { view: "activity" };
     if (p === "/settings") return { view: "settings" };
@@ -43,6 +45,7 @@
   const nav = [
     { href: "/repos", label: "Repositories", icon: "boxes", match: (v) => v === "repos" || v === "repo" },
     { href: "/sources", label: "Sources", icon: "book", match: (v) => v === "sources" },
+    { href: "/namespaces", label: "Namespaces", icon: "tag", match: (v) => v === "namespaces" },
     { href: "/activity", label: "Activity", icon: "activity", match: (v) => v === "activity" },
     { href: "/search", label: "Code search", icon: "search", match: (v) => v === "search" },
     { href: "/settings", label: "Settings", icon: "settings", match: (v) => v === "settings" },
@@ -53,6 +56,7 @@
     repos: "Repositories",
     repo: "Repository",
     sources: "Sources",
+    namespaces: "Namespaces",
     activity: "Activity",
     search: "Code search",
     settings: "Settings",
@@ -293,7 +297,7 @@
       </div>
     </header>
 
-    <main class="min-w-0 flex-1 px-2 {view === 'repo' ? 'py-2' : 'max-w-[1280px] py-7'}">
+    <main class="min-w-0 flex-1 px-2 {view === 'repo' ? 'py-2' : 'max-w-[1280px] py-2'}">
       {#if view === "repos"}
         <Repos />
       {:else if view === "repo"}
@@ -302,6 +306,8 @@
         {/key}
       {:else if view === "sources"}
         <Sources sourceName={route.sourceName || ""} />
+      {:else if view === "namespaces"}
+        <Namespaces />
       {:else if view === "activity"}
         <Activity />
       {:else if view === "search"}

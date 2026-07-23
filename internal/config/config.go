@@ -44,9 +44,6 @@ type Config struct {
 	MCP      MCP      `cfg:"mcp"`
 	Graphify Graphify `cfg:"graphify"`
 
-	// Repos seeds the registry at startup; repos can also be added at runtime.
-	Repos []RepoSeed `cfg:"repos"`
-
 	Telemetry tell.Config `cfg:"telemetry"`
 }
 
@@ -197,12 +194,6 @@ type CodeRAG struct {
 	Include []string `cfg:"include"`
 	// Exclude globs skip files (evaluated after Include).
 	Exclude []string `cfg:"exclude"`
-}
-
-// RepoSeed is a repository declared in the config file.
-type RepoSeed struct {
-	URL    string `cfg:"url"`
-	Branch string `cfg:"branch"`
 }
 
 // Load reads configuration (default -> file -> env) and initializes log level.

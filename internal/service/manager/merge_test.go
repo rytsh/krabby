@@ -63,9 +63,9 @@ func TestGraphRepoSelectionResultIsBoundedAndActionable(t *testing.T) {
 		repos = append(repos, fmt.Sprintf("github.com/acme/repo-%02d", i))
 	}
 
-	result := graphRepoSelectionResult("query_graph", repos)
+	result := graphRepoSelectionResult("query_graph", "", repos)
 	text := result.Content[0].(*mcp.TextContent).Text
-	for _, want := range []string{"Repository selection required", "Retry query_graph with repo", "list_repos", "search_code"} {
+	for _, want := range []string{"Repository selection required", "Retry query_graph with repo", "list_repos", "search_code", "namespace default"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("selection result missing %q: %s", want, text)
 		}

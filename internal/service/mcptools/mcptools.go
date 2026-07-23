@@ -73,9 +73,10 @@ func New(mgr *manager.Manager, version string, waitTimeout time.Duration, profil
 // ---- management tools -------------------------------------------------------
 
 type addRepoArgs struct {
-	URL    string `json:"url" jsonschema:"git URL of the repository (ssh or https)"`
-	Branch string `json:"branch,omitempty" jsonschema:"branch to track (default: repo default branch)"`
-	Wait   bool   `json:"wait,omitempty" jsonschema:"when true, block until the clone and graph build finish and return the final status (ready or error) instead of returning immediately"`
+	URL       string `json:"url" jsonschema:"git URL of the repository (ssh or https)"`
+	Branch    string `json:"branch,omitempty" jsonschema:"branch to track (default: repo default branch)"`
+	Namespace string `json:"namespace,omitempty" jsonschema:"namespace to assign this repo to (arbitrary grouping label); omitted means the 'default' namespace. '*' is reserved and rejected. Ignored if the repo is already tracked (use set_repo_namespace to move it)"`
+	Wait      bool   `json:"wait,omitempty" jsonschema:"when true, block until the clone and graph build finish and return the final status (ready or error) instead of returning immediately"`
 }
 
 type repoIDArgs struct {
@@ -106,10 +107,25 @@ func (a refreshRepoArgs) validateStages() error {
 type emptyArgs struct{}
 
 type listReposArgs struct {
-	Page    int    `json:"page,omitempty" jsonschema:"page number (default 1)"`
-	PerPage int    `json:"per_page,omitempty" jsonschema:"results per page (default 20, max 200)"`
-	Search  string `json:"search,omitempty" jsonschema:"case-insensitive substring filter on the repo id (host/group/.../name)"`
-	Owner   string `json:"owner,omitempty" jsonschema:"restrict to the direct children of one directory prefix (everything before the repo name)"`
+	Page      int    `json:"page,omitempty" jsonschema:"page number (default 1)"`
+	PerPage   int    `json:"per_page,omitempty" jsonschema:"results per page (default 20, max 200)"`
+	Search    string `json:"search,omitempty" jsonschema:"case-insensitive substring filter on the repo id (host/group/.../name)"`
+	Owner     string `json:"owner,omitempty" jsonschema:"restrict to the direct children of one directory prefix (everything before the repo name)"`
+	Namespace string `json:"namespace,omitempty" jsonschema:"restrict to one namespace; empty or 'default' selects the default bucket (untagged repos), '*' lists every namespace"`
+}
+
+type setRepoNamespaceArgs struct {
+	Repo      string `json:"repo" jsonschema:"repository id (owner/name) to move"`
+	Namespace string `json:"namespace" jsonschema:"target namespace; empty or 'default' returns the repo to the default bucket. '*' is reserved and rejected"`
+}
+
+type upsertNamespaceArgs struct {
+	Name        string `json:"name" jsonschema:"namespace name (arbitrary grouping label); empty or 'default' targets the default bucket. '*' is reserved and rejected"`
+	Description string `json:"description,omitempty" jsonschema:"human/LLM-facing summary of what this namespace holds (e.g. 'payment services and their shared libraries'); shown by list_namespaces so models can pick the right scope"`
+}
+
+type namespaceNameArgs struct {
+	Name string `json:"name" jsonschema:"namespace name to delete the description record for; the repos keep their tag"`
 }
 
 // repoView decorates a repo record with the transient in-memory activity so
@@ -126,13 +142,14 @@ func viewRepo(mgr *manager.Manager, repo *registry.Repo) repoView {
 func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout time.Duration) {
 	addTool(server, &mcp.Tool{
 		Name:        "list_repos",
-		Description: "Discover tracked repository ids and build status when the target repo is unknown, or when the user asks for an inventory. Filter with search/owner and inspect one page; do not fetch every page routinely.",
+		Description: "Discover tracked repository ids and build status when the target repo is unknown, or when the user asks for an inventory. Filter with search/owner/namespace and inspect one page; do not fetch every page routinely. Omitting namespace lists the 'default' bucket; pass namespace:'*' to list every namespace.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args listReposArgs) (*mcp.CallToolResult, any, error) {
 		opts := registry.ListOptions{
-			Page:    args.Page,
-			PerPage: args.PerPage,
-			Search:  args.Search,
-			Owner:   args.Owner,
+			Page:      args.Page,
+			PerPage:   args.PerPage,
+			Search:    args.Search,
+			Owner:     args.Owner,
+			Namespace: args.Namespace,
 		}
 
 		repos, total, err := mgr.Registry().ListPaged(ctx, opts)
@@ -164,7 +181,7 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 			"times out or is cancelled; poll repo_status until status is 'ready' or 'error'.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args addRepoArgs) (*mcp.CallToolResult, any, error) {
 		if !args.Wait {
-			repo, err := mgr.AddRepo(ctx, args.URL, args.Branch)
+			repo, err := mgr.AddRepo(ctx, args.URL, args.Branch, args.Namespace)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -175,12 +192,59 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 		wctx, cancel := waitContext(ctx, waitTimeout)
 		defer cancel()
 
-		repo, done, err := mgr.AddRepoWait(wctx, args.URL, args.Branch)
+		repo, done, err := mgr.AddRepoWait(wctx, args.URL, args.Branch, args.Namespace)
 		if err != nil {
 			return nil, nil, err
 		}
 
 		return waitResult(mgr, repo, done), nil, nil
+	})
+
+	addTool(server, &mcp.Tool{
+		Name:        "set_repo_namespace",
+		Description: "Move a tracked repository into a namespace (an arbitrary grouping label). Omitting or passing 'default' returns it to the default bucket; '*' is reserved. This only re-tags the repo; it does not rebuild anything.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args setRepoNamespaceArgs) (*mcp.CallToolResult, any, error) {
+		repo, err := mgr.SetRepoNamespace(ctx, args.Repo, args.Namespace)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return jsonResult(viewRepo(mgr, repo)), nil, nil
+	})
+
+	addTool(server, &mcp.Tool{
+		Name:        "list_namespaces",
+		Description: "List the repository namespaces with their repo counts and descriptions. Untagged repos are reported under 'default'. Use it to discover which namespaces exist and what each holds before scoping a search with the namespace parameter; the description tells you which namespace matches the user's question.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyArgs) (*mcp.CallToolResult, any, error) {
+		groups, err := mgr.Registry().Namespaces(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return jsonResult(map[string]any{"namespaces": groups}), nil, nil
+	})
+
+	addTool(server, &mcp.Tool{
+		Name:        "set_namespace_description",
+		Description: "Create or update a namespace's description (an arbitrary grouping label plus a summary of what it holds). The description is surfaced by list_namespaces to help pick the right search scope. This does not tag any repo; use add_repo or set_repo_namespace for that.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args upsertNamespaceArgs) (*mcp.CallToolResult, any, error) {
+		rec, err := mgr.UpsertNamespace(ctx, args.Name, args.Description)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return jsonResult(rec), nil, nil
+	})
+
+	addTool(server, &mcp.Tool{
+		Name:        "delete_namespace",
+		Description: "Delete a namespace's description record. Repos tagged with the namespace keep their tag; only the stored description is removed.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args namespaceNameArgs) (*mcp.CallToolResult, any, error) {
+		if err := mgr.DeleteNamespace(ctx, args.Name); err != nil {
+			return nil, nil, err
+		}
+
+		return textResult("deleted namespace description " + args.Name), nil, nil
 	})
 
 	addTool(server, &mcp.Tool{
@@ -420,9 +484,15 @@ func addCredentialTools(server *mcp.Server, mgr *manager.Manager) {
 // repoField documents the shared repo selector on query tools.
 const repoField = "repository id (owner/name) to query; always provide it when known, and omit only for explicit cross-repository analysis"
 
+// namespaceField documents the shared namespace selector. When repo is omitted,
+// the query is scoped to this namespace; an omitted namespace means the
+// 'default' namespace, and '*' searches every namespace.
+const namespaceField = "namespace to scope to when repo is omitted; empty means the 'default' namespace, '*' searches all namespaces"
+
 type queryGraphArgs struct {
 	Question    string   `json:"question" jsonschema:"architectural or relationship question; use search_code instead for symbols, paths, literals, definitions, and usages"`
 	Repo        string   `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; always provide when known, omit only for explicit cross-repository analysis"`
+	Namespace   string   `json:"namespace,omitempty" jsonschema:"namespace to scope to when repo is omitted; empty means the 'default' namespace, '*' searches all namespaces"`
 	Mode        string   `json:"mode,omitempty" jsonschema:"traversal mode: 'bfs' for broad context (default) or 'dfs' to trace a specific path"`
 	Depth       int      `json:"depth,omitempty" jsonschema:"traversal depth 1-6 (default 3)"`
 	TokenBudget int      `json:"token_budget,omitempty" jsonschema:"max output tokens (default 2000, max 4000)"`
@@ -430,14 +500,16 @@ type queryGraphArgs struct {
 }
 
 type nodeArgs struct {
-	Label string `json:"label" jsonschema:"node label or ID to look up"`
-	Repo  string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; always provide when known, omit only for explicit cross-repository analysis"`
+	Label     string `json:"label" jsonschema:"node label or ID to look up"`
+	Repo      string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; always provide when known, omit only for explicit cross-repository analysis"`
+	Namespace string `json:"namespace,omitempty" jsonschema:"namespace to scope to when repo is omitted; empty means the 'default' namespace, '*' searches all namespaces"`
 }
 
 type neighborsArgs struct {
 	Label          string `json:"label" jsonschema:"node label or ID"`
 	RelationFilter string `json:"relation_filter,omitempty" jsonschema:"optional: filter by relation type (e.g. 'calls', 'references', 'method', 'contains'). Direction is shown by arrows in the output (--> successor, <-- predecessor), not by the filter. An unknown relation returns an error listing the node's valid relations; get_node also lists them under 'Relations:'"`
 	Repo           string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; always provide when known, omit only for explicit cross-repository analysis"`
+	Namespace      string `json:"namespace,omitempty" jsonschema:"namespace to scope to when repo is omitted; empty means the 'default' namespace, '*' searches all namespaces"`
 	Page           int    `json:"page,omitempty" jsonschema:"page number (default 1)"`
 	PerPage        int    `json:"per_page,omitempty" jsonschema:"neighbors per page (default 50, max 200)"`
 }
@@ -445,24 +517,28 @@ type neighborsArgs struct {
 type communityArgs struct {
 	CommunityID int    `json:"community_id" jsonschema:"community ID (0-indexed by size)"`
 	Repo        string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; always provide when known, omit only for explicit cross-repository analysis"`
+	Namespace   string `json:"namespace,omitempty" jsonschema:"namespace to scope to when repo is omitted; empty means the 'default' namespace, '*' searches all namespaces"`
 	Page        int    `json:"page,omitempty" jsonschema:"page number (default 1)"`
 	PerPage     int    `json:"per_page,omitempty" jsonschema:"nodes per page (default 50, max 200)"`
 }
 
 type godNodesArgs struct {
-	TopN int    `json:"top_n,omitempty" jsonschema:"number of nodes to return (default 10, max 50)"`
-	Repo string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; always provide when known, omit only for explicit cross-repository analysis"`
+	TopN      int    `json:"top_n,omitempty" jsonschema:"number of nodes to return (default 10, max 50)"`
+	Repo      string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; always provide when known, omit only for explicit cross-repository analysis"`
+	Namespace string `json:"namespace,omitempty" jsonschema:"namespace to scope to when repo is omitted; empty means the 'default' namespace, '*' searches all namespaces"`
 }
 
 type statsArgs struct {
-	Repo string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; always provide when known, omit only for explicit cross-repository analysis"`
+	Repo      string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; always provide when known, omit only for explicit cross-repository analysis"`
+	Namespace string `json:"namespace,omitempty" jsonschema:"namespace to scope to when repo is omitted; empty means the 'default' namespace, '*' searches all namespaces"`
 }
 
 type shortestPathArgs struct {
-	Source  string `json:"source" jsonschema:"source concept label or keyword"`
-	Target  string `json:"target" jsonschema:"target concept label or keyword"`
-	MaxHops int    `json:"max_hops,omitempty" jsonschema:"maximum hops to consider (default 8, max 12)"`
-	Repo    string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; always provide when known, omit only for explicit cross-repository analysis"`
+	Source    string `json:"source" jsonschema:"source concept label or keyword"`
+	Target    string `json:"target" jsonschema:"target concept label or keyword"`
+	MaxHops   int    `json:"max_hops,omitempty" jsonschema:"maximum hops to consider (default 8, max 12)"`
+	Repo      string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; always provide when known, omit only for explicit cross-repository analysis"`
+	Namespace string `json:"namespace,omitempty" jsonschema:"namespace to scope to when repo is omitted; empty means the 'default' namespace, '*' searches all namespaces"`
 }
 
 func addQueryTools(server *mcp.Server, mgr *manager.Manager) {
@@ -479,7 +555,7 @@ func addQueryTools(server *mcp.Server, mgr *manager.Manager) {
 			call["context_filter"] = args.Context
 		}
 
-		res, err := mgr.CallGraphTool(ctx, args.Repo, "query_graph", call)
+		res, err := mgr.CallGraphTool(ctx, args.Repo, args.Namespace, "query_graph", call)
 
 		return res, nil, err
 	})
@@ -488,7 +564,7 @@ func addQueryTools(server *mcp.Server, mgr *manager.Manager) {
 		Name:        "get_node",
 		Description: "Get full details for a specific node by label or ID. " + repoField + ".",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args nodeArgs) (*mcp.CallToolResult, any, error) {
-		res, err := mgr.CallGraphTool(ctx, args.Repo, "get_node", map[string]any{"label": args.Label})
+		res, err := mgr.CallGraphTool(ctx, args.Repo, args.Namespace, "get_node", map[string]any{"label": args.Label})
 
 		return res, nil, err
 	})
@@ -502,7 +578,7 @@ func addQueryTools(server *mcp.Server, mgr *manager.Manager) {
 		setIfInt(call, "page", args.Page)
 		setIfInt(call, "per_page", args.PerPage)
 
-		res, err := mgr.CallGraphTool(ctx, args.Repo, "get_neighbors", call)
+		res, err := mgr.CallGraphTool(ctx, args.Repo, args.Namespace, "get_neighbors", call)
 
 		return res, nil, err
 	})
@@ -514,7 +590,7 @@ func addQueryTools(server *mcp.Server, mgr *manager.Manager) {
 		call := map[string]any{"community_id": args.CommunityID}
 		setIfInt(call, "page", args.Page)
 		setIfInt(call, "per_page", args.PerPage)
-		res, err := mgr.CallGraphTool(ctx, args.Repo, "get_community", call)
+		res, err := mgr.CallGraphTool(ctx, args.Repo, args.Namespace, "get_community", call)
 
 		return res, nil, err
 	})
@@ -526,7 +602,7 @@ func addQueryTools(server *mcp.Server, mgr *manager.Manager) {
 		call := map[string]any{}
 		setIfInt(call, "top_n", args.TopN)
 
-		res, err := mgr.CallGraphTool(ctx, args.Repo, "god_nodes", call)
+		res, err := mgr.CallGraphTool(ctx, args.Repo, args.Namespace, "god_nodes", call)
 
 		return res, nil, err
 	})
@@ -535,7 +611,7 @@ func addQueryTools(server *mcp.Server, mgr *manager.Manager) {
 		Name:        "graph_stats",
 		Description: "Return graph statistics: node count, edge count, communities, confidence breakdown. " + repoField + ".",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args statsArgs) (*mcp.CallToolResult, any, error) {
-		res, err := mgr.CallGraphTool(ctx, args.Repo, "graph_stats", map[string]any{})
+		res, err := mgr.CallGraphTool(ctx, args.Repo, args.Namespace, "graph_stats", map[string]any{})
 
 		return res, nil, err
 	})
@@ -547,7 +623,7 @@ func addQueryTools(server *mcp.Server, mgr *manager.Manager) {
 		call := map[string]any{"source": args.Source, "target": args.Target}
 		setIfInt(call, "max_hops", args.MaxHops)
 
-		res, err := mgr.CallGraphTool(ctx, args.Repo, "shortest_path", call)
+		res, err := mgr.CallGraphTool(ctx, args.Repo, args.Namespace, "shortest_path", call)
 
 		return res, nil, err
 	})

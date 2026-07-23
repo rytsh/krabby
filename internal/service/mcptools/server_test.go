@@ -18,8 +18,8 @@ func TestToolProfiles(t *testing.T) {
 		count   int
 		admin   bool
 	}{
-		{profile: ToolProfileStandard, count: 20},
-		{profile: ToolProfileFull, count: 36, admin: true},
+		{profile: ToolProfileStandard, count: 24},
+		{profile: ToolProfileFull, count: 40, admin: true},
 	}
 
 	for _, tt := range tests {

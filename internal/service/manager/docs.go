@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/rytsh/krabby/internal/service/llm"
 	"github.com/rytsh/krabby/internal/service/queue"
 	"github.com/rytsh/krabby/internal/service/rag"
+	"github.com/rytsh/krabby/internal/service/registry"
 	"github.com/rytsh/krabby/internal/service/repofs"
 	"github.com/rytsh/krabby/internal/service/settings"
 	"github.com/rytsh/krabby/internal/service/vectorstore"
@@ -628,12 +630,22 @@ func docsFilter(scope, key string) (vectorstore.Filter, error) {
 
 // SearchDocs returns bounded markdown excerpts most relevant to a question.
 // scope selects where to search (all/repos/sources); key restricts to one
-// repo id or web-source key ("web:<name>") and wins over scope. topDocs <= 0
-// uses the RAG default.
-func (m *Manager) SearchDocs(ctx context.Context, scope, key, question string, topDocs int) ([]rag.Doc, error) {
+// repo id or web-source key ("web:<name>") and wins over scope. namespace
+// scopes the repo portion when key is empty (empty or "default" == the default
+// bucket; NamespaceAll searches every repo); web sources are never namespaced
+// and always participate. topDocs <= 0 uses the RAG default.
+func (m *Manager) SearchDocs(ctx context.Context, scope, key, namespace, question string, topDocs int) ([]rag.Doc, error) {
 	filter, err := docsFilter(scope, key)
 	if err != nil {
 		return nil, err
+	}
+
+	// A namespace restricts only repo docs, and only when no explicit key was
+	// given. Fetch extra candidates so the post-filter does not starve results.
+	nsFilter := key == "" && !strings.EqualFold(strings.TrimSpace(namespace), registry.NamespaceAll)
+	fetch := topDocs
+	if nsFilter {
+		fetch = (namespaceScope{}).fetch(topDocs)
 	}
 
 	d, releaseDocs := m.acquireDocs()
@@ -643,15 +655,56 @@ func (m *Manager) SearchDocs(ctx context.Context, scope, key, question string, t
 		return nil, ErrDocsDisabled
 	}
 
-	docs, err := d.rag.Retrieve(ctx, filter, question, topDocs)
+	docs, err := d.rag.Retrieve(ctx, filter, question, fetch)
 	releaseDocs()
 	if err != nil {
 		return nil, err
 	}
 
+	if nsFilter {
+		docs, err = m.filterDocsByNamespace(ctx, docs, namespace, topDocs)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	m.enrichWebDocs(ctx, docs)
 
 	return docs, nil
+}
+
+// filterDocsByNamespace keeps web-source docs (which are never namespaced) and
+// repo docs whose repo is in the namespace, then trims to topDocs. It resolves
+// the namespace's repo set once and matches doc.Repo against it.
+func (m *Manager) filterDocsByNamespace(ctx context.Context, docs []rag.Doc, namespace string, topDocs int) ([]rag.Doc, error) {
+	repos, err := m.reg.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	inNamespace := map[string]struct{}{}
+	for _, repo := range repos {
+		if repoInNamespace(repo, namespace) {
+			inNamespace[repo.ID] = struct{}{}
+		}
+	}
+
+	out := docs[:0]
+	for _, doc := range docs {
+		if strings.HasPrefix(doc.Repo, websource.ScopePrefix) {
+			out = append(out, doc) // web source: always kept
+			continue
+		}
+		if _, ok := inNamespace[doc.Repo]; ok {
+			out = append(out, doc)
+		}
+	}
+
+	if topDocs > 0 && len(out) > topDocs {
+		out = out[:topDocs]
+	}
+
+	return out, nil
 }
 
 // enrichWebDocs fills the original link and team names on web-source doc hits
@@ -679,29 +732,187 @@ func (m *Manager) enrichWebDocs(ctx context.Context, docs []rag.Doc) {
 	}
 }
 
+// namespaceScope describes how a namespace-restricted cross-repo search should
+// run once the namespace is resolved to concrete repos.
+//
+//   - all: no restriction (the caller passed NamespaceAll or an explicit repo).
+//   - single: exactly one repo in the namespace; search that repo directly.
+//   - repos/set: several repos; search broadly and keep only these.
+type namespaceScope struct {
+	all    bool
+	single string
+	repos  []string
+	set    map[string]struct{}
+}
+
+func (s namespaceScope) contains(repo string) bool {
+	_, ok := s.set[repo]
+	return ok
+}
+
+// fetch enlarges the requested topK for a post-filtered multi-repo search so the
+// namespace filter does not starve the result set.
+func (s namespaceScope) fetch(topK int) int {
+	if topK <= 0 {
+		topK = 10
+	}
+	scaled := topK * 4
+	if scaled > 200 {
+		scaled = 200
+	}
+
+	return scaled
+}
+
+// namespaceScope resolves a repoID/namespace pair. An explicit repoID or
+// NamespaceAll yields an unrestricted (all) scope; otherwise it lists the repos
+// in the namespace and reports whether it is empty, a single repo, or several.
+func (m *Manager) namespaceScope(ctx context.Context, repoID, namespace string) (namespaceScope, error) {
+	if repoID != "" || strings.EqualFold(strings.TrimSpace(namespace), registry.NamespaceAll) {
+		return namespaceScope{all: true}, nil
+	}
+
+	repos, err := m.reg.List(ctx)
+	if err != nil {
+		return namespaceScope{}, err
+	}
+
+	scope := namespaceScope{set: map[string]struct{}{}}
+	for _, repo := range repos {
+		if repoInNamespace(repo, namespace) {
+			scope.repos = append(scope.repos, repo.ID)
+			scope.set[repo.ID] = struct{}{}
+		}
+	}
+	sort.Strings(scope.repos)
+
+	switch len(scope.repos) {
+	case 0:
+		return namespaceScope{}, fmt.Errorf("no repository in namespace %s; retry with namespace \"*\" to search all", displayNamespace(namespace))
+	case 1:
+		scope.single = scope.repos[0]
+	}
+
+	return scope, nil
+}
+
+func trimSnippets(snippets []coderag.Snippet, topK int) []coderag.Snippet {
+	if topK <= 0 {
+		topK = 10
+	}
+	if len(snippets) > topK {
+		return snippets[:topK]
+	}
+
+	return snippets
+}
+
 // SearchCode returns the code snippets most relevant to a query. repoID == ""
-// searches across all repos. topK <= 0 uses the code RAG default.
-func (m *Manager) SearchCode(ctx context.Context, repoID, query string, topK int) ([]coderag.Snippet, error) {
+// searches across the repos in namespace (empty or "default" == the default
+// bucket; NamespaceAll searches every repo). topK <= 0 uses the code RAG
+// default.
+func (m *Manager) SearchCode(ctx context.Context, repoID, namespace, query string, topK int) ([]coderag.Snippet, error) {
 	d, releaseDocs := m.acquireDocs()
 	defer releaseDocs()
 	if d.codeRag == nil || d.codeStore == nil {
 		return nil, ErrCodeRAGDisabled
 	}
 
-	return d.codeRag.Retrieve(ctx, repoID, query, topK)
+	scope, err := m.namespaceScope(ctx, repoID, namespace)
+	if err != nil {
+		return nil, err
+	}
+	if scope.single != "" {
+		return d.codeRag.Retrieve(ctx, scope.single, query, topK)
+	}
+
+	snippets, err := d.codeRag.Retrieve(ctx, repoID, query, scope.fetch(topK))
+	if err != nil {
+		return nil, err
+	}
+	if scope.all {
+		return snippets, nil
+	}
+
+	out := snippets[:0]
+	for _, s := range snippets {
+		if scope.contains(s.Repo) {
+			out = append(out, s)
+		}
+	}
+
+	return trimSnippets(out, topK), nil
 }
 
-// SearchCodeText performs normal BM25 full-text search over the local bw index.
+// SearchCodeText performs normal BM25 full-text search over the local bw index,
+// scoped to namespace when repoID is empty.
 func (m *Manager) SearchCodeText(
 	ctx context.Context,
-	repoID, query string,
+	repoID, namespace, query string,
 	page, perPage int,
 ) (coderag.SearchPage, error) {
 	if m.codeText == nil {
 		return coderag.SearchPage{}, errors.New("normal code search is not configured")
 	}
 
-	return m.codeText.Search(ctx, repoID, query, page, perPage)
+	scope, err := m.namespaceScope(ctx, repoID, namespace)
+	if err != nil {
+		return coderag.SearchPage{}, err
+	}
+	if scope.single != "" {
+		return m.codeText.Search(ctx, scope.single, query, page, perPage)
+	}
+	if scope.all {
+		return m.codeText.Search(ctx, repoID, query, page, perPage)
+	}
+
+	// Namespace with several repos: BM25 search takes a single repo key, so fan
+	// out over the namespace's repos and merge by score. Results are already
+	// per-repo ranked; a stable score sort keeps the strongest hits on top.
+	return m.searchCodeTextNamespace(ctx, scope, query, page, perPage)
+}
+
+func (m *Manager) searchCodeTextNamespace(
+	ctx context.Context,
+	scope namespaceScope,
+	query string,
+	page, perPage int,
+) (coderag.SearchPage, error) {
+	if perPage <= 0 {
+		perPage = 10
+	}
+	if page <= 0 {
+		page = 1
+	}
+
+	var all []coderag.Snippet
+	for _, id := range scope.repos {
+		// Pull enough from each repo to fill the requested page after merging.
+		res, err := m.codeText.Search(ctx, id, query, 1, page*perPage)
+		if err != nil {
+			return coderag.SearchPage{}, err
+		}
+		all = append(all, res.Results...)
+	}
+
+	sort.SliceStable(all, func(i, j int) bool { return all[i].Score > all[j].Score })
+
+	total := len(all)
+	start := (page - 1) * perPage
+	if start > total {
+		start = total
+	}
+	end := start + perPage
+	if end > total {
+		end = total
+	}
+
+	return coderag.SearchPage{
+		Results: all[start:end],
+		Total:   uint64(total),
+		Page:    page,
+		PerPage: perPage,
+	}, nil
 }
 
 // ListDocs returns the generated doc metadata for a repo from its manifest.

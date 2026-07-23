@@ -11,6 +11,7 @@
   let error = $state("");
   let addUrl = $state("");
   let addBranch = $state("");
+  let addNamespace = $state("");
   let adding = $state(false);
 
   // Server-side pagination + search + status filter. The API returns one page
@@ -82,9 +83,10 @@
     if (!addUrl.trim()) return;
     adding = true;
     try {
-      await api.addRepo(addUrl.trim(), addBranch.trim());
+      await api.addRepo(addUrl.trim(), addBranch.trim(), addNamespace.trim());
       addUrl = "";
       addBranch = "";
+      addNamespace = "";
       error = "";
       page = 1;
       await reload();
@@ -146,6 +148,7 @@
     onkeydown={(e) => e.key === "Enter" && add()}
   />
   <input class="input basis-[180px]" placeholder="branch (optional)" bind:value={addBranch} />
+  <input class="input basis-[180px]" placeholder="namespace (optional)" bind:value={addNamespace} />
   <button class="btn btn-primary" onclick={add} disabled={adding || !addUrl.trim()}>
     {adding ? "Adding…" : "Add repo"}
   </button>

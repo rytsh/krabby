@@ -40,17 +40,25 @@ export const api = {
   settings: () => req("/settings"),
   // repos returns a paginated envelope: { items, total, page, per_page }.
   // opts: { page, perPage, q, owner, status }.
-  repos: ({ page = 1, perPage = 20, q = "", owner = "", status = "" } = {}) => {
+  repos: ({ page = 1, perPage = 20, q = "", owner = "", status = "", namespace = "" } = {}) => {
     const p = new URLSearchParams();
     if (page) p.set("page", page);
     if (perPage) p.set("per_page", perPage);
     if (q) p.set("q", q);
     if (owner) p.set("owner", owner);
     if (status) p.set("status", status);
+    if (namespace) p.set("namespace", namespace);
     return req(`/repos?${p.toString()}`);
   },
   // owners returns [{ owner, count }] for the sidebar tree.
   owners: () => req("/repos/owners"),
+  // namespaces returns [{ namespace, count, description }].
+  namespaces: () => req("/repos/namespaces"),
+  upsertNamespace: (name, description) =>
+    req("/namespaces", { method: "POST", body: JSON.stringify({ name, description }) }),
+  deleteNamespace: (name) => req(`/namespaces/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  setRepoNamespace: (id, namespace) =>
+    req(`/repos/${id}/-/namespace`, { method: "POST", body: JSON.stringify({ namespace }) }),
   // activeRepos returns only repos with running jobs: [{ id, running, status }].
   activeRepos: () => req("/repos/active"),
   // tasks returns the central work-queue snapshot:
@@ -61,8 +69,12 @@ export const api = {
   // segments, so repo actions use a GitLab-style "/-/" separator between the
   // id and the action.
   repo: (id) => req(`/repos/${id}`),
-  addRepo: (url, branch) =>
-    req("/repos", { method: "POST", keepalive: true, body: JSON.stringify({ url, branch: branch || "" }) }),
+  addRepo: (url, branch, namespace = "") =>
+    req("/repos", {
+      method: "POST",
+      keepalive: true,
+      body: JSON.stringify({ url, branch: branch || "", namespace: namespace || "" }),
+    }),
   deleteRepo: (id) => req(`/repos/${id}`, { method: "DELETE", keepalive: true }),
   refreshRepo: (id) => req(`/repos/${id}/-/refresh`, { method: "POST", keepalive: true }),
   cancelRepoJob: (id) => req(`/repos/${id}/-/cancel`, { method: "POST", keepalive: true }),

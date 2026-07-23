@@ -167,17 +167,6 @@ func run(ctx context.Context) error {
 		slog.Error("warm normal code search index", "error", err)
 	}
 
-	// Seed repos from config; builds run in the background.
-	for _, seed := range cfg.Repos {
-		if seed.URL == "" {
-			continue
-		}
-
-		if _, err := mgr.AddRepo(ctx, seed.URL, seed.Branch); err != nil {
-			slog.Error("seed repo", "url", seed.URL, "error", err)
-		}
-	}
-
 	// Background poller. Repo cadence and per-source intervals are read from
 	// persisted runtime settings, so changes apply without a restart.
 	go scheduler.Run(ctx, mgr)

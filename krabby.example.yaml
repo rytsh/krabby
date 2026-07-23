@@ -43,12 +43,8 @@ graphify:
 # Docs, LLM/embedder, RAG/code-RAG, repository polling, git credentials and
 # webhook security are persisted runtime settings. Configure them from the UI
 # or REST API; changes apply without restarting krabby.
-
-# Repositories to track at startup. More can be added at runtime via the
-# add_repo MCP tool or POST /api/v1/repos. Runtime additions are persisted.
-repos:
-  - url: git@github.com:rakunlabs/ada.git
-  - url: git@github.com:rakunlabs/chu.git
-    branch: main
+#
+# Repositories are added at runtime via the add_repo MCP tool, the UI, or
+# POST /api/v1/repos (with an optional "namespace"); additions are persisted.
 
 telemetry: {}
