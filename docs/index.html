@@ -1,0 +1,830 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>krabby — code search, docs &amp; graph intelligence over MCP</title>
+<meta name="description" content="Krabby clones and indexes your repositories, builds a graphify knowledge graph per repo, and serves fast code search, docs retrieval and relationship analysis to LLM agents over MCP." />
+<link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+
+<meta property="og:type" content="website" />
+<meta property="og:title" content="krabby" />
+<meta property="og:description" content="Code search, documentation retrieval and graph analysis over MCP. Point it at repositories — it clones, indexes and keeps them fresh." />
+<meta name="theme-color" content="#dceceb" />
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+
+<style>
+  /* ---------- comic / halftone palette ---------- */
+  :root {
+    --paper: #f4eee0;
+    --paper-2: #efe7d4;
+    --ink: #141210;
+    --red: #e11d48;
+    --red-ink: #a10f33;
+    --yellow: #ffce2e;
+    --blue: #2b6cff;
+
+    --comic: "Bangers", system-ui, cursive;
+    --sans: "Archivo", system-ui, -apple-system, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+
+    --border: 3px solid var(--ink);
+    --pop: 7px 7px 0 var(--ink);
+    --pop-sm: 4px 4px 0 var(--ink);
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+
+  body {
+    margin: 0;
+    background:
+      repeating-linear-gradient(0deg, transparent 0 3px, rgba(23,23,23,.055) 3px 4px),
+      var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 17px;
+    line-height: 1.55;
+    overflow-x: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* halftone dot texture across the whole page (Ben-Day dots) */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -2;
+    background:
+      radial-gradient(rgba(20,18,16,0.10) 1.1px, transparent 1.4px) 0 0 / 7px 7px,
+      radial-gradient(1200px 600px at 82% -6%, rgba(225,29,72,0.10), transparent 60%),
+      var(--paper);
+  }
+
+  a { color: inherit; text-decoration: none; }
+  .wrap { width: min(1120px, 92vw); margin: 0 auto; }
+  section { padding: 84px 0; position: relative; }
+  .red { color: var(--red); }
+  .mono { font-family: var(--mono); }
+
+  /* comic caption box (section kicker) */
+  .caption {
+    display: inline-block;
+    font-family: var(--sans);
+    font-weight: 800;
+    font-size: 13px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink);
+    background: var(--yellow);
+    border: var(--border);
+    box-shadow: var(--pop-sm);
+    padding: 5px 12px;
+    transform: rotate(-1.4deg);
+  }
+
+  h2 {
+    font-family: var(--comic);
+    font-weight: 400;
+    font-size: clamp(38px, 6vw, 66px);
+    line-height: 0.95;
+    letter-spacing: 0.02em;
+    margin: 20px 0 0;
+    text-shadow: 3px 3px 0 rgba(20,18,16,0.12);
+  }
+  h2 em { color: var(--red); font-style: normal; }
+  .head { margin-bottom: 46px; }
+  .head p { max-width: 620px; margin: 16px 0 0; font-size: 17px; }
+
+  /* ---------- masthead nav ---------- */
+  nav {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    background: var(--paper);
+    border-bottom: 4px solid var(--ink);
+  }
+  nav .wrap { display: flex; align-items: center; gap: 18px; height: 64px; }
+  .brand {
+    display: flex; align-items: center; gap: 10px;
+    font-family: var(--comic); font-size: 30px; letter-spacing: 0.03em;
+  }
+  .brand .dot {
+    width: 14px; height: 14px; border-radius: 50%;
+    background: var(--red); border: 2px solid var(--ink);
+  }
+  nav .links { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+  nav .links a {
+    padding: 7px 12px;
+    font-weight: 700; font-size: 13px; letter-spacing: 0.04em; text-transform: uppercase;
+    color: var(--ink);
+  }
+  nav .links a:hover { color: var(--red); }
+  .btn {
+    display: inline-flex; align-items: center; gap: 9px;
+    font-family: var(--sans); font-weight: 800; font-size: 14px;
+    letter-spacing: 0.03em; text-transform: uppercase;
+    padding: 11px 18px;
+    background: var(--paper);
+    color: var(--ink);
+    border: var(--border);
+    box-shadow: var(--pop-sm);
+    cursor: pointer;
+    transition: transform 0.08s, box-shadow 0.08s, background 0.12s;
+  }
+  .btn:hover { transform: translate(-2px,-2px); box-shadow: 6px 6px 0 var(--ink); }
+  .btn:active { transform: translate(2px,2px); box-shadow: 1px 1px 0 var(--ink); }
+  .btn-red { background: var(--red); color: #fff; }
+  .btn-red:hover { background: var(--red-ink); }
+  .nav-btn { padding: 8px 14px; }
+  @media (max-width: 760px) { nav .links .hide-sm { display: none; } }
+
+  /* ---------- hero ---------- */
+  .hero { padding-top: 60px; padding-bottom: 30px; }
+  .hero-grid { display: grid; grid-template-columns: 1fr; gap: 0; }
+
+  /* cover panel that holds the wordmark */
+  .cover {
+    position: relative;
+    border: 4px solid var(--ink);
+    box-shadow: 10px 10px 0 var(--ink);
+    background:
+      radial-gradient(rgba(20,18,16,0.13) 1.4px, transparent 1.6px) 0 0 / 10px 10px,
+      var(--paper-2);
+    padding: 54px 30px 60px;
+    text-align: center;
+    overflow: hidden;
+  }
+  /* colored halftone corner wash */
+  .cover::after {
+    content: "";
+    position: absolute; inset: 0;
+    background: radial-gradient(120% 120% at 100% 0%, rgba(225,29,72,0.16), transparent 46%);
+    pointer-events: none;
+  }
+  .cover img {
+    position: relative;
+    width: min(640px, 82%);
+    display: block;
+    margin: 0 auto;
+    filter: drop-shadow(6px 6px 0 rgba(20,18,16,0.18));
+  }
+  .issue {
+    position: absolute; top: 14px; left: 16px;
+    font-family: var(--mono); font-size: 12px; font-weight: 700;
+    letter-spacing: 0.1em; color: var(--ink); opacity: 0.6;
+  }
+  .price {
+    position: absolute; top: 14px; right: 16px;
+    font-family: var(--comic); font-size: 22px; color: var(--red);
+    transform: rotate(6deg);
+  }
+
+  /* starburst badge */
+  .burst {
+    position: absolute; right: 22px; bottom: 18px;
+    width: 128px; height: 128px;
+    display: grid; place-items: center; text-align: center;
+    transform: rotate(-8deg);
+    z-index: 3;
+  }
+  .burst svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .burst b {
+    position: relative; font-family: var(--comic);
+    color: #fff; font-size: 17px; line-height: 1; letter-spacing: 0.02em;
+    text-shadow: 1px 1px 0 var(--red-ink);
+  }
+  @media (max-width: 640px) { .burst { width: 100px; height: 100px; right: 8px; bottom: 8px; } .burst b { font-size: 13px; } }
+
+  /* speech bubble tagline */
+  .bubble {
+    position: relative;
+    max-width: 760px;
+    margin: 34px auto 0;
+    background: #fff;
+    border: var(--border);
+    box-shadow: var(--pop);
+    border-radius: 22px;
+    padding: 22px 28px;
+  }
+  .bubble::after {
+    content: "";
+    position: absolute; left: 60px; bottom: -22px;
+    border: 12px solid transparent;
+    border-top-color: var(--ink);
+    filter: drop-shadow(0 3px 0 var(--ink));
+  }
+  .bubble .t {
+    font-family: var(--comic);
+    font-size: clamp(22px, 3.4vw, 34px);
+    line-height: 1.02; letter-spacing: 0.02em;
+  }
+  .bubble .t .red { color: var(--red); }
+  .bubble .s { margin: 12px 0 0; color: #3a352d; font-size: 16px; }
+
+  .cta { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; margin-top: 30px; }
+
+  .badges { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-top: 28px; }
+  .chip {
+    font-family: var(--mono); font-size: 12.5px; font-weight: 500;
+    padding: 5px 12px; background: #fff;
+    border: var(--border); box-shadow: var(--pop-sm);
+  }
+  .chip b { color: var(--red); }
+
+  /* ---------- feature panels ---------- */
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+  @media (max-width: 900px) { .grid { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 600px) { .grid { grid-template-columns: 1fr; } }
+
+  .panel {
+    position: relative;
+    background: #fff;
+    border: var(--border);
+    box-shadow: var(--pop);
+    padding: 26px 24px 24px;
+    transition: transform 0.1s, box-shadow 0.1s;
+  }
+  .panel:hover { transform: translate(-3px,-3px); box-shadow: 10px 10px 0 var(--ink); }
+  .panel .num {
+    font-family: var(--comic); font-size: 30px; color: var(--red);
+    line-height: 1;
+  }
+  .panel .ico {
+    position: absolute; top: 20px; right: 20px;
+    width: 44px; height: 44px; display: grid; place-items: center;
+    border: var(--border);
+    background:
+      radial-gradient(rgba(20,18,16,0.16) 1.1px, transparent 1.3px) 0 0 / 6px 6px,
+      var(--yellow);
+  }
+  .panel h3 {
+    font-family: var(--sans); font-weight: 900; text-transform: uppercase;
+    letter-spacing: 0.01em; font-size: 19px; margin: 10px 0 8px;
+  }
+  .panel p { margin: 0; color: #3a352d; font-size: 15px; }
+  .panel .tag {
+    display: inline-block; margin-top: 14px;
+    font-family: var(--mono); font-size: 11.5px; color: var(--ink);
+    border: 2px solid var(--ink); padding: 2px 8px; background: var(--paper);
+  }
+
+  /* ---------- architecture (night panel / screen) ---------- */
+  .arch { display: grid; grid-template-columns: 1.3fr 1fr; gap: 28px; align-items: center; }
+  @media (max-width: 880px) { .arch { grid-template-columns: 1fr; } }
+
+  .screen {
+    border: 4px solid var(--ink);
+    box-shadow: var(--pop);
+    background: #14110d;
+    overflow: hidden;
+  }
+  .tbar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 11px 14px; background: #201b14; border-bottom: 3px solid var(--ink);
+  }
+  .tbar i { width: 13px; height: 13px; border-radius: 50%; border: 2px solid #14110d; }
+  .tbar .r { background: var(--red); } .tbar .y { background: var(--yellow); } .tbar .g { background: #37c05b; }
+  .tbar span { margin-left: 8px; font-family: var(--mono); font-size: 12px; color: #b7ad98; }
+  .screen pre {
+    margin: 0; padding: 18px; font-family: var(--mono);
+    font-size: 12.5px; line-height: 1.55; color: #e7dcc4; overflow-x: auto;
+  }
+  .screen pre .a { color: var(--red); } .screen pre .b { color: #6ea8ff; }
+  .screen pre .g { color: #6ee787; } .screen pre .d { color: #6b6252; }
+
+  .points { list-style: none; margin: 0; padding: 0; display: grid; gap: 18px; }
+  .points li { position: relative; padding-left: 34px; font-size: 16px; color: #2b271f; }
+  .points li::before {
+    content: "»"; position: absolute; left: 0; top: -2px;
+    font-family: var(--comic); font-size: 26px; color: var(--red);
+  }
+  .points b { font-weight: 800; }
+
+  /* ---------- quick start ---------- */
+  .qs { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+  @media (max-width: 820px) { .qs { grid-template-columns: 1fr; } }
+  .code {
+    border: 4px solid var(--ink); box-shadow: var(--pop);
+    background: #14110d; overflow: hidden;
+  }
+  .clabel {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 14px; background: #201b14; border-bottom: 3px solid var(--ink);
+    font-family: var(--mono); font-size: 12px; color: #b7ad98;
+  }
+  .copy {
+    font-family: var(--sans); font-weight: 800; font-size: 11px; text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--ink); background: var(--yellow);
+    border: 2px solid var(--ink); padding: 3px 10px; cursor: pointer;
+    box-shadow: 2px 2px 0 var(--ink); transition: transform 0.08s, box-shadow 0.08s;
+  }
+  .copy:hover { transform: translate(-1px,-1px); box-shadow: 3px 3px 0 var(--ink); }
+  .copy.ok { background: #6ee787; }
+  .code pre {
+    margin: 0; padding: 16px; font-family: var(--mono);
+    font-size: 12.5px; line-height: 1.7; color: #e7dcc4; overflow-x: auto;
+  }
+  .code pre .c { color: #6b6252; } .code pre .s { color: #6ee787; }
+  .code pre .k { color: #6ea8ff; } .code pre .p { color: var(--red); }
+
+  /* ---------- tools ---------- */
+  .tools { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+  @media (max-width: 760px) { .tools { grid-template-columns: 1fr; } }
+  .trow {
+    display: flex; flex-direction: column; gap: 4px;
+    padding: 15px 18px; background: #fff;
+    border: var(--border); box-shadow: var(--pop-sm);
+    transition: transform 0.08s, box-shadow 0.08s;
+  }
+  .trow:hover { transform: translate(-2px,-2px); box-shadow: 6px 6px 0 var(--ink); }
+  .trow code {
+    font-family: var(--mono); font-size: 13.5px; color: var(--red); font-weight: 700;
+  }
+  .trow span { color: #3a352d; font-size: 14.5px; }
+
+  /* ---------- footer ---------- */
+  footer { border-top: 4px solid var(--ink); padding: 40px 0 54px; background: var(--paper-2); }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; justify-content: space-between; }
+  footer .fbrand { display: flex; align-items: center; gap: 10px; font-family: var(--comic); font-size: 28px; }
+  footer .fbrand .dot { width: 13px; height: 13px; border-radius: 50%; background: var(--red); border: 2px solid var(--ink); }
+  footer .flinks { display: flex; gap: 22px; }
+  footer .flinks a { font-weight: 800; font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; }
+  footer .flinks a:hover { color: var(--red); }
+  footer small { font-family: var(--mono); font-size: 12px; color: #6b6252; }
+
+  /* reveal (flat fade only — no 3D) */
+  .reveal { opacity: 0; transform: translateY(16px); transition: opacity 0.5s ease, transform 0.5s ease; }
+  .reveal.in { opacity: 1; transform: none; }
+  @media (prefers-reduced-motion: reduce) { .reveal { opacity: 1; transform: none; transition: none; } }
+</style>
+<style>
+  /* ---------- monochrome newspaper edition ---------- */
+  :root {
+    --paper: #dceceb;
+    --paper-2: #c7dedc;
+    --ink: #10353b;
+    --red: #b44743;
+    --red-ink: #87302d;
+    --yellow: #d6ad24;
+    --blue: #10353b;
+    --accent: #d6ad24;
+    --display: "Inter", system-ui, sans-serif;
+    --comic: var(--display);
+    --sans: "Inter", system-ui, sans-serif;
+    --mono: "JetBrains Mono", monospace;
+    --border: 1px solid var(--ink);
+    --pop: 5px 5px 0 var(--ink);
+    --pop-sm: 3px 3px 0 var(--ink);
+  }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.65;
+  }
+  body::before {
+    display: none;
+  }
+  .wrap { width: min(1160px, 90vw); }
+  section { padding: 72px 0; border-top: 1px solid var(--ink); }
+  .red, h2 em, .panel .num, .trow code { color: var(--red); }
+  .caption {
+    background: transparent;
+    border: 0;
+    box-shadow: none;
+    padding: 0;
+    transform: none;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .14em;
+    color: var(--red);
+  }
+  h2 {
+    font-family: var(--display);
+    font-weight: 700;
+    font-size: clamp(32px, 5vw, 58px);
+    line-height: 1.06;
+    letter-spacing: -.045em;
+    text-shadow: none;
+  }
+  .head { border-bottom: 3px double var(--ink); padding-bottom: 22px; margin-bottom: 34px; }
+  .head p { font-size: 14px; max-width: 700px; }
+
+  .hero { padding-top: 28px; padding-bottom: 60px; }
+  .cover {
+    border: 0;
+    box-shadow: none;
+    background: transparent;
+    padding: 0;
+    overflow: visible;
+  }
+  .cover::after { display: none; }
+  .cover img {
+    display: block;
+    clear: both;
+    position: relative;
+    width: min(720px, 90%);
+    margin: 0 auto;
+    border: 0;
+    filter: none;
+  }
+  .masthead {
+    display: none;
+    clear: both;
+    padding-top: 8px;
+    font-family: var(--display);
+    font-weight: 700;
+    font-size: clamp(68px, 13vw, 152px);
+    line-height: .9;
+    letter-spacing: -.1em;
+    text-transform: lowercase;
+  }
+  .masthead .initial {
+    display: inline-block;
+    letter-spacing: -.13em;
+    transform: scaleX(1.08);
+    transform-origin: left center;
+  }
+  .edition { display: none; }
+  .bubble {
+    max-width: none;
+    margin: 0;
+    background: transparent;
+    border: 0;
+    border-bottom: 0;
+    box-shadow: none;
+    border-radius: 0;
+    padding: 0 0 28px;
+  }
+  .front-grid {
+    position: relative;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 220px;
+    gap: 28px;
+    margin-top: 32px;
+    padding-bottom: 24px;
+    border-bottom: 1px solid var(--ink);
+  }
+  .front-grid::after {
+    content: "";
+    position: absolute;
+    width: 100%;
+    height: 10px;
+    bottom: -10px;
+    left: 0;
+    margin-top: 0;
+    background: var(--ink);
+    clip-path: polygon(0 50%, 4% 20%, 8% 62%, 13% 12%, 18% 58%, 24% 18%, 31% 65%, 38% 20%, 45% 58%, 52% 14%, 59% 64%, 66% 22%, 73% 55%, 80% 12%, 87% 62%, 94% 18%, 100% 50%, 100% 100%, 0 100%);
+    pointer-events: none;
+  }
+  .front-grid .bubble .t { text-align: left; }
+  .front-grid .bubble .s { margin-left: 0; text-align: left; }
+  .sidebar {
+    border-left: 1px solid var(--ink);
+    padding-left: 20px;
+    font-family: var(--sans);
+  }
+  .sidebar .label {
+    display: block;
+    margin-bottom: 12px;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: .13em;
+    border-bottom: 3px double var(--ink);
+    padding-bottom: 8px;
+  }
+  .sidebar h3 {
+    margin: 0;
+    font-family: var(--display);
+    font-size: 28px;
+    line-height: 1;
+    font-weight: 700;
+  }
+  .sidebar p { margin: 12px 0 0; font-size: 12px; line-height: 1.55; }
+  .sidebar .stamp {
+    display: inline-block;
+    margin-top: 18px;
+    border: 1px solid var(--red);
+    color: var(--red-ink);
+    padding: 5px 8px;
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: .08em;
+    transform: rotate(-3deg);
+  }
+  .bubble .t {
+    max-width: 980px;
+    margin: 0 auto;
+    text-align: center;
+    font-family: var(--sans);
+    font-weight: 700;
+    font-size: clamp(28px, 5vw, 62px);
+    line-height: 1.04;
+    letter-spacing: -.055em;
+  }
+  .bubble .s {
+    max-width: 760px;
+    margin: 20px auto 0;
+    text-align: center;
+    font-size: 14px;
+  }
+  .cta { margin-top: 26px; }
+  .btn {
+    border: 3px solid var(--ink);
+    box-shadow: 4px 4px 0 var(--ink);
+    background: var(--paper);
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .08em;
+    padding: 10px 16px;
+  }
+  .btn-red { background: var(--red); color: #fff; border-color: var(--red-ink); }
+  .btn:hover { background: var(--ink); color: var(--paper); }
+  .btn:active { transform: translate(2px, 2px); box-shadow: 1px 1px 0 var(--ink); }
+
+  .grid { gap: 0; border-top: 1px solid var(--ink); border-left: 1px solid var(--ink); }
+  .panel {
+    background:
+      radial-gradient(rgba(16,53,59,.14) .7px, transparent .9px) 0 0 / 5px 5px,
+      var(--paper);
+    border: 3px solid var(--ink);
+    border-right: 1px solid var(--ink);
+    border-bottom: 1px solid var(--ink);
+    box-shadow: 5px 5px 0 var(--ink);
+    padding: 24px 22px 22px;
+  }
+  .panel:hover { transform: translate(-2px,-2px); box-shadow: 7px 7px 0 var(--ink); background: var(--paper); }
+  .panel .num { font-family: var(--mono); font-size: 12px; }
+  .panel .ico { display: none; }
+  .panel h3 { font-family: var(--display); font-weight: 700; font-size: 17px; letter-spacing: .01em; margin-top: 14px; }
+  .panel p, .trow span { color: #292929; font-size: 13px; }
+  .panel .tag { border: 0; border-top: 1px solid var(--ink); padding: 6px 0 0; font-size: 10px; }
+
+  .arch { gap: 38px; }
+  .screen, .code { border: 3px solid var(--ink); box-shadow: 6px 6px 0 var(--ink); background: #102c32; }
+  .tbar, .clabel { background: #102c32; border-bottom: 1px solid #729294; }
+  .tbar i { width: 7px; height: 7px; border: 0; border-radius: 0; background: #aaa !important; }
+  .tbar span, .clabel { color: #ddd; }
+  .tbar span { flex: 1; margin-left: 0; text-align: center; }
+  .screen pre, .code pre { color: #eee; font-family: var(--mono); font-size: 11px; font-variant-ligatures: none; }
+  .screen pre { white-space: pre; letter-spacing: 0; }
+  .screen pre .a, .screen pre .b, .screen pre .g, .screen pre .d,
+  .code pre .c, .code pre .s, .code pre .k, .code pre .p { color: #ddd; }
+  .screen pre .a, .screen pre .g,
+  .code pre .s, .code pre .k { color: var(--accent); }
+  .points { gap: 14px; }
+  .points li { padding-left: 26px; font-size: 14px; }
+  .points li::before { content: "§"; font-family: var(--sans); font-size: 18px; color: var(--ink); }
+  .copy { background: #eee; border: 0; box-shadow: none; font-family: var(--mono); font-size: 10px; }
+  .copy.ok { background: #ccc; }
+  .release-link { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+  .tools { grid-template-columns: repeat(3, 1fr); gap: 0; border-top: 1px solid var(--ink); border-left: 1px solid var(--ink); }
+  .trow { border: 0; border-right: 1px solid var(--ink); border-bottom: 1px solid var(--ink); box-shadow: none; background: transparent; padding: 14px 16px; }
+  .trow:hover { transform: none; box-shadow: none; background: rgba(23,23,23,.04); }
+  footer { border-top: 3px double var(--ink); background: transparent; padding: 30px 0 42px; }
+  footer .fbrand { font-family: var(--display); font-weight: 700; font-size: 28px; letter-spacing: -.04em; }
+  footer .fbrand .dot { display: none; }
+  footer .flinks a { font-family: var(--mono); font-size: 10px; }
+  footer small { font-family: var(--mono); color: #444; }
+  @media (max-width: 760px) { .tools { grid-template-columns: repeat(2, 1fr); } .front-grid { grid-template-columns: 1fr; } .sidebar { border-left: 0; border-top: 1px solid var(--ink); padding: 18px 0 0; } }
+  @media (max-width: 600px) { .tools { grid-template-columns: 1fr; } .masthead { font-size: 22vw; letter-spacing: -.08em; } }
+</style>
+</head>
+<body>
+
+
+
+<!-- ===================== HERO ===================== -->
+<header class="hero wrap" id="top">
+  <div class="cover">
+    <img src="./krabby.webp" alt="krabby" />
+  </div>
+
+  <div class="front-grid">
+    <div class="bubble">
+      <p class="t">Code search, docs &amp; relationship analysis —
+        <span class="red">served to your agent over MCP.</span></p>
+      <p class="s">Point it at repositories. Krabby clones and indexes them, builds a
+        graphify knowledge graph per repo, and keeps those indexes fresh in the
+        background. Graph queries are answered in-process by a native Go engine.</p>
+    </div>
+    <aside class="sidebar">
+      <span class="label">INDEX REPORT</span>
+      <h3>THE REPO<br />HAS BEEN READ!</h3>
+      <p>A native Go engine, searchable docs and graph intelligence, delivered through one MCP endpoint.</p>
+      <span class="stamp">INDEXED · MCP READY</span>
+    </aside>
+  </div>
+
+  <div class="cta">
+    <a class="btn btn-red" href="#quickstart">Quick start »</a>
+    <a class="btn" href="https://github.com/rytsh/krabby" target="_blank" rel="noopener">Read the docs</a>
+  </div>
+
+
+</header>
+
+<!-- ===================== FEATURES ===================== -->
+<section id="features">
+  <div class="wrap">
+    <div class="head reveal">
+      <span class="caption">// what it does</span>
+      <h2>Built for agents that <em>read code</em> all day.</h2>
+      <p>Every capability below is served straight to your LLM or agent over a
+        single streamable-HTTP MCP endpoint.</p>
+    </div>
+
+    <div class="grid">
+      <div class="panel reveal">
+        <div class="ico"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#141210" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg></div>
+        <div class="num">01</div>
+        <h3>Queries are fast</h3>
+        <p>Graph query tools are answered <b>in-process by a native Go engine</b>
+          that reads <span class="mono">graph.json</span> directly and hot-reloads
+          on rebuild — no per-graph subprocess is spawned.</p>
+        <span class="tag">query_graph · get_node · shortest_path</span>
+      </div>
+
+      <div class="panel reveal">
+        <div class="ico"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#141210" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h6l2 2h8v12a2 2 0 0 1-2 2H4z"/><path d="M8 13h8M8 17h5"/></svg></div>
+        <div class="num">02</div>
+        <h3>Builds are cheap</h3>
+        <p>Code extraction is <b>AST-based</b> — no LLM key needed. The graphify
+          CLI is only invoked to build graphs incrementally.</p>
+        <span class="tag">graphify update</span>
+      </div>
+
+      <div class="panel reveal">
+        <div class="ico"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#141210" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></div>
+        <div class="num">03</div>
+        <h3>Docs &amp; RAG</h3>
+        <p>With an LLM configured, krabby generates per-file Markdown docs plus a
+          repo overview — browsable in the UI. The prompt is configurable.</p>
+        <span class="tag">optional · search_docs</span>
+      </div>
+
+      <div class="panel reveal">
+        <div class="ico"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#141210" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg></div>
+        <div class="num">04</div>
+        <h3>Web sources</h3>
+        <p>Custom web URL collections and Confluence spaces are converted to
+          Markdown and indexed beside repo docs. Search one collection like
+          <span class="mono">web:wine</span> or everything at once.</p>
+        <span class="tag">list_sources · confluence</span>
+      </div>
+
+      <div class="panel reveal">
+        <div class="ico"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#141210" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/></svg></div>
+        <div class="num">05</div>
+        <h3>Semantic code search</h3>
+        <p>Source is chunked at graphify symbol boundaries, embedded with a
+          dedicated code model such as Codestral Embed, and returned as ranked
+          path/line snippets.</p>
+        <span class="tag">optional · code/search</span>
+      </div>
+
+      <div class="panel reveal">
+        <div class="ico"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#141210" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2"/><circle cx="18" cy="7" r="2"/><circle cx="12" cy="18" r="2"/><path d="m7.7 7.1 2.8 8.1M16.3 8.2l-2.8 7.9M8 6.2l8 1.1"/></svg></div>
+        <div class="num">06</div>
+        <h3>Graph-backed code search</h3>
+        <p>Find real code through the repository graph: symbols, definitions,
+          usages and dependencies are resolved to the exact path and line.</p>
+        <span class="tag">search_code · query_graph</span>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ===================== ARCHITECTURE ===================== -->
+<section id="architecture">
+  <div class="wrap">
+    <div class="head reveal">
+      <span class="caption">// how it fits together</span>
+      <h2>One Go binary between <em>agents</em> and <em>repos</em>.</h2>
+    </div>
+
+    <div class="arch">
+      <div class="screen reveal">
+        <div class="tbar"><i class="r"></i><i class="y"></i><i class="g"></i><span>krabby · pipeline</span></div>
+ <pre><span class="d">+---------------------------------------+</span>
+<span class="d">|</span> <span class="b">LLM/Agent</span>   --MCP--> <span class="a">krabby (Go)</span>       <span class="d">|</span>
+<span class="d">|</span> <span class="b">CI/webhook</span>   --HTTP-> <span class="a">krabby (Go)</span>       <span class="d">|</span>
+<span class="d">|</span>                                       <span class="d">|</span>
+<span class="d">|</span>  |- MCP tools (manage + query)          <span class="d">|</span>
+<span class="d">|</span>  |- REST API + provider-neutral hook    <span class="d">|</span>
+<span class="d">|</span>  |- Registry (bw/BadgerDB)              <span class="d">|</span>
+<span class="d">|</span>  |- <span class="g">Native graph query engine (Go)</span>    <span class="d">|</span>
+<span class="d">|</span>  `- Scheduler (poll interval)           <span class="d">|</span>
+<span class="d">+---------------------------------------+</span></pre>
+      </div>
+
+      <ul class="points reveal">
+        <li><b>Registry</b> in embedded BadgerDB (bw) tracks every repo, credential and lock.</li>
+        <li><b>Plain files on disk</b> under <span class="mono">~/.krabby</span> — clones, <span class="mono">graph.json</span>, reports and vectors are all readable by other tools.</li>
+        <li><b>Provider-neutral webhook</b> at <span class="mono">/webhook/git</span> accepts common server formats with bearer / shared-token auth.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== QUICK START ===================== -->
+<section id="quickstart">
+  <div class="wrap">
+    <div class="head reveal">
+      <span class="caption">// get running</span>
+      <h2>From clone to first query in a <em>minute</em>.</h2>
+        <p>Requires git, ssh, and the graphify CLI
+          (<span class="mono">uv tool install graphifyy</span>).</p>
+    </div>
+
+    <div class="qs">
+      <div class="code reveal">
+         <div class="clabel"><span>shell — release &amp; run</span><button class="copy" data-copy="build">copy</button></div>
+ <pre id="build"><span class="c"># download the latest release</span>
+<a class="release-link" href="https://github.com/rytsh/krabby/releases/latest" target="_blank" rel="noopener">https://github.com/rytsh/krabby/releases/latest</a>
+
+<span class="c"># configure and start the server</span>
+ cp krabby.example.yaml krabby.yaml   <span class="c"># edit repos, keys</span>
+ ./bin/krabby
+
+<span class="c"># track a repo, then list what you have</span>
+curl -X POST localhost:8080/api/v1/repos \
+  -d <span class="s">'{"url":"git@git.example.com:team/service.git"}'</span>
+curl localhost:8080/api/v1/repos</pre>
+      </div>
+
+      <div class="code reveal">
+        <div class="clabel"><span>LLM — MCP setup prompt</span><button class="copy" data-copy="prompt">copy</button></div>
+ <pre id="prompt">Set up Krabby as an MCP server for this repository.
+
+Download the latest Krabby release, start the server, and connect
+the MCP client to:
+http://localhost:8080/mcp
+Use this header:
+X-Krabby-Tool-Profile: full
+
+After Krabby is running, configure its runtime model settings either
+through the Krabby web UI at http://localhost:8080 or through MCP tools:
+- LLM provider/model and API key for generated code documentation
+- General embedder for document/RAG search
+- Code embedder for code indexing and semantic code search
+Run test_llm, test_embedder, and test_code_embedder before adding or
+refreshing repositories so indexing and docs generation are verified.
+
+Verify that the MCP connection works, then use Krabby for this
+repository. For code questions, use graph-backed search first:
+find symbols, definitions, usages and dependencies through the
+repository graph, and always report exact file paths and lines.</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== FOOTER ===================== -->
+<footer>
+  <div class="wrap">
+    <div class="fbrand"><span class="dot"></span>krabby</div>
+    <div class="flinks">
+      <a href="https://github.com/rytsh/krabby" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://github.com/rytsh/krabby#mcp-tools" target="_blank" rel="noopener">MCP tools</a>
+      <a href="https://github.com/rytsh/krabby#rest-api" target="_blank" rel="noopener">REST API</a>
+      <a href="https://github.com/Graphify-Labs/graphify" target="_blank" rel="noopener">graphify</a>
+    </div>
+    <small>MIT © 2026 Eray Ates</small>
+  </div>
+</footer>
+
+<script>
+  // copy buttons
+  document.querySelectorAll('.copy').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var el = document.getElementById(btn.dataset.copy);
+      if (!el) return;
+      navigator.clipboard.writeText(el.innerText.trim()).then(function () {
+        var t = btn.textContent;
+        btn.textContent = 'copied!'; btn.classList.add('ok');
+        setTimeout(function () { btn.textContent = t; btn.classList.remove('ok'); }, 1400);
+      });
+    });
+  });
+
+  // flat reveal on scroll
+  var io = new IntersectionObserver(function (entries) {
+    entries.forEach(function (en) {
+      if (en.isIntersecting) { en.target.classList.add('in'); io.unobserve(en.target); }
+    });
+  }, { threshold: 0.12 });
+  document.querySelectorAll('.reveal').forEach(function (el, i) {
+    el.style.transitionDelay = (i % 6) * 50 + 'ms';
+    io.observe(el);
+  });
+</script>
+</body>
+</html>

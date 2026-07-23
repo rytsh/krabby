@@ -1,4 +1,4 @@
-<img src="./assets/krabby.webp" width="360" />
+<img src="./docs/krabby.webp" width="360" />
 
 Krabby provides code search, documentation retrieval, and relationship analysis
 over MCP. Point it at repositories; it clones and indexes them, builds a
