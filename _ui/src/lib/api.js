@@ -52,6 +52,10 @@ export const api = {
   owners: () => req("/repos/owners"),
   // activeRepos returns only repos with running jobs: [{ id, running, status }].
   activeRepos: () => req("/repos/active"),
+  // tasks returns the central work-queue snapshot:
+  // { limit, running, pending, tasks: [{ seq, id, kind, title, state, error,
+  //   enqueued_at, started_at, ended_at }] }.
+  tasks: () => req("/tasks"),
   // Repo ids are full paths (host/group/.../name) with any number of "/"
   // segments, so repo actions use a GitLab-style "/-/" separator between the
   // id and the action.

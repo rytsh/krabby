@@ -89,6 +89,25 @@ func TestReadFilePagination(t *testing.T) {
 	}
 }
 
+func TestListFilesPage(t *testing.T) {
+	dir := setupRepo(t)
+	page, err := ListFilesPage(dir, "", false, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Entries) != 1 || !page.HasMore || page.Page != 1 || page.PerPage != 1 {
+		t.Fatalf("unexpected first page: %+v", page)
+	}
+
+	next, err := ListFilesPage(dir, "", false, 2, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(next.Entries) != 1 || next.Entries[0].Path == page.Entries[0].Path {
+		t.Fatalf("unexpected second page: %+v", next)
+	}
+}
+
 func TestListFilesShallowSkipsNoise(t *testing.T) {
 	dir := setupRepo(t)
 

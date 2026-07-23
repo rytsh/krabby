@@ -142,12 +142,16 @@ func run(ctx context.Context) error {
 		slog.Error("migrate generated docs out of repository clones", "error", err)
 	}
 
-	// Build the initial docs/RAG client bundle from the persisted settings.
-	// A build error here disables the feature but does not abort startup.
+	// Build the initial docs/RAG client bundle from the persisted settings and
+	// apply the work-queue concurrency limit. A build error here disables the
+	// docs feature but does not abort startup.
 	if s, gerr := settingsStore.Get(ctx); gerr != nil {
 		slog.Error("load docs settings", "error", gerr)
-	} else if cerr := mgr.Configure(ctx, s); cerr != nil {
-		slog.Error("configure docs/rag (disabled until fixed via settings)", "error", cerr)
+	} else {
+		mgr.SetTaskConcurrency(s.TaskConcurrency)
+		if cerr := mgr.Configure(ctx, s); cerr != nil {
+			slog.Error("configure docs/rag (disabled until fixed via settings)", "error", cerr)
+		}
 	}
 	// Repos tracked before full-path ids used the last two URL segments as id,
 	// which let repos from different (nested) groups collide; re-key them.
@@ -174,7 +178,7 @@ func run(ctx context.Context) error {
 	// persisted runtime settings, so changes apply without a restart.
 	go scheduler.Run(ctx, mgr)
 
-	mcpServer := mcptools.New(mgr, version, cfg.MCP.WaitTimeout)
+	mcpServer := mcptools.New(mgr, version, cfg.MCP.WaitTimeout, cfg.MCP.ToolProfile)
 
 	// Server blocks until ctx is cancelled, then shuts down.
 	if err := server.Start(ctx, cfg, mgr, mcpServer); err != nil {

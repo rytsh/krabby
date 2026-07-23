@@ -25,6 +25,7 @@ import (
 	"github.com/rytsh/krabby/internal/service/graphify"
 	"github.com/rytsh/krabby/internal/service/graphquery"
 	"github.com/rytsh/krabby/internal/service/lease"
+	"github.com/rytsh/krabby/internal/service/queue"
 	"github.com/rytsh/krabby/internal/service/rag"
 	"github.com/rytsh/krabby/internal/service/registry"
 	"github.com/rytsh/krabby/internal/service/repofs"
@@ -56,8 +57,12 @@ type Manager struct {
 	// here (see SetWebSources).
 	webStore    *websource.Store
 	webFetchers map[string]websource.Fetcher
-	webJobMu    sync.Mutex
-	webJobs     map[string]struct{}
+
+	// queue is the central bounded work queue. Every background task (repo
+	// refresh/generate, web-source sync, reindex) is submitted here so a single
+	// configurable concurrency limit governs how many run at once, instead of
+	// each trigger spawning its own unbounded goroutine.
+	queue *queue.Queue
 
 	// Optional docs+RAG subsystem, held as an atomically swappable bundle so
 	// settings changes rebuild the clients live. docsMu guards the bundle.
@@ -163,11 +168,35 @@ func New(
 		locks:    map[string]*sync.Mutex{},
 		activity: map[string]map[string]struct{}{},
 		jobs:     map[string]*job{},
-		webJobs:  map[string]struct{}{},
 	}
+	// The queue's limit is updated from persisted settings at startup and on
+	// every settings change (see SetTaskConcurrency); it starts at the default.
+	m.queue = queue.New(baseCtx, queue.DefaultConcurrency)
 	m.leases = lease.New(m.TriggerRefresh)
 
 	return m
+}
+
+// Background task kinds submitted to the central queue. They classify work in
+// the Activity UI and namespace the dedup keys.
+const (
+	taskKindRefresh  = "refresh"
+	taskKindGenerate = "generate"
+	taskKindWebSync  = "websync"
+	taskKindReindex  = "reindex"
+)
+
+// SetTaskConcurrency updates the central work queue's concurrency limit live.
+// A value <= 0 falls back to the queue default. Called at startup and whenever
+// the setting changes in the UI/REST/MCP.
+func (m *Manager) SetTaskConcurrency(n int) {
+	m.queue.SetLimit(n)
+}
+
+// TaskSnapshot returns the current queue state (limit, running/queued counts,
+// and queued/running/recent tasks) for the Activity UI.
+func (m *Manager) TaskSnapshot() queue.Snapshot {
+	return m.queue.Snapshot()
 }
 
 // acquireDocs leases the active bundle until the returned release function is
@@ -202,6 +231,9 @@ func (m *Manager) Close() error {
 	m.configureMu.Lock()
 	defer m.configureMu.Unlock()
 
+	// Stop accepting queued work and drain running tasks, then wait for the
+	// few remaining raw goroutines (e.g. merged-graph rebuild after a delete).
+	m.queue.Close()
 	m.Wait()
 
 	m.docsMu.Lock()
@@ -343,12 +375,16 @@ func (m *Manager) registerJob(ctx context.Context, id string) (context.Context, 
 // cancelling its context; the in-flight git/graphify subprocess is killed and
 // the outcome is recorded as cancelled. It reports whether a job was running.
 func (m *Manager) CancelJob(id string) bool {
+	// Drop any not-yet-started tasks for this repo from the queue so a backlog
+	// can be cleared, then cancel the running job (if any).
+	dropped := m.queue.CancelPending(id)
+
 	m.jobMu.Lock()
 	j := m.jobs[id]
 	m.jobMu.Unlock()
 
 	if j == nil {
-		return false
+		return dropped > 0
 	}
 
 	slog.Info("cancelling running job", "repo", id)
@@ -587,28 +623,33 @@ func (m *Manager) RefreshWait(ctx context.Context, id string) (*registry.Repo, b
 	return repo, done, nil
 }
 
-// refreshAsync starts a refresh on the manager lifecycle context and returns a
-// channel closed when that refresh attempt completes. Refresh persists
-// StatusError + LastError on failure, so callers read the terminal state back
-// from the registry. During shutdown the channel is closed immediately.
+// submitRefresh enqueues a repo refresh on the central work queue and returns
+// its handle. Concurrent refreshes for the same repo coalesce onto one queued
+// task (queue dedup), and the queue bounds how many refreshes run at once.
+func (m *Manager) submitRefresh(id string) *queue.Handle {
+	return m.queue.Submit(queue.Task{
+		ID:    id,
+		Kind:  taskKindRefresh,
+		Title: "Refresh " + id,
+		Key:   taskKindRefresh + ":" + id,
+		Run: func(ctx context.Context) error {
+			if err := m.Refresh(ctx, id); err != nil {
+				slog.Error("refresh repo", "repo", id, "error", err)
+
+				return err
+			}
+
+			return nil
+		},
+	})
+}
+
+// refreshAsync enqueues a refresh and returns a channel closed when that
+// refresh attempt completes. Refresh persists StatusError + LastError on
+// failure, so callers read the terminal state back from the registry. During
+// shutdown the channel is closed immediately.
 func (m *Manager) refreshAsync(id string) <-chan struct{} {
-	finished := make(chan struct{})
-	if !m.startWork() {
-		close(finished)
-
-		return finished
-	}
-
-	go func() {
-		defer m.wg.Done()
-		defer close(finished)
-
-		if err := m.Refresh(m.baseCtx, id); err != nil {
-			slog.Error("refresh repo", "repo", id, "error", err)
-		}
-	}()
-
-	return finished
+	return m.submitRefresh(id).Done()
 }
 
 // registerRepo parses the url, upserts a pending record if the repo is new, and
@@ -741,20 +782,11 @@ func (m *Manager) WarmCodeSearch(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// TriggerRefresh starts a background refresh for a repo. Concurrent triggers
-// for the same repo serialize on the per-repo lock.
+// TriggerRefresh queues a background refresh for a repo on the central work
+// queue. Concurrent triggers for the same repo coalesce, and the queue's
+// concurrency limit bounds how many repos refresh at once.
 func (m *Manager) TriggerRefresh(id string) {
-	if !m.startWork() {
-		return
-	}
-
-	go func() {
-		defer m.wg.Done()
-
-		if err := m.Refresh(m.baseCtx, id); err != nil {
-			slog.Error("refresh repo", "repo", id, "error", err)
-		}
-	}()
+	m.submitRefresh(id)
 }
 
 // generateOrder is the canonical stage execution order for selective runs:
@@ -967,20 +999,31 @@ func (m *Manager) Generate(ctx context.Context, id string, targets []string, for
 	return errors.Join(errs...)
 }
 
-// TriggerGenerate starts a background selective generation for a repo. When
+// submitGenerate enqueues a selective generation on the central work queue and
+// returns its handle. Identical requests (same repo, targets and force) coalesce
+// onto one queued task.
+func (m *Manager) submitGenerate(id string, targets []string, force bool) *queue.Handle {
+	return m.queue.Submit(queue.Task{
+		ID:    id,
+		Kind:  taskKindGenerate,
+		Title: fmt.Sprintf("Generate %s for %s", strings.Join(targets, ", "), id),
+		Key:   fmt.Sprintf("%s:%s:%s:%t", taskKindGenerate, id, strings.Join(targets, ","), force),
+		Run: func(ctx context.Context) error {
+			if err := m.Generate(ctx, id, targets, force); err != nil {
+				slog.Error("generate", "repo", id, "targets", targets, "error", err)
+
+				return err
+			}
+
+			return nil
+		},
+	})
+}
+
+// TriggerGenerate queues a background selective generation for a repo. When
 // force is true the docs stage ignores its incremental caches.
 func (m *Manager) TriggerGenerate(id string, targets []string, force bool) {
-	if !m.startWork() {
-		return
-	}
-
-	go func() {
-		defer m.wg.Done()
-
-		if err := m.Generate(m.baseCtx, id, targets, force); err != nil {
-			slog.Error("generate", "repo", id, "targets", targets, "error", err)
-		}
-	}()
+	m.submitGenerate(id, targets, force)
 }
 
 // GenerateWait runs the selected generation stages for a repo in the background
@@ -1016,78 +1059,81 @@ func (m *Manager) GenerateWait(ctx context.Context, id string, targets []string,
 	return repo, done, nil
 }
 
-// generateAsync starts a selective generation on the manager lifecycle context
-// and returns a channel closed when that run completes. Generate persists
-// StatusError + LastError on failure, so callers read the terminal state back
-// from the registry. During shutdown the channel is closed immediately.
+// generateAsync enqueues a selective generation and returns a channel closed
+// when that run completes. Generate persists StatusError + LastError on failure,
+// so callers read the terminal state back from the registry. During shutdown the
+// channel is closed immediately.
 func (m *Manager) generateAsync(id string, targets []string, force bool) <-chan struct{} {
-	finished := make(chan struct{})
-	if !m.startWork() {
-		close(finished)
-
-		return finished
-	}
-
-	go func() {
-		defer m.wg.Done()
-		defer close(finished)
-
-		if err := m.Generate(m.baseCtx, id, targets, force); err != nil {
-			slog.Error("generate", "repo", id, "targets", targets, "error", err)
-		}
-	}()
-
-	return finished
+	return m.submitGenerate(id, targets, force).Done()
 }
 
 // TriggerReindexAll rebuilds optional docs/code indexes for every ready repo
-// without fetching git or rebuilding graphify output. It is used after a live
-// settings update because an ordinary refresh intentionally exits early when
-// the repository commit has not changed.
+// and web source without fetching git or rebuilding graphify output. It is used
+// after a live settings update because an ordinary refresh intentionally exits
+// early when the repository commit has not changed.
+//
+// A lightweight coordinator task lists the work and enqueues one reindex task
+// per repo/collection, so the global concurrency limit — not the repo count —
+// governs how many run at once. A limit of 1 reindexes sequentially (the
+// previous behavior, which avoided multiplying LLM/embedder load); a higher
+// limit fans out within that bound.
 func (m *Manager) TriggerReindexAll() {
-	if !m.startWork() {
-		return
-	}
+	m.queue.Submit(queue.Task{
+		ID:    "*",
+		Kind:  taskKindReindex,
+		Title: "Reindex all repositories and sources",
+		Key:   taskKindReindex + ":all",
+		Run:   m.reindexAll,
+	})
+}
 
-	go func() {
-		defer m.wg.Done()
-
-		repos, err := m.reg.List(m.baseCtx)
-		if err != nil {
-			slog.Error("list repos for reindex", "error", err)
-
-			return
-		}
-
-		// Reindex repositories sequentially to avoid multiplying LLM/embedder
-		// concurrency by the number of tracked repositories.
+// reindexAll is the queue coordinator for TriggerReindexAll: it enqueues a
+// reindex task for each ready repo and each web-source collection.
+func (m *Manager) reindexAll(ctx context.Context) error {
+	repos, err := m.reg.List(ctx)
+	if err != nil {
+		slog.Error("list repos for reindex", "error", err)
+	} else {
 		for _, listed := range repos {
 			if listed.Status != registry.StatusReady {
 				continue
 			}
 
-			l := m.lock(listed.ID)
-			l.Lock()
-
-			repo, err := m.reg.Get(m.baseCtx, listed.ID)
-			if err != nil {
-				slog.Error("load repo for reindex", "repo", listed.ID, "error", err)
-				l.Unlock()
-
-				continue
-			}
-
-			if repo != nil && repo.Status == registry.StatusReady {
-				m.buildDocsAndIndex(m.baseCtx, repo)
-			}
-
-			l.Unlock()
+			id := listed.ID
+			m.queue.Submit(queue.Task{
+				ID:    id,
+				Kind:  taskKindReindex,
+				Title: "Reindex " + id,
+				Key:   taskKindReindex + ":" + id,
+				Run:   func(ctx context.Context) error { return m.reindexRepo(ctx, id) },
+			})
 		}
+	}
 
-		// Web-source vectors live in the same docs index and follow the same
-		// embedder settings, so they are rebuilt from the on-disk markdown too.
-		m.reindexAllWebSources(m.baseCtx)
-	}()
+	// Web-source vectors live in the same docs index and follow the same
+	// embedder settings, so they are rebuilt from the on-disk markdown too.
+	m.enqueueWebReindex(ctx)
+
+	return nil
+}
+
+// reindexRepo rebuilds a single ready repo's docs/code indexes from its
+// existing clone, holding the per-repo lock.
+func (m *Manager) reindexRepo(ctx context.Context, id string) error {
+	l := m.lock(id)
+	l.Lock()
+	defer l.Unlock()
+
+	repo, err := m.reg.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+
+	if repo != nil && repo.Status == registry.StatusReady {
+		m.buildDocsAndIndex(ctx, repo)
+	}
+
+	return nil
 }
 
 // Refresh synchronously clones/pulls the repo and rebuilds its graph if needed.
@@ -1847,6 +1893,16 @@ func (m *Manager) ListRepoFiles(ctx context.Context, repoID, subdir string, recu
 	}
 
 	return repofs.ListFiles(dir, subdir, recursive)
+}
+
+// ListRepoFilesPage returns a bounded page of a stable repository listing.
+func (m *Manager) ListRepoFilesPage(ctx context.Context, repoID, subdir string, recursive bool, page, perPage int) (repofs.EntryPage, error) {
+	dir, err := m.repoCloneDir(ctx, repoID)
+	if err != nil {
+		return repofs.EntryPage{}, err
+	}
+
+	return repofs.ListFilesPage(dir, subdir, recursive, page, perPage)
 }
 
 // AcquireLease takes a TTL-bounded read lease on a repo so external tools can

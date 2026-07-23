@@ -571,6 +571,12 @@
           {/if}
         </div>
 
+        <div class="mb-2 rounded border border-line bg-surface-2 px-2.5 py-2 text-[11px] leading-relaxed text-faint">
+          <span class="font-medium text-dim">Refresh pipeline:</span>
+          Sync -> Graph, then <span class="text-accent">Code index || Docs</span>; Docs -> Docs index.
+          <span class="block">Docs index waits for Docs only. Unchanged repos stop after Sync.</span>
+        </div>
+
         <div class="flex flex-col">
           {#each stageRows as s (s.key)}
             <div class="border-t border-line py-2 first:border-t-0">

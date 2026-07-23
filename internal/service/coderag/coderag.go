@@ -1,9 +1,8 @@
 // Package coderag indexes raw source code into the vector store and retrieves
 // matching snippets for natural-language (or code) queries.
 //
-// Unlike the docs RAG (file-level: whole markdown documents are returned), code
-// retrieval is snippet-level: each hit carries the matching chunk plus its
-// repo-relative path and line range, so a caller can read more context via
+// Like docs RAG, retrieval is bounded: each hit carries the matching chunk plus
+// its repo-relative path and line range, so a caller can read more context via
 // read_file when needed.
 //
 // Chunking is symbol-aware: the graphify knowledge graph anchors symbols

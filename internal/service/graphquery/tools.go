@@ -36,6 +36,9 @@ func (g *Graph) QueryGraph(question string, opts QueryGraphOpts) string {
 	if budget <= 0 {
 		budget = 2000
 	}
+	if budget > 4000 {
+		budget = 4000
+	}
 
 	terms := queryTerms(question)
 	scored := g.scoreNodes(terms)
@@ -119,6 +122,18 @@ func (g *Graph) GetNode(label string) string {
 // as "no neighbours" and produces false negatives such as "this func has no
 // callers"). When the label was ambiguous it also hints to use the node ID.
 func (g *Graph) GetNeighbors(label, relationFilter string) string {
+	return g.getNeighbors(label, relationFilter, 0, 0)
+}
+
+// GetNeighborsPage returns one bounded page of direct neighbors.
+func (g *Graph) GetNeighborsPage(label, relationFilter string, page, perPage int) string {
+	if page <= 0 {
+		page = 1
+	}
+	return g.getNeighbors(label, relationFilter, page, perPage)
+}
+
+func (g *Graph) getNeighbors(label, relationFilter string, page, perPage int) string {
 	matches := g.findNode(strings.ToLower(label))
 	if len(matches) == 0 {
 		return fmt.Sprintf("No node matching '%s' found.", strings.ToLower(label))
@@ -151,14 +166,14 @@ func (g *Graph) GetNeighbors(label, relationFilter string) string {
 		}
 	}
 
-	lines := []string{"Neighbors of " + sanitize(g.labelOf(nid)) + ":"}
+	var entries []string
 
 	for _, r := range g.Successors(nid) {
 		rel := r.edge.Relation
 		if rf != "" && !strings.Contains(strings.ToLower(rel), rf) {
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("  --> %s [%s] [%s]",
+		entries = append(entries, fmt.Sprintf("  --> %s [%s] [%s]",
 			sanitize(g.labelOf(r.other)), sanitize(rel), sanitize(r.edge.Confidence)))
 	}
 
@@ -167,8 +182,18 @@ func (g *Graph) GetNeighbors(label, relationFilter string) string {
 		if rf != "" && !strings.Contains(strings.ToLower(rel), rf) {
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("  <-- %s [%s] [%s]",
+		entries = append(entries, fmt.Sprintf("  <-- %s [%s] [%s]",
 			sanitize(g.labelOf(r.other)), sanitize(rel), sanitize(r.edge.Confidence)))
+	}
+
+	lines := []string{"Neighbors of " + sanitize(g.labelOf(nid)) + ":"}
+	if page > 0 || perPage > 0 {
+		page, perPage, start, end := pageBounds(len(entries), page, perPage)
+		lines[0] = fmt.Sprintf("Neighbors of %s (%d total, page %d, per_page %d, has_more=%t):",
+			sanitize(g.labelOf(nid)), len(entries), page, perPage, end < len(entries))
+		lines = append(lines, entries[start:end]...)
+	} else {
+		lines = append(lines, entries...)
 	}
 
 	if hint := g.ambiguityHint(label, matches); hint != "" {
@@ -180,13 +205,31 @@ func (g *Graph) GetNeighbors(label, relationFilter string) string {
 
 // GetCommunity lists nodes in a community (mirrors _tool_get_community).
 func (g *Graph) GetCommunity(cid int) string {
+	return g.getCommunity(cid, 0, 0)
+}
+
+// GetCommunityPage returns one bounded page of community nodes.
+func (g *Graph) GetCommunityPage(cid, page, perPage int) string {
+	if page <= 0 {
+		page = 1
+	}
+	return g.getCommunity(cid, page, perPage)
+}
+
+func (g *Graph) getCommunity(cid, page, perPage int) string {
 	nodes := g.Community(cid)
 	if len(nodes) == 0 {
 		return fmt.Sprintf("Community %d not found.", cid)
 	}
 
-	lines := []string{fmt.Sprintf("Community %d (%d nodes):", cid, len(nodes))}
-	for _, n := range nodes {
+	start, end := 0, len(nodes)
+	header := fmt.Sprintf("Community %d (%d nodes):", cid, len(nodes))
+	if page > 0 || perPage > 0 {
+		page, perPage, start, end = pageBounds(len(nodes), page, perPage)
+		header = fmt.Sprintf("Community %d (%d nodes, page %d, per_page %d, has_more=%t):", cid, len(nodes), page, perPage, end < len(nodes))
+	}
+	lines := []string{header}
+	for _, n := range nodes[start:end] {
 		d := g.Nodes[n]
 		lines = append(lines, fmt.Sprintf("  %s [%s]", sanitize(g.labelOf(n)), sanitize(d.SourceFile)))
 	}
@@ -199,6 +242,9 @@ func (g *Graph) GetCommunity(cid int) string {
 func (g *Graph) GodNodes(topN int) string {
 	if topN <= 0 {
 		topN = 10
+	}
+	if topN > 50 {
+		topN = 50
 	}
 
 	lines := []string{"God nodes (most connected):"}
@@ -255,6 +301,9 @@ func (g *Graph) GraphStats() string {
 func (g *Graph) ShortestPath(source, target string, maxHops int) string {
 	if maxHops <= 0 {
 		maxHops = 8
+	}
+	if maxHops > 12 {
+		maxHops = 12
 	}
 
 	srcScored := g.scoreNodes(splitLower(source))
@@ -500,6 +549,30 @@ func splitLower(s string) []string {
 	}
 
 	return out
+}
+
+func pageBounds(total, page, perPage int) (int, int, int, int) {
+	if page <= 0 {
+		page = 1
+	}
+	if perPage <= 0 {
+		perPage = 50
+	}
+	if perPage > 200 {
+		perPage = 200
+	}
+	start := total
+	if page-1 <= total/perPage {
+		start = (page - 1) * perPage
+	}
+	if start > total {
+		start = total
+	}
+	end := start + perPage
+	if end > total {
+		end = total
+	}
+	return page, perPage, start, end
 }
 
 // formatLabelList renders a Python-style list repr: ['a', 'b'].

@@ -1,9 +1,9 @@
 <img src="./assets/krabby.webp" width="360" />
 
-krabby multi-repo [graphify](https://github.com/safishamsi/graphify) knowledge graphs
-served over MCP. Point it at your repositories; it clones them, builds a code
-knowledge graph per repo (plus a merged cross-repo graph), keeps them fresh in
-the background, and lets any MCP-capable LLM agent query them.
+Krabby provides code search, documentation retrieval, and relationship analysis
+over MCP. Point it at repositories; it clones and indexes them, builds a
+[graphify](https://github.com/safishamsi/graphify) knowledge graph per repo, and
+keeps those indexes fresh in the background.
 
 ```
                      ┌───────────────────────────────────────┐
@@ -56,6 +56,9 @@ curl localhost:8080/api/v1/repos
 
 MCP endpoint for agents (opencode, Claude Desktop, etc.): `http://localhost:8080/mcp`
 (streamable HTTP; set `mcp.api_key` to require `X-Api-Key` / `Authorization: Bearer`).
+The default `mcp.tool_profile: standard` exposes repository management and
+read/query/search tools. Use `full` to additionally expose credentials, clone
+leases, docs/RAG configuration, and endpoint probes.
 
 Example opencode config:
 
@@ -79,17 +82,25 @@ Example opencode config:
 | `repo_status` | Build state, last commit, last error |
 | `set_credential` / `list_credentials` / `remove_credential` | Per-host / per-org git credentials |
 | `lock_repo` / `unlock_repo` | TTL-bounded read locks for external consumers |
-| `query_graph` | BFS/DFS search over one repo or the merged graph |
+| `search_code` | First choice for symbols, paths, literals, definitions, usages, and implementation locations |
+| `read_file` / `list_files` | Page through a known source file or inspect a bounded directory listing |
+| `query_graph` | Architecture, dependency, call/data-flow, and cross-file relationship questions |
 | `get_node` / `get_neighbors` / `get_community` | Node-level inspection |
 | `god_nodes` / `graph_stats` / `shortest_path` | Graph-level analysis |
-| `search_docs` / `list_docs` / `get_doc` | Search and read generated or synced Markdown documentation |
+| `search_docs` / `list_docs` / `get_doc` | Search bounded excerpts and page through generated or synced Markdown |
 | `list_sources` | Discover named Custom web and Confluence collections (`web:<name>`) |
-| `search_code` | Normal bw full-text or semantic source search with locations and pagination |
 | `get_docs_config` / `set_docs_config` | Read or live-update docs and code RAG settings |
 | `test_llm` / `test_embedder` / `test_code_embedder` | Validate model endpoints without saving |
 
-Graph query tools take an optional full repo id (`host/group/.../name`); omit it to query the
-merged cross-repo graph.
+Always pass the full repo id (`host/group/.../name`) when it is known. Omit it
+only for an intentional cross-repository search or merged-graph analysis.
+`list_*` tools are for discovering unknown identifiers or explicit inventory
+requests; responses are paginated and agents should not exhaust every page by
+default. Source and document reads are also bounded and expose continuation
+metadata for large files.
+
+The `standard` profile omits the credential, lease, and docs/RAG administration
+rows above. Set `mcp.tool_profile: full` when an MCP client must administer them.
 
 ## REST API
 

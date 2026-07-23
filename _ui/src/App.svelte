@@ -1,5 +1,5 @@
 <script>
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { path, link } from "./lib/router.js";
   import { theme, toggleTheme } from "./lib/theme.js";
   import {
@@ -156,7 +156,9 @@
   $effect(() => {
     if (view === "repo" && repoId) {
       const owner = ownerOf(repoId);
-      expandAncestors(owner);
+      // Reveal the repo when navigation changes, but do not make manual
+      // collapse state a dependency that immediately reopens the group.
+      untrack(() => expandAncestors(owner));
       loadOwnerRepos(owner);
     }
   });

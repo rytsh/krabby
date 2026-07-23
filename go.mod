@@ -5,6 +5,7 @@ go 1.26
 require (
 	github.com/JohannesKaufmann/html-to-markdown/v2 v2.5.2
 	github.com/go-shiori/go-readability v0.0.0-20251205110129-5db1dc9836f0
+	github.com/google/jsonschema-go v0.4.3
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/rakunlabs/ada v0.4.7
 	github.com/rakunlabs/ada/handler/folder v0.4.7
@@ -22,6 +23,7 @@ require (
 	github.com/rakunlabs/logi v0.4.5
 	github.com/rakunlabs/query v0.4.6
 	github.com/rakunlabs/tell v0.1.5
+	golang.org/x/sync v0.22.0
 	golang.org/x/text v0.40.0
 )
 
@@ -47,7 +49,6 @@ require (
 	github.com/goccy/go-yaml v1.18.0 // indirect
 	github.com/gogs/chardet v0.0.0-20211120154057-b7413eaefb8f // indirect
 	github.com/google/flatbuffers v25.2.10+incompatible // indirect
-	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0 // indirect
 	github.com/hashicorp/consul/api v1.33.0 // indirect

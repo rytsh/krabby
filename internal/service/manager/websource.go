@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rytsh/krabby/internal/service/queue"
 	"github.com/rytsh/krabby/internal/service/repofs"
 	"github.com/rytsh/krabby/internal/service/websource"
 )
@@ -283,37 +284,27 @@ func (m *Manager) WebSourceDoc(ctx context.Context, name, docPath string) (*repo
 	return repofs.ReadFile(m.sourcesDir(name), docPath, 0, 0)
 }
 
-// TriggerWebRefresh starts a background sync of one collection.
+// TriggerWebRefresh queues a background sync of one collection on the central
+// work queue. Duplicate syncs of the same collection coalesce (queue dedup),
+// replacing the previous in-flight de-dup set, and the queue's concurrency
+// limit bounds how many syncs run at once.
 func (m *Manager) TriggerWebRefresh(name string) {
-	m.webJobMu.Lock()
-	if _, running := m.webJobs[name]; running {
-		m.webJobMu.Unlock()
+	scope := websource.ScopeKey(name)
+	m.queue.Submit(queue.Task{
+		ID:    scope,
+		Kind:  taskKindWebSync,
+		Title: "Sync " + scope,
+		Key:   taskKindWebSync + ":" + name,
+		Run: func(ctx context.Context) error {
+			if err := m.RefreshWebSource(ctx, name); err != nil {
+				slog.Error("refresh web source", "source", name, "error", err)
 
-		return
-	}
-	m.webJobs[name] = struct{}{}
-	m.webJobMu.Unlock()
+				return err
+			}
 
-	if !m.startWork() {
-		m.webJobMu.Lock()
-		delete(m.webJobs, name)
-		m.webJobMu.Unlock()
-
-		return
-	}
-
-	go func() {
-		defer m.wg.Done()
-		defer func() {
-			m.webJobMu.Lock()
-			delete(m.webJobs, name)
-			m.webJobMu.Unlock()
-		}()
-
-		if err := m.RefreshWebSource(m.baseCtx, name); err != nil {
-			slog.Error("refresh web source", "source", name, "error", err)
-		}
-	}()
+			return nil
+		},
+	})
 }
 
 // RefreshDueWebSources triggers a sync for every collection whose refresh
@@ -518,9 +509,10 @@ func (m *Manager) indexWebSource(ctx context.Context, name string) {
 	}
 }
 
-// reindexAllWebSources rebuilds the vectors of every collection from the
-// on-disk markdown. Used after live settings updates.
-func (m *Manager) reindexAllWebSources(ctx context.Context) {
+// enqueueWebReindex submits a reindex task for every web-source collection so
+// their vectors are rebuilt from the on-disk markdown under the global
+// concurrency limit. Used after live settings updates (see reindexAll).
+func (m *Manager) enqueueWebReindex(ctx context.Context) {
 	if m.webStore == nil {
 		return
 	}
@@ -533,12 +525,23 @@ func (m *Manager) reindexAllWebSources(ctx context.Context) {
 	}
 
 	for _, col := range cols {
-		scope := websource.ScopeKey(col.Name)
+		name := col.Name
+		scope := websource.ScopeKey(name)
+		m.queue.Submit(queue.Task{
+			ID:    scope,
+			Kind:  taskKindReindex,
+			Title: "Reindex " + scope,
+			Key:   taskKindReindex + ":" + scope,
+			Run: func(ctx context.Context) error {
+				l := m.lock(scope)
+				l.Lock()
+				defer l.Unlock()
 
-		l := m.lock(scope)
-		l.Lock()
-		m.indexWebSource(ctx, col.Name)
-		l.Unlock()
+				m.indexWebSource(ctx, name)
+
+				return nil
+			},
+		})
 	}
 }
 

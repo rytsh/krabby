@@ -19,56 +19,45 @@ import (
 // initialize. Most MCP clients surface it to the LLM as high-level context, so
 // it explains what krabby is, the add->poll->query lifecycle, and which tool to
 // reach for first. Per-tool specifics stay in each tool's Description.
-const serverInstructions = `krabby tracks git repositories and, for each one, builds a code knowledge
-graph plus optional generated docs and a code/RAG search index. Use it to
-understand and search codebases you point it at - it clones the repo, indexes
-it, and answers questions about the code for you.
+const serverInstructions = `Krabby indexes tracked git repositories for source search, documentation retrieval, and code-relationship analysis.
 
-Lifecycle:
-- add_repo clones a repo and builds its graph in the background (returns
-  immediately with status 'pending'; pass wait=true to block up to the
-  server cap). Poll repo_status until status is 'ready' before querying.
-- refresh_repo pulls new commits and rebuilds; cancel_repo_job stops a run.
-- list_repos pages through tracked repos (search/owner filters, total count)
-  so a large fleet never floods the context at once.
+Tool selection:
+- Use search_code first for symbols, paths, literals, definitions, usages, and implementation locations. Use normal mode for exact text and semantic mode for conceptual source search.
+- Use query_graph for architecture, dependencies, call/data flow, and relationships across files. It is not a keyword or symbol search.
+- Use search_docs for documentation, guides, wikis, and Confluence content.
+- Use list_* only when an identifier is unknown or the user explicitly requests an inventory. Do not exhaust pages or request a recursive file tree without a clear need.
+- Use get_* tools only after a search/query identifies the target.
 
-Repo ids are 'owner/name'. On the graph/query tools, omit 'repo' to hit the
-merged cross-repo graph (only if graphify.merge is enabled).
+Always pass repo when it is known. Omit repo only when the user explicitly requests cross-repository analysis and merged search is intended.
 
-Picking a tool:
-- Understand code: start with query_graph (best first call), then drill in with
-  get_node, get_neighbors, god_nodes, graph_stats, shortest_path, get_community.
-- Find/read source: search_code (full-text or semantic), then read_file and
-  list_files against the clone.
-- Docs & wikis: search_docs (RAG over generated docs + synced web sources),
-  list_docs, get_doc, list_sources.
-- Private git: set_credential / list_credentials / remove_credential.
-- External readers: lock_repo before walking a clone, unlock_repo after, so a
-  refresh does not pull mid-read.
-- Docs/RAG setup: get_docs_config, set_docs_config, and the test_* probes.
+add_repo and refresh_repo run in the background by default. Poll repo_status until ready or error before querying.`
 
-Many tools return a clear 'not enabled' error when the docs/RAG subsystem is
-off; enable it via set_docs_config.`
+const (
+	ToolProfileStandard = "standard"
+	ToolProfileFull     = "full"
+)
 
 // New builds the MCP server with all krabby tools registered. waitTimeout caps
 // how long wait=true management calls block before returning the in-progress
 // status (the build keeps running in the background); <=0 means no server-side
 // cap.
-func New(mgr *manager.Manager, version string, waitTimeout time.Duration) *mcp.Server {
+func New(mgr *manager.Manager, version string, waitTimeout time.Duration, profile string) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "krabby",
-		Title:   "krabby - multi-repo graphify knowledge graphs",
+		Title:   "Krabby codebase search and knowledge",
 		Version: version,
 	}, &mcp.ServerOptions{
 		Instructions: serverInstructions,
 	})
 
 	addManagementTools(server, mgr, waitTimeout)
-	addLeaseTools(server, mgr)
-	addCredentialTools(server, mgr)
 	addQueryTools(server, mgr)
 	addFileTools(server, mgr)
-	addDocTools(server, mgr)
+	addDocTools(server, mgr, profile == ToolProfileFull)
+	if profile == ToolProfileFull {
+		addLeaseTools(server, mgr)
+		addCredentialTools(server, mgr)
+	}
 
 	return server
 }
@@ -128,11 +117,8 @@ func viewRepo(mgr *manager.Manager, repo *registry.Repo) repoView {
 
 func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout time.Duration) {
 	addTool(server, &mcp.Tool{
-		Name: "list_repos",
-		Description: "List tracked repositories (paginated, ordered by id) with build status, currently " +
-			"running pipeline step, last commit and last build time. Use page/per_page to page through " +
-			"large fleets and search/owner to filter; the response includes the total match count so you " +
-			"can tell whether more pages exist without dumping every repo.",
+		Name:        "list_repos",
+		Description: "Discover tracked repository ids and build status when the target repo is unknown, or when the user asks for an inventory. Filter with search/owner and inspect one page; do not fetch every page routinely.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args listReposArgs) (*mcp.CallToolResult, any, error) {
 		opts := registry.ListOptions{
 			Page:    args.Page,
@@ -372,6 +358,11 @@ type credentialPatternArgs struct {
 	Pattern string `json:"pattern" jsonschema:"the credential pattern to remove, as shown by list_credentials"`
 }
 
+type listCredentialsArgs struct {
+	Page    int `json:"page,omitempty" jsonschema:"page number (default 1)"`
+	PerPage int `json:"per_page,omitempty" jsonschema:"credentials per page (default 50, max 200)"`
+}
+
 func addCredentialTools(server *mcp.Server, mgr *manager.Manager) {
 	addTool(server, &mcp.Tool{
 		Name: "set_credential",
@@ -395,13 +386,13 @@ func addCredentialTools(server *mcp.Server, mgr *manager.Manager) {
 	addTool(server, &mcp.Tool{
 		Name:        "list_credentials",
 		Description: "List stored git credential patterns (kind and username only; secrets are never returned).",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyArgs) (*mcp.CallToolResult, any, error) {
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args listCredentialsArgs) (*mcp.CallToolResult, any, error) {
 		creds, err := mgr.Credentials().List(ctx)
 		if err != nil {
 			return nil, nil, err
 		}
 
-		return jsonResult(creds), nil, nil
+		return jsonResult(pageSlice(creds, args.Page, args.PerPage, 50)), nil, nil
 	})
 
 	addTool(server, &mcp.Tool{
@@ -419,54 +410,57 @@ func addCredentialTools(server *mcp.Server, mgr *manager.Manager) {
 // ---- query tools (proxied to graphify serve) --------------------------------
 
 // repoField documents the shared repo selector on query tools.
-const repoField = "repository id (owner/name) to query; omit to query the merged cross-repo graph (must be enabled via graphify.merge)"
+const repoField = "repository id (owner/name) to query; always provide it when known, and omit only for explicit cross-repository analysis"
 
 type queryGraphArgs struct {
-	Question    string   `json:"question" jsonschema:"natural language question or keyword search"`
-	Repo        string   `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; omit to query the merged cross-repo graph (must be enabled via graphify.merge)"`
+	Question    string   `json:"question" jsonschema:"architectural or relationship question; use search_code instead for symbols, paths, literals, definitions, and usages"`
+	Repo        string   `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; always provide when known, omit only for explicit cross-repository analysis"`
 	Mode        string   `json:"mode,omitempty" jsonschema:"traversal mode: 'bfs' for broad context (default) or 'dfs' to trace a specific path"`
 	Depth       int      `json:"depth,omitempty" jsonschema:"traversal depth 1-6 (default 3)"`
-	TokenBudget int      `json:"token_budget,omitempty" jsonschema:"max output tokens (default 2000)"`
+	TokenBudget int      `json:"token_budget,omitempty" jsonschema:"max output tokens (default 2000, max 4000)"`
 	Context     []string `json:"context_filter,omitempty" jsonschema:"optional explicit edge-context filter, e.g. ['call','field']"`
 }
 
 type nodeArgs struct {
 	Label string `json:"label" jsonschema:"node label or ID to look up"`
-	Repo  string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; omit to query the merged cross-repo graph (must be enabled via graphify.merge)"`
+	Repo  string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; always provide when known, omit only for explicit cross-repository analysis"`
 }
 
 type neighborsArgs struct {
 	Label          string `json:"label" jsonschema:"node label or ID"`
 	RelationFilter string `json:"relation_filter,omitempty" jsonschema:"optional: filter by relation type (e.g. 'calls', 'references', 'method', 'contains'). Direction is shown by arrows in the output (--> successor, <-- predecessor), not by the filter. An unknown relation returns an error listing the node's valid relations; get_node also lists them under 'Relations:'"`
-	Repo           string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; omit to query the merged cross-repo graph (must be enabled via graphify.merge)"`
+	Repo           string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; always provide when known, omit only for explicit cross-repository analysis"`
+	Page           int    `json:"page,omitempty" jsonschema:"page number (default 1)"`
+	PerPage        int    `json:"per_page,omitempty" jsonschema:"neighbors per page (default 50, max 200)"`
 }
 
 type communityArgs struct {
 	CommunityID int    `json:"community_id" jsonschema:"community ID (0-indexed by size)"`
-	Repo        string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; omit to query the merged cross-repo graph (must be enabled via graphify.merge)"`
+	Repo        string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; always provide when known, omit only for explicit cross-repository analysis"`
+	Page        int    `json:"page,omitempty" jsonschema:"page number (default 1)"`
+	PerPage     int    `json:"per_page,omitempty" jsonschema:"nodes per page (default 50, max 200)"`
 }
 
 type godNodesArgs struct {
-	TopN int    `json:"top_n,omitempty" jsonschema:"number of nodes to return (default 10)"`
-	Repo string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; omit to query the merged cross-repo graph (must be enabled via graphify.merge)"`
+	TopN int    `json:"top_n,omitempty" jsonschema:"number of nodes to return (default 10, max 50)"`
+	Repo string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; always provide when known, omit only for explicit cross-repository analysis"`
 }
 
 type statsArgs struct {
-	Repo string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; omit to query the merged cross-repo graph (must be enabled via graphify.merge)"`
+	Repo string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; always provide when known, omit only for explicit cross-repository analysis"`
 }
 
 type shortestPathArgs struct {
 	Source  string `json:"source" jsonschema:"source concept label or keyword"`
 	Target  string `json:"target" jsonschema:"target concept label or keyword"`
-	MaxHops int    `json:"max_hops,omitempty" jsonschema:"maximum hops to consider (default 8)"`
-	Repo    string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; omit to query the merged cross-repo graph (must be enabled via graphify.merge)"`
+	MaxHops int    `json:"max_hops,omitempty" jsonschema:"maximum hops to consider (default 8, max 12)"`
+	Repo    string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; always provide when known, omit only for explicit cross-repository analysis"`
 }
 
 func addQueryTools(server *mcp.Server, mgr *manager.Manager) {
 	addTool(server, &mcp.Tool{
-		Name: "query_graph",
-		Description: "Search the code knowledge graph of one repo (or all repos merged) using BFS or DFS. " +
-			"Returns relevant nodes and edges as text context. Best first call for any codebase question.",
+		Name:        "query_graph",
+		Description: "Answer architecture, dependency, call/data-flow, and cross-file relationship questions by traversing the code knowledge graph. Use search_code instead for symbols, paths, literals, definitions, usages, or implementation locations.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args queryGraphArgs) (*mcp.CallToolResult, any, error) {
 		call := map[string]any{"question": args.Question}
 		setIf(call, "mode", args.Mode)
@@ -493,10 +487,12 @@ func addQueryTools(server *mcp.Server, mgr *manager.Manager) {
 
 	addTool(server, &mcp.Tool{
 		Name:        "get_neighbors",
-		Description: "Get all direct neighbors of a node with edge details. " + repoField + ".",
+		Description: "Inspect one bounded page of direct neighbors after query_graph or get_node identifies a target. " + repoField + ".",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args neighborsArgs) (*mcp.CallToolResult, any, error) {
 		call := map[string]any{"label": args.Label}
 		setIf(call, "relation_filter", args.RelationFilter)
+		setIfInt(call, "page", args.Page)
+		setIfInt(call, "per_page", args.PerPage)
 
 		res, err := mgr.CallGraphTool(ctx, args.Repo, "get_neighbors", call)
 
@@ -505,9 +501,12 @@ func addQueryTools(server *mcp.Server, mgr *manager.Manager) {
 
 	addTool(server, &mcp.Tool{
 		Name:        "get_community",
-		Description: "Get all nodes in a community by community ID. " + repoField + ".",
+		Description: "Inspect one bounded page of nodes in a known community. " + repoField + ".",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args communityArgs) (*mcp.CallToolResult, any, error) {
-		res, err := mgr.CallGraphTool(ctx, args.Repo, "get_community", map[string]any{"community_id": args.CommunityID})
+		call := map[string]any{"community_id": args.CommunityID}
+		setIfInt(call, "page", args.Page)
+		setIfInt(call, "per_page", args.PerPage)
+		res, err := mgr.CallGraphTool(ctx, args.Repo, "get_community", call)
 
 		return res, nil, err
 	})
@@ -552,13 +551,15 @@ type readFileArgs struct {
 	Repo     string `json:"repo" jsonschema:"repository id (owner/name) whose clone to read from"`
 	Path     string `json:"path" jsonschema:"repo-relative file path, e.g. 'listener/processor.go' (as shown in graph node src fields)"`
 	Offset   int64  `json:"offset,omitempty" jsonschema:"byte offset to start reading from (default 0); use with the truncated flag to page through large files"`
-	MaxBytes int    `json:"max_bytes,omitempty" jsonschema:"max bytes to return in this call (default and cap 524288)"`
+	MaxBytes int    `json:"max_bytes,omitempty" jsonschema:"max bytes to return (default 32768, max 131072)"`
 }
 
 type listFilesArgs struct {
 	Repo      string `json:"repo" jsonschema:"repository id (owner/name) whose clone to list"`
 	Subdir    string `json:"subdir,omitempty" jsonschema:"repo-relative directory to list (default: repository root)"`
 	Recursive bool   `json:"recursive,omitempty" jsonschema:"when true, walk the whole subtree (skips .git and graphify-out); otherwise list one level"`
+	Page      int    `json:"page,omitempty" jsonschema:"page number (default 1)"`
+	PerPage   int    `json:"per_page,omitempty" jsonschema:"entries per page (default 100, max 200)"`
 }
 
 func addFileTools(server *mcp.Server, mgr *manager.Manager) {
@@ -568,7 +569,7 @@ func addFileTools(server *mcp.Server, mgr *manager.Manager) {
 			"Use this to see the actual code behind a graph node (node 'src' fields give the path). " +
 			"Access is sandboxed to the repo; large files are truncated - page with offset until truncated is false.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args readFileArgs) (*mcp.CallToolResult, any, error) {
-		res, err := mgr.ReadRepoFile(ctx, args.Repo, args.Path, args.Offset, args.MaxBytes)
+		res, err := mgr.ReadRepoFile(ctx, args.Repo, args.Path, args.Offset, mcpReadSize(args.MaxBytes))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -577,11 +578,10 @@ func addFileTools(server *mcp.Server, mgr *manager.Manager) {
 	})
 
 	addTool(server, &mcp.Tool{
-		Name: "list_files",
-		Description: "List files and directories inside a tracked repository's clone. " +
-			"Use to explore layout before reading files. Set recursive=true for the full tree.",
+		Name:        "list_files",
+		Description: "Inspect one known directory, or discover a path when search_code cannot identify it. Do not request recursive=true unless the user explicitly needs a tree or inventory.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args listFilesArgs) (*mcp.CallToolResult, any, error) {
-		entries, err := mgr.ListRepoFiles(ctx, args.Repo, args.Subdir, args.Recursive)
+		entries, err := mgr.ListRepoFilesPage(ctx, args.Repo, args.Subdir, args.Recursive, args.Page, args.PerPage)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -604,12 +604,69 @@ func setIfInt(m map[string]any, key string, val int) {
 	}
 }
 
+func mcpReadSize(size int) int {
+	if size <= 0 {
+		return 32 * 1024
+	}
+	if size > 128*1024 {
+		return 128 * 1024
+	}
+	return size
+}
+
+func boundedCount(value, defaultValue, maxValue int) int {
+	if value <= 0 {
+		return defaultValue
+	}
+	if value > maxValue {
+		return maxValue
+	}
+	return value
+}
+
+type pageResult[T any] struct {
+	Items   []T  `json:"items"`
+	Total   int  `json:"total"`
+	Page    int  `json:"page"`
+	PerPage int  `json:"per_page"`
+	HasMore bool `json:"has_more"`
+}
+
+func pageSlice[T any](items []T, page, perPage, defaultPerPage int) pageResult[T] {
+	if page <= 0 {
+		page = 1
+	}
+	if perPage <= 0 {
+		perPage = defaultPerPage
+	}
+	if perPage > 200 {
+		perPage = 200
+	}
+
+	offset := len(items)
+	if page-1 <= len(items)/perPage {
+		offset = (page - 1) * perPage
+	}
+	if offset > len(items) {
+		offset = len(items)
+	}
+	end := offset + perPage
+	if end > len(items) {
+		end = len(items)
+	}
+
+	return pageResult[T]{
+		Items: items[offset:end], Total: len(items), Page: page,
+		PerPage: perPage, HasMore: end < len(items),
+	}
+}
+
 func textResult(text string) *mcp.CallToolResult {
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}
 }
 
 func jsonResult(v any) *mcp.CallToolResult {
-	b, err := json.MarshalIndent(v, "", "  ")
+	b, err := json.Marshal(v)
 	if err != nil {
 		return textResult(fmt.Sprintf("marshal error: %v", err))
 	}

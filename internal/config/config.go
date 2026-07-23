@@ -61,6 +61,10 @@ type Server struct {
 type MCP struct {
 	Path   string `cfg:"path" default:"/mcp"`
 	APIKey string `cfg:"api_key" log:"-"`
+	// ToolProfile controls the tools advertised to clients. "standard" exposes
+	// repository management and read/query/search tools; "full" additionally
+	// exposes credentials, leases, and docs/RAG administration.
+	ToolProfile string `cfg:"tool_profile" default:"standard"`
 	// WaitTimeout caps how long wait=true add_repo/refresh_repo calls block
 	// before returning the in-progress status. The build keeps running in the
 	// background either way; poll repo_status for the final state. 0 waits
@@ -171,8 +175,8 @@ type RAG struct {
 	ChunkOverlap int `cfg:"chunk_overlap" default:"200"`
 	// TopK is how many chunk matches to fetch before grouping into docs.
 	TopK int `cfg:"top_k" default:"20"`
-	// TopDocs is how many whole documents to return after grouping.
-	TopDocs int `cfg:"top_docs" default:"5"`
+	// TopDocs is how many ranked document excerpts to return after grouping.
+	TopDocs int `cfg:"top_docs" default:"3"`
 }
 
 // CodeRAG configures semantic search over raw source code. It indexes into a

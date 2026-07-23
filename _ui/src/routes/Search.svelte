@@ -1,6 +1,6 @@
 <script>
   // Code search supports local BM25 and semantic code vectors. Docs search uses
-  // the generated-document vector index and returns whole markdown documents.
+  // the generated-document vector index and returns bounded excerpts.
   import { onMount } from "svelte";
   import { api } from "../lib/api.js";
   import { navigate } from "../lib/router.js";
@@ -61,7 +61,7 @@
       const key = namespace ? "" : repoFilter;
       const response =
         searchScope === "docs"
-          ? await api.searchDocs(query, key, 10, namespace)
+          ? await api.searchDocs(query, key, 5, namespace)
           : await api.searchCode(query, repoFilter, searchMode, nextPage, perPage);
       if (seq !== searchSeq) return;
       results = searchScope === "docs" ? (Array.isArray(response) ? response : []) : response?.results || [];
@@ -220,7 +220,7 @@
               <span class="font-mono text-[11px] text-faint">{r.repo} / {r.path}</span>
               <span class="ml-auto text-[11px] text-faint">{pct(r.score)}</span>
             </div>
-            <pre class="m-0 max-h-56 overflow-hidden whitespace-pre-wrap px-3.5 py-2.5 font-mono text-[12px] leading-relaxed text-dim">{docExcerpt(r.content)}</pre>
+            <pre class="m-0 max-h-56 overflow-hidden whitespace-pre-wrap px-3.5 py-2.5 font-mono text-[12px] leading-relaxed text-dim">{docExcerpt(r.excerpt)}</pre>
           </button>
         {:else}
           <button class="card block w-full cursor-pointer overflow-hidden text-left transition-colors hover:border-accent" onclick={() => open(r)}>

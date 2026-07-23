@@ -19,6 +19,7 @@ server:
 
 mcp:
   path: /mcp
+  tool_profile: standard       # standard: repo + read/query/search; full: also admin tools
   # api_key: change-me            # require X-Api-Key / Bearer on /mcp
 
 graphify:

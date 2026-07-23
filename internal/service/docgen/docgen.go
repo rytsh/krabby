@@ -44,9 +44,10 @@ type DocMeta struct {
 
 // Manifest is the docs-index.json written into a repo's external docs directory.
 type Manifest struct {
-	Repo      string    `json:"repo"`
-	Model     string    `json:"model"`
-	Generated time.Time `json:"generated"`
+	Repo       string    `json:"repo"`
+	Model      string    `json:"model"`
+	PromptHash string    `json:"prompt_hash"`
+	Generated  time.Time `json:"generated"`
 	// Docs are the user-facing documents (the synthesized documentation.md).
 	Docs []DocMeta `json:"docs"`
 	// Summaries is the internal per-file summary cache used for incremental
@@ -277,6 +278,7 @@ func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir st
 	}
 
 	graph := g.loadGraph(clonePath)
+	promptHash := hashString(g.synthesisPrompt())
 
 	if err := os.MkdirAll(docsDir, 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir docs dir; %w", err)
@@ -340,7 +342,7 @@ func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir st
 	sort.Slice(summaries, func(i, j int) bool { return summaries[i].Path < summaries[j].Path })
 
 	// Synthesis: skip the LLM call when nothing changed and the doc exists.
-	docMeta, synthesized, synthErr := g.maybeSynthesize(ctx, repo, docsDir, graph, summaries, priorMan, regen)
+	docMeta, synthesized, synthErr := g.maybeSynthesize(ctx, repo, docsDir, graph, summaries, priorMan, regen, promptHash)
 
 	var docs []DocMeta
 	if docMeta != nil {
@@ -350,6 +352,7 @@ func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir st
 	man := &Manifest{
 		Repo:        repo,
 		Model:       g.llm.Model(),
+		PromptHash:  promptHash,
 		Generated:   time.Now(),
 		Docs:        docs,
 		Summaries:   summaries,
@@ -799,10 +802,11 @@ func (g *llmGenerator) maybeSynthesize(
 	summaries []DocMeta,
 	priorMan *Manifest,
 	regen int,
+	promptHash string,
 ) (*DocMeta, bool, error) {
 	docAbs := filepath.Join(docsDir, DocName)
 
-	if regen == 0 && priorMan != nil {
+	if regen == 0 && priorMan != nil && priorMan.PromptHash == promptHash {
 		for _, d := range priorMan.Docs {
 			if d.Path != DocName {
 				continue
@@ -818,10 +822,7 @@ func (g *llmGenerator) maybeSynthesize(
 		return nil, false, fmt.Errorf("no source files to document")
 	}
 
-	system := g.cfg.Prompt
-	if strings.TrimSpace(system) == "" {
-		system = DefaultPrompt
-	}
+	system := g.synthesisPrompt()
 
 	var user strings.Builder
 	fmt.Fprintf(&user, "Repository: %s\n\n", repo)
@@ -853,6 +854,14 @@ func (g *llmGenerator) maybeSynthesize(
 		Title:     "Documentation",
 		Generated: time.Now(),
 	}, true, nil
+}
+
+func (g *llmGenerator) synthesisPrompt() string {
+	if strings.TrimSpace(g.cfg.Prompt) == "" {
+		return DefaultPrompt
+	}
+
+	return g.cfg.Prompt
 }
 
 // joinSummaries concatenates summary contents within a byte budget. When the

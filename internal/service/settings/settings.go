@@ -73,6 +73,12 @@ type Settings struct {
 	CodeRAGInclude      []string `bw:"code_rag_include"       json:"code_rag_include"`
 	CodeRAGExclude      []string `bw:"code_rag_exclude"       json:"code_rag_exclude"`
 
+	// TaskConcurrency caps how many background tasks (repo refresh/generate,
+	// web-source sync, reindex) run at once through the central work queue.
+	// <= 0 means the built-in default. Raising it processes more repositories
+	// in parallel; lowering it protects git/graphify/LLM/embedder backends.
+	TaskConcurrency int `bw:"task_concurrency" json:"task_concurrency"`
+
 	// System: git polling and webhook verification (previously file/env
 	// config). GitPollInterval semantics: 0 = default (1h), negative =
 	// polling disabled.
@@ -100,7 +106,7 @@ func Defaults() Settings {
 		RAGChunkSize:    1200,
 		RAGChunkOverlap: 200,
 		RAGTopK:         20,
-		RAGTopDocs:      5,
+		RAGTopDocs:      3,
 
 		CodeEmbedBatch:       64,
 		CodeEmbedConcurrency: 4,
@@ -111,6 +117,9 @@ func Defaults() Settings {
 		CodeRAGChunkOverlap: 1000,
 		CodeRAGTopK:         10,
 
+		// Keep the queue.DefaultConcurrency default in sync with this value.
+		TaskConcurrency: 3,
+
 		GitPollInterval: time.Hour,
 	}
 }
@@ -119,7 +128,7 @@ func Defaults() Settings {
 // booleans indicating whether each is set.
 type Redacted struct {
 	Settings
-	DocsDefaultPrompt  string `json:"docs_default_prompt"`
+	DocsDefaultPrompt  string `json:"docs_default_prompt,omitempty"`
 	LLMAPIKeySet       bool   `json:"llm_api_key_set"`
 	EmbedAPIKeySet     bool   `json:"embed_api_key_set"`
 	CodeEmbedAPIKeySet bool   `json:"code_embed_api_key_set"`
@@ -191,15 +200,17 @@ type Patch struct {
 	CodeRAGInclude      *[]string `json:"code_rag_include"`
 	CodeRAGExclude      *[]string `json:"code_rag_exclude"`
 
+	TaskConcurrency *int           `json:"task_concurrency"`
 	GitPollInterval *time.Duration `json:"git_poll_interval"`
 	WebhookSecret   *string        `json:"webhook_secret"`
 }
 
-// RuntimeOnly reports whether a patch changes only scheduler/webhook fields.
-// Those settings do not affect LLM/embedder clients or vector contents, so
-// callers can persist them without rebuilding clients and reindexing all data.
+// RuntimeOnly reports whether a patch changes only scheduler/webhook/queue
+// fields. Those settings do not affect LLM/embedder clients or vector contents,
+// so callers can persist them without rebuilding clients and reindexing all
+// data.
 func (p Patch) RuntimeOnly() bool {
-	return (p.GitPollInterval != nil || p.WebhookSecret != nil) &&
+	return (p.GitPollInterval != nil || p.WebhookSecret != nil || p.TaskConcurrency != nil) &&
 		p.DocsEnabled == nil && p.DocsConcurrency == nil &&
 		p.DocsSummaryModel == nil && p.DocsMaxGroups == nil &&
 		p.DocsInclude == nil && p.DocsExclude == nil && p.DocsPrompt == nil &&
@@ -326,6 +337,9 @@ func (p Patch) Apply(base Settings) Settings {
 	if p.CodeRAGExclude != nil {
 		base.CodeRAGExclude = *p.CodeRAGExclude
 	}
+	if p.TaskConcurrency != nil {
+		base.TaskConcurrency = *p.TaskConcurrency
+	}
 	if p.GitPollInterval != nil {
 		base.GitPollInterval = *p.GitPollInterval
 	}
@@ -350,12 +364,12 @@ type Store struct {
 	mcpBucket *bw.Bucket[MCPKey]
 }
 
-// settingsSchemaVersion v6 adds git_poll_interval and webhook_secret
-// (system settings moved out of the file/env config). v5 added
-// docs_summary_model; v4 docs_max_groups; v3 embed_concurrency /
-// code_embed_concurrency. Bumping the version lets bw migrate existing
-// settings records in place.
-const settingsSchemaVersion = 6
+// settingsSchemaVersion v7 adds task_concurrency (central work-queue limit).
+// v6 added git_poll_interval and webhook_secret (system settings moved out of
+// the file/env config). v5 added docs_summary_model; v4 docs_max_groups; v3
+// embed_concurrency / code_embed_concurrency. Bumping the version lets bw
+// migrate existing settings records in place.
+const settingsSchemaVersion = 7
 
 // New opens the settings bucket. If no record exists yet, seed is persisted as
 // the initial configuration (seeded from file/env config by the caller).

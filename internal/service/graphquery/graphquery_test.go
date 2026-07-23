@@ -113,6 +113,18 @@ func TestGetCommunity(t *testing.T) {
 	}
 }
 
+func TestGraphPagesAreBounded(t *testing.T) {
+	g := loadSmall(t)
+	neighbors := g.GetNeighborsPage("Service", "", 1, 1)
+	if !strings.Contains(neighbors, "per_page 1, has_more=true") {
+		t.Fatalf("neighbors are not paged:\n%s", neighbors)
+	}
+	community := g.GetCommunityPage(0, 1, 1)
+	if !strings.Contains(community, "per_page 1, has_more=true") {
+		t.Fatalf("community is not paged:\n%s", community)
+	}
+}
+
 func TestQueryGraph(t *testing.T) {
 	g := loadSmall(t)
 	got := g.QueryGraph("Service", QueryGraphOpts{})

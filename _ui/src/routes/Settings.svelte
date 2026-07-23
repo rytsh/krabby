@@ -123,7 +123,10 @@
     runtimeMsg = "";
     runtimeErr = "";
     try {
-      const patch = { git_poll_interval: Number(docsCfg.git_poll_interval) };
+      const patch = {
+        git_poll_interval: Number(docsCfg.git_poll_interval),
+        task_concurrency: Number(docsCfg.task_concurrency),
+      };
       if (clearWebhook) patch.webhook_secret = "";
       else if (webhookSecret) patch.webhook_secret = webhookSecret;
       docsCfg = await api.setDocsConfig(patch);
@@ -397,7 +400,9 @@
 </div>
 
 <h2 class="mb-1 mt-10 text-[15px] font-semibold">Runtime</h2>
-<p class="text-dim">Repository polling and webhook security. Changes apply without a restart.</p>
+<p class="text-dim">
+  Repository polling, background task concurrency and webhook security. Changes apply without a restart.
+</p>
 
 {#if docsCfg}
   <div class="card mt-3 p-4">
@@ -415,6 +420,14 @@
           <option value="21600000000000">every 6 hours</option>
           <option value="86400000000000">daily</option>
         </select>
+      </label>
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Concurrent tasks
+        <input class="input" type="number" min="1" max="64" bind:value={docsCfg.task_concurrency} />
+        <span class="text-[12px] text-faint">
+          How many background tasks (refresh, generate, web sync, reindex) run at once. Lower to protect
+          git/graphify/LLM/embedder backends; raise to process more repositories in parallel.
+        </span>
       </label>
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Git webhook secret {docsCfg.webhook_secret_set ? "(set)" : "(not set)"}

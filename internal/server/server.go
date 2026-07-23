@@ -79,6 +79,7 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	api.GET("/repos", server.Wrap(listRepos(mgr)))
 	api.GET("/repos/owners", server.Wrap(listRepoOwners(mgr)))
 	api.GET("/repos/active", server.Wrap(listActiveRepos(mgr)))
+	api.GET("/tasks", server.Wrap(listTasks(mgr)))
 	api.POST("/repos", server.Wrap(addRepo(mgr)))
 
 	// Repo ids are full paths (host/group/.../name) with any number of "/"
@@ -440,6 +441,15 @@ func listActiveRepos(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
+// listTasks returns the central work-queue snapshot: the concurrency limit,
+// live running/queued counters and the queued/running/recent tasks. Powers the
+// Activity page's task view.
+func listTasks(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		return c.SendJSON(mgr.TaskSnapshot())
+	}
+}
+
 func addRepo(mgr *manager.Manager) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req addRepoRequest
@@ -740,7 +750,7 @@ func getDoc(mgr *manager.Manager) ada.HandlerFunc {
 			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": "path query param is required"})
 		}
 
-		doc, err := mgr.GetDoc(c.Request.Context(), repoID(c.Request), path)
+		doc, err := mgr.GetDoc(c.Request.Context(), repoID(c.Request), path, 0, 0)
 		if err != nil {
 			return c.SetStatus(http.StatusNotFound).SendJSON(map[string]string{"error": err.Error()})
 		}

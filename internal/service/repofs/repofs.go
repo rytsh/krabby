@@ -47,9 +47,19 @@ type FileContent struct {
 
 // Entry is one item in a directory listing.
 type Entry struct {
-	Path  string `json:"path"`           // repo-relative, slash-separated
+	Path  string `json:"path"` // repo-relative, slash-separated
 	IsDir bool   `json:"is_dir"`
 	Size  int64  `json:"size,omitempty"` // bytes, files only
+}
+
+// EntryPage is a bounded page of a directory listing. Capped means the listing
+// reached the repository-wide safety limit and later entries are unavailable.
+type EntryPage struct {
+	Entries []Entry `json:"entries"`
+	Page    int     `json:"page"`
+	PerPage int     `json:"per_page"`
+	HasMore bool    `json:"has_more"`
+	Capped  bool    `json:"capped,omitempty"`
 }
 
 // clean normalises a user-supplied repo-relative path and rejects anything that
@@ -173,6 +183,44 @@ func ListFiles(rootDir, subdir string, recursive bool) ([]Entry, error) {
 	}
 
 	return entries, nil
+}
+
+// ListFilesPage returns a bounded page from the safety-capped stable listing.
+func ListFilesPage(rootDir, subdir string, recursive bool, page, perPage int) (EntryPage, error) {
+	if page <= 0 {
+		page = 1
+	}
+	if perPage <= 0 {
+		perPage = 100
+	}
+	if perPage > 200 {
+		perPage = 200
+	}
+
+	entries, err := ListFiles(rootDir, subdir, recursive)
+	if err != nil {
+		return EntryPage{}, err
+	}
+
+	offset := len(entries)
+	if page-1 <= len(entries)/perPage {
+		offset = (page - 1) * perPage
+	}
+	if offset > len(entries) {
+		offset = len(entries)
+	}
+	end := offset + perPage
+	if end > len(entries) {
+		end = len(entries)
+	}
+
+	return EntryPage{
+		Entries: entries[offset:end],
+		Page:    page,
+		PerPage: perPage,
+		HasMore: end < len(entries),
+		Capped:  len(entries) == MaxListEntries,
+	}, nil
 }
 
 func listShallow(root *os.Root, dir string) ([]Entry, error) {

@@ -14,6 +14,7 @@ import (
 	"github.com/rytsh/krabby/internal/service/docgen"
 	"github.com/rytsh/krabby/internal/service/embedder"
 	"github.com/rytsh/krabby/internal/service/llm"
+	"github.com/rytsh/krabby/internal/service/queue"
 	"github.com/rytsh/krabby/internal/service/rag"
 	"github.com/rytsh/krabby/internal/service/repofs"
 	"github.com/rytsh/krabby/internal/service/settings"
@@ -195,6 +196,10 @@ func (m *Manager) PatchDocsConfig(ctx context.Context, patch settings.Patch) (se
 			return settings.Redacted{}, err
 		}
 
+		// Runtime-only patches skip the client rebuild, so apply the queue
+		// concurrency change here directly.
+		m.SetTaskConcurrency(saved.TaskConcurrency)
+
 		return redactSettings(saved), nil
 	}
 
@@ -211,6 +216,8 @@ func (m *Manager) setDocsConfig(ctx context.Context, next settings.Settings) (se
 		return settings.Redacted{}, err
 	}
 
+	m.SetTaskConcurrency(saved.TaskConcurrency)
+
 	if err := m.Configure(ctx, saved); err != nil {
 		return redactSettings(saved), fmt.Errorf("settings saved but rebuild failed; %w", err)
 	}
@@ -224,6 +231,12 @@ func (m *Manager) setDocsConfig(ctx context.Context, next settings.Settings) (se
 }
 
 func redactSettings(s settings.Settings) settings.Redacted {
+	// Installs migrated to the task_concurrency setting have 0 stored; present
+	// the effective default so the UI shows the value actually applied.
+	if s.TaskConcurrency <= 0 {
+		s.TaskConcurrency = queue.DefaultConcurrency
+	}
+
 	r := s.Redact()
 	r.DocsDefaultPrompt = docgen.DefaultPrompt
 
@@ -326,7 +339,7 @@ func (m *Manager) buildBundle(s settings.Settings) (*docsBundle, error) {
 			}
 
 			b.store = store
-			b.rag = rag.New(ragConfig(s), emb, store, m.repoDocsDir)
+			b.rag = rag.New(ragConfig(s), emb, store)
 		}
 	}
 
@@ -613,7 +626,7 @@ func docsFilter(scope, key string) (vectorstore.Filter, error) {
 	}
 }
 
-// SearchDocs returns the whole markdown documents most relevant to a question.
+// SearchDocs returns bounded markdown excerpts most relevant to a question.
 // scope selects where to search (all/repos/sources); key restricts to one
 // repo id or web-source key ("web:<name>") and wins over scope. topDocs <= 0
 // uses the RAG default.
@@ -685,7 +698,7 @@ func (m *Manager) ListDocs(ctx context.Context, repoID string) ([]docgen.DocMeta
 
 // GetDoc returns one generated markdown doc. Path is relative to that repo's
 // external docs directory and access is sandboxed to it.
-func (m *Manager) GetDoc(ctx context.Context, repoID, docPath string) (*repofs.FileContent, error) {
+func (m *Manager) GetDoc(ctx context.Context, repoID, docPath string, offset int64, maxBytes int) (*repofs.FileContent, error) {
 	if m.docsRootDir == "" {
 		return nil, ErrDocsDisabled
 	}
@@ -695,7 +708,7 @@ func (m *Manager) GetDoc(ctx context.Context, repoID, docPath string) (*repofs.F
 		return nil, err
 	}
 
-	return repofs.ReadFile(dir, docPath, 0, 0)
+	return repofs.ReadFile(dir, docPath, offset, maxBytes)
 }
 
 // repoDocsDir resolves a docs key to its markdown directory: "web:<name>"

@@ -59,8 +59,8 @@ zero-infrastructure promise.
 
  query path (MCP tool / REST):
    question ─► embedder.Embed(question) ─► vectorstore.Search(topK)
-            ─► collect distinct doc paths (ranked) ─► read WHOLE markdown files
-            ─► return [{repo, path, title, score, content}]  (file-level)
+            ─► collect distinct doc paths (ranked)
+            ─► return bounded [{repo, path, title, score, excerpt}]
 ```
 
 ### New packages (`internal/service/...`)
@@ -184,7 +184,7 @@ System-level `Config` helpers still derive storage paths such as
   external generated-docs directory.
 - New Manager methods (thin, delegate to rag/docgen):
   - `SearchDocs(ctx, repo, question, topDocs) ([]rag.Doc, error)`
-  - `GetDoc(ctx, repo, docPath) (content, error)`
+  - `GetDoc(ctx, repo, docPath, offset, maxBytes) (content, error)`
   - `ListDocs(ctx, repo) ([]docgen.DocMeta, error)`
   - `AskDocs(ctx, repo, question) (answer, sources, error)` (optional; uses llm)
 
@@ -192,13 +192,13 @@ System-level `Config` helpers still derive storage paths such as
 
 | Tool | Purpose |
 | --- | --- |
-| `list_docs` | List generated doc files for a repo (or all). |
-| `get_doc` | Return one whole markdown doc by path. |
-| `search_docs` | RAG: return the top whole markdown docs relevant to a question. |
+| `list_docs` | Page through generated doc metadata for one repo. |
+| `get_doc` | Read a known markdown path with byte pagination. |
+| `search_docs` | Return bounded excerpts from the most relevant docs. |
 | `ask_docs` | (optional) RAG + chat LLM: answer a question, cite doc sources. |
 
-All take optional `repo` (owner/name); omit = across all repos, mirroring the
-graph tools.
+`list_docs` and `get_doc` require a repo. For `search_docs`, pass a repo or
+`web:<collection>` whenever known; omit it only for intentional broad search.
 
 ## REST endpoints (new)
 

@@ -77,10 +77,10 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
     {
       name: "Knowledge graph",
       tools: [
-        ["query_graph", "Search the code knowledge graph with BFS/DFS. Best first call for any codebase question."],
+        ["query_graph", "Analyze architecture, dependencies, flows, and cross-file relationships with BFS/DFS."],
         ["get_node", "Get full details for a node by label or ID."],
-        ["get_neighbors", "Get all direct neighbors of a node with edge details."],
-        ["get_community", "Get all nodes in a community by community ID."],
+        ["get_neighbors", "Page through direct neighbors of a node with edge details."],
+        ["get_community", "Page through nodes in a community by community ID."],
         ["god_nodes", "The most connected nodes — the core abstractions of the codebase."],
         ["graph_stats", "Node count, edge count, communities, confidence breakdown."],
         ["shortest_path", "Find the shortest path between two concepts in the graph."],
@@ -89,18 +89,18 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
     {
       name: "Files",
       tools: [
-        ["list_files", "List files and directories inside a tracked repository's clone."],
-        ["read_file", "Read the source of a file inside a tracked repository's clone."],
+        ["list_files", "Inspect a bounded page of files and directories in a tracked clone."],
+        ["read_file", "Read a bounded page of a known source file."],
       ],
     },
     {
       name: "Docs & search",
       tools: [
-        ["list_docs", "List the generated markdown documentation files for a repository."],
-        ["get_doc", "Return one whole generated markdown document by its doc path."],
-        ["search_docs", "RAG search across repo docs and named web-source collections."],
+        ["list_docs", "Page through generated documentation metadata for a repository."],
+        ["get_doc", "Read a bounded page of a known generated document."],
+        ["search_docs", "Return ranked excerpts from repo docs and named web-source collections."],
         ["list_sources", "List Custom web and Confluence collections and their web:<name> search keys."],
-        ["search_code", "Normal bw full-text or semantic source search, with locations and pagination."],
+        ["search_code", "First choice for symbols, paths, definitions, usages, and implementation locations."],
       ],
     },
     {

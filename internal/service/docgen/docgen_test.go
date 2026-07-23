@@ -375,6 +375,51 @@ func TestGenerateIncremental(t *testing.T) {
 	}
 }
 
+func TestGenerateResynthesizesWhenPromptChanges(t *testing.T) {
+	clone := t.TempDir()
+	writeSrc(t, clone, "a.go", "package a\n")
+
+	var calls int32
+	client := fakeLLM(t, &calls)
+	docsDir := filepath.Join(clone, "krabby-docs")
+
+	first, err := New(config.Docs{Prompt: "first prompt"}, client, nil, nil).
+		Generate(context.Background(), "r", clone, docsDir, false)
+	if err != nil {
+		t.Fatalf("first gen: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("first run calls = %d, want 2 (summary + synthesis)", calls)
+	}
+
+	second, err := New(config.Docs{Prompt: "second prompt"}, client, nil, nil).
+		Generate(context.Background(), "r", clone, docsDir, false)
+	if err != nil {
+		t.Fatalf("second gen: %v", err)
+	}
+	if calls != 3 {
+		t.Fatalf("prompt change calls = %d, want 3 (synthesis only)", calls)
+	}
+	if !second.ChangedDocs {
+		t.Fatal("prompt change did not mark documentation as changed")
+	}
+	if first.PromptHash == "" || first.PromptHash == second.PromptHash {
+		t.Fatalf("prompt hashes = %q and %q, want different non-empty hashes", first.PromptHash, second.PromptHash)
+	}
+
+	third, err := New(config.Docs{Prompt: "second prompt"}, client, nil, nil).
+		Generate(context.Background(), "r", clone, docsDir, false)
+	if err != nil {
+		t.Fatalf("third gen: %v", err)
+	}
+	if calls != 3 {
+		t.Fatalf("unchanged prompt made another LLM call: %d", calls)
+	}
+	if third.ChangedDocs {
+		t.Fatal("unchanged prompt marked documentation as changed")
+	}
+}
+
 func TestMigratesOldPerFileLayout(t *testing.T) {
 	clone := t.TempDir()
 	writeSrc(t, clone, "a.go", "package a\n")

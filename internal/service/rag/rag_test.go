@@ -69,11 +69,7 @@ func newTestService(t *testing.T, docsDirs map[string]string) *Service {
 
 	t.Cleanup(func() { _ = store.Close() })
 
-	resolver := func(_ context.Context, repo string) (string, error) {
-		return docsDirs[repo], nil
-	}
-
-	return New(cfg, emb, store, resolver)
+	return New(cfg, emb, store)
 }
 
 func writeDocs(t *testing.T, files map[string]string) string {
@@ -95,7 +91,7 @@ func writeDocs(t *testing.T, files map[string]string) string {
 	return dir
 }
 
-func TestIndexAndRetrieveWholeDoc(t *testing.T) {
+func TestIndexAndRetrieveExcerpt(t *testing.T) {
 	ctx := context.Background()
 
 	docsDir := writeDocs(t, map[string]string{
@@ -128,9 +124,8 @@ func TestIndexAndRetrieveWholeDoc(t *testing.T) {
 		t.Fatalf("title = %q", d.Title)
 	}
 
-	// Whole file, not just the matching chunk.
-	if !strings.Contains(d.Content, "# Beta Worker") || !strings.Contains(d.Content, "processes beta jobs") {
-		t.Fatalf("content is not the whole doc: %q", d.Content)
+	if !strings.Contains(d.Excerpt, "# Beta Worker") || !strings.Contains(d.Excerpt, "processes beta jobs") {
+		t.Fatalf("excerpt does not contain matching context: %q", d.Excerpt)
 	}
 
 	// Nested docs are reachable too.
@@ -141,6 +136,35 @@ func TestIndexAndRetrieveWholeDoc(t *testing.T) {
 
 	if len(docs) != 1 || docs[0].Path != "sub/gamma.md" {
 		t.Fatalf("gamma doc = %+v", docs)
+	}
+}
+
+func TestRetrieveClampsCountAndExcerpt(t *testing.T) {
+	ctx := context.Background()
+	long := strings.Repeat("alpha ", MaxExcerptRunes+100)
+	docsDir := writeDocs(t, map[string]string{
+		"a.md": long,
+		"b.md": "alpha beta",
+		"c.md": "alpha gamma",
+		"d.md": "alpha delta",
+		"e.md": "alpha epsilon",
+		"f.md": "alpha zeta",
+	})
+	s := newTestService(t, nil)
+	if err := s.Index(ctx, "o/r", docsDir); err != nil {
+		t.Fatal(err)
+	}
+	docs, err := s.Retrieve(ctx, vectorstore.FilterKey("o/r"), "alpha", 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docs) > MaxTopDocs {
+		t.Fatalf("returned %d docs, max is %d", len(docs), MaxTopDocs)
+	}
+	for _, doc := range docs {
+		if len([]rune(doc.Excerpt)) > MaxExcerptRunes {
+			t.Fatalf("excerpt has %d runes", len([]rune(doc.Excerpt)))
+		}
 	}
 }
 

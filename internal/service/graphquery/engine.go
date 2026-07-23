@@ -154,9 +154,9 @@ func (e *Engine) Call(path, tool string, args map[string]any) (string, error) {
 	case "get_node":
 		return g.GetNode(argStr(args, "label")), nil
 	case "get_neighbors":
-		return g.GetNeighbors(argStr(args, "label"), argStr(args, "relation_filter")), nil
+		return g.GetNeighborsPage(argStr(args, "label"), argStr(args, "relation_filter"), argInt(args, "page"), argInt(args, "per_page")), nil
 	case "get_community":
-		return g.GetCommunity(argInt(args, "community_id")), nil
+		return g.GetCommunityPage(argInt(args, "community_id"), argInt(args, "page"), argInt(args, "per_page")), nil
 	case "god_nodes":
 		return g.GodNodes(argInt(args, "top_n")), nil
 	case "graph_stats":

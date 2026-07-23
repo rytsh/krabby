@@ -1,9 +1,7 @@
 // Package rag wires the documentation markdown, the embedder and the vector
 // store into an indexing + retrieval service.
 //
-// Retrieval is file-level: the vector index only routes a question to the most
-// relevant markdown documents; the WHOLE markdown file(s) are then returned to
-// the caller/LLM (not just the matching chunks).
+// Retrieval returns bounded excerpts from the most relevant markdown documents.
 package rag
 
 import (
@@ -20,36 +18,35 @@ import (
 	"github.com/rytsh/krabby/internal/config"
 	"github.com/rytsh/krabby/internal/service/docgen"
 	"github.com/rytsh/krabby/internal/service/embedder"
-	"github.com/rytsh/krabby/internal/service/repofs"
 	"github.com/rytsh/krabby/internal/service/vectorstore"
 )
 
-// Doc is a whole markdown document returned by retrieval.
+const (
+	DefaultTopDocs  = 3
+	MaxTopDocs      = 5
+	MaxExcerptRunes = 4000
+)
+
+// Doc is a ranked documentation excerpt returned by retrieval.
 type Doc struct {
-	Repo    string  `json:"repo"`
-	Path    string  `json:"path"` // path relative to the repo's docs directory
-	Title   string  `json:"title"`
-	Score   float32 `json:"score"` // best chunk score that surfaced this doc
-	Content string  `json:"content"`
+	Repo      string  `json:"repo"`
+	Path      string  `json:"path"` // path relative to the repo's docs directory
+	Title     string  `json:"title"`
+	Score     float32 `json:"score"` // best chunk score that surfaced this doc
+	Excerpt   string  `json:"excerpt"`
+	Truncated bool    `json:"truncated,omitempty"`
 }
 
-// DocsDirResolver maps a repo id to its markdown docs directory. Used by
-// Retrieve to read the whole document files behind the chunk matches.
-type DocsDirResolver func(ctx context.Context, repo string) (string, error)
-
-// Service indexes generated docs and retrieves whole docs for a question.
+// Service indexes generated docs and retrieves bounded excerpts for a question.
 type Service struct {
-	cfg     config.RAG
-	emb     *embedder.Client
-	store   vectorstore.Store
-	docsDir DocsDirResolver
+	cfg   config.RAG
+	emb   *embedder.Client
+	store vectorstore.Store
 }
 
-// New builds a RAG service. emb and store must be non-nil; callers gate on
-// rag.enabled + configured embedder/store before constructing. docsDir resolves
-// a repo id to its docs directory for whole-file retrieval.
-func New(cfg config.RAG, emb *embedder.Client, store vectorstore.Store, docsDir DocsDirResolver) *Service {
-	return &Service{cfg: cfg, emb: emb, store: store, docsDir: docsDir}
+// New builds a RAG service. emb and store must be non-nil.
+func New(cfg config.RAG, emb *embedder.Client, store vectorstore.Store) *Service {
+	return &Service{cfg: cfg, emb: emb, store: store}
 }
 
 // Index (re)builds the vector index for a repo's generated docs. It reads the
@@ -164,7 +161,7 @@ func (s *Service) HasRepo(ctx context.Context, repo string) (bool, error) {
 	return s.store.HasRepo(ctx, repo)
 }
 
-// Retrieve returns up to topDocs whole markdown documents most relevant to the
+// Retrieve returns up to topDocs bounded excerpts most relevant to the
 // question. The filter selects which keys (repos, web-source collections or
 // both) are searched; a zero filter searches everything. topDocs <= 0 uses
 // the configured default (RAG.TopDocs).
@@ -178,7 +175,10 @@ func (s *Service) Retrieve(ctx context.Context, filter vectorstore.Filter, quest
 	}
 
 	if topDocs <= 0 {
-		topDocs = 5
+		topDocs = DefaultTopDocs
+	}
+	if topDocs > MaxTopDocs {
+		topDocs = MaxTopDocs
 	}
 
 	topK := s.cfg.TopK
@@ -189,6 +189,9 @@ func (s *Service) Retrieve(ctx context.Context, filter vectorstore.Filter, quest
 	// Fetch more chunks than docs wanted so grouping has material to rank.
 	if topK < topDocs {
 		topK = topDocs * 4
+	}
+	if topK > 40 {
+		topK = 40
 	}
 
 	vecs, err := s.emb.Embed(ctx, []string{question})
@@ -236,43 +239,28 @@ func (s *Service) Retrieve(ctx context.Context, filter vectorstore.Filter, quest
 
 		m := best[k]
 
-		content, err := s.readDoc(ctx, k.repo, k.path)
-		if err != nil {
-			// Stale index entry (doc removed/renamed); skip it, don't fail retrieval.
-			slog.Warn("rag: skip unreadable doc", "repo", k.repo, "doc", k.path, "error", err)
-
-			continue
-		}
+		excerpt, truncated := boundedExcerpt(m.Payload.Chunk)
 
 		docs = append(docs, Doc{
-			Repo:    k.repo,
-			Path:    k.path,
-			Title:   m.Payload.Title,
-			Score:   m.Score,
-			Content: content,
+			Repo:      k.repo,
+			Path:      k.path,
+			Title:     m.Payload.Title,
+			Score:     m.Score,
+			Excerpt:   excerpt,
+			Truncated: truncated,
 		})
 	}
 
 	return docs, nil
 }
 
-// readDoc reads a whole markdown document, sandboxed to the repo's docs dir.
-func (s *Service) readDoc(ctx context.Context, repo, docPath string) (string, error) {
-	if s.docsDir == nil {
-		return "", errors.New("docs dir resolver not configured")
+func boundedExcerpt(content string) (string, bool) {
+	runes := []rune(content)
+	if len(runes) <= MaxExcerptRunes {
+		return content, false
 	}
 
-	dir, err := s.docsDir(ctx, repo)
-	if err != nil {
-		return "", err
-	}
-
-	fc, err := repofs.ReadFile(dir, docPath, 0, 0)
-	if err != nil {
-		return "", err
-	}
-
-	return fc.Content, nil
+	return string(runes[:MaxExcerptRunes]), true
 }
 
 // manifestTitles maps doc path -> title from the docgen manifest, when present.
