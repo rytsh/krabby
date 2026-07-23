@@ -1,7 +1,7 @@
 <script>
   import { onMount, onDestroy } from "svelte";
   import { api } from "../lib/api.js";
-  import { path as routePath } from "../lib/router.js";
+  import { path as routePath, link } from "../lib/router.js";
   import { fmtDate } from "../lib/format.js";
   import Status from "../lib/Status.svelte";
   import CodeView from "../lib/CodeView.svelte";
@@ -667,6 +667,18 @@
         <div class="flex items-center justify-between gap-2">
           <span class="text-dim">Branch</span>
           <span class="text-faint">{repo.branch || "default"}</span>
+        </div>
+        <div class="flex items-center justify-between gap-2">
+          <span class="text-dim">Namespace</span>
+          <a
+            href="/namespaces"
+            use:link
+            class="inline-flex items-center gap-1 font-mono text-faint transition-colors hover:text-fg"
+            title="Namespace this repository belongs to"
+          >
+            <Icon name="tag" size={12} />
+            {repo.namespace || "default"}
+          </a>
         </div>
         <div class="flex items-center justify-between gap-2">
           <span class="text-dim">Last build</span>

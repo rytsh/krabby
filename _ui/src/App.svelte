@@ -156,6 +156,26 @@
   // fetched lazily when its group is expanded (see toggleGroup/expandGroup).
   onMount(loadOwners);
 
+  // Walk the owner tree and fetch repos for every group that is already
+  // expanded. loadOwnerRepos is cached, so this is a no-op for groups whose
+  // repos are already loaded.
+  function loadExpandedOwners(nodes) {
+    for (const node of nodes) {
+      if (!expanded[node.key]) continue;
+      if (node.owner !== null) loadOwnerRepos(node.owner);
+      if (node.children.length > 0) loadExpandedOwners(node.children);
+    }
+  }
+
+  // On load (and whenever the tree rebuilds) restore the repos of the groups
+  // that were left expanded from a previous session. Without this the expanded
+  // folders render empty after a page refresh until the user toggles them,
+  // because repos are only fetched on manual expand.
+  $effect(() => {
+    const tree = ownerTree;
+    untrack(() => loadExpandedOwners(tree));
+  });
+
   // Build metadata (version / commit / date) for the sidebar footer, so the
   // running build is identifiable from every page.
   let build = $state(null);
