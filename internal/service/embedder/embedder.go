@@ -21,6 +21,11 @@ import (
 // ErrNotConfigured is returned when no embeddings base URL is configured.
 var ErrNotConfigured = errors.New("embedder not configured (set embedder.base_url)")
 
+// maxSafeBatch is the largest per-request input count sent to the embeddings
+// endpoint regardless of the configured batch, chosen to satisfy the most
+// restrictive common provider limit (Google Gemini caps a batch at 100).
+const maxSafeBatch = 100
+
 // Client talks to an OpenAI-compatible /embeddings endpoint.
 type Client struct {
 	baseURL string
@@ -49,6 +54,16 @@ func New(cfg config.Embedder) (*Client, error) {
 	batch := cfg.Batch
 	if batch <= 0 {
 		batch = 64
+	}
+	// Cap the per-request batch at a provider-safe ceiling. Several embedding
+	// backends reject oversized batches outright rather than truncating them
+	// (Google Gemini: "at most 100 requests can be in one batch", HTTP 400),
+	// which fails every embed call and silently breaks indexing. 100 is the
+	// most restrictive common limit; OpenAI/TEI/vLLM accept far more but run
+	// fine at 100, and lost throughput is recovered via Concurrency. A larger
+	// configured value is clamped instead of trusted.
+	if batch > maxSafeBatch {
+		batch = maxSafeBatch
 	}
 
 	conc := cfg.Concurrency

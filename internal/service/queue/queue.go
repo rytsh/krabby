@@ -276,6 +276,57 @@ func (q *Queue) CancelPending(id string) int {
 	return n
 }
 
+// CancelSeq drops the single queued (not-yet-started) task with the given seq,
+// marking it canceled and closing its handle. It reports whether a matching
+// queued task was found and removed; a running or already-finished task is not
+// affected (cancel a running job through its own context via the manager).
+func (q *Queue) CancelSeq(seq uint64) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	for i, t := range q.pending {
+		if t.seq != seq {
+			continue
+		}
+
+		q.pending = append(q.pending[:i], q.pending[i+1:]...)
+		t.state = StateCanceled
+		t.endedAt = time.Now()
+		q.removeKeyLocked(t)
+		q.pushRecentLocked(t)
+		close(t.handle.done)
+
+		return true
+	}
+
+	return false
+}
+
+// Bump moves the queued task with the given seq to the front of the backlog so
+// it is the next to start when a slot frees (or immediately if one is free). It
+// reports whether a matching queued task was found. A running or finished task
+// cannot be bumped.
+func (q *Queue) Bump(seq uint64) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	for i, t := range q.pending {
+		if t.seq != seq {
+			continue
+		}
+
+		if i > 0 {
+			q.pending = append(q.pending[:i], q.pending[i+1:]...)
+			q.pending = append([]*task{t}, q.pending...)
+			q.wakeUp()
+		}
+
+		return true
+	}
+
+	return false
+}
+
 // Snapshot returns the current queue state for the UI.
 func (q *Queue) Snapshot() Snapshot {
 	q.mu.Lock()

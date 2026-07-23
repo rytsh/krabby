@@ -339,6 +339,84 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 
 		return textResult("cancelling running job for " + args.Repo), nil, nil
 	})
+
+	addQueueTools(server, mgr)
+}
+
+type bumpTaskArgs struct {
+	Seq uint64 `json:"seq" jsonschema:"the task's queue sequence number (seq) as shown by queue_status"`
+}
+
+type cancelTaskArgs struct {
+	Seq  uint64 `json:"seq,omitempty" jsonschema:"cancel the single queued task with this sequence number (seq) from queue_status; takes precedence over repo"`
+	Repo string `json:"repo,omitempty" jsonschema:"cancel all queued (not-yet-started) tasks for this repo id; ignored when seq is set"`
+}
+
+type setTaskConcurrencyArgs struct {
+	Limit int `json:"limit" jsonschema:"how many background tasks may run at once; values <= 0 restore the built-in default"`
+}
+
+// addQueueTools registers the background work-queue management tools. The queue
+// funnels all background work (clone/refresh, docs, code_index, reindex,
+// web-sync) through one bounded FIFO; these tools let a caller inspect it,
+// reprioritize a waiting task, drop unwanted ones and retune concurrency live.
+func addQueueTools(server *mcp.Server, mgr *manager.Manager) {
+	addTool(server, &mcp.Tool{
+		Name: "queue_status",
+		Description: "Inspect the background work queue: the concurrency limit, how many tasks are " +
+			"running vs pending, and the list of tasks (running, queued and recently finished) with each " +
+			"task's seq, id, kind and state. Use the seq of a queued task with bump_task or cancel_task.",
+	}, func(_ context.Context, _ *mcp.CallToolRequest, _ emptyArgs) (*mcp.CallToolResult, any, error) {
+		return jsonResult(mgr.TaskSnapshot()), nil, nil
+	})
+
+	addTool(server, &mcp.Tool{
+		Name: "bump_task",
+		Description: "Move a queued task to the front of the backlog so it starts next when a slot frees " +
+			"(or immediately if one is free). Identify the task by its seq from queue_status. Only queued " +
+			"tasks can be bumped; a running or finished task cannot.",
+	}, func(_ context.Context, _ *mcp.CallToolRequest, args bumpTaskArgs) (*mcp.CallToolResult, any, error) {
+		if !mgr.BumpTask(args.Seq) {
+			return nil, nil, fmt.Errorf("no queued task with seq %d (it may be running or already finished)", args.Seq)
+		}
+
+		return textResult(fmt.Sprintf("bumped task %d to the front of the queue", args.Seq)), nil, nil
+	})
+
+	addTool(server, &mcp.Tool{
+		Name: "cancel_task",
+		Description: "Remove queued (not-yet-started) work from the backlog. Pass seq to cancel one task " +
+			"(from queue_status), or repo to cancel every queued task for a repo id. Running work is not " +
+			"affected; use cancel_repo_job for that. seq takes precedence when both are given.",
+	}, func(_ context.Context, _ *mcp.CallToolRequest, args cancelTaskArgs) (*mcp.CallToolResult, any, error) {
+		if args.Seq != 0 {
+			if !mgr.CancelTask(args.Seq) {
+				return nil, nil, fmt.Errorf("no queued task with seq %d (it may be running or already finished)", args.Seq)
+			}
+
+			return textResult(fmt.Sprintf("cancelled queued task %d", args.Seq)), nil, nil
+		}
+
+		if args.Repo == "" {
+			return nil, nil, fmt.Errorf("provide seq or repo to cancel")
+		}
+
+		n := mgr.CancelPendingForRepo(args.Repo)
+
+		return textResult(fmt.Sprintf("cancelled %d queued task(s) for %s", n, args.Repo)), nil, nil
+	})
+
+	addTool(server, &mcp.Tool{
+		Name: "set_task_concurrency",
+		Description: "Change how many background tasks run concurrently, effective immediately. Raising it " +
+			"lets waiting tasks start at once; lowering it takes effect as running tasks finish (it never " +
+			"interrupts work in progress). A value <= 0 restores the default. This is the runtime queue " +
+			"limit; it is not persisted to settings.",
+	}, func(_ context.Context, _ *mcp.CallToolRequest, args setTaskConcurrencyArgs) (*mcp.CallToolResult, any, error) {
+		mgr.SetTaskConcurrency(args.Limit)
+
+		return jsonResult(mgr.TaskSnapshot()), nil, nil
+	})
 }
 
 // waitContext bounds a wait=true call so a build that outlives the caller's

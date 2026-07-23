@@ -61,6 +61,49 @@ func TestEmbedBatchingAndDim(t *testing.T) {
 	}
 }
 
+func TestEmbedClampsBatchToSafeMax(t *testing.T) {
+	var maxSeen int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req embedRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if len(req.Input) > maxSeen {
+			maxSeen = len(req.Input)
+		}
+
+		var resp embedResponse
+		for range req.Input {
+			resp.Data = append(resp.Data, struct {
+				Embedding []float32 `json:"embedding"`
+			}{Embedding: []float32{1}})
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	// Configure an oversized batch; the client must clamp it so no single
+	// request exceeds the provider-safe ceiling (Gemini rejects > 100).
+	c, err := New(config.Embedder{BaseURL: srv.URL, Model: "m", Batch: 500})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	inputs := make([]string, 250)
+	for i := range inputs {
+		inputs[i] = "x"
+	}
+
+	out, err := c.Embed(context.Background(), inputs)
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if len(out) != len(inputs) {
+		t.Fatalf("got %d vectors want %d", len(out), len(inputs))
+	}
+	if maxSeen > maxSafeBatch {
+		t.Fatalf("largest request batch = %d, want <= %d", maxSeen, maxSafeBatch)
+	}
+}
+
 func TestPing(t *testing.T) {
 	srv := embedServer(t, [][]float32{{1, 2, 3, 4}})
 	defer srv.Close()

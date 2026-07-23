@@ -84,6 +84,9 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	api.GET("/repos/namespaces", server.Wrap(listRepoNamespaces(mgr)))
 	api.GET("/repos/active", server.Wrap(listActiveRepos(mgr)))
 	api.GET("/tasks", server.Wrap(listTasks(mgr)))
+	api.PUT("/tasks/concurrency", server.Wrap(setTaskConcurrency(mgr)))
+	api.POST("/tasks/{seq}/-/bump", server.Wrap(bumpTask(mgr)))
+	api.DELETE("/tasks/{seq}", server.Wrap(cancelTask(mgr)))
 	api.POST("/repos", server.Wrap(addRepo(mgr)))
 
 	// Namespace metadata (name + description). The repo tags themselves live on
@@ -565,6 +568,63 @@ func listActiveRepos(mgr *manager.Manager) ada.HandlerFunc {
 func listTasks(mgr *manager.Manager) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		return c.SendJSON(mgr.TaskSnapshot())
+	}
+}
+
+type taskConcurrencyRequest struct {
+	Limit int `json:"limit"`
+}
+
+// setTaskConcurrency changes how many background tasks run at once, effective
+// immediately. It returns the resulting snapshot so the UI reflects the new
+// limit without a second fetch. The value is not persisted to settings.
+func setTaskConcurrency(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		var req taskConcurrencyRequest
+		if err := c.Bind(&req); err != nil {
+			return c.SetStatus(http.StatusBadRequest).Err(err)
+		}
+
+		mgr.SetTaskConcurrency(req.Limit)
+
+		return c.SendJSON(mgr.TaskSnapshot())
+	}
+}
+
+// bumpTask moves a queued task to the front of the backlog so it starts next.
+func bumpTask(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		seq, err := strconv.ParseUint(c.Request.PathValue("seq"), 10, 64)
+		if err != nil {
+			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": "invalid task seq"})
+		}
+
+		if !mgr.BumpTask(seq) {
+			return c.SetStatus(http.StatusConflict).SendJSON(map[string]string{
+				"error": "no queued task with that seq (it may be running or already finished)",
+			})
+		}
+
+		return c.SetStatus(http.StatusAccepted).SendJSON(mgr.TaskSnapshot())
+	}
+}
+
+// cancelTask removes a single queued task by seq. Running work is unaffected;
+// cancel that through the repo job endpoint.
+func cancelTask(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		seq, err := strconv.ParseUint(c.Request.PathValue("seq"), 10, 64)
+		if err != nil {
+			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": "invalid task seq"})
+		}
+
+		if !mgr.CancelTask(seq) {
+			return c.SetStatus(http.StatusConflict).SendJSON(map[string]string{
+				"error": "no queued task with that seq (it may be running or already finished)",
+			})
+		}
+
+		return c.SetStatus(http.StatusAccepted).SendJSON(mgr.TaskSnapshot())
 	}
 }
 

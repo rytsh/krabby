@@ -18,8 +18,8 @@ func TestToolProfiles(t *testing.T) {
 		count   int
 		admin   bool
 	}{
-		{profile: ToolProfileStandard, count: 24},
-		{profile: ToolProfileFull, count: 40, admin: true},
+		{profile: ToolProfileStandard, count: 28},
+		{profile: ToolProfileFull, count: 44, admin: true},
 	}
 
 	for _, tt := range tests {
@@ -61,6 +61,12 @@ func TestToolProfiles(t *testing.T) {
 			for _, name := range []string{"search_code", "query_graph", "search_docs", "list_files"} {
 				if !names[name] {
 					t.Errorf("profile missing core tool %q", name)
+				}
+			}
+			// Queue-management tools are available in both profiles.
+			for _, name := range []string{"queue_status", "bump_task", "cancel_task", "set_task_concurrency"} {
+				if !names[name] {
+					t.Errorf("profile missing queue tool %q", name)
 				}
 			}
 			for _, name := range []string{"set_docs_config", "test_llm", "list_credentials", "lock_repo", "add_source", "refresh_source", "source_types"} {

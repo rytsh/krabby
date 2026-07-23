@@ -199,6 +199,26 @@ func (m *Manager) TaskSnapshot() queue.Snapshot {
 	return m.queue.Snapshot()
 }
 
+// BumpTask moves the queued task with the given seq to the front of the backlog
+// so it starts next when a slot frees. It reports whether a matching queued
+// task was found (a running or finished task cannot be bumped).
+func (m *Manager) BumpTask(seq uint64) bool {
+	return m.queue.Bump(seq)
+}
+
+// CancelTask removes the single queued task with the given seq, marking it
+// canceled. It reports whether a matching queued task was found. Running tasks
+// are not affected here; cancel those with CancelJob.
+func (m *Manager) CancelTask(seq uint64) bool {
+	return m.queue.CancelSeq(seq)
+}
+
+// CancelPendingForRepo drops every queued (not-yet-started) task for a repo id
+// and returns how many were removed. Running work is left alone.
+func (m *Manager) CancelPendingForRepo(id string) int {
+	return m.queue.CancelPending(id)
+}
+
 // acquireDocs leases the active bundle until the returned release function is
 // called. Configure waits for all leases before closing replaced stores, so an
 // in-flight search/index can never race a live settings update.
@@ -1132,14 +1152,7 @@ func (m *Manager) reindexAll(ctx context.Context) error {
 				continue
 			}
 
-			id := listed.ID
-			m.queue.Submit(queue.Task{
-				ID:    id,
-				Kind:  taskKindReindex,
-				Title: "Reindex " + id,
-				Key:   taskKindReindex + ":" + id,
-				Run:   func(ctx context.Context) error { return m.reindexRepo(ctx, id) },
-			})
+			m.scheduleReindex(listed.ID)
 		}
 	}
 
@@ -1148,6 +1161,19 @@ func (m *Manager) reindexAll(ctx context.Context) error {
 	m.enqueueWebReindex(ctx)
 
 	return nil
+}
+
+// scheduleReindex enqueues a deduplicated background reindex of one repo's
+// docs/code indexes. The queue key collapses repeats, so calling it while an
+// identical reindex is already queued/running is a no-op.
+func (m *Manager) scheduleReindex(id string) {
+	m.queue.Submit(queue.Task{
+		ID:    id,
+		Kind:  taskKindReindex,
+		Title: "Reindex " + id,
+		Key:   taskKindReindex + ":" + id,
+		Run:   func(ctx context.Context) error { return m.reindexRepo(ctx, id) },
+	})
 }
 
 // reindexRepo rebuilds a single ready repo's docs/code indexes from its
@@ -1163,7 +1189,10 @@ func (m *Manager) reindexRepo(ctx context.Context, id string) error {
 	}
 
 	if repo != nil && repo.Status == registry.StatusReady {
-		m.buildDocsAndIndex(ctx, repo)
+		// deferReindex=false: this already is the reindex path. Re-queueing on an
+		// empty bundle here would busy-loop; recovery instead rides on the next
+		// Configure/TriggerReindexAll once a healthy bundle is installed.
+		m.buildDocsAndIndex(ctx, repo, false)
 	}
 
 	return nil
@@ -1286,7 +1315,10 @@ func (m *Manager) refresh(ctx context.Context, repo *registry.Repo) error {
 	}
 
 	// Best-effort docs + RAG indexing. Failures never fail the graph build.
-	m.buildDocsAndIndex(ctx, repo)
+	// deferReindex=true: if the live bundle is momentarily empty (a Configure
+	// swap coinciding with this post-graph phase), re-queue so a healthy bundle
+	// finishes the indexes instead of leaving them silently missing.
+	m.buildDocsAndIndex(ctx, repo, true)
 
 	return nil
 }
@@ -1295,10 +1327,23 @@ func (m *Manager) refresh(ctx context.Context, repo *registry.Repo) error {
 // (docs + code) for a repo. All steps are optional and best-effort: a nil
 // generator/service or an error is logged and swallowed so the graph build
 // result stands.
-func (m *Manager) buildDocsAndIndex(ctx context.Context, repo *registry.Repo) {
+func (m *Manager) buildDocsAndIndex(ctx context.Context, repo *registry.Repo, deferReindex bool) {
 	d, releaseDocs := m.acquireDocs()
 	defer releaseDocs()
 	if d.gen == nil && d.rag == nil && d.codeRag == nil {
+		// A fully empty bundle is only ever the transient state produced by
+		// Close (shutdown) or the brief window of a live Configure swap. If we
+		// hit it here the graph build already flipped the repo to Ready, so a
+		// silent return would leave docs/code indexes permanently missing with
+		// no error trace until the next commit. Log it and, on the refresh path,
+		// re-queue a reindex so a healthy bundle picks the work up. The reindex
+		// path passes deferReindex=false to avoid busy-looping on itself.
+		slog.Warn("docs/code bundle unavailable during index build",
+			"repo", repo.ID, "requeued", deferReindex)
+		if deferReindex {
+			m.scheduleReindex(repo.ID)
+		}
+
 		return
 	}
 

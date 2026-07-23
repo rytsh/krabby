@@ -65,6 +65,13 @@ export const api = {
   // { limit, running, pending, tasks: [{ seq, id, kind, title, state, error,
   //   enqueued_at, started_at, ended_at }] }.
   tasks: () => req("/tasks"),
+  // setTaskConcurrency changes the live queue limit and returns the new snapshot.
+  setTaskConcurrency: (limit) =>
+    req("/tasks/concurrency", { method: "PUT", body: JSON.stringify({ limit }) }),
+  // bumpTask moves a queued task (by seq) to the front of the backlog.
+  bumpTask: (seq) => req(`/tasks/${seq}/-/bump`, { method: "POST", keepalive: true }),
+  // cancelTask drops a single queued task (by seq) from the backlog.
+  cancelTask: (seq) => req(`/tasks/${seq}`, { method: "DELETE", keepalive: true }),
   // Repo ids are full paths (host/group/.../name) with any number of "/"
   // segments, so repo actions use a GitLab-style "/-/" separator between the
   // id and the action.

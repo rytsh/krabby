@@ -242,6 +242,121 @@ func TestCancelPending(t *testing.T) {
 	}
 }
 
+// queuedSeqByID returns the seq of the first queued task with the given id.
+func queuedSeqByID(q *Queue, id string) (uint64, bool) {
+	for _, it := range q.Snapshot().Tasks {
+		if it.ID == id && it.State == StateQueued {
+			return it.Seq, true
+		}
+	}
+
+	return 0, false
+}
+
+func TestCancelSeq(t *testing.T) {
+	t.Parallel()
+
+	q := New(context.Background(), 1)
+	defer q.Close()
+
+	release := make(chan struct{})
+	q.Submit(Task{ID: "busy", Run: func(context.Context) error { <-release; return nil }})
+	waitFor(t, time.Second, func() bool { return q.Snapshot().Running == 1 })
+
+	var ran int32
+	target := q.Submit(Task{ID: "target", Run: func(context.Context) error {
+		atomic.AddInt32(&ran, 1)
+
+		return nil
+	}})
+
+	seq, ok := queuedSeqByID(q, "target")
+	if !ok {
+		t.Fatal("target not queued")
+	}
+
+	if !q.CancelSeq(seq) {
+		t.Fatal("CancelSeq returned false for a queued task")
+	}
+	if q.CancelSeq(seq) {
+		t.Fatal("CancelSeq returned true for an already-removed task")
+	}
+
+	select {
+	case <-target.Done():
+	case <-time.After(time.Second):
+		t.Fatal("canceled task handle was not closed")
+	}
+
+	close(release)
+	waitFor(t, time.Second, func() bool { return q.Snapshot().Running == 0 })
+
+	if got := atomic.LoadInt32(&ran); got != 0 {
+		t.Fatalf("canceled task ran %d times, want 0", got)
+	}
+}
+
+func TestBump(t *testing.T) {
+	t.Parallel()
+
+	q := New(context.Background(), 1)
+	defer q.Close()
+
+	release := make(chan struct{})
+	q.Submit(Task{ID: "busy", Run: func(context.Context) error { <-release; return nil }})
+	waitFor(t, time.Second, func() bool { return q.Snapshot().Running == 1 })
+
+	// Enqueue three tasks; the slot is occupied so all stay queued in FIFO order.
+	var order []string
+	var mu sync.Mutex
+	mk := func(name string) func(context.Context) error {
+		return func(context.Context) error {
+			mu.Lock()
+			order = append(order, name)
+			mu.Unlock()
+
+			return nil
+		}
+	}
+	q.Submit(Task{ID: "a", Run: mk("a")})
+	q.Submit(Task{ID: "b", Run: mk("b")})
+	last := q.Submit(Task{ID: "c", Run: mk("c")})
+
+	// Bump the last one (c) to the front.
+	seq, ok := queuedSeqByID(q, "c")
+	if !ok {
+		t.Fatal("c not queued")
+	}
+	if !q.Bump(seq) {
+		t.Fatal("Bump returned false for a queued task")
+	}
+
+	// Let the backlog drain.
+	close(release)
+	<-last.Done()
+	waitFor(t, time.Second, func() bool { return q.Snapshot().Running == 0 })
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(order) != 3 || order[0] != "c" {
+		t.Fatalf("run order = %v, want c first", order)
+	}
+}
+
+func TestBumpUnknownSeq(t *testing.T) {
+	t.Parallel()
+
+	q := New(context.Background(), 1)
+	defer q.Close()
+
+	if q.Bump(99999) {
+		t.Fatal("Bump returned true for an unknown seq")
+	}
+	if q.CancelSeq(99999) {
+		t.Fatal("CancelSeq returned true for an unknown seq")
+	}
+}
+
 func TestSnapshotStatesAndError(t *testing.T) {
 	t.Parallel()
 

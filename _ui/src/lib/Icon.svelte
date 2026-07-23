@@ -1,6 +1,7 @@
 <script>
   import {
     Activity,
+    ArrowUp,
     BookOpen,
     Boxes,
     Braces,
@@ -24,12 +25,14 @@
     Sun,
     Tag,
     Warehouse,
+    X,
   } from "@lucide/svelte";
 
   let { name, size = 18 } = $props();
 
   const icons = {
     activity: Activity,
+    "arrow-up": ArrowUp,
     book: BookOpen,
     boxes: Boxes,
     braces: Braces,
@@ -53,6 +56,7 @@
     sun: Sun,
     tag: Tag,
     warehouse: Warehouse,
+    x: X,
   };
 
   let Component = $derived(icons[name]);

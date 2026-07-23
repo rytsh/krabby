@@ -114,6 +114,70 @@
     }
   }
 
+  // In-flight action guard so a task's buttons disable while its request runs.
+  let busySeq = $state(0);
+
+  async function bump(task) {
+    busySeq = task.seq;
+    try {
+      const s = await api.bumpTask(task.seq);
+      if (s && Array.isArray(s.tasks)) snap = s;
+      else await refresh();
+    } catch {
+      // errorToast already surfaced it; re-sync so stale rows don't linger.
+      await refresh();
+    } finally {
+      busySeq = 0;
+    }
+  }
+
+  async function cancelQueued(task) {
+    busySeq = task.seq;
+    try {
+      const s = await api.cancelTask(task.seq);
+      if (s && Array.isArray(s.tasks)) snap = s;
+      else await refresh();
+    } catch {
+      await refresh();
+    } finally {
+      busySeq = 0;
+    }
+  }
+
+  async function cancelRunning(task) {
+    if (task.id === "*" || task.id.startsWith("web:")) return;
+    busySeq = task.seq;
+    try {
+      await api.cancelRepoJob(task.id);
+    } catch {
+      // ignore; toast shown
+    } finally {
+      busySeq = 0;
+      await refresh();
+    }
+  }
+
+  let savingLimit = $state(false);
+  async function changeConcurrency(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n < 1) return;
+    savingLimit = true;
+    try {
+      const s = await api.setTaskConcurrency(n);
+      if (s && Array.isArray(s.tasks)) snap = s;
+      else await refresh();
+    } catch {
+      await refresh();
+    } finally {
+      savingLimit = false;
+    }
+  }
+
+  // A running repo job can be cancelled; the aggregate "*" and web syncs cannot.
+  function canCancelRunning(task) {
+    return task.id !== "*" && !task.id.startsWith("web:");
+  }
+
   function setLiveInterval(value) {
     liveInterval = Number(value);
     localStorage.setItem(LIVE_INTERVAL_KEY, String(liveInterval));
@@ -172,7 +236,20 @@
     <div class="mt-1.5 text-[12px] text-faint">Queued</div>
   </div>
   <div class="card px-4 py-3">
-    <div class="font-mono text-2xl font-semibold leading-none">{snap.limit}</div>
+    <div class="flex items-center gap-2">
+      <input
+        type="number"
+        min="1"
+        class="input !h-8 !w-16 !py-0 font-mono text-lg font-semibold"
+        value={snap.limit}
+        disabled={savingLimit}
+        onchange={(e) => changeConcurrency(e.currentTarget.value)}
+        aria-label="Queue concurrency limit"
+      />
+      {#if savingLimit}
+        <span class="text-[11px] text-faint">saving…</span>
+      {/if}
+    </div>
     <div class="mt-1.5 text-[12px] text-faint">Concurrency limit</div>
   </div>
   <div class="card px-4 py-3">
@@ -229,8 +306,40 @@
               <div class="mt-1 text-[12px] text-faint">{task.title}</div>
             {/if}
           </div>
-          <div class="flex items-center border-t border-line px-5 py-2.5 text-[11px] text-faint sm:border-l sm:border-t-0">
-            {timing(task)}
+          <div class="flex items-center gap-2 border-t border-line px-5 py-2.5 text-[11px] text-faint sm:border-l sm:border-t-0">
+            <span class="whitespace-nowrap">{timing(task)}</span>
+            <div class="ml-auto flex items-center gap-1.5">
+              {#if task.state === "queued"}
+                <button
+                  class="btn btn-sm inline-flex items-center gap-1 !py-1 !text-[11px]"
+                  title="Move to the front of the queue"
+                  disabled={busySeq === task.seq}
+                  onclick={() => bump(task)}
+                >
+                  <Icon name="arrow-up" size={12} />
+                  Bump
+                </button>
+                <button
+                  class="btn btn-sm inline-flex items-center gap-1 !py-1 !text-[11px] text-err"
+                  title="Remove from the queue"
+                  disabled={busySeq === task.seq}
+                  onclick={() => cancelQueued(task)}
+                >
+                  <Icon name="x" size={12} />
+                  Cancel
+                </button>
+              {:else if task.state === "running" && canCancelRunning(task)}
+                <button
+                  class="btn btn-sm inline-flex items-center gap-1 !py-1 !text-[11px] text-err"
+                  title="Abort the running job"
+                  disabled={busySeq === task.seq}
+                  onclick={() => cancelRunning(task)}
+                >
+                  <Icon name="x" size={12} />
+                  Stop
+                </button>
+              {/if}
+            </div>
           </div>
         </div>
       {/each}
