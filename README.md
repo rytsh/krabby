@@ -56,9 +56,9 @@ curl localhost:8080/api/v1/repos
 
 MCP endpoint for agents (opencode, Claude Desktop, etc.): `http://localhost:8080/mcp`
 (streamable HTTP; set `mcp.api_key` to require `X-Api-Key` / `Authorization: Bearer`).
-The default `mcp.tool_profile: standard` exposes repository management and
-read/query/search tools. Use `full` to additionally expose credentials, clone
-leases, docs/RAG configuration, and endpoint probes.
+Without a profile header it exposes the 20-tool standard catalog. Send
+`X-Krabby-Tool-Profile: full` on every MCP request to additionally expose
+credentials, clone leases, docs/RAG configuration, and endpoint probes.
 
 Example opencode config:
 
@@ -71,6 +71,12 @@ Example opencode config:
     }
   }
 }
+```
+
+For the full profile, add a persistent header to the same server entry:
+
+```json
+"headers": { "X-Krabby-Tool-Profile": "full" }
 ```
 
 ## MCP tools
@@ -100,7 +106,8 @@ default. Source and document reads are also bounded and expose continuation
 metadata for large files.
 
 The `standard` profile omits the credential, lease, and docs/RAG administration
-rows above. Set `mcp.tool_profile: full` when an MCP client must administer them.
+rows above. Configure `X-Krabby-Tool-Profile: full` when an MCP client must
+administer them.
 
 ## REST API
 

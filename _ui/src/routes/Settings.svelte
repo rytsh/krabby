@@ -227,6 +227,7 @@
       ["Data dir", s.data_dir],
       ["Listen", `${s.server.host || "0.0.0.0"}:${s.server.port}`],
       ["MCP path", s.mcp.path],
+      ["MCP profiles", "standard (default), full (X-Krabby-Tool-Profile: full)"],
       ["MCP API key", s.mcp.api_key_set ? "set" : "not set", s.mcp.api_key_set],
       ["Graphify bin", s.graphify.bin],
       ["Graphify python", s.graphify.python || "auto (shebang)"],
@@ -260,7 +261,9 @@
   <h2 class="mb-1 mt-8 text-[15px] font-semibold">MCP access</h2>
   <p class="text-dim">
     Protect the MCP endpoint with an API key. Changes apply immediately — no restart needed. Clients
-    send the key in the <code class="font-mono text-[12px]">X-Api-Key</code> header.
+    send the key in the <code class="font-mono text-[12px]">X-Api-Key</code> header. The endpoint uses the
+    standard tool profile by default; send <code class="font-mono text-[12px]">X-Krabby-Tool-Profile: full</code>
+    to expose credential, lease, and docs/RAG administration tools.
   </p>
 
   <div class="card mt-3 p-4">

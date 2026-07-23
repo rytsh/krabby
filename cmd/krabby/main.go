@@ -178,10 +178,11 @@ func run(ctx context.Context) error {
 	// persisted runtime settings, so changes apply without a restart.
 	go scheduler.Run(ctx, mgr)
 
-	mcpServer := mcptools.New(mgr, version, cfg.MCP.WaitTimeout, cfg.MCP.ToolProfile)
+	mcpServer := mcptools.New(mgr, version, cfg.MCP.WaitTimeout, mcptools.ToolProfileStandard)
+	mcpFullServer := mcptools.New(mgr, version, cfg.MCP.WaitTimeout, mcptools.ToolProfileFull)
 
 	// Server blocks until ctx is cancelled, then shuts down.
-	if err := server.Start(ctx, cfg, mgr, mcpServer); err != nil {
+	if err := server.Start(ctx, cfg, mgr, mcpServer, mcpFullServer); err != nil {
 		return fmt.Errorf("start server; %w", err)
 	}
 

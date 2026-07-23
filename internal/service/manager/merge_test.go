@@ -2,10 +2,13 @@ package manager
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func TestMergeDisabledBehavior(t *testing.T) {
@@ -37,6 +40,38 @@ func TestMergeDisabledBehavior(t *testing.T) {
 	_, err := m.GraphPathFor(context.Background(), "")
 	if err == nil || !strings.Contains(err.Error(), "disabled") {
 		t.Fatalf("GraphPathFor(\"\") error = %v, want a 'disabled' message", err)
+	}
+}
+
+func TestInferRepoID(t *testing.T) {
+	repos := []string{"github.com/acme/auth-service", "github.com/acme/payments"}
+
+	if got := inferRepoID(repos, map[string]any{"question": "How does auth service validate tokens?"}); got != repos[0] {
+		t.Fatalf("inferRepoID() = %q, want %q", got, repos[0])
+	}
+	if got := inferRepoID(repos, map[string]any{"question": "How does request validation work?"}); got != "" {
+		t.Fatalf("ambiguous inferRepoID() = %q, want empty", got)
+	}
+	if got := inferRepoID([]string{"a/foo-service", "b/foo_service"}, map[string]any{"question": "foo service"}); got != "" {
+		t.Fatalf("duplicate-name inferRepoID() = %q, want empty", got)
+	}
+}
+
+func TestGraphRepoSelectionResultIsBoundedAndActionable(t *testing.T) {
+	var repos []string
+	for i := range 25 {
+		repos = append(repos, fmt.Sprintf("github.com/acme/repo-%02d", i))
+	}
+
+	result := graphRepoSelectionResult("query_graph", repos)
+	text := result.Content[0].(*mcp.TextContent).Text
+	for _, want := range []string{"Repository selection required", "Retry query_graph with repo", "list_repos", "search_code"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("selection result missing %q: %s", want, text)
+		}
+	}
+	if strings.Contains(text, "repo-24") {
+		t.Fatalf("selection result exceeded bounded repo list: %s", text)
 	}
 }
 

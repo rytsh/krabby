@@ -39,8 +39,10 @@ import (
 	"github.com/rytsh/krabby/internal/service/settings"
 )
 
+const MCPToolProfileHeader = "X-Krabby-Tool-Profile"
+
 // Start runs the HTTP server until ctx is cancelled.
-func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpServer *mcp.Server) error {
+func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpServer, mcpFullServer *mcp.Server) error {
 	server := ada.New()
 	server.Use(
 		mrecover.Middleware(),
@@ -61,9 +63,10 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 		_, _ = w.Write([]byte("OK"))
 	})
 
-	// MCP endpoint (streamable HTTP). POST/GET/DELETE share the same path.
+	// The profile is selected when the client connects. Omitting the header keeps
+	// the smaller standard catalog; full exposes administration tools as well.
 	mcpHandler := mcp.NewStreamableHTTPHandler(
-		func(*http.Request) *mcp.Server { return mcpServer },
+		func(r *http.Request) *mcp.Server { return mcpServerForRequest(r, mcpServer, mcpFullServer) },
 		&mcp.StreamableHTTPOptions{},
 	)
 	// The MCP key can be overridden at runtime from the UI; resolve it per
@@ -160,6 +163,14 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 }
 
 // ---- middleware -------------------------------------------------------------
+
+func mcpServerForRequest(r *http.Request, standard, full *mcp.Server) *mcp.Server {
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get(MCPToolProfileHeader)), "full") {
+		return full
+	}
+
+	return standard
+}
 
 // apiKeyMiddleware guards a handler with an API key resolved per request, so
 // runtime changes (UI-managed MCP key) apply without a restart. An empty key

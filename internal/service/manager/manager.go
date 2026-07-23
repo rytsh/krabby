@@ -1837,6 +1837,26 @@ func (m *Manager) GraphPathFor(ctx context.Context, repoID string) (string, erro
 // CallGraphTool answers a graph query tool call against the resolved graph using
 // the in-process native engine (no python serve process is spawned).
 func (m *Manager) CallGraphTool(ctx context.Context, repoID, tool string, args map[string]any) (*mcp.CallToolResult, error) {
+	if repoID == "" && !m.mergeEnabled {
+		repoIDs, err := m.graphRepoIDs(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		switch len(repoIDs) {
+		case 0:
+			return nil, errors.New("no repository graph is ready; add a repository or wait for its build to finish")
+		case 1:
+			repoID = repoIDs[0]
+		default:
+			if inferred := inferRepoID(repoIDs, args); inferred != "" {
+				repoID = inferred
+			} else {
+				return graphRepoSelectionResult(tool, repoIDs), nil
+			}
+		}
+	}
+
 	graphPath, err := m.GraphPathFor(ctx, repoID)
 	if err != nil {
 		return nil, err
@@ -1848,6 +1868,79 @@ func (m *Manager) CallGraphTool(ctx context.Context, repoID, tool string, args m
 	}
 
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}, nil
+}
+
+func (m *Manager) graphRepoIDs(ctx context.Context) ([]string, error) {
+	repos, err := m.reg.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	ids := make([]string, 0, len(repos))
+	for _, repo := range repos {
+		if fileExists(graphify.GraphPath(repo.Path)) {
+			ids = append(ids, repo.ID)
+		}
+	}
+	sort.Strings(ids)
+
+	return ids, nil
+}
+
+func inferRepoID(repoIDs []string, args map[string]any) string {
+	var values []string
+	for _, value := range args {
+		if text, ok := value.(string); ok {
+			values = append(values, text)
+		}
+	}
+	haystack := normalizedMatchText(strings.Join(values, " "))
+
+	match := ""
+	for _, repoID := range repoIDs {
+		name := repoID
+		if slash := strings.LastIndex(name, "/"); slash >= 0 {
+			name = name[slash+1:]
+		}
+		needle := normalizedMatchText(name)
+		if len(needle) < 4 || !strings.Contains(haystack, needle) {
+			continue
+		}
+		if match != "" {
+			return ""
+		}
+		match = repoID
+	}
+
+	return match
+}
+
+func normalizedMatchText(value string) string {
+	value = strings.ToLower(value)
+	return strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			return r
+		}
+		return -1
+	}, value)
+}
+
+func graphRepoSelectionResult(tool string, repoIDs []string) *mcp.CallToolResult {
+	const maxShown = 20
+	shown := repoIDs
+	if len(shown) > maxShown {
+		shown = shown[:maxShown]
+	}
+
+	text := fmt.Sprintf(
+		"Repository selection required: cross-repository merge is disabled and %d repository graphs are available. Retry %s with repo set to one of: %s.",
+		len(repoIDs), tool, strings.Join(shown, ", "))
+	if len(repoIDs) > len(shown) {
+		text += " Use list_repos with search to find additional repository ids."
+	}
+	text += " If the question does not identify a repository, ask the user which one they mean; for symbol or source lookup, search_code can search across repositories first."
+
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}
 }
 
 // GraphEngine exposes the native graph engine for in-process consumers (docgen).

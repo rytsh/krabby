@@ -9,6 +9,16 @@
   let apiKeySet = $derived(!!(settings && settings.mcp && settings.mcp.api_key_set));
   let mcpUrl = $derived(`${window.location.origin}${basePath}${mcpPath}`);
   let apiBase = $derived(`${window.location.origin}${basePath}/api/v1`);
+  let mcpProfile = $state("standard");
+  let configHeaders = $derived.by(() => {
+    const headers = [];
+    if (apiKeySet) headers.push(`"X-Api-Key": "<your-api-key>"`);
+    if (mcpProfile === "full") headers.push(`"X-Krabby-Tool-Profile": "full"`);
+    return headers.length ? `,\n      "headers": { ${headers.join(", ")} }` : "";
+  });
+  let cliHeaders = $derived(
+    `${apiKeySet ? ' --header "X-Api-Key: <your-api-key>"' : ""}${mcpProfile === "full" ? ' --header "X-Krabby-Tool-Profile: full"' : ""}`,
+  );
 
   let copied = $state("");
   async function copy(text, key) {
@@ -22,21 +32,22 @@
   }
 
   let opencodeConfig = $derived(`{
+  "$schema": "https://opencode.ai/config.json",
   "mcp": {
     "krabby": {
       "type": "remote",
-      "url": "${mcpUrl}"${apiKeySet ? `,\n      "headers": { "X-Api-Key": "<your-api-key>" }` : ""}
+      "url": "${mcpUrl}"${configHeaders}
     }
   }
 }`);
 
-  let claudeCmd = $derived(`claude mcp add --transport http krabby ${mcpUrl}${apiKeySet ? ' --header "X-Api-Key: <your-api-key>"' : ""}`);
+  let claudeCmd = $derived(`claude mcp add --transport http krabby ${mcpUrl}${cliHeaders}`);
 
   let genericConfig = $derived(`{
   "mcpServers": {
     "krabby": {
       "type": "http",
-      "url": "${mcpUrl}"${apiKeySet ? `,\n      "headers": { "X-Api-Key": "<your-api-key>" }` : ""}
+      "url": "${mcpUrl}"${configHeaders}
     }
   }
 }`);
@@ -46,6 +57,7 @@
 Server name: krabby
 Transport: streamable HTTP
 URL: ${mcpUrl}
+Tool profile: ${mcpProfile}${mcpProfile === "full" ? " (send X-Krabby-Tool-Profile: full on every request)" : " (default; no profile header)"}
 ${apiKeySet ? "Authentication: send the API key in the X-Api-Key header. Ask me for the key before editing the configuration." : "Authentication: none"}
 
 Detect this client's MCP configuration format and update the appropriate project or user configuration. Preserve all existing settings and other MCP servers. After configuring it, verify the connection and confirm that the Krabby tools are available.`);
@@ -70,8 +82,9 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
         ["remove_repo", "Stop tracking a repository and delete its local clone and graph."],
         ["refresh_repo", "Pull the latest commits and rebuild the knowledge graph."],
         ["repo_status", "Get build state, last commit and last error of a repository."],
-        ["lock_repo", "Take a TTL-bounded read lock so external tools can walk the clone safely."],
-        ["unlock_repo", "Release a read lock taken with lock_repo."],
+        ["cancel_repo_job", "Cancel the refresh or generation job currently running for a repository."],
+        ["lock_repo", "Take a TTL-bounded read lock so external tools can walk the clone safely.", true],
+        ["unlock_repo", "Release a read lock taken with lock_repo.", true],
       ],
     },
     {
@@ -106,17 +119,22 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
     {
       name: "Configuration",
       tools: [
-        ["get_docs_config", "Return the current docs/RAG configuration (secrets redacted)."],
-        ["set_docs_config", "Update the docs/RAG configuration and rebuild the clients live."],
-        ["test_llm", "Test the chat LLM connection without saving."],
-        ["test_embedder", "Test the embeddings connection without saving."],
-        ["test_code_embedder", "Test the dedicated code embeddings connection without saving."],
-        ["set_credential", "Store a git credential (SSH key or token) for a host or host/path prefix."],
-        ["list_credentials", "List stored git credential patterns (secrets never returned)."],
-        ["remove_credential", "Remove a stored git credential by its pattern."],
+        ["get_docs_config", "Return the current docs/RAG configuration (secrets redacted).", true],
+        ["set_docs_config", "Update the docs/RAG configuration and rebuild the clients live.", true],
+        ["test_llm", "Test the chat LLM connection without saving.", true],
+        ["test_embedder", "Test the embeddings connection without saving.", true],
+        ["test_code_embedder", "Test the dedicated code embeddings connection without saving.", true],
+        ["set_credential", "Store a git credential (SSH key or token) for a host or host/path prefix.", true],
+        ["list_credentials", "List stored git credential patterns (secrets never returned).", true],
+        ["remove_credential", "Remove a stored git credential by its pattern.", true],
       ],
     },
   ];
+  let visibleToolGroups = $derived(
+    toolGroups
+      .map((group) => ({ ...group, tools: group.tools.filter(([, , fullOnly]) => !fullOnly || mcpProfile === "full") }))
+      .filter((group) => group.tools.length > 0),
+  );
 
   onMount(async () => {
     try {
@@ -142,6 +160,16 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
   <div class="flex items-center gap-2">
     <code class="rounded-md border border-line bg-bg px-3 py-2 font-mono text-[13px]">{mcpUrl}</code>
     <button class="btn btn-sm" onclick={() => copy(mcpUrl, "url")}>{copied === "url" ? "Copied" : "Copy"}</button>
+  </div>
+  <div class="mt-3 grid gap-2 sm:grid-cols-2">
+    <div class="rounded-md border border-accent/40 bg-accent/5 p-3">
+      <div class="text-[13px] font-medium">Standard profile</div>
+      <div class="mt-1 text-[12px] text-dim">Default when no profile header is sent. Exposes 20 repo, query, search, and read tools.</div>
+    </div>
+    <div class="rounded-md border border-line p-3">
+      <div class="text-[13px] font-medium">Full profile</div>
+      <div class="mt-1 text-[12px] text-dim">Uses the same URL with <code class="font-mono">X-Krabby-Tool-Profile: full</code>. Adds credential, lease, and docs/RAG administration tools.</div>
+    </div>
   </div>
   {#if apiKeySet}
     <p class="mb-0 mt-2 text-[13px] text-warn">
@@ -171,11 +199,35 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
   </div>
 
   <div class="mb-4">
-    <div class="mb-1.5 flex items-center gap-2">
+    <div class="mb-1.5 flex flex-wrap items-center gap-2">
       <span class="text-[13px] text-dim">opencode — <code class="font-mono text-[12px]">opencode.json</code></span>
-      <button class="btn btn-sm ml-auto" onclick={() => copy(opencodeConfig, "oc")}>{copied === "oc" ? "Copied" : "Copy"}</button>
+      <div class="ml-auto flex items-center rounded-md border border-line bg-bg p-0.5" aria-label="OpenCode MCP tool profile">
+        <button
+          class="rounded px-2.5 py-1 text-[11px] text-dim transition-colors hover:text-fg"
+          class:!bg-surface-2={mcpProfile === "standard"}
+          class:!text-fg={mcpProfile === "standard"}
+          aria-pressed={mcpProfile === "standard"}
+          onclick={() => (mcpProfile = "standard")}
+        >Standard</button>
+        <button
+          class="rounded px-2.5 py-1 text-[11px] text-dim transition-colors hover:text-fg"
+          class:!bg-surface-2={mcpProfile === "full"}
+          class:!text-fg={mcpProfile === "full"}
+          aria-pressed={mcpProfile === "full"}
+          onclick={() => (mcpProfile = "full")}
+        >Full</button>
+      </div>
+      <button class="btn btn-sm" onclick={() => copy(opencodeConfig, "oc")}>{copied === "oc" ? "Copied" : "Copy"}</button>
     </div>
     <pre class="m-0 overflow-x-auto rounded-md border border-line bg-bg p-3 font-mono text-[12.5px] leading-relaxed">{opencodeConfig}</pre>
+    <p class="mb-0 mt-1.5 text-[11px] text-faint">
+      {#if mcpProfile === "full"}
+        Full adds <code class="font-mono">X-Krabby-Tool-Profile: full</code> under <code class="font-mono">headers</code> and exposes all 30 tools.
+      {:else}
+        Standard omits the profile header and exposes the smaller 20-tool catalog.
+      {/if}
+      Add this to project or user <code class="font-mono">opencode.json</code>, restart the client, then verify with <code class="font-mono">opencode mcp list</code>.
+    </p>
   </div>
 
   <div class="mb-4">
@@ -184,6 +236,7 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
       <button class="btn btn-sm ml-auto" onclick={() => copy(claudeCmd, "cc")}>{copied === "cc" ? "Copied" : "Copy"}</button>
     </div>
     <pre class="m-0 overflow-x-auto rounded-md border border-line bg-bg p-3 font-mono text-[12.5px] leading-relaxed">{claudeCmd}</pre>
+    <p class="mb-0 mt-1.5 text-[11px] text-faint">Claude Code stores this in local project scope by default. Use <code class="font-mono">--scope user</code> for all projects, then verify with <code class="font-mono">claude mcp list</code>.</p>
   </div>
 
   <div>
@@ -259,10 +312,10 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
 <div class="card my-4 p-4">
   <h2 class="mb-1 text-[15px] font-semibold">Available tools</h2>
   <p class="mt-0 text-[13px] text-faint">
-    {toolGroups.reduce((n, g) => n + g.tools.length, 0)} tools exposed over MCP.
+    {visibleToolGroups.reduce((n, g) => n + g.tools.length, 0)} tools in the selected {mcpProfile} profile.
   </p>
 
-  {#each toolGroups as group}
+  {#each visibleToolGroups as group}
     <h3 class="mb-1.5 mt-4 text-[13px] font-medium uppercase tracking-wider text-faint">{group.name}</h3>
     <div class="overflow-hidden rounded-md border border-line">
       <table class="w-full border-collapse">

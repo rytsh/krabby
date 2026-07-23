@@ -27,6 +27,7 @@ Tool selection:
 - Use search_docs for documentation, guides, wikis, and Confluence content.
 - Use list_* only when an identifier is unknown or the user explicitly requests an inventory. Do not exhaust pages or request a recursive file tree without a clear need.
 - Use get_* tools only after a search/query identifies the target.
+- If a graph tool returns "Repository selection required", retry it with one of the provided repo ids instead of treating the result as a failure.
 
 Always pass repo when it is known. Omit repo only when the user explicitly requests cross-repository analysis and merged search is intended.
 
@@ -42,12 +43,19 @@ const (
 // status (the build keeps running in the background); <=0 means no server-side
 // cap.
 func New(mgr *manager.Manager, version string, waitTimeout time.Duration, profile string) *mcp.Server {
+	title := "Krabby codebase search and knowledge"
+	instructions := serverInstructions
+	if profile == ToolProfileFull {
+		title += " (full administration)"
+		instructions += "\n\nThis connection uses the full profile and can mutate credentials and runtime configuration. Use administration tools only when explicitly requested."
+	}
+
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "krabby",
-		Title:   "Krabby codebase search and knowledge",
+		Title:   title,
 		Version: version,
 	}, &mcp.ServerOptions{
-		Instructions: serverInstructions,
+		Instructions: instructions,
 	})
 
 	addManagementTools(server, mgr, waitTimeout)

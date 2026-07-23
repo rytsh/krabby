@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func TestVerifyGitWebhook(t *testing.T) {
@@ -113,5 +115,32 @@ func TestAPIKeyMiddleware(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("rotated key should be accepted, got %d", rec.Code)
+	}
+}
+
+func TestMCPServerForRequest(t *testing.T) {
+	standard := mcp.NewServer(&mcp.Implementation{Name: "standard", Version: "test"}, nil)
+	full := mcp.NewServer(&mcp.Implementation{Name: "full", Version: "test"}, nil)
+
+	tests := []struct {
+		name   string
+		header string
+		want   *mcp.Server
+	}{
+		{name: "default", want: standard},
+		{name: "standard", header: "standard", want: standard},
+		{name: "unknown", header: "other", want: standard},
+		{name: "full", header: "full", want: full},
+		{name: "full case insensitive", header: " FULL ", want: full},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+			req.Header.Set(MCPToolProfileHeader, tt.header)
+			if got := mcpServerForRequest(req, standard, full); got != tt.want {
+				t.Fatalf("selected server %p, want %p", got, tt.want)
+			}
+		})
 	}
 }
