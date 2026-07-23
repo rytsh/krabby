@@ -126,7 +126,9 @@ func TestMatchesExcluded(t *testing.T) {
 		"a/b/fixtures/c.json":     true,
 		"foo/__mocks__/bar.js":    true,
 		"lib.min.js":              true,
-		"internal/service/foo.go": false,
+		"vendor/github.com/pkg/errors/errors.go": true,
+		"vendor/modules.txt":                     true,
+		"internal/service/foo.go":                false,
 		"cmd/main.go":             false,
 		"pkg/testdatabase/x.go":   false, // substring must NOT match a dir segment
 		"exporter/testdatatofile.go": false,

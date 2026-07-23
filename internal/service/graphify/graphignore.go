@@ -23,6 +23,10 @@ var DefaultGraphIgnore = []string{
 	"testfixtures/",
 	"mocks/",
 	"__mocks__/",
+	// Vendored dependency trees not covered by graphify's built-in skip list
+	// (Go's vendor/ can hold thousands of third-party source files that stall
+	// the graph build).
+	"vendor/",
 	// Generated / vendored assets that are not source.
 	"*.min.js",
 	"*.min.css",
