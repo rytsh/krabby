@@ -207,9 +207,11 @@ func apiKeyMiddleware(getKey func() string) func(next http.Handler) http.Handler
 // (MCP api key, webhook secret) are deliberately omitted; booleans indicate
 // only whether they are configured.
 type settingsResponse struct {
-	Version  string `json:"version"`
-	LogLevel string `json:"log_level"`
-	DataDir  string `json:"data_dir"`
+	Version   string `json:"version"`
+	Commit    string `json:"commit"`
+	BuildDate string `json:"build_date"`
+	LogLevel  string `json:"log_level"`
+	DataDir   string `json:"data_dir"`
 
 	Server struct {
 		Host     string `json:"host"`
@@ -234,6 +236,8 @@ func getSettings(cfg *config.Config, mgr *manager.Manager) ada.HandlerFunc {
 		var s settingsResponse
 
 		s.Version = config.Version
+		s.Commit = config.Commit
+		s.BuildDate = config.Date
 		s.LogLevel = cfg.LogLevel
 		s.DataDir = cfg.DataDir
 

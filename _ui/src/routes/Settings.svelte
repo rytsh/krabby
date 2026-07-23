@@ -223,6 +223,8 @@
   function rows(s) {
     return [
       ["Version", s.version],
+      ["Commit", s.commit],
+      ["Build date", s.build_date],
       ["Log level", s.log_level],
       ["Data dir", s.data_dir],
       ["Listen", `${s.server.host || "0.0.0.0"}:${s.server.port}`],

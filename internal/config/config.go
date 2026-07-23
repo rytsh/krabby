@@ -23,6 +23,10 @@ var (
 	ServiceName = "krabby"
 	// Version is injected at build time.
 	Version = "v0.0.0"
+	// Commit is the short git commit hash, injected at build time.
+	Commit = "-"
+	// Date is the UTC build timestamp, injected at build time.
+	Date = "-"
 )
 
 // Config is the root file/env configuration for krabby. It intentionally

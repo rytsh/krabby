@@ -9,6 +9,7 @@
     ownerOf,
   } from "./lib/repos.js";
   import { buildOwnerTree, collapseTree, sidebarPathMode } from "./lib/paths.js";
+  import { api } from "./lib/api.js";
   import Icon from "./lib/Icon.svelte";
   import BrandIcon from "./lib/BrandIcon.svelte";
   import ToastHost from "./lib/ToastHost.svelte";
@@ -151,6 +152,22 @@
   // fetched lazily when its group is expanded (see toggleGroup/expandGroup).
   onMount(loadOwners);
 
+  // Build metadata (version / commit / date) for the sidebar footer, so the
+  // running build is identifiable from every page.
+  let build = $state(null);
+  onMount(async () => {
+    try {
+      build = await api.settings();
+    } catch {
+      build = null;
+    }
+  });
+  let buildDate = $derived.by(() => {
+    if (!build || !build.build_date || build.build_date === "-") return "";
+    const d = new Date(build.build_date);
+    return Number.isNaN(d.getTime()) ? build.build_date : d.toLocaleString();
+  });
+
   // When viewing a repo, make sure its owner group is expanded and loaded so
   // the active repo is visible and highlighted in the sidebar.
   $effect(() => {
@@ -196,7 +213,23 @@
       </nav>
     {/if}
 
-    <div class="mt-auto px-2 pb-1 pt-4 text-xs text-faint">multi-repo graphify knowledge graphs</div>
+    <div class="mt-auto px-2 pb-1 pt-4 text-xs text-faint">
+      <div>multi-repo graphify knowledge graphs</div>
+      {#if build}
+        <div
+          class="mt-2 font-mono text-[10px] leading-relaxed text-faint"
+          title={buildDate ? `built ${buildDate}` : ""}
+        >
+          <span class="text-dim">{build.version}</span>
+          {#if build.commit && build.commit !== "-"}
+            <span> · {build.commit}</span>
+          {/if}
+          {#if buildDate}
+            <div>{buildDate}</div>
+          {/if}
+        </div>
+      {/if}
+    </div>
   </aside>
 
   <div

@@ -37,6 +37,8 @@ var (
 
 func main() {
 	config.Version = version
+	config.Commit = commit
+	config.Date = date
 
 	into.Init(run,
 		into.WithLogger(logi.InitializeLog(logi.WithCaller(false))),
