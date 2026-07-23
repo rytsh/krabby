@@ -53,7 +53,7 @@ type getDocArgs struct {
 // addDocTools registers the documentation + RAG tools. They surface even when
 // the subsystem is disabled; calls then return a clear 'not enabled' error.
 func addDocTools(server *mcp.Server, mgr *manager.Manager) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name: "search_docs",
 		Description: "RAG search over generated repository documentation AND synced web sources (wikis, " +
 			"Confluence spaces). Embeds the question, finds the most relevant documents via the vector " +
@@ -69,7 +69,7 @@ func addDocTools(server *mcp.Server, mgr *manager.Manager) {
 		return jsonResult(docs), nil, nil
 	})
 
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name: "search_code",
 		Description: "Search raw source code using normal bw full-text search (default) or semantic vector search. " +
 			"Returns ranked snippets with repository, path, symbol and line location. Normal mode supports exact " +
@@ -102,7 +102,7 @@ func addDocTools(server *mcp.Server, mgr *manager.Manager) {
 		}), nil, nil
 	})
 
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "list_docs",
 		Description: "List the generated markdown documentation files for a repository (title + path + source).",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args listDocsArgs) (*mcp.CallToolResult, any, error) {
@@ -114,7 +114,7 @@ func addDocTools(server *mcp.Server, mgr *manager.Manager) {
 		return jsonResult(docs), nil, nil
 	})
 
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "get_doc",
 		Description: "Return one whole generated markdown document by its repo-relative doc path.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args getDocArgs) (*mcp.CallToolResult, any, error) {
@@ -126,7 +126,7 @@ func addDocTools(server *mcp.Server, mgr *manager.Manager) {
 		return jsonResult(doc), nil, nil
 	})
 
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name: "list_sources",
 		Description: "List the synced web-source collections (wikis, Confluence spaces). Each collection " +
 			"is searchable via search_docs with repo='web:<name>'.",
@@ -262,7 +262,7 @@ func settingsForArgs(ctx context.Context, mgr *manager.Manager, req *mcp.CallToo
 }
 
 func addDocConfigTools(server *mcp.Server, mgr *manager.Manager) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name: "get_docs_config",
 		Description: "Return the current docs/RAG configuration (LLM, embedders, chunking). " +
 			"Secrets are never returned; only *_key_set booleans indicate whether each API key is set.",
@@ -275,7 +275,7 @@ func addDocConfigTools(server *mcp.Server, mgr *manager.Manager) {
 		return jsonResult(cfg), nil, nil
 	})
 
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name: "set_docs_config",
 		Description: "Update the docs/RAG configuration and rebuild the clients live (no restart). " +
 			"API key fields are write-only: leave them empty to keep the existing secret. " +
@@ -295,7 +295,7 @@ func addDocConfigTools(server *mcp.Server, mgr *manager.Manager) {
 		return jsonResult(cfg), nil, nil
 	})
 
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name: "test_llm",
 		Description: "Test the chat LLM connection and credentials without saving. Uses any provided " +
 			"fields; blank api key falls back to the stored secret. Returns ok/latency/error.",
@@ -308,7 +308,7 @@ func addDocConfigTools(server *mcp.Server, mgr *manager.Manager) {
 		return jsonResult(mgr.TestLLM(ctx, merged)), nil, nil
 	})
 
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name: "test_embedder",
 		Description: "Test the embeddings connection and credentials without saving. Uses any provided " +
 			"fields; blank api key falls back to the stored secret. Returns ok/dim/latency/error.",
@@ -321,7 +321,7 @@ func addDocConfigTools(server *mcp.Server, mgr *manager.Manager) {
 		return jsonResult(mgr.TestEmbedder(ctx, merged)), nil, nil
 	})
 
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name: "test_code_embedder",
 		Description: "Test the dedicated code embeddings connection without saving. A blank code " +
 			"base URL uses the docs embedder. Returns ok/dim/latency/error.",

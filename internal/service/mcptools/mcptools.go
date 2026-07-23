@@ -83,7 +83,7 @@ func viewRepo(mgr *manager.Manager, repo *registry.Repo) repoView {
 }
 
 func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout time.Duration) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "list_repos",
 		Description: "List all tracked repositories with build status, currently running pipeline step, last commit and last build time.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyArgs) (*mcp.CallToolResult, any, error) {
@@ -100,7 +100,7 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 		return jsonResult(views), nil, nil
 	})
 
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name: "add_repo",
 		Description: "Track a new repository: clones it and builds its knowledge graph. " +
 			"By default returns immediately (status 'pending'); check progress with repo_status. " +
@@ -128,7 +128,7 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 		return waitResult(mgr, repo, done), nil, nil
 	})
 
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "remove_repo",
 		Description: "Stop tracking a repository and delete its local clone and graph.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args repoIDArgs) (*mcp.CallToolResult, any, error) {
@@ -139,7 +139,7 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 		return textResult("removed " + args.Repo), nil, nil
 	})
 
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name: "refresh_repo",
 		Description: "Pull the latest commits and rebuild the knowledge graph for a repository. " +
 			"By default rebuilds in the background and returns immediately. " +
@@ -189,7 +189,7 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 		return waitResult(mgr, repo, done), nil, nil
 	})
 
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name: "repo_status",
 		Description: "Get status of a tracked repository: build state, last commit, last error if any. " +
 			"The 'running' field shows the pipeline step currently executing (e.g. 'sync', 'graph', 'docs'); " +
@@ -208,7 +208,7 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 		return jsonResult(viewRepo(mgr, repo)), nil, nil
 	})
 
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name: "cancel_repo_job",
 		Description: "Cancel the refresh/generate job currently running for a repository. " +
 			"The in-flight step is aborted and recorded as 'cancelled by user'; the repo can be " +
@@ -261,7 +261,7 @@ type unlockRepoArgs struct {
 }
 
 func addLeaseTools(server *mcp.Server, mgr *manager.Manager) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name: "lock_repo",
 		Description: "Take a TTL-bounded read lock on a repository clone so external tools can walk it " +
 			"without a refresh pulling mid-read. Deferred refreshes run automatically on unlock/expiry. " +
@@ -286,7 +286,7 @@ func addLeaseTools(server *mcp.Server, mgr *manager.Manager) {
 		return jsonResult(l), nil, nil
 	})
 
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "unlock_repo",
 		Description: "Release a read lock taken with lock_repo. Any refresh deferred during the lock runs immediately.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, args unlockRepoArgs) (*mcp.CallToolResult, any, error) {
@@ -312,7 +312,7 @@ type credentialPatternArgs struct {
 }
 
 func addCredentialTools(server *mcp.Server, mgr *manager.Manager) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name: "set_credential",
 		Description: "Store a git credential for a host or host/path prefix. Used when cloning/pulling " +
 			"matching repositories. Example: pattern 'gitlab.example.com' with an SSH key, or " +
@@ -331,7 +331,7 @@ func addCredentialTools(server *mcp.Server, mgr *manager.Manager) {
 		return textResult(fmt.Sprintf("stored %s credential for pattern %q", cred.Kind, cred.Pattern)), nil, nil
 	})
 
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "list_credentials",
 		Description: "List stored git credential patterns (kind and username only; secrets are never returned).",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyArgs) (*mcp.CallToolResult, any, error) {
@@ -343,7 +343,7 @@ func addCredentialTools(server *mcp.Server, mgr *manager.Manager) {
 		return jsonResult(creds), nil, nil
 	})
 
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "remove_credential",
 		Description: "Remove a stored git credential by its pattern.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args credentialPatternArgs) (*mcp.CallToolResult, any, error) {
@@ -402,7 +402,7 @@ type shortestPathArgs struct {
 }
 
 func addQueryTools(server *mcp.Server, mgr *manager.Manager) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name: "query_graph",
 		Description: "Search the code knowledge graph of one repo (or all repos merged) using BFS or DFS. " +
 			"Returns relevant nodes and edges as text context. Best first call for any codebase question.",
@@ -421,7 +421,7 @@ func addQueryTools(server *mcp.Server, mgr *manager.Manager) {
 		return res, nil, err
 	})
 
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "get_node",
 		Description: "Get full details for a specific node by label or ID. " + repoField + ".",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args nodeArgs) (*mcp.CallToolResult, any, error) {
@@ -430,7 +430,7 @@ func addQueryTools(server *mcp.Server, mgr *manager.Manager) {
 		return res, nil, err
 	})
 
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "get_neighbors",
 		Description: "Get all direct neighbors of a node with edge details. " + repoField + ".",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args neighborsArgs) (*mcp.CallToolResult, any, error) {
@@ -442,7 +442,7 @@ func addQueryTools(server *mcp.Server, mgr *manager.Manager) {
 		return res, nil, err
 	})
 
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "get_community",
 		Description: "Get all nodes in a community by community ID. " + repoField + ".",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args communityArgs) (*mcp.CallToolResult, any, error) {
@@ -451,7 +451,7 @@ func addQueryTools(server *mcp.Server, mgr *manager.Manager) {
 		return res, nil, err
 	})
 
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "god_nodes",
 		Description: "Return the most connected nodes - the core abstractions of the codebase. " + repoField + ".",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args godNodesArgs) (*mcp.CallToolResult, any, error) {
@@ -463,7 +463,7 @@ func addQueryTools(server *mcp.Server, mgr *manager.Manager) {
 		return res, nil, err
 	})
 
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "graph_stats",
 		Description: "Return graph statistics: node count, edge count, communities, confidence breakdown. " + repoField + ".",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args statsArgs) (*mcp.CallToolResult, any, error) {
@@ -472,7 +472,7 @@ func addQueryTools(server *mcp.Server, mgr *manager.Manager) {
 		return res, nil, err
 	})
 
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "shortest_path",
 		Description: "Find the shortest path between two concepts in the knowledge graph. " + repoField + ".",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args shortestPathArgs) (*mcp.CallToolResult, any, error) {
@@ -501,7 +501,7 @@ type listFilesArgs struct {
 }
 
 func addFileTools(server *mcp.Server, mgr *manager.Manager) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name: "read_file",
 		Description: "Read the source of a file inside a tracked repository's clone. " +
 			"Use this to see the actual code behind a graph node (node 'src' fields give the path). " +
@@ -515,7 +515,7 @@ func addFileTools(server *mcp.Server, mgr *manager.Manager) {
 		return jsonResult(res), nil, nil
 	})
 
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name: "list_files",
 		Description: "List files and directories inside a tracked repository's clone. " +
 			"Use to explore layout before reading files. Set recursive=true for the full tree.",
