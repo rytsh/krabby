@@ -385,6 +385,7 @@ func listRepos(mgr *manager.Manager) ada.HandlerFunc {
 		opts := registry.ListOptions{
 			Search: params.Get("q"),
 			Owner:  params.Get("owner"),
+			Status: params.Get("status"),
 		}
 		if n, err := strconv.Atoi(params.Get("page")); err == nil && n > 0 {
 			opts.Page = n

@@ -12,10 +12,16 @@
   let addBranch = $state("");
   let adding = $state(false);
 
-  // Server-side pagination + search. The API returns one page at a time.
+  // Server-side pagination + search + status filter. The API returns one page
+  // at a time.
   let query = $state("");
+  let status = $state("");
   let page = $state(1);
   const pageSize = 10;
+
+  // Repo status values the backend can report (registry.Status*), plus web
+  // sources reuse the same field. Keep in sync with lib/Status.svelte colors.
+  const statusOptions = ["pending", "cloning", "building", "ready", "error"];
 
   let items = $state([]);
   let total = $state(0);
@@ -30,7 +36,7 @@
     const seq = ++loadSeq;
     loading = true;
     try {
-      const res = await api.repos({ page, perPage: pageSize, q: query.trim() });
+      const res = await api.repos({ page, perPage: pageSize, q: query.trim(), status });
       if (seq !== loadSeq) return;
       items = res?.items || [];
       total = res?.total || 0;
@@ -53,6 +59,12 @@
     page = 1;
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(load, 250);
+  }
+
+  function setStatus(v) {
+    status = v;
+    page = 1;
+    load();
   }
 
   function goto(p) {
@@ -148,6 +160,17 @@
       oninput={(e) => setQuery(e.target.value)}
     />
   </div>
+  <select
+    class="input basis-[150px] capitalize"
+    aria-label="Filter by status"
+    value={status}
+    onchange={(e) => setStatus(e.target.value)}
+  >
+    <option value="">All statuses</option>
+    {#each statusOptions as s}
+      <option value={s} class="capitalize">{s}</option>
+    {/each}
+  </select>
   <span class="whitespace-nowrap text-[13px] text-faint">
     {total} total
   </span>
@@ -156,10 +179,14 @@
 <div class="card overflow-hidden">
   {#if !loaded}
     <div class="p-6 text-center text-dim">Loading…</div>
-  {:else if total === 0 && !query.trim()}
+  {:else if total === 0 && !query.trim() && !status}
     <div class="p-6 text-center text-dim">No repositories tracked yet.</div>
   {:else if items.length === 0}
-    <div class="p-6 text-center text-dim">No repositories match “{query}”.</div>
+    <div class="p-6 text-center text-dim">
+      No repositories match{query.trim() ? ` “${query}”` : ""}{status
+        ? `${query.trim() ? " with" : " the"} status “${status}”`
+        : ""}.
+    </div>
   {:else}
     <table class="w-full border-collapse">
       <thead>

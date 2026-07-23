@@ -157,6 +157,7 @@ type ListOptions struct {
 	PerPage int
 	Search  string
 	Owner   string
+	Status  string
 }
 
 const (
@@ -183,6 +184,11 @@ func buildFilter(q *query.Query, opts ListOptions) {
 	if s := strings.TrimSpace(opts.Search); s != "" {
 		q.Where = append(q.Where,
 			query.NewExpressionCmp(query.OperatorILike, "id", "%"+s+"%").Expression())
+	}
+
+	if st := strings.TrimSpace(opts.Status); st != "" {
+		q.Where = append(q.Where,
+			query.NewExpressionCmp(query.OperatorEq, "status", st).Expression())
 	}
 }
 

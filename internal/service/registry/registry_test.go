@@ -105,6 +105,52 @@ func TestListPagedOwnerFilter(t *testing.T) {
 	}
 }
 
+func TestListPagedStatusFilter(t *testing.T) {
+	reg := newTestRegistry(t)
+	ctx := context.Background()
+
+	upsert := func(id, status string) {
+		if err := reg.Upsert(ctx, &Repo{ID: id, URL: "https://example.com/" + id, Status: status}); err != nil {
+			t.Fatalf("upsert %s: %v", id, err)
+		}
+	}
+	upsert("acme/alpha", StatusReady)
+	upsert("acme/beta", StatusReady)
+	upsert("acme/gamma", StatusError)
+	upsert("acme/delta", StatusBuilding)
+
+	repos, total, err := reg.ListPaged(ctx, ListOptions{Status: StatusReady})
+	if err != nil {
+		t.Fatalf("status filter: %v", err)
+	}
+	if total != 2 {
+		t.Fatalf("ready total = %d, want 2", total)
+	}
+	for _, r := range repos {
+		if r.Status != StatusReady {
+			t.Fatalf("unexpected status %q for repo %q", r.Status, r.ID)
+		}
+	}
+
+	// Status combines with search: only ready repos also matching "alpha".
+	_, total, err = reg.ListPaged(ctx, ListOptions{Status: StatusReady, Search: "alpha"})
+	if err != nil {
+		t.Fatalf("status+search filter: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("ready+alpha total = %d, want 1", total)
+	}
+
+	// Empty status returns everything.
+	_, total, err = reg.ListPaged(ctx, ListOptions{})
+	if err != nil {
+		t.Fatalf("no filter: %v", err)
+	}
+	if total != 4 {
+		t.Fatalf("unfiltered total = %d, want 4", total)
+	}
+}
+
 func TestOwners(t *testing.T) {
 	reg := newTestRegistry(t)
 	seed(t, reg, "acme/alpha", "acme/beta", "gamma/x", "solo")

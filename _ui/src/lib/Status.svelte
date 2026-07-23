@@ -28,7 +28,7 @@
 {:else}
   <span class="inline-flex items-center gap-1.5 text-[13px] text-dim">
     <span
-      class="inline-block h-[7px] w-[7px] rounded-full"
+      class="inline-block h-[8px] w-[8px] flex-shrink-0 rounded-[2px]"
       style="background: {colors[status] || 'var(--color-faint)'}"
     ></span>
     {status || "unknown"}

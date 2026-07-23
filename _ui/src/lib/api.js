@@ -39,13 +39,14 @@ async function req(path, opts = {}) {
 export const api = {
   settings: () => req("/settings"),
   // repos returns a paginated envelope: { items, total, page, per_page }.
-  // opts: { page, perPage, q, owner }.
-  repos: ({ page = 1, perPage = 20, q = "", owner = "" } = {}) => {
+  // opts: { page, perPage, q, owner, status }.
+  repos: ({ page = 1, perPage = 20, q = "", owner = "", status = "" } = {}) => {
     const p = new URLSearchParams();
     if (page) p.set("page", page);
     if (perPage) p.set("per_page", perPage);
     if (q) p.set("q", q);
     if (owner) p.set("owner", owner);
+    if (status) p.set("status", status);
     return req(`/repos?${p.toString()}`);
   },
   // owners returns [{ owner, count }] for the sidebar tree.

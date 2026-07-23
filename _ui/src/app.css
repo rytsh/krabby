@@ -9,12 +9,16 @@
   --color-bg: var(--bg);
   --color-surface: var(--surface);
   --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
   --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
   --color-fg: var(--fg);
   --color-dim: var(--dim);
   --color-faint: var(--faint);
   --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
   --color-accent-fg: var(--accent-fg);
+  --color-err-soft: var(--err-soft);
   --color-ok: var(--ok);
   --color-warn: var(--warn);
   --color-err: var(--err);
@@ -29,15 +33,19 @@
   --bg: #18181b;
   --surface: #1f1f23;
   --surface-2: #27272a;
+  --surface-3: #323238;
   --line: #303035;
+  --line-strong: #46464d;
   --fg: #e4e4e7;
   --dim: #a1a1aa;
   --faint: #71717a;
   --accent: #f43f5e;
+  --accent-hover: #fb5c76;
   --accent-fg: #ffffff;
   --ok: #4ade80;
   --warn: #fbbf24;
   --err: #f87171;
+  --err-soft: rgb(248 113 113 / 0.12);
   --busy: #60a5fa;
   --scrollbar-thumb: #3f3f46;
   --scrollbar-thumb-hover: #52525b;
@@ -49,15 +57,19 @@
   --bg: #fafafa;
   --surface: #ffffff;
   --surface-2: #f4f4f5;
+  --surface-3: #e9e9ec;
   --line: #e4e4e7;
+  --line-strong: #c8c8ce;
   --fg: #18181b;
   --dim: #52525b;
   --faint: #a1a1aa;
   --accent: #e11d48;
+  --accent-hover: #be123c;
   --accent-fg: #ffffff;
   --ok: #16a34a;
   --warn: #d97706;
   --err: #dc2626;
+  --err-soft: rgb(220 38 38 / 0.1);
   --busy: #2563eb;
   --scrollbar-thumb: #d4d4d8;
   --scrollbar-thumb-hover: #a1a1aa;
@@ -121,13 +133,13 @@ html.theme-anim * {
 /* A couple of shared component classes to avoid repeating long utility runs. */
 @layer components {
   .btn {
-    @apply cursor-pointer rounded-md border border-line bg-surface-2 px-3 py-1.5 text-fg transition-colors hover:bg-line disabled:cursor-default disabled:opacity-50;
+    @apply cursor-pointer rounded-md border border-line bg-surface-2 px-3 py-1.5 text-fg transition-colors hover:border-line-strong hover:bg-surface-3 disabled:cursor-default disabled:opacity-50 disabled:hover:border-line disabled:hover:bg-surface-2;
   }
   .btn-primary {
-    @apply border-accent bg-accent text-accent-fg hover:brightness-110;
+    @apply border-accent bg-accent text-accent-fg hover:border-accent-hover hover:bg-accent-hover disabled:hover:border-accent disabled:hover:bg-accent;
   }
   .btn-danger {
-    @apply hover:border-err hover:text-err;
+    @apply hover:border-err hover:bg-err-soft hover:text-err disabled:hover:border-line disabled:hover:bg-surface-2 disabled:hover:text-fg;
   }
   .btn-sm {
     @apply px-2.5 py-1 text-[13px];
@@ -139,7 +151,7 @@ html.theme-anim * {
     @apply border-line bg-surface-2 text-fg hover:bg-surface-2 hover:text-fg;
   }
   .icon-btn {
-    @apply inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-md border border-line bg-surface-2 text-dim transition-colors hover:bg-line hover:text-fg;
+    @apply inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-md border border-line bg-surface-2 text-dim transition-colors hover:border-line-strong hover:bg-surface-3 hover:text-fg;
   }
   .input {
     @apply rounded-md border border-line bg-bg px-2.5 py-1.5 text-fg outline-none focus:border-accent;
