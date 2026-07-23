@@ -47,7 +47,7 @@ func New(mgr *manager.Manager, version string, waitTimeout time.Duration, profil
 	instructions := serverInstructions
 	if profile == ToolProfileFull {
 		title += " (full administration)"
-		instructions += "\n\nThis connection uses the full profile and can mutate credentials and runtime configuration. Use administration tools only when explicitly requested."
+		instructions += "\n\nThis connection uses the full profile and can mutate credentials, runtime configuration and web sources. Web sources (pages, confluence, jira) are managed with source_types, add_source, update_source, refresh_source, delete_source and get_source; use them only when explicitly requested."
 	}
 
 	server := mcp.NewServer(&mcp.Implementation{

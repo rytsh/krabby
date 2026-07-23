@@ -68,3 +68,66 @@ func TestConfigMergeAndRedaction(t *testing.T) {
 		t.Fatalf("secret leaked in view: %s", raw)
 	}
 }
+
+func TestValidateSpaceOrRootPage(t *testing.T) {
+	f := New()
+	tests := []struct {
+		name string
+		raw  string
+		ok   bool
+	}{
+		{name: "space", raw: `{"base_url":"https://w.example.com","space":"FIN"}`, ok: true},
+		{name: "root page", raw: `{"base_url":"https://w.example.com","root_page":"1254228318"}`, ok: true},
+		{name: "neither", raw: `{"base_url":"https://w.example.com"}`, ok: false},
+		{name: "no base", raw: `{"root_page":"123"}`, ok: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := f.Validate(json.RawMessage(tt.raw)); (err == nil) != tt.ok {
+				t.Fatalf("Validate() err = %v, want ok=%v", err, tt.ok)
+			}
+		})
+	}
+}
+
+func TestFirstEndpoint(t *testing.T) {
+	// Subtree mode: CQL descendant query.
+	sub := firstEndpoint(Config{RootPage: "1254228318"}, "")
+	if !strings.Contains(sub, "/rest/api/content/search") ||
+		!strings.Contains(sub, "ancestor") {
+		t.Fatalf("subtree endpoint = %q", sub)
+	}
+
+	// Subtree scoped to a space adds a space clause.
+	subSpace := firstEndpoint(Config{RootPage: "1", Space: "FIN"}, "")
+	if !strings.Contains(subSpace, "space") {
+		t.Fatalf("scoped subtree endpoint = %q", subSpace)
+	}
+
+	// Space mode: CQL space query (uniform CQL for incremental support).
+	space := firstEndpoint(Config{Space: "FIN"}, "")
+	if !strings.Contains(space, "/rest/api/content/search") || !strings.Contains(space, "space") {
+		t.Fatalf("space endpoint = %q", space)
+	}
+	if !strings.Contains(space, "lastmodified+ASC") && !strings.Contains(space, "lastmodified%20ASC") {
+		t.Fatalf("expected ascending order for monotonic watermark: %q", space)
+	}
+
+	// Incremental: watermark adds a lastmodified clause.
+	inc := firstEndpoint(Config{RootPage: "1"}, "2025-01-02 15:04")
+	if !strings.Contains(inc, "lastmodified") {
+		t.Fatalf("incremental endpoint missing lastmodified: %q", inc)
+	}
+}
+
+func TestParseConfluenceTime(t *testing.T) {
+	if parseConfluenceTime("2026-07-23T12:44:38.000Z").IsZero() {
+		t.Fatal("failed to parse RFC3339 version.when")
+	}
+	if parseConfluenceTime("2025-01-02 15:04").IsZero() {
+		t.Fatal("failed to parse watermark format")
+	}
+	if !parseConfluenceTime("nonsense").IsZero() {
+		t.Fatal("garbage should be zero time")
+	}
+}

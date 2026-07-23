@@ -6,6 +6,7 @@
   import { fmtDate } from "../lib/format.js";
   import Icon from "../lib/Icon.svelte";
   import Status from "../lib/Status.svelte";
+  import { successToast } from "../lib/toast.js";
 
   let error = $state("");
   let addUrl = $state("");
@@ -99,6 +100,7 @@
     e.stopPropagation();
     try {
       await api.refreshRepo(id);
+      successToast("Refresh queued");
       await reload();
     } catch (err) {
       error = err.message;
@@ -110,6 +112,7 @@
     e.stopPropagation();
     try {
       await api.cancelRepoJob(id);
+      successToast("Cancel requested");
       await reload();
     } catch (err) {
       error = err.message;

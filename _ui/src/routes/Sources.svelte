@@ -9,6 +9,7 @@
   import Icon from "../lib/Icon.svelte";
   import Status from "../lib/Status.svelte";
   import MarkdownView from "../lib/MarkdownView.svelte";
+  import { successToast } from "../lib/toast.js";
 
   // selected/doc come from the route: /sources/<name>?doc=<path>.
   let { sourceName = "" } = $props();
@@ -24,6 +25,9 @@
   // Per-collection page lists, loaded lazily when expanded.
   let pages = $state({});
   let expanded = $state({});
+  // Per-collection distinct team names and the active team filter (JIRA).
+  let teams = $state({});
+  let teamFilter = $state({});
 
   // Doc viewer state.
   let docContent = $state("");
@@ -39,6 +43,7 @@
     return {
       name: "",
       type: "pages",
+      description: "",
       refresh_interval: "24h",
       base_url: "",
       space: "",
@@ -46,6 +51,16 @@
       api_token: "",
       include_labels: "",
       exclude_labels: "",
+      // Confluence-only
+      root_page: "",
+      include_root: true,
+      // JIRA-only
+      project: "",
+      jql: "",
+      team_fields: "",
+      max_issues: "",
+      // Confluence + JIRA
+      full_resync_every: "",
     };
   }
 
@@ -62,11 +77,18 @@
 
   async function loadPages(name) {
     try {
-      const res = await api.source(name);
+      const res = await api.source(name, teamFilter[name] || "");
       pages = { ...pages, [name]: res?.pages || [] };
+      // teams is the full set across the collection (unfiltered by the server).
+      if (res?.teams) teams = { ...teams, [name]: res.teams };
     } catch (e) {
       error = e.message;
     }
+  }
+
+  function setTeamFilter(name, value) {
+    teamFilter = { ...teamFilter, [name]: value };
+    loadPages(name);
   }
 
   function toggle(name) {
@@ -84,18 +106,39 @@
   async function add() {
     adding = true;
     try {
-      const body = {
-        name: form.name.trim(),
-        type: form.type,
-        refresh_interval: form.refresh_interval === "manual" ? "" : form.refresh_interval,
-        config: form.type === "confluence" ? {
+      let config = {};
+      if (form.type === "confluence") {
+        config = {
           base_url: form.base_url.trim(),
           space: form.space.trim(),
+          root_page: form.root_page.trim(),
+          include_root: form.include_root,
           user: form.user.trim(),
           api_token: form.api_token,
           include_labels: splitLabels(form.include_labels),
           exclude_labels: splitLabels(form.exclude_labels),
-        } : {},
+          full_resync_every: form.full_resync_every.trim(),
+        };
+      } else if (form.type === "jira") {
+        config = {
+          base_url: form.base_url.trim(),
+          user: form.user.trim(),
+          api_token: form.api_token,
+          project: form.project.trim(),
+          jql: form.jql.trim(),
+          include_labels: splitLabels(form.include_labels),
+          exclude_labels: splitLabels(form.exclude_labels),
+          team_fields: splitLabels(form.team_fields),
+          max_issues: form.max_issues ? Number(form.max_issues) : 0,
+          full_resync_every: form.full_resync_every.trim(),
+        };
+      }
+      const body = {
+        name: form.name.trim(),
+        type: form.type,
+        description: form.description.trim(),
+        refresh_interval: form.refresh_interval === "manual" ? "" : form.refresh_interval,
+        config,
       };
       if (editingName) await api.updateSource(editingName, body);
       else await api.addSource(body);
@@ -117,6 +160,7 @@
     form = {
       name: source.name,
       type: source.type,
+      description: source.description || "",
       refresh_interval: source.refresh_interval || "manual",
       base_url: source.config?.base_url || "",
       space: source.config?.space || "",
@@ -124,6 +168,13 @@
       api_token: "",
       include_labels: (source.config?.include_labels || []).join(", "),
       exclude_labels: (source.config?.exclude_labels || []).join(", "),
+      root_page: source.config?.root_page || "",
+      include_root: source.config?.include_root !== false,
+      project: source.config?.project || "",
+      jql: source.config?.jql || "",
+      team_fields: (source.config?.team_fields || []).join(", "),
+      max_issues: source.config?.max_issues || "",
+      full_resync_every: source.config?.full_resync_every || "",
     };
     showAdd = true;
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -139,6 +190,7 @@
     e.stopPropagation();
     try {
       await api.refreshSource(name);
+      successToast("Sync queued");
       await load();
     } catch (err) {
       error = err.message;
@@ -265,6 +317,7 @@
             <select class="input" bind:value={form.type} disabled={!!editingName}>
               <option value="pages">Custom web (URL list)</option>
               <option value="confluence">Confluence space</option>
+              <option value="jira">JIRA project / JQL</option>
             </select>
           </label>
           <label class="flex flex-col gap-1 text-[13px] text-dim">
@@ -279,6 +332,15 @@
           </label>
         </div>
 
+        <label class="flex flex-col gap-1 text-[13px] text-dim">
+          Description (what this source holds — shown to MCP/AI to pick the right source)
+          <input
+            class="input"
+            placeholder="e.g. Delivery Support runbooks and TERs"
+            bind:value={form.description}
+          />
+        </label>
+
         {#if form.type === "confluence"}
           <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <label class="flex flex-col gap-1 text-[13px] text-dim">
@@ -286,9 +348,19 @@
               <input class="input" placeholder="https://acme.atlassian.net/wiki" bind:value={form.base_url} />
             </label>
             <label class="flex flex-col gap-1 text-[13px] text-dim">
-              Space key
-              <input class="input" placeholder="WINE" bind:value={form.space} />
+              Space key {form.root_page ? "(optional when root page set)" : ""}
+              <input class="input" placeholder="FinOps" bind:value={form.space} />
             </label>
+            <label class="flex flex-col gap-1 text-[13px] text-dim">
+              Root page id (index this page + all descendants only)
+              <input class="input" placeholder="1254228318" bind:value={form.root_page} />
+            </label>
+            {#if form.root_page}
+              <label class="flex items-center gap-2 text-[13px] text-dim sm:col-span-2">
+                <input type="checkbox" bind:checked={form.include_root} />
+                Also index the root page itself
+              </label>
+            {/if}
             <label class="flex flex-col gap-1 text-[13px] text-dim">
               User (email; empty = bearer token)
               <input class="input" placeholder="me@acme.com" bind:value={form.user} />
@@ -305,7 +377,67 @@
               Exclude labels (comma separated)
               <input class="input" placeholder="draft, archived" bind:value={form.exclude_labels} />
             </label>
+            <label class="flex flex-col gap-1 text-[13px] text-dim">
+              Full re-sync every (e.g. 24h; reconciles deletions)
+              <input class="input" placeholder="24h" bind:value={form.full_resync_every} />
+            </label>
           </div>
+          <p class="m-0 text-[12px] text-faint">
+            Set a <strong>Root page id</strong> (from the page URL) to index just that page and its
+            whole sub-tree — register several sub-trees of one space as separate keyed sources (e.g.
+            <code class="font-mono">delivery-support</code>). Leave it empty to index the whole space.
+          </p>
+        {:else if form.type === "jira"}
+          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <label class="flex flex-col gap-1 text-[13px] text-dim">
+              Base URL
+              <input class="input" placeholder="https://jira.acme.com" bind:value={form.base_url} />
+            </label>
+            <label class="flex flex-col gap-1 text-[13px] text-dim">
+              Project key (or use JQL below)
+              <input class="input" placeholder="OFS" bind:value={form.project} />
+            </label>
+            <label class="flex flex-col gap-1 text-[13px] text-dim sm:col-span-2">
+              JQL (optional; overrides project)
+              <input
+                class="input"
+                placeholder="project = OFS AND updated >= -30d ORDER BY updated DESC"
+                bind:value={form.jql}
+              />
+            </label>
+            <label class="flex flex-col gap-1 text-[13px] text-dim">
+              User (email; empty = bearer token / PAT)
+              <input class="input" placeholder="me@acme.com" bind:value={form.user} />
+            </label>
+            <label class="flex flex-col gap-1 text-[13px] text-dim">
+              API token / PAT {editingName ? "(blank = keep existing)" : ""}
+              <input class="input" type="password" bind:value={form.api_token} />
+            </label>
+            <label class="flex flex-col gap-1 text-[13px] text-dim">
+              Include labels (comma separated; empty = all)
+              <input class="input" placeholder="customer, prod" bind:value={form.include_labels} />
+            </label>
+            <label class="flex flex-col gap-1 text-[13px] text-dim">
+              Skip labels (comma separated)
+              <input class="input" placeholder="wontfix, duplicate" bind:value={form.exclude_labels} />
+            </label>
+            <label class="flex flex-col gap-1 text-[13px] text-dim">
+              Team field ids (comma separated custom fields)
+              <input class="input" placeholder="customfield_104705, customfield_110643" bind:value={form.team_fields} />
+            </label>
+            <label class="flex flex-col gap-1 text-[13px] text-dim">
+              Max issues (0 = default)
+              <input class="input" type="number" min="0" placeholder="5000" bind:value={form.max_issues} />
+            </label>
+            <label class="flex flex-col gap-1 text-[13px] text-dim">
+              Full re-sync every (e.g. 24h; reconciles deletions)
+              <input class="input" placeholder="24h" bind:value={form.full_resync_every} />
+            </label>
+          </div>
+          <p class="m-0 text-[12px] text-faint">
+            Team field ids are instance-specific JIRA custom fields that hold team/squad ownership
+            (e.g. a "Squad" field). Their values are indexed so tickets are searchable by team name.
+          </p>
         {:else}
           <p class="m-0 text-[12px] text-faint">
             Add page URLs after creating the collection. Private pages resolve auth from the git
@@ -337,7 +469,7 @@
             aria-expanded={!!expanded[s.name]}
           >
             <Icon name={expanded[s.name] ? "chevron-down" : "chevron-right"} size={14} />
-            <Icon name={s.type === "confluence" ? "book" : "search"} size={14} />
+            <Icon name={s.type === "confluence" ? "book" : s.type === "jira" ? "tag" : "search"} size={14} />
             <span class="font-mono text-[13.5px] font-medium">{s.name}</span>
             <span class="rounded border border-line px-1.5 text-[11px] text-dim">{s.type}</span>
             <span class="font-mono text-[11px] text-faint">web:{s.name}</span>
@@ -352,13 +484,25 @@
 
           {#if expanded[s.name]}
             <div class="border-t border-line px-3.5 py-3">
+              {#if s.description}
+                <p class="mb-2 text-[12.5px] text-dim">{s.description}</p>
+              {/if}
               <div class="mb-3 flex flex-wrap items-center gap-x-5 gap-y-1 text-[12px] text-faint">
                 <span>Last sync: {s.last_refresh_at ? fmtDate(s.last_refresh_at) : "never"}</span>
                 <span>Auto refresh: {s.refresh_interval || "manual"}</span>
                 {#if s.type === "confluence"}
-                  <span class="font-mono">{s.config?.base_url} · {s.config?.space}</span>
+                  <span class="font-mono">
+                    {s.config?.base_url}
+                    {s.config?.root_page ? `· page ${s.config.root_page} + subtree` : `· ${s.config?.space}`}
+                  </span>
                   {#if s.config?.include_labels?.length}
                     <span>labels: {s.config.include_labels.join(", ")}</span>
+                  {/if}
+                {/if}
+                {#if s.type === "jira"}
+                  <span class="font-mono">{s.config?.base_url} · {s.config?.jql || s.config?.project}</span>
+                  {#if s.config?.exclude_labels?.length}
+                    <span>skip: {s.config.exclude_labels.join(", ")}</span>
                   {/if}
                 {/if}
                 {#if s.last_error}
@@ -383,6 +527,22 @@
                   <button class="btn" onclick={() => addPage(s.name)} disabled={!(pageUrl[s.name] || "").trim()}>
                     Add page
                   </button>
+                </div>
+              {/if}
+
+              {#if s.type === "jira" && teams[s.name]?.length}
+                <div class="mb-3 flex items-center gap-2 text-[12px] text-dim">
+                  <span>Filter by team:</span>
+                  <select
+                    class="input max-w-xs"
+                    value={teamFilter[s.name] || ""}
+                    onchange={(e) => setTeamFilter(s.name, e.target.value)}
+                  >
+                    <option value="">all teams</option>
+                    {#each teams[s.name] as t}
+                      <option value={t}>{t}</option>
+                    {/each}
+                  </select>
                 </div>
               {/if}
 

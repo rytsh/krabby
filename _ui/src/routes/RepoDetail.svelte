@@ -8,6 +8,7 @@
   import FileTree from "../lib/FileTree.svelte";
   import MarkdownView from "../lib/MarkdownView.svelte";
   import Icon from "../lib/Icon.svelte";
+  import { successToast } from "../lib/toast.js";
 
   let { repoId } = $props();
 
@@ -250,6 +251,7 @@
   async function refresh() {
     try {
       await api.refreshRepo(repoId);
+      successToast("Refresh queued");
       await loadRepo();
     } catch (e) {
       error = e.message;
@@ -259,6 +261,7 @@
   async function cancelJob() {
     try {
       await api.cancelRepoJob(repoId);
+      successToast("Cancel requested");
       await loadRepo();
     } catch (e) {
       error = e.message;

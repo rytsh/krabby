@@ -22,6 +22,7 @@
     Search,
     Settings,
     Sun,
+    Tag,
     Warehouse,
   } from "@lucide/svelte";
 
@@ -50,6 +51,7 @@
     search: Search,
     settings: Settings,
     sun: Sun,
+    tag: Tag,
     warehouse: Warehouse,
   };
 

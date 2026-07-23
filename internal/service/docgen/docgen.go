@@ -954,8 +954,8 @@ func cleanupStaleDocs(docsDir string, docs []DocMeta) {
 
 // selectFiles walks the clone and returns repo-relative slash paths that match
 // the Include globs and none of the Exclude globs. When Include is empty a set of
-// sensible source extensions is documented. graphify-out and .git are skipped by
-// repofs.ListFiles.
+// sensible source extensions is documented. graphify-out, .git and vendor are
+// skipped by repofs.ListFiles.
 func (g *llmGenerator) selectFiles(clonePath string) ([]string, error) {
 	entries, err := repofs.ListFiles(clonePath, "", true)
 	if err != nil {

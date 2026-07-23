@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -11,6 +12,7 @@ import (
 	"github.com/rytsh/krabby/internal/service/coderag"
 	"github.com/rytsh/krabby/internal/service/manager"
 	"github.com/rytsh/krabby/internal/service/settings"
+	"github.com/rytsh/krabby/internal/service/websource"
 )
 
 // ---- docs + RAG tools -------------------------------------------------------
@@ -58,6 +60,78 @@ type getDocArgs struct {
 type listSourcesArgs struct {
 	Page    int `json:"page,omitempty" jsonschema:"page number (default 1)"`
 	PerPage int `json:"per_page,omitempty" jsonschema:"collections per page (default 50, max 200)"`
+}
+
+// addSourceArgs is the create/update payload for a web source (pages,
+// confluence or jira). Config is the opaque provider-owned object; its shape
+// depends on Type (discover shapes with source_types).
+type addSourceArgs struct {
+	Name            string          `json:"name" jsonschema:"collection name; lowercase [a-z0-9._-]; becomes the search scope key web:<name>. Choose a meaningful key, e.g. 'delivery-support'"`
+	Type            string          `json:"type" jsonschema:"source type: 'pages', 'confluence' or 'jira' (see source_types)"`
+	Description     string          `json:"description,omitempty" jsonschema:"short human summary of what this source holds (e.g. 'Delivery Support runbooks and TERs'); shown to models by list_sources so they can pick the right source to search"`
+	RefreshInterval string          `json:"refresh_interval,omitempty" jsonschema:"Go duration between automatic re-syncs, e.g. '1h' or '24h'; empty or 'manual' means manual only"`
+	Config          json.RawMessage `json:"config,omitempty" jsonschema:"provider-owned config object. jira: base_url, user, api_token, project or jql, include_labels, exclude_labels, team_fields, max_issues. confluence: base_url, and either space (whole space) or root_page (a page id to index that page and all its descendants as one keyed source), optional include_root, user, api_token, include_labels, exclude_labels. API tokens are write-only; blank on update keeps the stored secret"`
+}
+
+type updateSourceArgs struct {
+	Name            string          `json:"name" jsonschema:"existing collection name to update; the type is immutable"`
+	Description     string          `json:"description,omitempty" jsonschema:"short human summary of what this source holds; shown to models by list_sources"`
+	RefreshInterval string          `json:"refresh_interval,omitempty" jsonschema:"Go duration between automatic re-syncs, e.g. '1h'; empty or 'manual' means manual only"`
+	Config          json.RawMessage `json:"config,omitempty" jsonschema:"provider-owned config object; a blank api_token keeps the stored secret"`
+}
+
+type sourceNameArgs struct {
+	Name string `json:"name" jsonschema:"collection name"`
+}
+
+type getSourceArgs struct {
+	Name string `json:"name" jsonschema:"collection name"`
+	Team string `json:"team,omitempty" jsonschema:"optional: when set, list only tickets whose teams include this exact team name (case-insensitive)"`
+	Page int    `json:"page,omitempty" jsonschema:"page number for the ticket list (default 1)"`
+	Per  int    `json:"per_page,omitempty" jsonschema:"tickets per page (default 50, max 200)"`
+}
+
+func (a addSourceArgs) collection() (*websource.Collection, error) {
+	col := &websource.Collection{
+		Name:        strings.TrimSpace(strings.ToLower(a.Name)),
+		Type:        strings.TrimSpace(a.Type),
+		Description: strings.TrimSpace(a.Description),
+		Config:      a.Config,
+	}
+	if a.RefreshInterval != "" && a.RefreshInterval != "manual" {
+		d, err := time.ParseDuration(a.RefreshInterval)
+		if err != nil {
+			return nil, fmt.Errorf("invalid refresh_interval; %w", err)
+		}
+		col.RefreshInterval = d
+	}
+
+	return col, nil
+}
+
+// sourceResult is the redacted MCP view of a collection (secrets reduced to a
+// set/unset flag by the fetcher's ConfigView).
+type sourceResult struct {
+	*websource.Collection
+	RefreshInterval string `json:"refresh_interval"`
+	Config          any    `json:"config,omitempty"`
+	ScopeKey        string `json:"scope_key"`
+	Running         string `json:"running,omitempty"`
+}
+
+func viewSourceMCP(mgr *manager.Manager, col *websource.Collection) sourceResult {
+	interval := ""
+	if col.RefreshInterval > 0 {
+		interval = col.RefreshInterval.String()
+	}
+
+	return sourceResult{
+		Collection:      col,
+		RefreshInterval: interval,
+		Config:          mgr.WebSourceConfigView(col),
+		ScopeKey:        websource.ScopeKey(col.Name),
+		Running:         mgr.Activity(websource.ScopeKey(col.Name)),
+	}
 }
 
 // addDocTools registers the documentation + RAG tools. They surface even when
@@ -134,7 +208,7 @@ func addDocTools(server *mcp.Server, mgr *manager.Manager, includeAdmin bool) {
 
 	addTool(server, &mcp.Tool{
 		Name:        "list_sources",
-		Description: "Discover a web-source collection name when it is unknown or the user requests an inventory. Do not call before every search_docs request.",
+		Description: "List web-source collections (name, type, status and a human 'description' of what each holds). Use it to pick which source to scope search_docs to (repo=web:<name>) when the user's question matches a source's description; also for an inventory. Do not call before every search_docs request.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args listSourcesArgs) (*mcp.CallToolResult, any, error) {
 		cols, err := mgr.ListWebCollections(ctx)
 		if err != nil {
@@ -146,7 +220,119 @@ func addDocTools(server *mcp.Server, mgr *manager.Manager, includeAdmin bool) {
 
 	if includeAdmin {
 		addDocConfigTools(server, mgr)
+		addSourceAdminTools(server, mgr)
 	}
+}
+
+// addSourceAdminTools registers the web-source management tools (create,
+// update, delete, refresh, inspect) so sources like jira/confluence/pages can
+// be set up over MCP, mirroring the REST/UI surface. Admin profile only.
+func addSourceAdminTools(server *mcp.Server, mgr *manager.Manager) {
+	addTool(server, &mcp.Tool{
+		Name: "source_types",
+		Description: "List the web-source types that can be created (e.g. pages, confluence, jira) " +
+			"so add_source is called with a valid type. Config shape depends on the type.",
+	}, func(_ context.Context, _ *mcp.CallToolRequest, _ emptyArgs) (*mcp.CallToolResult, any, error) {
+		return jsonResult(map[string]any{"types": mgr.WebSourceTypes()}), nil, nil
+	})
+
+	addTool(server, &mcp.Tool{
+		Name: "add_source",
+		Description: "Create a web source (pages, confluence or jira) to index into the docs RAG index " +
+			"under scope web:<name>, then trigger its first background sync. Config is provider-owned; for " +
+			"jira set base_url + (project or jql), and optionally exclude_labels (skip labels) and team_fields " +
+			"(custom field ids holding team/squad). API tokens are write-only. Poll get_source until status is ready.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args addSourceArgs) (*mcp.CallToolResult, any, error) {
+		col, err := args.collection()
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := mgr.AddWebCollection(ctx, col); err != nil {
+			return nil, nil, err
+		}
+
+		return jsonResult(viewSourceMCP(mgr, col)), nil, nil
+	})
+
+	addTool(server, &mcp.Tool{
+		Name: "update_source",
+		Description: "Update a web source's refresh interval and/or provider config. The type is immutable. " +
+			"A blank api_token in config keeps the stored secret. Does not re-sync by itself; call refresh_source.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args updateSourceArgs) (*mcp.CallToolResult, any, error) {
+		col := &websource.Collection{
+			Name:        strings.TrimSpace(strings.ToLower(args.Name)),
+			Description: strings.TrimSpace(args.Description),
+			Config:      args.Config,
+		}
+		if args.RefreshInterval != "" && args.RefreshInterval != "manual" {
+			d, err := time.ParseDuration(args.RefreshInterval)
+			if err != nil {
+				return nil, nil, fmt.Errorf("invalid refresh_interval; %w", err)
+			}
+			col.RefreshInterval = d
+		}
+		if err := mgr.UpdateWebCollection(ctx, col); err != nil {
+			return nil, nil, err
+		}
+
+		return jsonResult(viewSourceMCP(mgr, col)), nil, nil
+	})
+
+	addTool(server, &mcp.Tool{
+		Name:        "delete_source",
+		Description: "Stop tracking a web source: removes its collection, pages, synced markdown and vectors.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args sourceNameArgs) (*mcp.CallToolResult, any, error) {
+		if err := mgr.DeleteWebCollection(ctx, strings.TrimSpace(strings.ToLower(args.Name))); err != nil {
+			return nil, nil, err
+		}
+
+		return jsonResult(map[string]string{"status": "deleted", "source": args.Name}), nil, nil
+	})
+
+	addTool(server, &mcp.Tool{
+		Name: "refresh_source",
+		Description: "Queue a background re-sync of a web source: fetches current items, re-embeds changed " +
+			"ones and prunes items that vanished. Poll get_source until status is ready.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args sourceNameArgs) (*mcp.CallToolResult, any, error) {
+		name := strings.TrimSpace(strings.ToLower(args.Name))
+		col, err := mgr.WebCollection(ctx, name)
+		if err != nil {
+			return nil, nil, err
+		}
+		if col == nil {
+			return nil, nil, fmt.Errorf("source %s not found", name)
+		}
+		mgr.TriggerWebRefresh(name)
+
+		return jsonResult(map[string]string{"status": "refresh queued", "source": name}), nil, nil
+	})
+
+	addTool(server, &mcp.Tool{
+		Name: "get_source",
+		Description: "Inspect one web source: its (redacted) config and status plus a bounded list of its " +
+			"indexed items with titles and original links. For jira, pass team to list only tickets whose teams " +
+			"include that exact team name (case-insensitive).",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args getSourceArgs) (*mcp.CallToolResult, any, error) {
+		name := strings.TrimSpace(strings.ToLower(args.Name))
+		col, err := mgr.WebCollection(ctx, name)
+		if err != nil {
+			return nil, nil, err
+		}
+		if col == nil {
+			return nil, nil, fmt.Errorf("source %s not found", name)
+		}
+
+		pages, err := mgr.WebPagesByTeam(ctx, name, args.Team)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return jsonResult(map[string]any{
+			"source": viewSourceMCP(mgr, col),
+			"count":  len(pages),
+			"items":  pageSlice(pages, args.Page, args.Per, 50),
+		}), nil, nil
+	})
 }
 
 func boundedCodeSnippets(snippets []coderag.Snippet) []coderag.Snippet {

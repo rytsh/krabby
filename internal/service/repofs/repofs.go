@@ -30,10 +30,12 @@ const (
 // ErrTooLarge indicates the requested read exceeds MaxFileBytes.
 var ErrTooLarge = errors.New("file too large")
 
-// Dir excluded from listings; graphify output and VCS metadata are noise.
+// Dir excluded from listings; graphify output, VCS metadata and vendored
+// third-party trees are noise.
 var skipDirs = map[string]bool{
 	".git":         true,
 	"graphify-out": true,
+	"vendor":       true,
 }
 
 // FileContent is the result of reading a file, with pagination metadata.

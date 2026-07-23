@@ -45,7 +45,8 @@ func (f *Fetcher) ConfigView(_ json.RawMessage) any { return nil }
 
 // Fetch re-fetches every registered page. Per-page failures are reported via
 // RemotePage.Err so one broken URL never aborts the whole collection sync.
-func (f *Fetcher) Fetch(ctx context.Context, _ *websource.Collection, pages []*websource.Page) ([]websource.RemotePage, error) {
+// URL-list collections are always a full fetch (no incremental state).
+func (f *Fetcher) Fetch(ctx context.Context, _ *websource.Collection, pages []*websource.Page, _ json.RawMessage) (*websource.FetchResult, error) {
 	out := make([]websource.RemotePage, 0, len(pages))
 
 	for _, p := range pages {
@@ -64,7 +65,7 @@ func (f *Fetcher) Fetch(ctx context.Context, _ *websource.Collection, pages []*w
 		out = append(out, remote)
 	}
 
-	return out, nil
+	return &websource.FetchResult{Pages: out}, nil
 }
 
 func (f *Fetcher) fetchOne(ctx context.Context, pageURL string) (title, markdown string, err error) {

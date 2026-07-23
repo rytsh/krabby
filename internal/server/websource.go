@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 type sourceRequest struct {
 	Name            string `json:"name"`
 	Type            string `json:"type"`
+	Description     string `json:"description"`
 	RefreshInterval string `json:"refresh_interval"` // Go duration, e.g. "24h"; empty = manual only
 
 	// Config is an opaque provider-owned object. The registered fetcher
@@ -28,9 +30,10 @@ type sourceRequest struct {
 
 func (r sourceRequest) collection() (*websource.Collection, error) {
 	col := &websource.Collection{
-		Name:   strings.TrimSpace(strings.ToLower(r.Name)),
-		Type:   strings.TrimSpace(r.Type),
-		Config: r.Config,
+		Name:        strings.TrimSpace(strings.ToLower(r.Name)),
+		Type:        strings.TrimSpace(r.Type),
+		Description: strings.TrimSpace(r.Description),
+		Config:      r.Config,
 	}
 
 	if r.RefreshInterval != "" {
@@ -127,16 +130,52 @@ func getSource(mgr *manager.Manager) ada.HandlerFunc {
 			return c.SetStatus(http.StatusNotFound).SendJSON(map[string]string{"error": "not found"})
 		}
 
-		pages, err := mgr.WebPages(c.Request.Context(), name)
+		allPages, err := mgr.WebPages(c.Request.Context(), name)
 		if err != nil {
 			return c.Err(err)
 		}
 
+		// Optional ?team= filters the listed tickets by team (JIRA sources).
+		pages := allPages
+		if team := c.Request.URL.Query().Get("team"); team != "" {
+			pages, err = mgr.WebPagesByTeam(c.Request.Context(), name, team)
+			if err != nil {
+				return c.Err(err)
+			}
+		}
+
 		return c.SendJSON(map[string]any{
-			"source": viewSource(mgr, col, len(pages)),
+			"source": viewSource(mgr, col, len(allPages)),
 			"pages":  pages,
+			"teams":  collectTeams(allPages),
 		})
 	}
+}
+
+// collectTeams returns the distinct team names across a collection's pages,
+// sorted, so the UI can offer a team filter for JIRA sources.
+func collectTeams(pages []*websource.Page) []string {
+	seen := map[string]string{} // lowercase -> original
+	for _, p := range pages {
+		for _, t := range p.Teams {
+			t = strings.TrimSpace(t)
+			if t == "" {
+				continue
+			}
+			key := strings.ToLower(t)
+			if _, ok := seen[key]; !ok {
+				seen[key] = t
+			}
+		}
+	}
+
+	out := make([]string, 0, len(seen))
+	for _, v := range seen {
+		out = append(out, v)
+	}
+	sort.Strings(out)
+
+	return out
 }
 
 func updateSource(mgr *manager.Manager) ada.HandlerFunc {

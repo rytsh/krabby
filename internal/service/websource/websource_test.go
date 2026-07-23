@@ -111,3 +111,22 @@ func TestStoreCollectionsAndPages(t *testing.T) {
 		t.Fatalf("pages after delete=%+v err=%v", pages, err)
 	}
 }
+
+func TestFullResyncDue(t *testing.T) {
+	// First run (zero time) always forces a full pass.
+	if !FullResyncDue(time.Time{}, time.Hour) {
+		t.Fatal("zero lastFull should be due")
+	}
+	// Recent full pass within the interval is not due.
+	if FullResyncDue(time.Now().Add(-30*time.Minute), time.Hour) {
+		t.Fatal("recent full pass should not be due")
+	}
+	// Older than the interval is due.
+	if !FullResyncDue(time.Now().Add(-2*time.Hour), time.Hour) {
+		t.Fatal("stale full pass should be due")
+	}
+	// Non-positive interval falls back to the default (24h).
+	if FullResyncDue(time.Now().Add(-1*time.Hour), 0) {
+		t.Fatal("with default interval a 1h-old pass should not be due")
+	}
+}

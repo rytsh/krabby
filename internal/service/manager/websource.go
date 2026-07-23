@@ -110,6 +110,10 @@ func (m *Manager) UpdateWebCollection(ctx context.Context, col *websource.Collec
 	col.LastError = existing.LastError
 	col.LastRefreshAt = existing.LastRefreshAt
 	col.CreatedAt = existing.CreatedAt
+	col.State = existing.State // preserve the provider sync watermark
+	if col.Description == "" {
+		col.Description = existing.Description // blank keeps the stored summary
+	}
 
 	return m.webStore.UpsertCollection(ctx, col)
 }
@@ -196,6 +200,34 @@ func (m *Manager) WebPages(ctx context.Context, name string) ([]*websource.Page,
 	}
 
 	return m.webStore.Pages(ctx, name)
+}
+
+// WebPagesByTeam returns the page records of one collection whose Teams
+// contain team (case-insensitive). An empty team returns all pages. Used to
+// list tickets filtered by team.
+func (m *Manager) WebPagesByTeam(ctx context.Context, name, team string) ([]*websource.Page, error) {
+	pages, err := m.WebPages(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+
+	team = strings.ToLower(strings.TrimSpace(team))
+	if team == "" {
+		return pages, nil
+	}
+
+	out := make([]*websource.Page, 0, len(pages))
+	for _, p := range pages {
+		for _, t := range p.Teams {
+			if strings.ToLower(strings.TrimSpace(t)) == team {
+				out = append(out, p)
+
+				break
+			}
+		}
+	}
+
+	return out, nil
 }
 
 // AddWebPage registers a page URL on a "pages" collection and triggers a
@@ -384,7 +416,7 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 		return fail(err)
 	}
 
-	remotes, err := fetcher.Fetch(ctx, col, pages)
+	result, err := fetcher.Fetch(ctx, col, pages, col.State)
 	if err != nil {
 		return fail(fmt.Errorf("fetch %s; %w", name, err))
 	}
@@ -399,11 +431,14 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 		existing[p.Slug] = p
 	}
 
-	changed := false
+	// changedPaths / removedPaths drive incremental re-embedding: only the
+	// docs whose markdown actually changed (or were deleted) are re-indexed,
+	// so a large collection is not fully re-embedded when a few items change.
+	var changedPaths, removedPaths []string
 	seen := map[string]bool{}
 	now := time.Now()
 
-	for _, remote := range remotes {
+	for _, remote := range result.Pages {
 		seen[remote.Slug] = true
 
 		rec := existing[remote.Slug]
@@ -431,6 +466,8 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 			rec.Title = remote.Title
 		}
 
+		rec.Teams = remote.Teams
+
 		markdown := withTitleHeading(remote.Markdown, rec.Title)
 		hash := websource.Hash(markdown)
 		file := filepath.Join(dir, remote.Slug+".md")
@@ -441,7 +478,7 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 			}
 
 			rec.Hash = hash
-			changed = true
+			changedPaths = append(changedPaths, remote.Slug+".md")
 		}
 
 		rec.Status = websource.StatusReady
@@ -452,36 +489,53 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 		}
 	}
 
-	// Discovery types own the page set: records that vanished remotely are
-	// dropped. URL-list collections keep every user-registered page.
+	// Pruning of vanished records. In a full discovery fetch, any record not
+	// seen this run is gone. In an incremental fetch, unseen means unchanged,
+	// so only the provider's explicit Removed list is pruned.
 	if col.Type != websource.TypePages {
-		for slug, rec := range existing {
-			if seen[slug] {
-				continue
+		var prune []*websource.Page
+		if result.Incremental {
+			for _, slug := range result.Removed {
+				if rec := existing[slug]; rec != nil {
+					prune = append(prune, rec)
+				}
 			}
+		} else {
+			for slug, rec := range existing {
+				if !seen[slug] {
+					prune = append(prune, rec)
+				}
+			}
+		}
 
+		for _, rec := range prune {
 			if err := m.webStore.DeletePage(ctx, rec.ID); err != nil {
 				return fail(err)
 			}
 
-			_ = os.Remove(filepath.Join(dir, slug+".md"))
-			changed = true
+			_ = os.Remove(filepath.Join(dir, rec.Slug+".md"))
+			removedPaths = append(removedPaths, rec.Slug+".md")
 		}
 	}
 
-	if changed {
-		m.indexWebSource(ctx, name)
+	if len(changedPaths) > 0 || len(removedPaths) > 0 {
+		m.indexWebSourcePaths(ctx, name, changedPaths, removedPaths)
 	}
 
 	col.Status = websource.StatusReady
 	col.LastError = ""
 	col.LastRefreshAt = time.Now()
+	if result.State != nil {
+		col.State = result.State
+	}
 
 	if err := m.webStore.UpsertCollection(context.WithoutCancel(ctx), col); err != nil {
 		return err
 	}
 
-	slog.Info("web source synced", "source", name, "pages", len(remotes), "changed", changed)
+	slog.Info("web source synced", "source", name,
+		"fetched", len(result.Pages), "changed", len(changedPaths),
+		"removed", len(removedPaths), "incremental", result.Incremental)
 
 	return nil
 }
@@ -506,6 +560,29 @@ func (m *Manager) indexWebSource(ctx context.Context, name string) {
 
 	if err := d.rag.Index(ctx, scope, m.sourcesDir(name)); err != nil {
 		slog.Error("index web source", "source", name, "error", err)
+	}
+}
+
+// indexWebSourcePaths incrementally updates only the changed/removed docs of a
+// collection in the RAG index, so a large source (e.g. a JIRA project) is not
+// fully re-embedded when a few items change.
+func (m *Manager) indexWebSourcePaths(ctx context.Context, name string, changed, removed []string) {
+	d, releaseDocs := m.acquireDocs()
+	defer releaseDocs()
+
+	if d.rag == nil {
+		slog.Debug("rag disabled; web source not indexed", "source", name)
+
+		return
+	}
+
+	scope := websource.ScopeKey(name)
+
+	m.setActivity(scope, "docs_index")
+	defer m.clearActivity(scope, "docs_index")
+
+	if err := d.rag.IndexPaths(ctx, scope, m.sourcesDir(name), changed, removed); err != nil {
+		slog.Error("index web source (incremental)", "source", name, "error", err)
 	}
 }
 

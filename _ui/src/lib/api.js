@@ -100,7 +100,7 @@ export const api = {
   // Web content sources (wikis, Confluence spaces).
   sources: () => req("/sources"),
   addSource: (body) => req("/sources", { method: "POST", keepalive: true, body: JSON.stringify(body) }),
-  source: (name) => req(`/sources/${name}`),
+  source: (name, team = "") => req(`/sources/${name}${team ? `?team=${encodeURIComponent(team)}` : ""}`),
   updateSource: (name, body) => req(`/sources/${name}`, { method: "PUT", body: JSON.stringify(body) }),
   deleteSource: (name) => req(`/sources/${name}`, { method: "DELETE", keepalive: true }),
   refreshSource: (name) => req(`/sources/${name}/refresh`, { method: "POST", keepalive: true }),

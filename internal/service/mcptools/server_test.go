@@ -19,7 +19,7 @@ func TestToolProfiles(t *testing.T) {
 		admin   bool
 	}{
 		{profile: ToolProfileStandard, count: 20},
-		{profile: ToolProfileFull, count: 30, admin: true},
+		{profile: ToolProfileFull, count: 36, admin: true},
 	}
 
 	for _, tt := range tests {
@@ -63,7 +63,7 @@ func TestToolProfiles(t *testing.T) {
 					t.Errorf("profile missing core tool %q", name)
 				}
 			}
-			for _, name := range []string{"set_docs_config", "test_llm", "list_credentials", "lock_repo"} {
+			for _, name := range []string{"set_docs_config", "test_llm", "list_credentials", "lock_repo", "add_source", "refresh_source", "source_types"} {
 				if names[name] != tt.admin {
 					t.Errorf("admin tool %q present=%t, want %t", name, names[name], tt.admin)
 				}

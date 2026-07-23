@@ -4,7 +4,7 @@
 // fetcher implementation, and a set of pages persisted as markdown files that
 // feed the shared docs RAG index.
 //
-// Fetchers live in per-type subpackages (websource/confluence,
+// Fetchers live in per-type subpackages (websource/confluence, websource/jira,
 // websource/pages) and implement the Fetcher interface; new source types add
 // a new subpackage and register their fetcher in the manager wiring.
 package websource
@@ -28,6 +28,7 @@ import (
 const (
 	TypePages      = "pages"      // custom web: user-registered page URLs
 	TypeConfluence = "confluence" // Confluence space via REST API
+	TypeJira       = "jira"       // JIRA project / JQL query via REST API
 )
 
 // Collection status values.
@@ -61,8 +62,12 @@ type Collection struct {
 	// paths and as the search scope key, so it is restricted to
 	// [a-z0-9][a-z0-9._-]*.
 	Name string `bw:"name,pk" json:"name"`
-	// Type selects the fetcher: TypePages or TypeConfluence.
+	// Type selects the fetcher: TypePages, TypeConfluence or TypeJira.
 	Type string `bw:"type" json:"type"`
+	// Description is a short, human-written summary of what this source holds
+	// (e.g. "Delivery Support runbooks and TERs"). It is surfaced to MCP
+	// clients via list_sources so a model can pick the right source to search.
+	Description string `bw:"description" json:"description,omitempty"`
 	// RefreshInterval is how often the scheduler re-syncs the collection.
 	// 0 disables automatic refresh (manual only).
 	RefreshInterval time.Duration `bw:"refresh_interval" json:"refresh_interval"`
@@ -76,6 +81,11 @@ type Collection struct {
 	// merges and redacts it; the common model never needs a provider-specific
 	// field when a new source type is added.
 	Config json.RawMessage `bw:"config" json:"-"`
+
+	// State is an opaque provider sync watermark (e.g. JIRA's last-updated
+	// cursor for incremental fetches). It is written by the fetcher via
+	// FetchResult.State and never exposed over the API.
+	State json.RawMessage `bw:"state" json:"-"`
 }
 
 // Page is one synced document of a collection.
@@ -87,6 +97,9 @@ type Page struct {
 	Slug  string `bw:"slug"  json:"slug"`
 	URL   string `bw:"url"   json:"url"`
 	Title string `bw:"title" json:"title,omitempty"`
+	// Teams are optional provider tags (e.g. JIRA team/squad values) used to
+	// list and filter tickets by team.
+	Teams []string `bw:"teams" json:"teams,omitempty"`
 	// Hash fingerprints the converted markdown so unchanged pages skip
 	// re-embedding.
 	Hash        string    `bw:"hash"       json:"-"`
@@ -102,15 +115,34 @@ type RemotePage struct {
 	Title    string
 	URL      string
 	Markdown string
+	// Teams are optional provider-supplied tags (e.g. JIRA team/squad field
+	// values) recorded on the page so tickets can be listed/filtered by team.
+	Teams []string
 	// Err marks a page that failed to fetch/convert; the sync records the
 	// error on the page record and keeps the previous content.
 	Err error
 }
 
+// FetchResult is the outcome of one fetch. Pages are the items returned this
+// run. Incremental marks a partial fetch (only items changed since the last
+// sync): the manager then upserts only those items and must NOT prune records
+// it did not see, because unseen means unchanged, not deleted. Removed lists
+// slugs the provider positively knows no longer match (so they can be pruned
+// even in incremental mode). State is an opaque provider watermark the manager
+// persists back onto the collection and hands to the next fetch.
+type FetchResult struct {
+	Pages       []RemotePage
+	Incremental bool
+	Removed     []string
+	State       json.RawMessage
+}
+
 // Fetcher lists and converts the current remote pages of one collection.
 // Implementations live in per-type subpackages. pages carries the persisted
 // page records: URL-list types re-fetch them, discovery types (Confluence)
-// may ignore them.
+// may ignore them. state is the provider watermark returned by the previous
+// fetch (nil on first run); providers that support incremental sync use it to
+// fetch only what changed and return an advanced State.
 type Fetcher interface {
 	// Validate checks provider config before a collection is persisted.
 	Validate(config json.RawMessage) error
@@ -119,7 +151,7 @@ type Fetcher interface {
 	MergeConfig(current, update json.RawMessage) (json.RawMessage, error)
 	// ConfigView returns a JSON-safe, redacted provider config for REST/UI.
 	ConfigView(config json.RawMessage) any
-	Fetch(ctx context.Context, col *Collection, pages []*Page) ([]RemotePage, error)
+	Fetch(ctx context.Context, col *Collection, pages []*Page, state json.RawMessage) (*FetchResult, error)
 }
 
 // nameRe restricts collection names to something safe for directories, URLS
@@ -130,7 +162,7 @@ var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
 func ValidName(name string) bool { return nameRe.MatchString(name) }
 
 // schemaVersion must be bumped whenever Collection or Page change shape.
-const schemaVersion = 2
+const schemaVersion = 5
 
 // Store persists collections and pages.
 type Store struct {

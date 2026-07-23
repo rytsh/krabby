@@ -35,6 +35,11 @@ type Doc struct {
 	Score     float32 `json:"score"` // best chunk score that surfaced this doc
 	Excerpt   string  `json:"excerpt"`
 	Truncated bool    `json:"truncated,omitempty"`
+
+	// URL and Teams are populated only for web-source hits (e.g. JIRA
+	// tickets): URL is the original item link, Teams the owning team names.
+	URL   string   `json:"url,omitempty"`
+	Teams []string `json:"teams,omitempty"`
 }
 
 // Service indexes generated docs and retrieves bounded excerpts for a question.
@@ -144,6 +149,89 @@ func (s *Service) Index(ctx context.Context, repo string, docsDir string) error 
 	}
 
 	slog.Info("rag index rebuilt", "repo", repo, "docs", len(titlesIndexed(items)), "chunks", len(items))
+
+	return nil
+}
+
+// IndexPaths incrementally updates a repo's docs vectors: it re-embeds only the
+// markdown files in changed (relative, slash-separated, e.g. "ofs-1.md") and
+// removes vectors for changed+removed paths first, leaving every other doc's
+// vectors untouched. This avoids re-embedding an entire large collection (e.g.
+// a JIRA project) when only a few items changed. A changed path whose file is
+// missing on disk is treated as removed.
+func (s *Service) IndexPaths(ctx context.Context, repo, docsDir string, changed, removed []string) error {
+	// Drop prior vectors for everything we are about to touch so stale chunks
+	// (including those of now-removed docs) disappear.
+	stale := make([]string, 0, len(changed)+len(removed))
+	stale = append(stale, removed...)
+	stale = append(stale, changed...)
+	if len(stale) > 0 {
+		if err := s.store.DeletePaths(ctx, repo, stale); err != nil {
+			return fmt.Errorf("delete changed vectors; %w", err)
+		}
+	}
+
+	titles := manifestTitles(docsDir)
+
+	var (
+		items []vectorstore.Item
+		texts []string
+	)
+
+	for _, docPath := range changed {
+		docPath = filepath.ToSlash(docPath)
+		b, err := os.ReadFile(filepath.Join(docsDir, filepath.FromSlash(docPath)))
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue // treated as removed: vectors already dropped above
+			}
+
+			return fmt.Errorf("read %s; %w", docPath, err)
+		}
+
+		content := string(b)
+		title := titles[docPath]
+		if title == "" {
+			title = firstHeading(content)
+		}
+		if title == "" {
+			title = docPath
+		}
+
+		for i, c := range chunk(content, s.cfg.ChunkSize, s.cfg.ChunkOverlap) {
+			items = append(items, vectorstore.Item{
+				ID: fmt.Sprintf("%s/%s#%d", repo, docPath, i),
+				Payload: vectorstore.Payload{
+					Repo:    repo,
+					DocPath: docPath,
+					Title:   title,
+					Chunk:   c,
+				},
+			})
+			texts = append(texts, c)
+		}
+	}
+
+	if len(items) == 0 {
+		return nil
+	}
+
+	vecs, err := s.emb.Embed(ctx, texts)
+	if err != nil {
+		return fmt.Errorf("embed %d chunks; %w", len(texts), err)
+	}
+	if len(vecs) != len(items) {
+		return fmt.Errorf("embedder returned %d vectors for %d chunks", len(vecs), len(items))
+	}
+	for i := range items {
+		items[i].Vector = vecs[i]
+	}
+
+	if err := s.store.Upsert(ctx, items); err != nil {
+		return fmt.Errorf("upsert %d vectors; %w", len(items), err)
+	}
+
+	slog.Info("rag index updated", "repo", repo, "changed", len(changed), "removed", len(removed), "chunks", len(items))
 
 	return nil
 }

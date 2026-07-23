@@ -15,6 +15,7 @@ func setupRepo(t *testing.T) string {
 	mustWrite(t, filepath.Join(dir, "listener", "processor.go"), "package listener\n")
 	mustWrite(t, filepath.Join(dir, ".git", "config"), "[core]\n")
 	mustWrite(t, filepath.Join(dir, "graphify-out", "graph.json"), "{}")
+	mustWrite(t, filepath.Join(dir, "vendor", "dep", "lib.go"), "package dep\n")
 
 	// A secret outside the repo that traversal attempts must never reach.
 	mustWrite(t, filepath.Join(filepath.Dir(dir), "secret.txt"), "TOP SECRET")
@@ -117,7 +118,7 @@ func TestListFilesShallowSkipsNoise(t *testing.T) {
 	}
 
 	for _, e := range entries {
-		if e.Path == ".git" || e.Path == "graphify-out" {
+		if e.Path == ".git" || e.Path == "graphify-out" || e.Path == "vendor" {
 			t.Fatalf("listing must skip %s", e.Path)
 		}
 	}
@@ -148,7 +149,9 @@ func TestListFilesRecursiveSkipsNoise(t *testing.T) {
 	}
 
 	for _, e := range entries {
-		if e.Path == ".git" || e.Path == filepath.Join("graphify-out", "graph.json") {
+		if e.Path == ".git" ||
+			e.Path == filepath.Join("graphify-out", "graph.json") ||
+			e.Path == filepath.Join("vendor", "dep", "lib.go") {
 			t.Fatalf("recursive listing must skip %s", e.Path)
 		}
 	}

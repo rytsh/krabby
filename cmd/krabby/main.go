@@ -24,6 +24,7 @@ import (
 	"github.com/rytsh/krabby/internal/service/settings"
 	"github.com/rytsh/krabby/internal/service/websource"
 	"github.com/rytsh/krabby/internal/service/websource/confluence"
+	"github.com/rytsh/krabby/internal/service/websource/jira"
 	"github.com/rytsh/krabby/internal/service/websource/pages"
 	"github.com/rytsh/krabby/internal/storage"
 )
@@ -131,6 +132,7 @@ func run(ctx context.Context) error {
 	mgr.SetWebSources(webStore, map[string]websource.Fetcher{
 		websource.TypePages:      pages.New(pageCredentials(creds)),
 		websource.TypeConfluence: confluence.New(),
+		websource.TypeJira:       jira.New(),
 	})
 	if err := mgr.ReconcileInterruptedStages(ctx); err != nil {
 		slog.Error("reconcile interrupted generation stages", "error", err)

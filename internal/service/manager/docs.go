@@ -637,12 +637,46 @@ func (m *Manager) SearchDocs(ctx context.Context, scope, key, question string, t
 	}
 
 	d, releaseDocs := m.acquireDocs()
-	defer releaseDocs()
 	if d.rag == nil {
+		releaseDocs()
+
 		return nil, ErrDocsDisabled
 	}
 
-	return d.rag.Retrieve(ctx, filter, question, topDocs)
+	docs, err := d.rag.Retrieve(ctx, filter, question, topDocs)
+	releaseDocs()
+	if err != nil {
+		return nil, err
+	}
+
+	m.enrichWebDocs(ctx, docs)
+
+	return docs, nil
+}
+
+// enrichWebDocs fills the original link and team names on web-source doc hits
+// (e.g. JIRA tickets) from their persisted page records so search results can
+// link back and show ownership. Missing records are left unenriched.
+func (m *Manager) enrichWebDocs(ctx context.Context, docs []rag.Doc) {
+	if m.webStore == nil {
+		return
+	}
+
+	for i := range docs {
+		name := websource.CollectionName(docs[i].Repo)
+		if name == "" {
+			continue
+		}
+
+		slug := strings.TrimSuffix(docs[i].Path, ".md")
+		page, err := m.webStore.GetPage(ctx, websource.PageID(name, slug))
+		if err != nil || page == nil {
+			continue
+		}
+
+		docs[i].URL = page.URL
+		docs[i].Teams = page.Teams
+	}
 }
 
 // SearchCode returns the code snippets most relevant to a query. repoID == ""

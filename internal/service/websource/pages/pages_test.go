@@ -24,12 +24,13 @@ func TestFetchCustomPages(t *testing.T) {
 	fetcher := New(func(context.Context, string) (string, string, error) {
 		return "", "secret", nil
 	})
-	remotes, err := fetcher.Fetch(context.Background(), &websource.Collection{Name: "wine"}, []*websource.Page{
+	res, err := fetcher.Fetch(context.Background(), &websource.Collection{Name: "wine"}, []*websource.Page{
 		{Slug: "fermentation", URL: server.URL + "/fermentation"},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	remotes := res.Pages
 	if len(remotes) != 1 || remotes[0].Err != nil {
 		t.Fatalf("remotes=%+v", remotes)
 	}
