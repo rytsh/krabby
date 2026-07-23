@@ -15,6 +15,41 @@ import (
 	"github.com/rytsh/krabby/internal/service/registry"
 )
 
+// serverInstructions is the server-level guidance returned to clients on
+// initialize. Most MCP clients surface it to the LLM as high-level context, so
+// it explains what krabby is, the add->poll->query lifecycle, and which tool to
+// reach for first. Per-tool specifics stay in each tool's Description.
+const serverInstructions = `krabby tracks git repositories and, for each one, builds a code knowledge
+graph plus optional generated docs and a code/RAG search index. Use it to
+understand and search codebases you point it at - it clones the repo, indexes
+it, and answers questions about the code for you.
+
+Lifecycle:
+- add_repo clones a repo and builds its graph in the background (returns
+  immediately with status 'pending'; pass wait=true to block up to the
+  server cap). Poll repo_status until status is 'ready' before querying.
+- refresh_repo pulls new commits and rebuilds; cancel_repo_job stops a run.
+- list_repos pages through tracked repos (search/owner filters, total count)
+  so a large fleet never floods the context at once.
+
+Repo ids are 'owner/name'. On the graph/query tools, omit 'repo' to hit the
+merged cross-repo graph (only if graphify.merge is enabled).
+
+Picking a tool:
+- Understand code: start with query_graph (best first call), then drill in with
+  get_node, get_neighbors, god_nodes, graph_stats, shortest_path, get_community.
+- Find/read source: search_code (full-text or semantic), then read_file and
+  list_files against the clone.
+- Docs & wikis: search_docs (RAG over generated docs + synced web sources),
+  list_docs, get_doc, list_sources.
+- Private git: set_credential / list_credentials / remove_credential.
+- External readers: lock_repo before walking a clone, unlock_repo after, so a
+  refresh does not pull mid-read.
+- Docs/RAG setup: get_docs_config, set_docs_config, and the test_* probes.
+
+Many tools return a clear 'not enabled' error when the docs/RAG subsystem is
+off; enable it via set_docs_config.`
+
 // New builds the MCP server with all krabby tools registered. waitTimeout caps
 // how long wait=true management calls block before returning the in-progress
 // status (the build keeps running in the background); <=0 means no server-side
@@ -24,7 +59,9 @@ func New(mgr *manager.Manager, version string, waitTimeout time.Duration) *mcp.S
 		Name:    "krabby",
 		Title:   "krabby - multi-repo graphify knowledge graphs",
 		Version: version,
-	}, nil)
+	}, &mcp.ServerOptions{
+		Instructions: serverInstructions,
+	})
 
 	addManagementTools(server, mgr, waitTimeout)
 	addLeaseTools(server, mgr)
@@ -71,6 +108,13 @@ func (a refreshRepoArgs) validateStages() error {
 
 type emptyArgs struct{}
 
+type listReposArgs struct {
+	Page    int    `json:"page,omitempty" jsonschema:"page number (default 1)"`
+	PerPage int    `json:"per_page,omitempty" jsonschema:"results per page (default 20, max 200)"`
+	Search  string `json:"search,omitempty" jsonschema:"case-insensitive substring filter on the repo id (host/group/.../name)"`
+	Owner   string `json:"owner,omitempty" jsonschema:"restrict to the direct children of one directory prefix (everything before the repo name)"`
+}
+
 // repoView decorates a repo record with the transient in-memory activity so
 // callers can see which pipeline step is currently running (empty = idle).
 type repoView struct {
@@ -84,10 +128,20 @@ func viewRepo(mgr *manager.Manager, repo *registry.Repo) repoView {
 
 func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout time.Duration) {
 	addTool(server, &mcp.Tool{
-		Name:        "list_repos",
-		Description: "List all tracked repositories with build status, currently running pipeline step, last commit and last build time.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyArgs) (*mcp.CallToolResult, any, error) {
-		repos, err := mgr.Registry().List(ctx)
+		Name: "list_repos",
+		Description: "List tracked repositories (paginated, ordered by id) with build status, currently " +
+			"running pipeline step, last commit and last build time. Use page/per_page to page through " +
+			"large fleets and search/owner to filter; the response includes the total match count so you " +
+			"can tell whether more pages exist without dumping every repo.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args listReposArgs) (*mcp.CallToolResult, any, error) {
+		opts := registry.ListOptions{
+			Page:    args.Page,
+			PerPage: args.PerPage,
+			Search:  args.Search,
+			Owner:   args.Owner,
+		}
+
+		repos, total, err := mgr.Registry().ListPaged(ctx, opts)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -97,7 +151,14 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 			views = append(views, viewRepo(mgr, repo))
 		}
 
-		return jsonResult(views), nil, nil
+		page, perPage := registry.PageParams(opts)
+
+		return jsonResult(map[string]any{
+			"repos":    views,
+			"total":    total,
+			"page":     page,
+			"per_page": perPage,
+		}), nil, nil
 	})
 
 	addTool(server, &mcp.Tool{

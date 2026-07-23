@@ -186,10 +186,11 @@ func buildFilter(q *query.Query, opts ListOptions) {
 	}
 }
 
-// ListPaged returns one page of repos ordered by id, plus the total number of
-// records matching the same filter (ignoring pagination).
-func (r *Registry) ListPaged(ctx context.Context, opts ListOptions) (repos []*Repo, total int, err error) {
-	perPage := opts.PerPage
+// PageParams returns the page and perPage actually applied by ListPaged for the
+// given options, clamping to the same defaults and maximum. Callers use it to
+// echo the effective pagination back to clients without duplicating the limits.
+func PageParams(opts ListOptions) (page, perPage int) {
+	perPage = opts.PerPage
 	if perPage <= 0 {
 		perPage = defaultPerPage
 	}
@@ -197,10 +198,18 @@ func (r *Registry) ListPaged(ctx context.Context, opts ListOptions) (repos []*Re
 		perPage = maxPerPage
 	}
 
-	page := opts.Page
+	page = opts.Page
 	if page <= 0 {
 		page = 1
 	}
+
+	return page, perPage
+}
+
+// ListPaged returns one page of repos ordered by id, plus the total number of
+// records matching the same filter (ignoring pagination).
+func (r *Registry) ListPaged(ctx context.Context, opts ListOptions) (repos []*Repo, total int, err error) {
+	page, perPage := PageParams(opts)
 
 	total, err = r.Count(ctx, opts)
 	if err != nil {
