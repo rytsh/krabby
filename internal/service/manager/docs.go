@@ -133,6 +133,43 @@ func (m *Manager) PollInterval() time.Duration {
 	}
 }
 
+// RepoSchedules returns the effective repository poll schedules from the
+// runtime settings: the configured per-namespace cron schedules, or a single
+// fallback derived from GitPollInterval when none are configured. The scheduler
+// reads this on every reconcile tick so UI/REST changes apply without a
+// restart.
+func (m *Manager) RepoSchedules() []settings.RepoSchedule {
+	if m.settings == nil {
+		return nil
+	}
+
+	s, err := m.settings.Get(context.Background())
+	if err != nil {
+		slog.Error("load repo schedules", "error", err)
+
+		return nil
+	}
+
+	return s.EffectiveSchedules()
+}
+
+// RefreshNamespace queues a background refresh for every repo in ns (using the
+// same namespace semantics as the registry: "" / "default" is the default
+// bucket, "*" is every namespace). Called by the scheduler when a namespace's
+// cron fires. Triggers coalesce per repo and the work queue bounds concurrency.
+func (m *Manager) RefreshNamespace(ctx context.Context, ns string) error {
+	repos, err := m.reg.ListNamespace(ctx, ns)
+	if err != nil {
+		return fmt.Errorf("list repos for namespace %q; %w", ns, err)
+	}
+
+	for _, repo := range repos {
+		m.TriggerRefresh(repo.ID)
+	}
+
+	return nil
+}
+
 // WebhookSecret returns the provider-neutral git webhook verification secret from the
 // runtime settings ("" disables signature verification).
 func (m *Manager) WebhookSecret() string {

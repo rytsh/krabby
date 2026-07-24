@@ -12,9 +12,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/rakunlabs/bw"
+	"github.com/worldline-go/hardloop"
 )
 
 // recordID is the single-row key for the settings bucket.
@@ -81,11 +83,32 @@ type Settings struct {
 
 	// System: git polling and webhook verification (previously file/env
 	// config). GitPollInterval semantics: 0 = default (1h), negative =
-	// polling disabled.
+	// polling disabled. Retained as the fallback source for EffectiveSchedules
+	// when RepoSchedules is empty (older installs, or the "simple" mode).
 	GitPollInterval time.Duration `bw:"git_poll_interval"     json:"git_poll_interval"`
 	WebhookSecret   string        `bw:"webhook_secret" json:"-"` // write-only
 
+	// RepoSchedules are per-namespace repository poll schedules expressed as
+	// cron specs. When non-empty they fully drive repo polling (the scheduler
+	// ignores GitPollInterval); when empty the scheduler falls back to
+	// GitPollInterval. See EffectiveSchedules.
+	RepoSchedules []RepoSchedule `bw:"repo_schedules" json:"repo_schedules"`
+
 	UpdatedAt time.Time `bw:"updated_at" json:"updated_at,omitzero"`
+}
+
+// RepoSchedule is one repository poll schedule scoped to a namespace and
+// expressed as one or more cron specs (github.com/worldline-go/hardloop). Every
+// listed spec triggers a poll of the schedule's namespace; multiple specs and
+// multiple schedules may coexist. Namespace "" or "default" targets the default
+// bucket (untagged repos); "*" targets every namespace.
+//
+// Cron day-of-month and day-of-week are combined with AND (both must match),
+// which differs from crontab.guru's OR but is the intended behaviour.
+type RepoSchedule struct {
+	Namespace string   `bw:"namespace" json:"namespace"`
+	Specs     []string `bw:"specs"     json:"specs"`
+	Disabled  bool     `bw:"disabled"  json:"disabled,omitempty"`
 }
 
 // Defaults returns the initial settings persisted on first run. All values
@@ -122,6 +145,51 @@ func Defaults() Settings {
 
 		GitPollInterval: time.Hour,
 	}
+}
+
+// EffectiveSchedules returns the repo poll schedules the scheduler should run.
+//
+// When RepoSchedules is configured it is authoritative. Otherwise a single
+// fallback schedule is derived from GitPollInterval so older installs (and the
+// simple interval mode) keep working: a negative interval disables polling
+// (no schedules), and any other value maps to an "@every <duration>" spec
+// scoped to every namespace ("*").
+func (s Settings) EffectiveSchedules() []RepoSchedule {
+	if len(s.RepoSchedules) > 0 {
+		return s.RepoSchedules
+	}
+
+	if s.GitPollInterval < 0 {
+		return nil
+	}
+
+	d := s.GitPollInterval
+	if d == 0 {
+		d = time.Hour
+	}
+
+	return []RepoSchedule{{
+		Namespace: "*",
+		Specs:     []string{"@every " + d.String()},
+	}}
+}
+
+// ValidateSchedules checks that every configured cron spec parses. It is called
+// before persisting so the UI/REST surface a clear error instead of silently
+// dropping an unparseable schedule at scheduler load time.
+func (s Settings) ValidateSchedules() error {
+	for i, sc := range s.RepoSchedules {
+		for _, spec := range sc.Specs {
+			if strings.TrimSpace(spec) == "" {
+				return fmt.Errorf("schedule %d (namespace %q): empty cron spec", i, sc.Namespace)
+			}
+			if _, err := hardloop.ParseStandard(spec); err != nil {
+				return fmt.Errorf("schedule %d (namespace %q): invalid cron spec %q; %w", i, sc.Namespace, spec, err)
+			}
+		}
+	}
+
+	return nil
 }
 
 // Redacted is a safe-to-return view of Settings: secrets are replaced by
@@ -200,9 +268,10 @@ type Patch struct {
 	CodeRAGInclude      *[]string `json:"code_rag_include"`
 	CodeRAGExclude      *[]string `json:"code_rag_exclude"`
 
-	TaskConcurrency *int           `json:"task_concurrency"`
-	GitPollInterval *time.Duration `json:"git_poll_interval"`
-	WebhookSecret   *string        `json:"webhook_secret"`
+	TaskConcurrency *int            `json:"task_concurrency"`
+	GitPollInterval *time.Duration  `json:"git_poll_interval"`
+	RepoSchedules   *[]RepoSchedule `json:"repo_schedules"`
+	WebhookSecret   *string         `json:"webhook_secret"`
 }
 
 // RuntimeOnly reports whether a patch changes only scheduler/webhook/queue
@@ -210,7 +279,7 @@ type Patch struct {
 // so callers can persist them without rebuilding clients and reindexing all
 // data.
 func (p Patch) RuntimeOnly() bool {
-	return (p.GitPollInterval != nil || p.WebhookSecret != nil || p.TaskConcurrency != nil) &&
+	return (p.GitPollInterval != nil || p.WebhookSecret != nil || p.TaskConcurrency != nil || p.RepoSchedules != nil) &&
 		p.DocsEnabled == nil && p.DocsConcurrency == nil &&
 		p.DocsSummaryModel == nil && p.DocsMaxGroups == nil &&
 		p.DocsInclude == nil && p.DocsExclude == nil && p.DocsPrompt == nil &&
@@ -343,6 +412,9 @@ func (p Patch) Apply(base Settings) Settings {
 	if p.GitPollInterval != nil {
 		base.GitPollInterval = *p.GitPollInterval
 	}
+	if p.RepoSchedules != nil {
+		base.RepoSchedules = *p.RepoSchedules
+	}
 	if p.WebhookSecret != nil {
 		base.WebhookSecret = *p.WebhookSecret
 	}
@@ -364,12 +436,14 @@ type Store struct {
 	mcpBucket *bw.Bucket[MCPKey]
 }
 
-// settingsSchemaVersion v7 adds task_concurrency (central work-queue limit).
-// v6 added git_poll_interval and webhook_secret (system settings moved out of
-// the file/env config). v5 added docs_summary_model; v4 docs_max_groups; v3
-// embed_concurrency / code_embed_concurrency. Bumping the version lets bw
-// migrate existing settings records in place.
-const settingsSchemaVersion = 7
+// settingsSchemaVersion v8 adds repo_schedules (per-namespace cron poll
+// schedules; empty records fall back to git_poll_interval). v7 added
+// task_concurrency (central work-queue limit). v6 added git_poll_interval and
+// webhook_secret (system settings moved out of the file/env config). v5 added
+// docs_summary_model; v4 docs_max_groups; v3 embed_concurrency /
+// code_embed_concurrency. Bumping the version lets bw migrate existing settings
+// records in place.
+const settingsSchemaVersion = 8
 
 // New opens the settings bucket. If no record exists yet, seed is persisted as
 // the initial configuration (seeded from file/env config by the caller).
@@ -442,6 +516,10 @@ func (s *Store) Set(ctx context.Context, patch Settings) (Settings, error) {
 
 	next := patch
 	next.ID = recordID
+
+	if err := next.ValidateSchedules(); err != nil {
+		return Settings{}, err
+	}
 
 	// Keep-if-empty for secrets.
 	if next.LLMAPIKey == "" {

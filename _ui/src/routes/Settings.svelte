@@ -24,6 +24,9 @@
   let runtimeBusy = $state(false);
   let runtimeMsg = $state("");
   let runtimeErr = $state("");
+  // Existing namespaces, used to suggest schedule targets. "*" (all) and the
+  // default bucket are always available regardless of what is stored.
+  let namespaceOptions = $state([]);
 
   // Connection test state.
   let llmTest = $state(null); // { ok, latency_ms, model, error }
@@ -53,9 +56,47 @@
 
     try {
       docsCfg = await api.docsConfig();
+      if (docsCfg && !Array.isArray(docsCfg.repo_schedules)) docsCfg.repo_schedules = [];
     } catch (e) {
       docsErr = e.message;
     }
+
+    try {
+      const ns = await api.namespaces();
+      namespaceOptions = Array.isArray(ns) ? ns : [];
+    } catch {
+      namespaceOptions = [];
+    }
+  }
+
+  // Repository poll schedule editor. Each schedule targets a namespace ("*" =
+  // all, "" / "default" = untagged repos) and lists one or more cron specs;
+  // every spec triggers a poll of that namespace. Deep $state reactivity makes
+  // in-place push/splice update the UI.
+  function addSchedule() {
+    docsCfg.repo_schedules.push({ namespace: "*", specs: ["0 * * * *"], disabled: false });
+  }
+  function removeSchedule(i) {
+    docsCfg.repo_schedules.splice(i, 1);
+  }
+  function addSpec(i) {
+    docsCfg.repo_schedules[i].specs.push("");
+  }
+  function removeSpec(i, j) {
+    docsCfg.repo_schedules[i].specs.splice(j, 1);
+    if (docsCfg.repo_schedules[i].specs.length === 0) docsCfg.repo_schedules[i].specs.push("");
+  }
+
+  // cleanSchedules normalizes the editor state for the API: trims specs, drops
+  // empty ones, and removes schedules left without any spec.
+  function cleanSchedules(list) {
+    return (list || [])
+      .map((s) => ({
+        namespace: (s.namespace || "").trim(),
+        specs: (s.specs || []).map((x) => (x || "").trim()).filter(Boolean),
+        disabled: !!s.disabled,
+      }))
+      .filter((s) => s.specs.length > 0);
   }
 
   async function saveCredential() {
@@ -91,6 +132,8 @@
     delete patch.code_embed_api_key_set;
     delete patch.docs_default_prompt;
     delete patch.updated_at;
+    // Never submit half-edited (empty-spec) schedules the backend would reject.
+    patch.repo_schedules = cleanSchedules(docsCfg.repo_schedules);
     patch.llm_api_key = llmKey;
     patch.embed_api_key = embedKey;
     patch.code_embed_api_key = codeEmbedKey;
@@ -123,10 +166,12 @@
     runtimeMsg = "";
     runtimeErr = "";
     try {
+      const schedules = cleanSchedules(docsCfg.repo_schedules);
       const patch = {
-        git_poll_interval: Number(docsCfg.git_poll_interval),
         task_concurrency: Number(docsCfg.task_concurrency),
+        repo_schedules: schedules,
       };
+      docsCfg.repo_schedules = schedules;
       if (clearWebhook) patch.webhook_secret = "";
       else if (webhookSecret) patch.webhook_secret = webhookSecret;
       docsCfg = await api.setDocsConfig(patch);
@@ -411,21 +456,73 @@
 
 {#if docsCfg}
   <div class="card mt-3 p-4">
+    <!-- Repository poll schedules (cron, per namespace) -->
+    <div class="mb-4">
+      <div class="mb-1 flex items-center justify-between">
+        <span class="text-[13px] font-semibold text-dim">Repository poll schedules</span>
+        <button class="btn btn-sm" onclick={addSchedule}>+ Add schedule</button>
+      </div>
+      <p class="mb-2 text-[12px] text-faint">
+        Poll repositories on cron schedules. Target a namespace (<code class="font-mono">*</code> = all,
+        <code class="font-mono">default</code> = untagged) and add one or more cron specs; each spec
+        triggers a poll. Multiple schedules and specs are supported. With no schedules configured, polling
+        falls back to the legacy fixed interval.
+      </p>
+
+      <datalist id="ns-options">
+        <option value="*"></option>
+        <option value="default"></option>
+        {#each namespaceOptions as ns}
+          <option value={ns.namespace}></option>
+        {/each}
+      </datalist>
+
+      {#if docsCfg.repo_schedules.length === 0}
+        <p class="rounded-md border border-dashed border-faint px-3 py-2 text-[12px] text-faint">
+          No schedules configured — repositories poll on the legacy fixed interval.
+        </p>
+      {/if}
+
+      {#each docsCfg.repo_schedules as sched, i}
+        <div class="mb-2 rounded-md border border-faint p-3">
+          <div class="flex flex-wrap items-end gap-3">
+            <label class="flex flex-col gap-1 text-[12px] text-dim">
+              Namespace
+              <input
+                class="input w-48"
+                list="ns-options"
+                bind:value={sched.namespace}
+                placeholder="* (all namespaces)"
+              />
+            </label>
+            <label class="flex items-center gap-2 text-[12px] text-dim">
+              <input type="checkbox" bind:checked={sched.disabled} />
+              Disabled
+            </label>
+            <button class="btn btn-sm btn-danger ml-auto" onclick={() => removeSchedule(i)}>
+              Remove schedule
+            </button>
+          </div>
+          <div class="mt-2 flex flex-col gap-1.5">
+            {#each sched.specs as _spec, j}
+              <div class="flex items-center gap-2">
+                <input
+                  class="input font-mono text-[12px]"
+                  bind:value={sched.specs[j]}
+                  placeholder="0 * * * *  (or @every 15m)"
+                />
+                <button class="btn btn-sm" onclick={() => removeSpec(i, j)} title="Remove cron spec">
+                  −
+                </button>
+              </div>
+            {/each}
+            <button class="btn btn-sm self-start" onclick={() => addSpec(i)}>+ Add cron spec</button>
+          </div>
+        </div>
+      {/each}
+    </div>
+
     <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-      <label class="flex flex-col gap-1 text-[13px] text-dim">
-        Repository poll interval
-        <select
-          class="input"
-          value={String(docsCfg.git_poll_interval)}
-          onchange={(e) => (docsCfg.git_poll_interval = Number(e.currentTarget.value))}
-        >
-          <option value="-1">disabled</option>
-          <option value="900000000000">every 15 minutes</option>
-          <option value="3600000000000">every hour</option>
-          <option value="21600000000000">every 6 hours</option>
-          <option value="86400000000000">daily</option>
-        </select>
-      </label>
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Concurrent tasks
         <input class="input" type="number" min="1" max="64" bind:value={docsCfg.task_concurrency} />

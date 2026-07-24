@@ -66,6 +66,77 @@ func TestRuntimePatch(t *testing.T) {
 	}
 }
 
+func TestEffectiveSchedulesFallback(t *testing.T) {
+	t.Parallel()
+
+	// Negative interval disables polling entirely.
+	if got := (Settings{GitPollInterval: -1}).EffectiveSchedules(); got != nil {
+		t.Fatalf("disabled interval should yield no schedules, got %#v", got)
+	}
+
+	// Zero maps to the hourly default across all namespaces.
+	got := (Settings{GitPollInterval: 0}).EffectiveSchedules()
+	if len(got) != 1 || got[0].Namespace != "*" || len(got[0].Specs) != 1 || got[0].Specs[0] != "@every 1h0m0s" {
+		t.Fatalf("zero interval fallback = %#v", got)
+	}
+
+	// A positive interval maps to an @every spec.
+	got = (Settings{GitPollInterval: 15 * time.Minute}).EffectiveSchedules()
+	if len(got) != 1 || got[0].Specs[0] != "@every 15m0s" {
+		t.Fatalf("positive interval fallback = %#v", got)
+	}
+
+	// Configured schedules take precedence over the interval fallback.
+	cfg := Settings{
+		GitPollInterval: time.Hour,
+		RepoSchedules:   []RepoSchedule{{Namespace: "team-a", Specs: []string{"*/15 * * * *"}}},
+	}
+	got = cfg.EffectiveSchedules()
+	if len(got) != 1 || got[0].Namespace != "team-a" {
+		t.Fatalf("configured schedules not authoritative = %#v", got)
+	}
+}
+
+func TestValidateSchedules(t *testing.T) {
+	t.Parallel()
+
+	ok := Settings{RepoSchedules: []RepoSchedule{
+		{Namespace: "*", Specs: []string{"0 */6 * * *", "@every 30m"}},
+	}}
+	if err := ok.ValidateSchedules(); err != nil {
+		t.Fatalf("valid specs rejected: %v", err)
+	}
+
+	bad := Settings{RepoSchedules: []RepoSchedule{
+		{Namespace: "team-a", Specs: []string{"not a cron"}},
+	}}
+	if err := bad.ValidateSchedules(); err == nil {
+		t.Fatal("invalid cron spec was not rejected")
+	}
+
+	empty := Settings{RepoSchedules: []RepoSchedule{{Namespace: "team-a", Specs: []string{"  "}}}}
+	if err := empty.ValidateSchedules(); err == nil {
+		t.Fatal("empty cron spec was not rejected")
+	}
+}
+
+func TestRuntimePatchRepoSchedules(t *testing.T) {
+	t.Parallel()
+
+	var patch Patch
+	if err := json.Unmarshal([]byte(`{"repo_schedules":[{"namespace":"*","specs":["0 * * * *"]}]}`), &patch); err != nil {
+		t.Fatal(err)
+	}
+	if !patch.RuntimeOnly() {
+		t.Fatal("repo_schedules-only patch was not recognized as runtime-only")
+	}
+
+	got := patch.Apply(Settings{})
+	if len(got.RepoSchedules) != 1 || got.RepoSchedules[0].Namespace != "*" {
+		t.Fatalf("repo_schedules patch result = %#v", got.RepoSchedules)
+	}
+}
+
 func TestPatchApplyExplicitFalse(t *testing.T) {
 	t.Parallel()
 

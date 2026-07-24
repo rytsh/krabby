@@ -12,7 +12,7 @@ keeps those indexes fresh in the background.
                      │  ├─ REST API + provider-neutral hook  │──► graphify update
  CI/webhook ──HTTP─► │  ├─ Registry (bw/BadgerDB)            │──► graphify merge-graphs
                      │  ├─ Native graph query engine (Go)    │
-                     │  └─ Scheduler (poll interval)         │
+                     │  └─ Scheduler (cron schedules)        │
                      └───────────────────────────────────────┘
 ```
 
@@ -209,8 +209,14 @@ webhook / poll / refresh_repo
   → generated docs + docs RAG index (when enabled)
 ```
 
-Repos are also polled at the runtime interval configured in Settings (default
-1h); changes apply without restarting krabby.
+Repos are also polled on cron schedules configured in Settings. Each schedule
+targets a namespace (`*` = all, `default` = untagged) and carries one or more
+cron specs (e.g. `0 */6 * * *`, or `@every 15m`), so different namespaces can
+poll on different cadences and multiple schedules may coexist. With no schedule
+configured, polling falls back to a fixed interval (default 1h). Cron scheduling
+uses [worldline-go/hardloop](https://github.com/worldline-go/hardloop); note
+day-of-month and day-of-week are combined with AND. Changes apply without
+restarting krabby.
 
 ## Configuration
 

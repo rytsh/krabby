@@ -314,6 +314,27 @@ func (r *Registry) ListPaged(ctx context.Context, opts ListOptions) (repos []*Re
 	return repos, total, nil
 }
 
+// ListNamespace returns every repo in the given namespace, unpaginated. The
+// namespace is interpreted like ListOptions.Namespace: "" or "default" selects
+// the default bucket (untagged repos), and NamespaceAll ("*") returns repos
+// from every namespace. Used by the scheduler to poll a namespace on its cron.
+func (r *Registry) ListNamespace(ctx context.Context, ns string) ([]*Repo, error) {
+	q := query.New()
+	buildNamespaceFilter(q, ns)
+	q.SetLimit(100000)
+
+	repos, err := r.bucket.Find(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("list repos by namespace; %w", err)
+	}
+
+	if repos == nil {
+		repos = []*Repo{}
+	}
+
+	return repos, nil
+}
+
 // Count returns the number of repos matching the search/owner filter.
 func (r *Registry) Count(ctx context.Context, opts ListOptions) (int, error) {
 	q := query.New()

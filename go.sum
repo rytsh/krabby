@@ -266,6 +266,8 @@ github.com/rakunlabs/query v0.4.6/go.mod h1:2DGX9UqBE4PaaWAZ+eR/v6lWiSJ376ar7L0j
 github.com/rakunlabs/tell v0.1.5 h1:UVgyoOtqNaBK0MKtLeMGin2wjRNzG22bsV0vhhdGCAs=
 github.com/rakunlabs/tell v0.1.5/go.mod h1:GUNttkejaN1pqJDwR8FY7ZYW1J74RLN6paASsoW6PHc=
 github.com/rivo/uniseg v0.1.0/go.mod h1:J6wj4VEh+S6ZtnVlnTBMWIodfgj8LQOQFoIToxlJtxc=
+github.com/robfig/cron/v3 v3.0.1 h1:WdRxkvbJztn8LMz/QEvLN5sBU+xKpSqwwUO1Pjr4qDs=
+github.com/robfig/cron/v3 v3.0.1/go.mod h1:eQICP3HwyT7UooqI/z+Ov+PtYAWygg1TEWWzGIFLtro=
 github.com/rogpeppe/go-internal v1.14.1 h1:UQB4HGPB6osV0SQTLymcB4TgvyWu6ZyliaW0tI/otEQ=
 github.com/rogpeppe/go-internal v1.14.1/go.mod h1:MaRKkUm5W0goXpeCfT7UZI6fk/L7L7so1lCWt35ZSgc=
 github.com/ryanuber/columnize v0.0.0-20160712163229-9b3edd62028f/go.mod h1:sm1tb6uqfes/u+d4ooFouqFdy9/2g9QGwK3SQygK0Ts=
@@ -304,6 +306,8 @@ github.com/vmihailenco/msgpack/v5 v5.4.1 h1:cQriyiUvjTwOHg8QZaPihLWeRAAVoCpE00IU
 github.com/vmihailenco/msgpack/v5 v5.4.1/go.mod h1:GaZTsDaehaPpQVyxrf5mtQlH+pc21PIudVV/E3rRQok=
 github.com/vmihailenco/tagparser/v2 v2.0.0 h1:y09buUbR+b5aycVFQs/g70pqKVZNBmxwAhO7/IwNM9g=
 github.com/vmihailenco/tagparser/v2 v2.0.0/go.mod h1:Wri+At7QHww0WTrCBeu4J6bNtoV6mEfg5OIWRZA9qds=
+github.com/worldline-go/hardloop v0.3.2 h1:gupB7o1D7G/PPwqdn7ZmSJy8hW5uyQZrjBWVE7Ed108=
+github.com/worldline-go/hardloop v0.3.2/go.mod h1:b8TAxNFpU3YDl1MAkWKit1aNF4vTMce23Y4fQB2P4Jo=
 github.com/worldline-go/struct2 v1.4.0 h1:81QtMoOyux9aVXjPeqaDPJQVb3y/akSWm0AjNjK7U2w=
 github.com/worldline-go/struct2 v1.4.0/go.mod h1:WQ0q9deNrhnzWkWvrC1sIYc6SfziRsRCAwQBgS94T8E=
 github.com/xhit/go-str2duration/v2 v2.1.0 h1:lxklc02Drh6ynqX+DdPyp5pCKLUQpRT8bp8Ydu2Bstc=
