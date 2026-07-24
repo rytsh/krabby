@@ -9,7 +9,6 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -18,7 +17,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/rakunlabs/ada"
@@ -33,7 +31,6 @@ import (
 	"github.com/rytsh/krabby/internal/service/credentials"
 	"github.com/rytsh/krabby/internal/service/gitops"
 	"github.com/rytsh/krabby/internal/service/graphify"
-	"github.com/rytsh/krabby/internal/service/lease"
 	"github.com/rytsh/krabby/internal/service/manager"
 	"github.com/rytsh/krabby/internal/service/registry"
 	"github.com/rytsh/krabby/internal/service/settings"
@@ -105,7 +102,6 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	//   ...
 	api.GET("/repos/{ref...}", server.Wrap(dispatchRepo(mgr, map[string]ada.HandlerFunc{
 		"":       getRepo(mgr),
-		"lock":   lockStatus(mgr),
 		"graph":  repoArtifact(mgr, graphify.GraphPath),
 		"report": repoArtifact(mgr, graphify.ReportPath),
 		"html":   repoArtifact(mgr, graphify.HTMLPath),
@@ -118,12 +114,10 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 		"refresh":   refreshRepo(mgr),
 		"generate":  generateRepo(mgr),
 		"cancel":    cancelRepoJob(mgr),
-		"lock":      lockRepo(mgr),
 		"namespace": setRepoNamespace(mgr),
 	})))
 	api.DELETE("/repos/{ref...}", server.Wrap(dispatchRepo(mgr, map[string]ada.HandlerFunc{
-		"":     deleteRepo(mgr),
-		"lock": unlockRepo(mgr),
+		"": deleteRepo(mgr),
 	})))
 	// Web content sources (wikis, Confluence spaces): named collections whose
 	// pages are synced to markdown and indexed into the docs RAG.
@@ -755,84 +749,6 @@ func cancelRepoJob(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-// ---- lease handlers ---------------------------------------------------------
-
-type lockRequest struct {
-	Owner string `json:"owner"`
-	TTL   string `json:"ttl"` // Go duration, e.g. "5m"; empty = default
-}
-
-func lockRepo(mgr *manager.Manager) ada.HandlerFunc {
-	return func(c *ada.Context) error {
-		var req lockRequest
-		if c.Request.ContentLength > 0 {
-			if err := c.Bind(&req); err != nil {
-				return c.SetStatus(http.StatusBadRequest).Err(err)
-			}
-		}
-
-		var ttl time.Duration
-
-		if req.TTL != "" {
-			d, err := time.ParseDuration(req.TTL)
-			if err != nil {
-				return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": "invalid ttl: " + err.Error()})
-			}
-
-			ttl = d
-		}
-
-		l, err := mgr.AcquireLease(c.Request.Context(), repoID(c.Request), req.Owner, ttl)
-		if err != nil {
-			if errors.Is(err, lease.ErrLeased) {
-				return c.SetStatus(http.StatusConflict).SendJSON(map[string]string{"error": err.Error()})
-			}
-
-			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
-		}
-
-		// Token is included: the caller needs it to release the lock.
-		return c.SendJSON(l)
-	}
-}
-
-func lockStatus(mgr *manager.Manager) ada.HandlerFunc {
-	return func(c *ada.Context) error {
-		l := mgr.LeaseInfo(repoID(c.Request))
-		if l == nil {
-			return c.SendJSON(map[string]any{"locked": false})
-		}
-
-		return c.SendJSON(map[string]any{"locked": true, "lease": l})
-	}
-}
-
-func unlockRepo(mgr *manager.Manager) ada.HandlerFunc {
-	return func(c *ada.Context) error {
-		token := c.Request.Header.Get("X-Lock-Token")
-		if token == "" {
-			token = c.Request.URL.Query().Get("token")
-		}
-
-		if token == "" {
-			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": "X-Lock-Token header (or token query param) is required"})
-		}
-
-		if err := mgr.ReleaseLease(repoID(c.Request), token); err != nil {
-			switch {
-			case errors.Is(err, lease.ErrNotLeased):
-				return c.SetStatus(http.StatusNotFound).SendJSON(map[string]string{"error": err.Error()})
-			case errors.Is(err, lease.ErrBadToken):
-				return c.SetStatus(http.StatusForbidden).SendJSON(map[string]string{"error": err.Error()})
-			default:
-				return c.Err(err)
-			}
-		}
-
-		return c.SendNoContent()
-	}
-}
-
 // ---- artifact handlers ------------------------------------------------------
 
 // repoArtifact serves a graphify output file (graph.json, GRAPH_REPORT.md,
@@ -867,12 +783,14 @@ func repoArtifact(mgr *manager.Manager, pathFn func(repoPath string) string) ada
 func listRepoFiles(mgr *manager.Manager) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		subdir := c.Request.URL.Query().Get("subdir")
+		snapshot := c.Request.URL.Query().Get("snapshot")
 		recursive := c.Request.URL.Query().Get("recursive") == "true"
 
-		entries, err := mgr.ListRepoFiles(c.Request.Context(), repoID(c.Request), subdir, recursive)
+		entries, token, err := mgr.ListRepoFilesAt(c.Request.Context(), repoID(c.Request), subdir, snapshot, recursive)
 		if err != nil {
 			return c.SetStatus(http.StatusNotFound).SendJSON(map[string]string{"error": err.Error()})
 		}
+		c.Response.Header().Set("X-Krabby-Snapshot", token)
 
 		return c.SendJSON(entries)
 	}
@@ -899,7 +817,7 @@ func readRepoFile(mgr *manager.Manager) ada.HandlerFunc {
 			}
 		}
 
-		fc, err := mgr.ReadRepoFile(c.Request.Context(), repoID(c.Request), path, offset, maxBytes)
+		fc, err := mgr.ReadRepoFileAt(c.Request.Context(), repoID(c.Request), path, c.Request.URL.Query().Get("snapshot"), offset, maxBytes)
 		if err != nil {
 			return c.SetStatus(http.StatusNotFound).SendJSON(map[string]string{"error": err.Error()})
 		}

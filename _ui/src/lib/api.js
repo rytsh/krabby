@@ -8,10 +8,11 @@ const BASE = "api/v1";
 
 async function req(path, opts = {}) {
   try {
+    const { responseMeta = false, ...fetchOpts } = opts;
     // path starts with "/"; joining onto the relative BASE keeps it relative.
     const res = await fetch(BASE + path, {
       headers: { "Content-Type": "application/json" },
-      ...opts,
+      ...fetchOpts,
     });
 
     const text = await res.text();
@@ -29,7 +30,7 @@ async function req(path, opts = {}) {
       throw new Error(msg);
     }
 
-    return body;
+    return responseMeta ? { body, headers: res.headers } : body;
   } catch (error) {
     errorToast(error);
     throw error;
@@ -87,10 +88,17 @@ export const api = {
   cancelRepoJob: (id) => req(`/repos/${id}/-/cancel`, { method: "POST", keepalive: true }),
   generate: (id, targets, force = false) =>
     req(`/repos/${id}/-/generate`, { method: "POST", keepalive: true, body: JSON.stringify({ targets, force }) }),
-  lockStatus: (id) => req(`/repos/${id}/-/lock`),
-  files: (id, subdir = "", recursive = false) =>
-    req(`/repos/${id}/-/files?subdir=${encodeURIComponent(subdir)}&recursive=${recursive}`),
-  file: (id, path) => req(`/repos/${id}/-/file?path=${encodeURIComponent(path)}`),
+  files: async (id, subdir = "", recursive = false, snapshot = "") => {
+    const p = new URLSearchParams({ subdir, recursive: String(recursive) });
+    if (snapshot) p.set("snapshot", snapshot);
+    const { body, headers } = await req(`/repos/${id}/-/files?${p}`, { responseMeta: true });
+    return { entries: body, snapshot: headers.get("X-Krabby-Snapshot") || snapshot };
+  },
+  file: (id, path, snapshot = "") => {
+    const p = new URLSearchParams({ path });
+    if (snapshot) p.set("snapshot", snapshot);
+    return req(`/repos/${id}/-/file?${p}`);
+  },
   credentials: () => req("/credentials"),
   setCredential: (credential) =>
     req("/credentials", { method: "PUT", body: JSON.stringify(credential) }),
@@ -106,13 +114,14 @@ export const api = {
   testCodeEmbedder: (cfg) => req("/docs/config/test/code-embedder", { method: "POST", body: JSON.stringify(cfg) }),
   // searchDocs scoping: repo may be a repository id or a web-source key
   // ("web:<name>") and wins over scope; scope is all|repos|sources.
-  searchDocs: (q, repo = "", top = 0, scope = "") =>
+  // namespace scopes results to a single namespace; "" (or "*") searches all.
+  searchDocs: (q, repo = "", top = 0, scope = "", namespace = "") =>
     req(
-      `/docs/search?q=${encodeURIComponent(q)}&repo=${encodeURIComponent(repo)}&top=${top}&scope=${encodeURIComponent(scope)}`,
+      `/docs/search?q=${encodeURIComponent(q)}&repo=${encodeURIComponent(repo)}&top=${top}&scope=${encodeURIComponent(scope)}&namespace=${encodeURIComponent(namespace)}`,
     ),
-  searchCode: (q, repo = "", mode = "normal", page = 1, perPage = 20, top = 0) =>
+  searchCode: (q, repo = "", mode = "normal", page = 1, perPage = 20, top = 0, namespace = "") =>
     req(
-      `/code/search?q=${encodeURIComponent(q)}&repo=${encodeURIComponent(repo)}&mode=${mode}&page=${page}&per_page=${perPage}&top=${top}`,
+      `/code/search?q=${encodeURIComponent(q)}&repo=${encodeURIComponent(repo)}&mode=${mode}&page=${page}&per_page=${perPage}&top=${top}&namespace=${encodeURIComponent(namespace)}`,
     ),
   docs: (id) => req(`/repos/${id}/-/docs`),
   doc: (id, path) => req(`/repos/${id}/-/doc?path=${encodeURIComponent(path)}`),

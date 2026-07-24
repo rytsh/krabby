@@ -95,6 +95,15 @@ func (g *Git) Clone(ctx context.Context, url, branch, dest string, auth *credent
 	return nil
 }
 
+// SetRemoteURL points an existing clone at url. Snapshot preparation first
+// clones the active local version for speed, then restores the real origin
+// before fetching updates.
+func (g *Git) SetRemoteURL(ctx context.Context, dir, url string) error {
+	_, err := g.run(ctx, dir, nil, "remote", "set-url", "origin", url)
+
+	return err
+}
+
 // Fetch updates remote refs.
 func (g *Git) Fetch(ctx context.Context, dir string, auth *credentials.Auth) error {
 	_, err := g.run(ctx, dir, auth, "fetch", "--prune", "origin")

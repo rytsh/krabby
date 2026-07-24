@@ -63,7 +63,6 @@ func New(mgr *manager.Manager, version string, waitTimeout time.Duration, profil
 	addFileTools(server, mgr)
 	addDocTools(server, mgr, profile == ToolProfileFull)
 	if profile == ToolProfileFull {
-		addLeaseTools(server, mgr)
 		addCredentialTools(server, mgr)
 	}
 
@@ -444,57 +443,6 @@ func waitResult(mgr *manager.Manager, repo *registry.Repo, done bool) *mcp.CallT
 	return res
 }
 
-// ---- lease tools ------------------------------------------------------------
-
-type lockRepoArgs struct {
-	Repo  string `json:"repo" jsonschema:"repository id in owner/name form"`
-	Owner string `json:"owner,omitempty" jsonschema:"who holds the lock, e.g. 'docgen' (informational)"`
-	TTL   string `json:"ttl,omitempty" jsonschema:"lock duration as Go duration, e.g. '5m' (default 10m, max 1h)"`
-}
-
-type unlockRepoArgs struct {
-	Repo  string `json:"repo" jsonschema:"repository id in owner/name form"`
-	Token string `json:"token" jsonschema:"the token returned by lock_repo"`
-}
-
-func addLeaseTools(server *mcp.Server, mgr *manager.Manager) {
-	addTool(server, &mcp.Tool{
-		Name: "lock_repo",
-		Description: "Take a TTL-bounded read lock on a repository clone so external tools can walk it " +
-			"without a refresh pulling mid-read. Deferred refreshes run automatically on unlock/expiry. " +
-			"Returns a token required for unlock_repo.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args lockRepoArgs) (*mcp.CallToolResult, any, error) {
-		var ttl time.Duration
-
-		if args.TTL != "" {
-			d, err := time.ParseDuration(args.TTL)
-			if err != nil {
-				return nil, nil, fmt.Errorf("invalid ttl; %w", err)
-			}
-
-			ttl = d
-		}
-
-		l, err := mgr.AcquireLease(ctx, args.Repo, args.Owner, ttl)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		return jsonResult(l), nil, nil
-	})
-
-	addTool(server, &mcp.Tool{
-		Name:        "unlock_repo",
-		Description: "Release a read lock taken with lock_repo. Any refresh deferred during the lock runs immediately.",
-	}, func(_ context.Context, _ *mcp.CallToolRequest, args unlockRepoArgs) (*mcp.CallToolResult, any, error) {
-		if err := mgr.ReleaseLease(args.Repo, args.Token); err != nil {
-			return nil, nil, err
-		}
-
-		return textResult("unlocked " + args.Repo), nil, nil
-	})
-}
-
 // ---- credential tools -------------------------------------------------------
 
 type setCredentialArgs struct {
@@ -712,6 +660,7 @@ func addQueryTools(server *mcp.Server, mgr *manager.Manager) {
 type readFileArgs struct {
 	Repo     string `json:"repo" jsonschema:"repository id (owner/name) whose clone to read from"`
 	Path     string `json:"path" jsonschema:"repo-relative file path, e.g. 'listener/processor.go' (as shown in graph node src fields)"`
+	Snapshot string `json:"snapshot,omitempty" jsonschema:"snapshot token returned by an earlier read_file call; pass it on continuation reads to stay on the same commit"`
 	Offset   int64  `json:"offset,omitempty" jsonschema:"byte offset to start reading from (default 0); use with the truncated flag to page through large files"`
 	MaxBytes int    `json:"max_bytes,omitempty" jsonschema:"max bytes to return (default 32768, max 131072)"`
 }
@@ -719,6 +668,7 @@ type readFileArgs struct {
 type listFilesArgs struct {
 	Repo      string `json:"repo" jsonschema:"repository id (owner/name) whose clone to list"`
 	Subdir    string `json:"subdir,omitempty" jsonschema:"repo-relative directory to list (default: repository root)"`
+	Snapshot  string `json:"snapshot,omitempty" jsonschema:"snapshot token returned by an earlier list_files call; pass it on later pages to keep a stable listing"`
 	Recursive bool   `json:"recursive,omitempty" jsonschema:"when true, walk the whole subtree (skips .git and graphify-out); otherwise list one level"`
 	Page      int    `json:"page,omitempty" jsonschema:"page number (default 1)"`
 	PerPage   int    `json:"per_page,omitempty" jsonschema:"entries per page (default 100, max 200)"`
@@ -729,9 +679,10 @@ func addFileTools(server *mcp.Server, mgr *manager.Manager) {
 		Name: "read_file",
 		Description: "Read the source of a file inside a tracked repository's clone. " +
 			"Use this to see the actual code behind a graph node (node 'src' fields give the path). " +
-			"Access is sandboxed to the repo; large files are truncated - page with offset until truncated is false.",
+			"Access is sandboxed to the repo; large files are truncated - page with offset until truncated is false, " +
+			"passing the returned snapshot token on continuation reads.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args readFileArgs) (*mcp.CallToolResult, any, error) {
-		res, err := mgr.ReadRepoFile(ctx, args.Repo, args.Path, args.Offset, mcpReadSize(args.MaxBytes))
+		res, err := mgr.ReadRepoFileAt(ctx, args.Repo, args.Path, args.Snapshot, args.Offset, mcpReadSize(args.MaxBytes))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -741,9 +692,9 @@ func addFileTools(server *mcp.Server, mgr *manager.Manager) {
 
 	addTool(server, &mcp.Tool{
 		Name:        "list_files",
-		Description: "Inspect one known directory, or discover a path when search_code cannot identify it. Do not request recursive=true unless the user explicitly needs a tree or inventory.",
+		Description: "Inspect one known directory, or discover a path when search_code cannot identify it. Pass the returned snapshot token on later pages. Do not request recursive=true unless the user explicitly needs a tree or inventory.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args listFilesArgs) (*mcp.CallToolResult, any, error) {
-		entries, err := mgr.ListRepoFilesPage(ctx, args.Repo, args.Subdir, args.Recursive, args.Page, args.PerPage)
+		entries, err := mgr.ListRepoFilesPageAt(ctx, args.Repo, args.Subdir, args.Snapshot, args.Recursive, args.Page, args.PerPage)
 		if err != nil {
 			return nil, nil, err
 		}

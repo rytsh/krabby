@@ -14,6 +14,8 @@
   let repoOptionsTruncated = $state(false);
   // Web-source collections for docs-search scoping (searched as "web:<name>").
   let sourceOptions = $state([]);
+  // Namespaces for the namespace filter: [{ namespace, count, description }].
+  let namespaceOptions = $state([]);
 
   async function loadRepoOptions() {
     try {
@@ -28,6 +30,11 @@
     } catch {
       sourceOptions = [];
     }
+    try {
+      namespaceOptions = (await api.namespaces()) || [];
+    } catch {
+      namespaceOptions = [];
+    }
   }
 
   let q = $state("");
@@ -35,6 +42,8 @@
   // (whole namespace), a repo id, or "web:<name>". Code search only supports
   // repo ids, so switching to code resets non-repo selections.
   let repoFilter = $state("");
+  // namespaceFilter scopes results to a single namespace; "" searches all.
+  let namespaceFilter = $state("");
   let scope = $state("code");
   let mode = $state("normal");
   let results = $state(null); // null = not searched yet
@@ -55,14 +64,16 @@
     loading = true;
     error = "";
     try {
-      // Map the where-selector onto the API params: namespace values become
-      // the scope param, everything else (repo id or web:<name>) is a key.
-      const namespace = repoFilter === "repos" || repoFilter === "sources" ? repoFilter : "";
-      const key = namespace ? "" : repoFilter;
+      // Map the where-selector onto the API params: the "repos"/"sources"
+      // values become the docs scope param, everything else (repo id or
+      // web:<name>) is a key. namespaceFilter is an orthogonal filter passed
+      // through to both search kinds ("" = every namespace).
+      const docsScope = repoFilter === "repos" || repoFilter === "sources" ? repoFilter : "";
+      const key = docsScope ? "" : repoFilter;
       const response =
         searchScope === "docs"
-          ? await api.searchDocs(query, key, 5, namespace)
-          : await api.searchCode(query, repoFilter, searchMode, nextPage, perPage);
+          ? await api.searchDocs(query, key, 5, docsScope, namespaceFilter)
+          : await api.searchCode(query, repoFilter, searchMode, nextPage, perPage, 0, namespaceFilter);
       if (seq !== searchSeq) return;
       results = searchScope === "docs" ? (Array.isArray(response) ? response : []) : response?.results || [];
       total = searchScope === "docs" ? results.length : response?.total || 0;
@@ -159,6 +170,19 @@
       <option disabled>… more (search all repositories)</option>
     {/if}
   </select>
+  {#if namespaceOptions.length > 0}
+    <select
+      class="input sm:basis-[180px]"
+      bind:value={namespaceFilter}
+      onchange={resetResults}
+      aria-label="Namespace filter"
+    >
+      <option value="">all namespaces</option>
+      {#each namespaceOptions as ns (ns.namespace)}
+        <option value={ns.namespace}>{ns.namespace} ({ns.count})</option>
+      {/each}
+    </select>
+  {/if}
 </div>
 
 <div class="mb-4 flex flex-col gap-2 sm:flex-row">

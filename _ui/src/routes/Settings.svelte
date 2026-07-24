@@ -265,7 +265,7 @@
     Protect the MCP endpoint with an API key. Changes apply immediately — no restart needed. Clients
     send the key in the <code class="font-mono text-[12px]">X-Api-Key</code> header. The endpoint uses the
     standard tool profile by default; send <code class="font-mono text-[12px]">X-Krabby-Tool-Profile: full</code>
-    to expose credential, lease, and docs/RAG administration tools.
+    to expose credential and docs/RAG administration tools.
   </p>
 
   <div class="card mt-3 p-4">

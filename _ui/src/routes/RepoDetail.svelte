@@ -73,8 +73,10 @@
   // File tree state: root entries plus lazily-loaded children per directory.
   let rootEntries = $state([]);
   let rootLoaded = false;
+  let fileSnapshot = $state("");
   let expanded = $state({});
   let children = $state({});
+  let fileBrowserVersion = 0;
 
   // Browser mode: "docs" (default: comprehensive markdown) or "files".
   let mode = $state("docs");
@@ -149,6 +151,7 @@
   async function loadRepo() {
     try {
       const next = await api.repo(repoId);
+      const snapshotChanged = repo?.path && next?.path && repo.path !== next.path;
       const docsStage = next?.stages?.docs;
       const nextDocsVersion = docsStage?.finished_at || "";
       const docsFinished =
@@ -156,6 +159,17 @@
 
       docsVersion = nextDocsVersion;
       repo = next;
+      if (snapshotChanged) {
+        fileBrowserVersion += 1;
+        fileSnapshot = "";
+        rootLoaded = false;
+        rootEntries = [];
+        expanded = {};
+        children = {};
+        selected = null;
+        fileContent = null;
+        if (mode === "files") await loadRoot();
+      }
       if (docsFinished) await loadDocs();
     } catch (e) {
       error = e.message;
@@ -168,10 +182,16 @@
   }
 
   async function loadRoot() {
+    const version = fileBrowserVersion;
     fileError = "";
     rootLoaded = true;
     try {
-      rootEntries = sortEntries(await api.files(repoId, "", false));
+      const result = await api.files(repoId, "", false);
+      if (version !== fileBrowserVersion) return;
+      fileSnapshot = result.snapshot;
+      expanded = {};
+      children = {};
+      rootEntries = sortEntries(result.entries);
     } catch (e) {
       fileError = e.message;
       rootEntries = [];
@@ -180,6 +200,7 @@
 
   // Expand/collapse a directory in place; fetch its children on first expand.
   async function toggleDir(entry) {
+    const version = fileBrowserVersion;
     const p = entry.path;
     if (expanded[p]) {
       expanded = { ...expanded, [p]: false };
@@ -188,8 +209,9 @@
     expanded = { ...expanded, [p]: true };
     if (!children[p]) {
       try {
-        const list = sortEntries(await api.files(repoId, p, false));
-        children = { ...children, [p]: list };
+        const result = await api.files(repoId, p, false, fileSnapshot);
+        if (version !== fileBrowserVersion) return;
+        children = { ...children, [p]: sortEntries(result.entries) };
       } catch (e) {
         fileError = e.message;
         expanded = { ...expanded, [p]: false };
@@ -198,11 +220,14 @@
   }
 
   async function openFile(entry) {
+    const version = fileBrowserVersion;
     selected = entry.path;
     fileContent = null;
     fileError = "";
     try {
-      fileContent = await api.file(repoId, entry.path);
+      const content = await api.file(repoId, entry.path, fileSnapshot);
+      if (version !== fileBrowserVersion) return;
+      fileContent = content;
     } catch (e) {
       fileError = e.message;
     }
@@ -218,6 +243,7 @@
 
   // Expand every ancestor directory of a file so it is visible in the tree.
   async function revealFile(file) {
+    const version = fileBrowserVersion;
     if (!rootLoaded) await loadRoot();
     const parts = file.split("/");
     let prefix = "";
@@ -225,8 +251,9 @@
       prefix = prefix ? `${prefix}/${parts[i]}` : parts[i];
       if (!children[prefix]) {
         try {
-          const list = sortEntries(await api.files(repoId, prefix, false));
-          children = { ...children, [prefix]: list };
+          const result = await api.files(repoId, prefix, false, fileSnapshot);
+          if (version !== fileBrowserVersion) return;
+          children = { ...children, [prefix]: sortEntries(result.entries) };
         } catch {
           break;
         }

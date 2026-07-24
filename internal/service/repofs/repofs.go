@@ -42,9 +42,10 @@ var skipDirs = map[string]bool{
 type FileContent struct {
 	Path      string `json:"path"`
 	Content   string `json:"content"`
-	Bytes     int    `json:"bytes"`      // bytes returned
-	TotalSize int64  `json:"total_size"` // full file size on disk
-	Truncated bool   `json:"truncated"`  // true when TotalSize > bytes returned
+	Bytes     int    `json:"bytes"`              // bytes returned
+	TotalSize int64  `json:"total_size"`         // full file size on disk
+	Truncated bool   `json:"truncated"`          // true when TotalSize > bytes returned
+	Snapshot  string `json:"snapshot,omitempty"` // pass back on continuation reads
 }
 
 // Entry is one item in a directory listing.
@@ -57,11 +58,12 @@ type Entry struct {
 // EntryPage is a bounded page of a directory listing. Capped means the listing
 // reached the repository-wide safety limit and later entries are unavailable.
 type EntryPage struct {
-	Entries []Entry `json:"entries"`
-	Page    int     `json:"page"`
-	PerPage int     `json:"per_page"`
-	HasMore bool    `json:"has_more"`
-	Capped  bool    `json:"capped,omitempty"`
+	Entries  []Entry `json:"entries"`
+	Page     int     `json:"page"`
+	PerPage  int     `json:"per_page"`
+	HasMore  bool    `json:"has_more"`
+	Capped   bool    `json:"capped,omitempty"`
+	Snapshot string  `json:"snapshot,omitempty"` // pass back on continuation pages
 }
 
 // clean normalises a user-supplied repo-relative path and rejects anything that

@@ -24,7 +24,6 @@ import (
 	"github.com/rytsh/krabby/internal/service/gitops"
 	"github.com/rytsh/krabby/internal/service/graphify"
 	"github.com/rytsh/krabby/internal/service/graphquery"
-	"github.com/rytsh/krabby/internal/service/lease"
 	"github.com/rytsh/krabby/internal/service/queue"
 	"github.com/rytsh/krabby/internal/service/rag"
 	"github.com/rytsh/krabby/internal/service/registry"
@@ -102,8 +101,6 @@ type Manager struct {
 	mcpKeyMu     sync.RWMutex
 	mcpKey       string
 	mcpConfigKey string
-
-	leases *lease.Manager
 }
 
 // docsBundle is an immutable snapshot of the docs/RAG clients. A nil field means
@@ -172,8 +169,6 @@ func New(
 	// The queue's limit is updated from persisted settings at startup and on
 	// every settings change (see SetTaskConcurrency); it starts at the default.
 	m.queue = queue.New(baseCtx, queue.DefaultConcurrency)
-	m.leases = lease.New(m.TriggerRefresh)
-
 	return m
 }
 
@@ -570,6 +565,9 @@ func (m *Manager) lock(id string) *sync.Mutex {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if m.locks == nil {
+		m.locks = map[string]*sync.Mutex{}
+	}
 	if l, ok := m.locks[id]; ok {
 		return l
 	}
@@ -720,6 +718,10 @@ func (m *Manager) SetRepoNamespace(ctx context.Context, ref, namespace string) (
 		return nil, fmt.Errorf("repo %s not found", ref)
 	}
 
+	l := m.lock(repo.ID)
+	l.Lock()
+	defer l.Unlock()
+
 	return m.reg.SetNamespace(ctx, repo.ID, namespace)
 }
 
@@ -773,7 +775,16 @@ func (m *Manager) RemoveRepo(ctx context.Context, id string) error {
 		return err
 	}
 
-	if repo.Path != "" && filepath.HasPrefix(repo.Path, m.reposDir) {
+	snapshotRoot := m.snapshotRoot(id)
+	if err := os.RemoveAll(snapshotRoot); err != nil {
+		return fmt.Errorf("remove snapshots for %s; %w", id, err)
+	}
+
+	legacyPath := m.legacyRepoPath(id)
+	if err := os.RemoveAll(legacyPath); err != nil {
+		return fmt.Errorf("remove legacy clone %s; %w", legacyPath, err)
+	}
+	if repo.Path != "" && repo.Path != legacyPath && !pathWithin(repo.Path, snapshotRoot) && pathWithin(repo.Path, m.reposDir) {
 		if err := os.RemoveAll(repo.Path); err != nil {
 			return fmt.Errorf("remove clone %s; %w", repo.Path, err)
 		}
@@ -791,6 +802,12 @@ func (m *Manager) RemoveRepo(ctx context.Context, id string) error {
 	}()
 
 	return nil
+}
+
+func pathWithin(path, root string) bool {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
+
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // WarmCodeSearch creates missing bw FTS indexes for repositories that were
@@ -977,19 +994,23 @@ func (m *Manager) Generate(ctx context.Context, id string, targets []string, for
 
 		switch name {
 		case registry.StageGraph:
-			serr = m.runStage(ctx, repo, name, func() error {
-				if err := m.gfy.Update(ctx, repo.Path); err != nil {
-					return err
-				}
-
-				repo.LastBuildAt = time.Now()
-
+			snapshot, err := m.prepareCurrentSnapshot(ctx, repo)
+			if err != nil {
+				serr = err
+				st := repo.Stages.Get(registry.StageGraph)
+				st.Status = registry.StageError
+				st.Error = err.Error()
+				st.Commit = repo.LastCommit
+				st.FinishedAt = time.Now()
+				_ = m.reg.Upsert(context.WithoutCancel(ctx), repo)
+			} else {
+				serr = m.buildGraphSnapshot(ctx, repo, snapshot, registry.StatusReady)
+			}
+			if serr == nil {
 				if err := m.rebuildMerged(ctx); err != nil {
 					slog.Error("rebuild merged graph", "error", err)
 				}
-
-				return nil
-			})
+			}
 
 			// The graph underpins symbol-aware code chunking and docs
 			// generation. If it failed there is no graph to build on, so skip
@@ -1213,15 +1234,6 @@ func (m *Manager) Refresh(ctx context.Context, id string) error {
 		return fmt.Errorf("repo %s not found", id)
 	}
 
-	// An external tool holds a read lease: defer the refresh until release/expiry.
-	if m.leases.Active(id) {
-		m.leases.MarkPending(id)
-
-		slog.Info("refresh deferred: repo is leased", "repo", id)
-
-		return nil
-	}
-
 	jobCtx, finish := m.registerJob(ctx, id)
 	defer finish()
 
@@ -1251,11 +1263,11 @@ func (m *Manager) refresh(ctx context.Context, repo *registry.Repo) error {
 
 	defer m.clearRepoActivity(repo.ID)
 
-	graphPath := graphify.GraphPath(repo.Path)
-	hadGraph := fileExists(graphPath)
+	hadGraph := fileExists(graphify.GraphPath(repo.Path))
+	staleIgnore := hadGraph && m.gfy.GraphNeedsIgnoreRebuild(repo.Path)
 
 	m.setActivity(repo.ID, "sync")
-	changed, err := m.sync(ctx, repo)
+	snapshot, err := m.prepareSnapshot(ctx, repo, !hadGraph || staleIgnore)
 	m.clearActivity(repo.ID, "sync")
 
 	if err != nil {
@@ -1264,13 +1276,7 @@ func (m *Manager) refresh(ctx context.Context, repo *registry.Repo) error {
 
 	repo.LastSyncAt = time.Now()
 
-	// A stale graph built before the current .graphifyignore rules still holds
-	// excluded nodes (testdata, fixtures, ...). Rebuild it even when git is
-	// unchanged so a manual refresh actually cleans it; gfy.Update writes the
-	// ignore file and force-rebuilds.
-	staleIgnore := hadGraph && m.gfy.GraphNeedsIgnoreRebuild(repo.Path)
-
-	if hadGraph && !changed && !staleIgnore {
+	if snapshot == nil {
 		// Nothing new; keep current status.
 		repo.Status = registry.StatusReady
 		repo.LastError = ""
@@ -1280,28 +1286,19 @@ func (m *Manager) refresh(ctx context.Context, repo *registry.Repo) error {
 		return m.reg.Upsert(ctx, repo)
 	}
 
-	if staleIgnore && !changed {
+	if staleIgnore && snapshot.Commit == repo.LastCommit {
 		slog.Info("graph contains now-excluded files; rebuilding to apply ignore rules", "repo", repo.ID)
 	}
 
 	repo.Status = registry.StatusBuilding
 	repo.LastError = ""
 
-	slog.Info("building graph", "repo", repo.ID, "path", repo.Path, "commit", shortSHA(repo.LastCommit))
+	slog.Info("building graph snapshot", "repo", repo.ID, "path", snapshot.StagingPath, "commit", shortSHA(snapshot.Commit))
 
 	buildStart := time.Now()
 
-	if err := m.runStage(ctx, repo, registry.StageGraph, func() error {
-		return m.gfy.Update(ctx, repo.Path)
-	}); err != nil {
+	if err := m.buildGraphSnapshot(ctx, repo, snapshot, registry.StatusReady); err != nil {
 		return fmt.Errorf("graphify update; %w", err)
-	}
-
-	repo.Status = registry.StatusReady
-	repo.LastBuildAt = time.Now()
-	repo.LastError = ""
-	if err := m.reg.Upsert(ctx, repo); err != nil {
-		return err
 	}
 
 	slog.Info("repo parsed successfully, graph ready",
@@ -1524,10 +1521,21 @@ func (m *Manager) migrateRepoID(ctx context.Context, repo *registry.Repo, newID 
 
 	// Move the clone when it lives inside the managed repos directory.
 	newPath := filepath.Join(m.reposDir, filepath.FromSlash(newID))
+	oldSnapshotRoot := m.snapshotRoot(oldID)
+	newSnapshotRoot := m.snapshotRoot(newID)
 	switch {
 	case repo.Path == "":
 		repo.Path = newPath
-	case repo.Path != newPath && filepath.HasPrefix(repo.Path, m.reposDir):
+	case pathWithin(repo.Path, oldSnapshotRoot):
+		rel, err := filepath.Rel(oldSnapshotRoot, repo.Path)
+		if err != nil {
+			return fmt.Errorf("resolve snapshot path; %w", err)
+		}
+		if err := moveDir(oldSnapshotRoot, newSnapshotRoot); err != nil {
+			return fmt.Errorf("move snapshots; %w", err)
+		}
+		repo.Path = filepath.Join(newSnapshotRoot, rel)
+	case repo.Path != newPath && pathWithin(repo.Path, m.reposDir):
 		if err := moveDir(repo.Path, newPath); err != nil {
 			return fmt.Errorf("move clone; %w", err)
 		}
@@ -1752,88 +1760,281 @@ func mergeLegacyDocs(src, dst string) error {
 	return os.Remove(src)
 }
 
-// sync makes the local clone current. It returns true when new commits arrived
-// (or the repo was cloned for the first time).
-func (m *Manager) sync(ctx context.Context, repo *registry.Repo) (bool, error) {
+// snapshotGracePeriod is how long a retired repository version is kept after a
+// newer one is activated (beyond the always-kept newest previous version). It
+// only needs to outlive an in-flight paginated read: a client replaying an
+// already-reaped snapshot token transparently falls back to the current active
+// version (see repoCloneDirAt), so this stays short.
+const snapshotGracePeriod = 5 * time.Minute
+
+type preparedSnapshot struct {
+	StagingPath string
+	FinalPath   string
+	Commit      string
+}
+
+// prepareSnapshot fetches remote state without changing the active working
+// tree. When a rebuild is needed it creates a private clone for graph generation;
+// the caller publishes that clone only after the graph is complete.
+func (m *Manager) prepareSnapshot(ctx context.Context, repo *registry.Repo, force bool) (*preparedSnapshot, error) {
 	auth, err := m.creds.Resolve(ctx, repo.URL)
 	if err != nil {
-		return false, fmt.Errorf("resolve credentials; %w", err)
+		return nil, fmt.Errorf("resolve credentials; %w", err)
 	}
 
-	if !fileExists(filepath.Join(repo.Path, ".git")) {
+	hasActiveClone := fileExists(filepath.Join(repo.Path, ".git"))
+	if hasActiveClone {
+		if err := m.git.Fetch(ctx, repo.Path, auth); err != nil {
+			return nil, fmt.Errorf("fetch; %w", err)
+		}
+
+		local, err := m.git.Head(ctx, repo.Path)
+		if err != nil {
+			return nil, err
+		}
+
+		remote, err := m.git.RemoteHead(ctx, repo.Path, repo.Branch)
+		if err != nil {
+			return nil, err
+		}
+
+		if local == remote && !force {
+			repo.LastCommit = local
+
+			return nil, nil
+		}
+
+		slog.Info("new snapshot required",
+			"repo", repo.ID,
+			"local", shortSHA(local),
+			"remote", shortSHA(remote),
+			"forced", force,
+		)
+	} else {
 		repo.Status = registry.StatusCloning
 		if err := m.reg.Upsert(ctx, repo); err != nil {
-			return false, err
+			return nil, err
 		}
-
-		slog.Info("cloning repo", "repo", repo.ID, "url", repo.URL, "branch", repo.Branch)
-
-		cloneStart := time.Now()
-
-		if err := os.MkdirAll(filepath.Dir(repo.Path), 0o755); err != nil {
-			return false, fmt.Errorf("mkdir; %w", err)
-		}
-
-		if err := m.git.Clone(ctx, repo.URL, repo.Branch, repo.Path, auth); err != nil {
-			return false, fmt.Errorf("clone; %w", err)
-		}
-
-		head, err := m.git.Head(ctx, repo.Path)
-		if err != nil {
-			return false, err
-		}
-
-		repo.LastCommit = head
-
-		slog.Info("repo cloned successfully",
-			"repo", repo.ID,
-			"commit", shortSHA(head),
-			"took", time.Since(cloneStart).Round(time.Millisecond).String(),
-		)
-
-		return true, nil
 	}
 
-	if err := m.git.Fetch(ctx, repo.Path, auth); err != nil {
-		return false, fmt.Errorf("fetch; %w", err)
+	return m.createSnapshot(ctx, repo, auth, hasActiveClone, true)
+}
+
+// prepareCurrentSnapshot copies the active commit without contacting the
+// remote. Selective graph generation therefore keeps its existing no-sync
+// contract while still avoiding writes to the published snapshot.
+func (m *Manager) prepareCurrentSnapshot(ctx context.Context, repo *registry.Repo) (*preparedSnapshot, error) {
+	if !fileExists(filepath.Join(repo.Path, ".git")) {
+		return nil, fmt.Errorf("repo %s has no clone yet; refresh it first", repo.ID)
 	}
 
-	local, err := m.git.Head(ctx, repo.Path)
+	return m.createSnapshot(ctx, repo, nil, true, false)
+}
+
+func (m *Manager) createSnapshot(
+	ctx context.Context,
+	repo *registry.Repo,
+	auth *credentials.Auth,
+	hasActiveClone, syncRemote bool,
+) (_ *preparedSnapshot, retErr error) {
+	root := m.snapshotRoot(repo.ID)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return nil, fmt.Errorf("mkdir snapshot root; %w", err)
+	}
+
+	m.cleanupSnapshots(repo.ID, repo.Path)
+
+	stagingPath, err := os.MkdirTemp(root, ".staging-")
 	if err != nil {
-		return false, err
+		return nil, fmt.Errorf("create snapshot staging directory; %w", err)
+	}
+	defer func() {
+		if retErr != nil {
+			_ = os.RemoveAll(stagingPath)
+		}
+	}()
+
+	cloneURL := repo.URL
+	cloneAuth := auth
+	if hasActiveClone {
+		cloneURL = repo.Path
+		cloneAuth = nil
 	}
 
-	remote, err := m.git.RemoteHead(ctx, repo.Path, repo.Branch)
+	cloneStart := time.Now()
+	if err := m.git.Clone(ctx, cloneURL, repo.Branch, stagingPath, cloneAuth); err != nil {
+		return nil, fmt.Errorf("clone snapshot; %w", err)
+	}
+
+	if hasActiveClone {
+		if err := m.git.SetRemoteURL(ctx, stagingPath, repo.URL); err != nil {
+			return nil, fmt.Errorf("set snapshot origin; %w", err)
+		}
+		if syncRemote {
+			if err := m.git.Fetch(ctx, stagingPath, auth); err != nil {
+				return nil, fmt.Errorf("fetch snapshot; %w", err)
+			}
+			if err := m.git.Pull(ctx, stagingPath, auth); err != nil {
+				return nil, fmt.Errorf("update snapshot; %w", err)
+			}
+		}
+	}
+
+	head, err := m.git.Head(ctx, stagingPath)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 
-	if local == remote {
-		repo.LastCommit = local
-
-		return false, nil
-	}
-
-	slog.Info("new commits on remote, pulling",
+	finalPath := filepath.Join(root, fmt.Sprintf("%d-%s", time.Now().UnixNano(), shortSHA(head)))
+	slog.Info("repo snapshot prepared",
 		"repo", repo.ID,
-		"local", shortSHA(local),
-		"remote", shortSHA(remote),
+		"commit", shortSHA(head),
+		"took", time.Since(cloneStart).Round(time.Millisecond).String(),
 	)
 
-	if err := m.git.Pull(ctx, repo.Path, auth); err != nil {
-		return false, fmt.Errorf("pull; %w", err)
+	return &preparedSnapshot{StagingPath: stagingPath, FinalPath: finalPath, Commit: head}, nil
+}
+
+// buildGraphSnapshot builds privately, then activates source and graph together
+// with one registry record replacement. A failed build leaves the old Path and
+// LastCommit untouched.
+func (m *Manager) buildGraphSnapshot(
+	ctx context.Context,
+	repo *registry.Repo,
+	snapshot *preparedSnapshot,
+	activeStatus string,
+) error {
+	st := repo.Stages.Get(registry.StageGraph)
+	fail := func(err error, path string) error {
+		if ctx.Err() != nil {
+			err = ErrCancelled
+		}
+		st.Status = registry.StageError
+		st.Error = err.Error()
+		st.Commit = snapshot.Commit
+		st.FinishedAt = time.Now()
+		_ = m.reg.Upsert(context.WithoutCancel(ctx), repo)
+		_ = os.RemoveAll(path)
+
+		return err
 	}
 
-	head, err := m.git.Head(ctx, repo.Path)
+	st.Status = registry.StageRunning
+	st.Error = ""
+	if err := m.reg.Upsert(ctx, repo); err != nil {
+		return fail(err, snapshot.StagingPath)
+	}
+
+	m.setActivity(repo.ID, registry.StageGraph)
+	defer m.clearActivity(repo.ID, registry.StageGraph)
+	start := time.Now()
+	err := m.gfy.Update(ctx, snapshot.StagingPath)
 	if err != nil {
-		return false, err
+		return fail(err, snapshot.StagingPath)
 	}
 
-	repo.LastCommit = head
+	if err := os.Rename(snapshot.StagingPath, snapshot.FinalPath); err != nil {
+		return fail(fmt.Errorf("finalize snapshot; %w", err), snapshot.StagingPath)
+	}
+	_ = os.Chtimes(snapshot.FinalPath, time.Now(), time.Now())
 
-	slog.Info("repo updated to latest", "repo", repo.ID, "commit", shortSHA(head))
+	oldPath := repo.Path
+	oldCommit := repo.LastCommit
+	oldStatus := repo.Status
+	oldBuildAt := repo.LastBuildAt
+	oldError := repo.LastError
+	if oldPath != "" {
+		_ = os.Chtimes(oldPath, time.Now(), time.Now())
+	}
 
-	return true, nil
+	repo.Path = snapshot.FinalPath
+	repo.LastCommit = snapshot.Commit
+	repo.Status = activeStatus
+	repo.LastBuildAt = time.Now()
+	repo.LastError = ""
+	st.Status = registry.StageOK
+	st.Error = ""
+	st.Commit = snapshot.Commit
+	st.FinishedAt = time.Now()
+
+	if err := m.reg.Upsert(ctx, repo); err != nil {
+		repo.Path = oldPath
+		repo.LastCommit = oldCommit
+		repo.Status = oldStatus
+		repo.LastBuildAt = oldBuildAt
+		repo.LastError = oldError
+
+		return fail(err, snapshot.FinalPath)
+	}
+
+	slog.Info("graph snapshot activated", "repo", repo.ID, "commit", shortSHA(snapshot.Commit),
+		"took", time.Since(start).Round(time.Millisecond).String())
+	m.cleanupSnapshots(repo.ID, repo.Path)
+
+	return nil
+}
+
+func (m *Manager) snapshotRoot(id string) string {
+	return filepath.Join(m.reposDir, ".snapshots", filepath.FromSlash(id))
+}
+
+func (m *Manager) legacyRepoPath(id string) string {
+	return filepath.Join(m.reposDir, filepath.FromSlash(id))
+}
+
+// cleanupSnapshots keeps the active and newest previous snapshot. Older
+// versions are reaped once snapshotGracePeriod has elapsed, without delaying
+// refresh or mutating a published tree.
+func (m *Manager) cleanupSnapshots(id, activePath string) {
+	root := m.snapshotRoot(id)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+
+	type version struct {
+		path string
+		mod  time.Time
+	}
+	var versions []version
+	for _, entry := range entries {
+		path := filepath.Join(root, entry.Name())
+		if strings.HasPrefix(entry.Name(), ".staging-") {
+			if filepath.Clean(path) != filepath.Clean(activePath) {
+				_ = os.RemoveAll(path)
+			}
+			continue
+		}
+		if !entry.IsDir() || filepath.Clean(path) == filepath.Clean(activePath) {
+			continue
+		}
+		info, err := entry.Info()
+		if err == nil {
+			versions = append(versions, version{path: path, mod: info.ModTime()})
+		}
+	}
+
+	sort.Slice(versions, func(i, j int) bool { return versions[i].mod.After(versions[j].mod) })
+	for i, version := range versions {
+		if i == 0 || time.Since(version.mod) < snapshotGracePeriod {
+			continue
+		}
+		m.engine.Invalidate(graphify.GraphPath(version.path))
+		if err := os.RemoveAll(version.path); err != nil {
+			slog.Warn("remove retired snapshot", "repo", id, "path", version.path, "error", err)
+		}
+	}
+
+	legacyPath := m.legacyRepoPath(id)
+	if filepath.Clean(legacyPath) == filepath.Clean(activePath) {
+		return
+	}
+	if info, err := os.Stat(legacyPath); err == nil && time.Since(info.ModTime()) >= snapshotGracePeriod {
+		m.engine.Invalidate(graphify.GraphPath(legacyPath))
+		if err := os.RemoveAll(legacyPath); err != nil {
+			slog.Warn("remove retired legacy clone", "repo", id, "path", legacyPath, "error", err)
+		}
+	}
 }
 
 // rebuildMerged regenerates the cross-repo merged graph from all ready repos.
@@ -1864,15 +2065,24 @@ func (m *Manager) rebuildMerged(ctx context.Context) error {
 
 	switch len(graphs) {
 	case 0:
-		return nil
+		if err := os.Remove(m.mergedPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove empty merged graph; %w", err)
+		}
 	case 1:
 		// merge-graphs needs >=2 inputs; single repo = copy.
 		if err := copyFile(graphs[0], m.mergedPath); err != nil {
 			return fmt.Errorf("copy single graph; %w", err)
 		}
 	default:
-		if err := m.gfy.MergeGraphs(ctx, m.mergedPath, graphs...); err != nil {
+		tmp := m.mergedPath + ".tmp"
+		_ = os.Remove(tmp)
+		if err := m.gfy.MergeGraphs(ctx, tmp, graphs...); err != nil {
+			_ = os.Remove(tmp)
 			return err
+		}
+		if err := os.Rename(tmp, m.mergedPath); err != nil {
+			_ = os.Remove(tmp)
+			return fmt.Errorf("publish merged graph; %w", err)
 		}
 	}
 
@@ -2058,85 +2268,119 @@ func (m *Manager) GraphEngine() *graphquery.Engine { return m.engine }
 // repoCloneDir resolves a repo id to its on-disk clone directory, verifying the
 // repo is tracked and has actually been cloned.
 func (m *Manager) repoCloneDir(ctx context.Context, repoID string) (string, error) {
+	dir, _, err := m.repoCloneDirAt(ctx, repoID, "")
+
+	return dir, err
+}
+
+// repoCloneDirAt resolves an optional snapshot token. A token is a soft hint,
+// not a hard requirement: while the pinned immutable version still exists it is
+// honored so paginated reads stay on one commit, but an unknown, malformed, or
+// already-retired token transparently falls back to the current active snapshot
+// (returning its token) so a client that keeps replaying an old token never
+// wedges once the grace period reaps that version.
+func (m *Manager) repoCloneDirAt(ctx context.Context, repoID, snapshot string) (string, string, error) {
 	repo, err := m.reg.Get(ctx, repoID)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	if repo == nil {
-		return "", fmt.Errorf("repo %s not found", repoID)
+		return "", "", fmt.Errorf("repo %s not found", repoID)
 	}
 
+	// A pinned token: honor it only while that version is still on disk. A
+	// traversal-unsafe token is ignored (never joined into a path) and simply
+	// falls through to the current active snapshot.
+	if snapshot != "" && snapshot == filepath.Base(snapshot) && !strings.ContainsAny(snapshot, `/\`) &&
+		snapshot != m.snapshotToken(repoID, repo.Path) {
+		dir := filepath.Join(m.snapshotRoot(repoID), snapshot)
+		if snapshot == "legacy" {
+			dir = m.legacyRepoPath(repoID)
+		}
+		if fileExists(filepath.Join(dir, ".git")) {
+			return dir, snapshot, nil
+		}
+	}
+
+	// Current active snapshot (empty, matching, or retired/unknown token).
 	if repo.Path == "" || !fileExists(filepath.Join(repo.Path, ".git")) {
-		return "", fmt.Errorf("repo %s not cloned yet (status: %s)", repoID, repo.Status)
+		return "", "", fmt.Errorf("repo %s not cloned yet (status: %s)", repoID, repo.Status)
 	}
 
-	return repo.Path, nil
+	return repo.Path, m.snapshotToken(repoID, repo.Path), nil
+}
+
+func (m *Manager) snapshotToken(repoID, repoPath string) string {
+	if pathWithin(repoPath, m.snapshotRoot(repoID)) {
+		return filepath.Base(repoPath)
+	}
+
+	return "legacy"
 }
 
 // ReadRepoFile returns the contents of a source file inside a tracked repo's
 // clone. Access is sandboxed to the clone directory. offset/maxBytes paginate
 // large files; maxBytes<=0 uses the repofs default cap.
 func (m *Manager) ReadRepoFile(ctx context.Context, repoID, relPath string, offset int64, maxBytes int) (*repofs.FileContent, error) {
-	dir, err := m.repoCloneDir(ctx, repoID)
+	return m.ReadRepoFileAt(ctx, repoID, relPath, "", offset, maxBytes)
+}
+
+// ReadRepoFileAt reads from a specific immutable snapshot when snapshot is set.
+func (m *Manager) ReadRepoFileAt(ctx context.Context, repoID, relPath, snapshot string, offset int64, maxBytes int) (*repofs.FileContent, error) {
+	dir, token, err := m.repoCloneDirAt(ctx, repoID, snapshot)
 	if err != nil {
 		return nil, err
 	}
 
-	return repofs.ReadFile(dir, relPath, offset, maxBytes)
+	result, err := repofs.ReadFile(dir, relPath, offset, maxBytes)
+	if err != nil {
+		return nil, err
+	}
+	result.Snapshot = token
+
+	return result, nil
 }
 
 // ListRepoFiles lists files under subdir ("" = repo root) in a tracked repo's
 // clone. When recursive is true it walks the whole subtree.
 func (m *Manager) ListRepoFiles(ctx context.Context, repoID, subdir string, recursive bool) ([]repofs.Entry, error) {
-	dir, err := m.repoCloneDir(ctx, repoID)
+	entries, _, err := m.ListRepoFilesAt(ctx, repoID, subdir, "", recursive)
+
+	return entries, err
+}
+
+// ListRepoFilesAt lists a specific immutable snapshot when snapshot is set.
+func (m *Manager) ListRepoFilesAt(ctx context.Context, repoID, subdir, snapshot string, recursive bool) ([]repofs.Entry, string, error) {
+	dir, token, err := m.repoCloneDirAt(ctx, repoID, snapshot)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
-	return repofs.ListFiles(dir, subdir, recursive)
+	entries, err := repofs.ListFiles(dir, subdir, recursive)
+
+	return entries, token, err
 }
 
 // ListRepoFilesPage returns a bounded page of a stable repository listing.
 func (m *Manager) ListRepoFilesPage(ctx context.Context, repoID, subdir string, recursive bool, page, perPage int) (repofs.EntryPage, error) {
-	dir, err := m.repoCloneDir(ctx, repoID)
+	return m.ListRepoFilesPageAt(ctx, repoID, subdir, "", recursive, page, perPage)
+}
+
+// ListRepoFilesPageAt lists a specific immutable snapshot when snapshot is set.
+func (m *Manager) ListRepoFilesPageAt(ctx context.Context, repoID, subdir, snapshot string, recursive bool, page, perPage int) (repofs.EntryPage, error) {
+	dir, token, err := m.repoCloneDirAt(ctx, repoID, snapshot)
 	if err != nil {
 		return repofs.EntryPage{}, err
 	}
 
-	return repofs.ListFilesPage(dir, subdir, recursive, page, perPage)
-}
-
-// AcquireLease takes a TTL-bounded read lease on a repo so external tools can
-// walk its clone without racing a refresh. Fails while a refresh is running.
-func (m *Manager) AcquireLease(ctx context.Context, id, owner string, ttl time.Duration) (*lease.Lease, error) {
-	repo, err := m.reg.Get(ctx, id)
+	result, err := repofs.ListFilesPage(dir, subdir, recursive, page, perPage)
 	if err != nil {
-		return nil, err
+		return repofs.EntryPage{}, err
 	}
+	result.Snapshot = token
 
-	if repo == nil {
-		return nil, fmt.Errorf("repo %s not found", id)
-	}
-
-	// Ensure no refresh is mutating the clone right now.
-	l := m.lock(id)
-	if !l.TryLock() {
-		return nil, fmt.Errorf("refresh in progress for %s; retry shortly", id)
-	}
-	l.Unlock()
-
-	return m.leases.Acquire(id, owner, ttl)
-}
-
-// ReleaseLease ends a lease; a deferred refresh fires automatically.
-func (m *Manager) ReleaseLease(id, token string) error {
-	return m.leases.Release(id, token)
-}
-
-// LeaseInfo returns the active lease for id without its token, or nil.
-func (m *Manager) LeaseInfo(id string) *lease.Lease {
-	return m.leases.Info(id)
+	return result, nil
 }
 
 // Registry exposes read access for API handlers.

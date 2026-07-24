@@ -83,8 +83,6 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
         ["refresh_repo", "Pull the latest commits and rebuild the knowledge graph."],
         ["repo_status", "Get build state, last commit and last error of a repository."],
         ["cancel_repo_job", "Cancel the refresh or generation job currently running for a repository."],
-        ["lock_repo", "Take a TTL-bounded read lock so external tools can walk the clone safely.", true],
-        ["unlock_repo", "Release a read lock taken with lock_repo.", true],
       ],
     },
     {
@@ -164,11 +162,11 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
   <div class="mt-3 grid gap-2 sm:grid-cols-2">
     <div class="rounded-md border border-accent/40 bg-accent/5 p-3">
       <div class="text-[13px] font-medium">Standard profile</div>
-      <div class="mt-1 text-[12px] text-dim">Default when no profile header is sent. Exposes 20 repo, query, search, and read tools.</div>
+      <div class="mt-1 text-[12px] text-dim">Default when no profile header is sent. Exposes 28 repo, query, search, and read tools.</div>
     </div>
     <div class="rounded-md border border-line p-3">
       <div class="text-[13px] font-medium">Full profile</div>
-      <div class="mt-1 text-[12px] text-dim">Uses the same URL with <code class="font-mono">X-Krabby-Tool-Profile: full</code>. Adds credential, lease, and docs/RAG administration tools.</div>
+      <div class="mt-1 text-[12px] text-dim">Uses the same URL with <code class="font-mono">X-Krabby-Tool-Profile: full</code>. Adds credential and docs/RAG administration tools.</div>
     </div>
   </div>
   {#if apiKeySet}
@@ -222,9 +220,9 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
     <pre class="m-0 overflow-x-auto rounded-md border border-line bg-bg p-3 font-mono text-[12.5px] leading-relaxed">{opencodeConfig}</pre>
     <p class="mb-0 mt-1.5 text-[11px] text-faint">
       {#if mcpProfile === "full"}
-        Full adds <code class="font-mono">X-Krabby-Tool-Profile: full</code> under <code class="font-mono">headers</code> and exposes all 30 tools.
+        Full adds <code class="font-mono">X-Krabby-Tool-Profile: full</code> under <code class="font-mono">headers</code> and exposes all 42 tools.
       {:else}
-        Standard omits the profile header and exposes the smaller 20-tool catalog.
+        Standard omits the profile header and exposes the smaller 28-tool catalog.
       {/if}
       Add this to project or user <code class="font-mono">opencode.json</code>, restart the client, then verify with <code class="font-mono">opencode mcp list</code>.
     </p>

@@ -1,8 +1,8 @@
 <img src="./docs/krabby.webp" width="360" />
 
 Krabby provides code search, documentation retrieval, and relationship analysis
-over MCP. Point it at repositories; it clones and indexes them, builds a
-[graphify](https://github.com/safishamsi/graphify) knowledge graph per repo, and
+over MCP. Point it at repositories; it clones and indexes, docs and RAG them with LLM and Embeddings,
+builds a [graphify](https://github.com/Graphify-Labs/graphify) knowledge graph per repo, and
 keeps those indexes fresh in the background.
 
 ```
@@ -56,9 +56,9 @@ curl localhost:8080/api/v1/repos
 
 MCP endpoint for agents (opencode, Claude Desktop, etc.): `http://localhost:8080/mcp`
 (streamable HTTP; set `mcp.api_key` to require `X-Api-Key` / `Authorization: Bearer`).
-Without a profile header it exposes the 20-tool standard catalog. Send
+Without a profile header it exposes the 28-tool standard catalog. Send
 `X-Krabby-Tool-Profile: full` on every MCP request to additionally expose
-credentials, clone leases, docs/RAG configuration, and endpoint probes.
+credentials, docs/RAG configuration, and endpoint probes.
 
 Example opencode config:
 
@@ -87,7 +87,6 @@ For the full profile, add a persistent header to the same server entry:
 | `refresh_repo` | Pull + rebuild graph in the background |
 | `repo_status` | Build state, last commit, last error |
 | `set_credential` / `list_credentials` / `remove_credential` | Per-host / per-org git credentials |
-| `lock_repo` / `unlock_repo` | TTL-bounded read locks for external consumers |
 | `search_code` | First choice for symbols, paths, literals, definitions, usages, and implementation locations |
 | `read_file` / `list_files` | Page through a known source file or inspect a bounded directory listing |
 | `query_graph` | Architecture, dependency, call/data-flow, and cross-file relationship questions |
@@ -104,8 +103,16 @@ only for an intentional cross-repository search or merged-graph analysis.
 requests; responses are paginated and agents should not exhaust every page by
 default. Source and document reads are also bounded and expose continuation
 metadata for large files.
+`read_file` and paginated `list_files` responses include a `snapshot` token;
+pass it back on continuation calls so every page stays on the same immutable
+repository version even if a refresh activates meanwhile. The token is a soft
+hint, not a lock: it is honored only while that version is still retained (the
+newest previous version plus a short grace window, 5m by default). Once the version is
+reaped, replaying its token transparently falls back to the current active
+snapshot and returns the new token — it never errors or wedges a client, so a
+consumer that keeps replaying an old token simply advances to the latest.
 
-The `standard` profile omits the credential, lease, and docs/RAG administration
+The `standard` profile omits the credential and docs/RAG administration
 rows above. Configure `X-Krabby-Tool-Profile: full` when an MCP client must
 administer them.
 
@@ -119,9 +126,6 @@ administer them.
 | `GET /api/v1/repos/{full-path...}` | Repo status |
 | `DELETE /api/v1/repos/{full-path...}` | Untrack + delete clone |
 | `POST /api/v1/repos/{full-path...}/-/refresh` | "This repo changed" trigger |
-| `POST /api/v1/repos/{full-path...}/-/lock` `{"owner","ttl"}` | Take a read lock (returns token) |
-| `GET /api/v1/repos/{full-path...}/-/lock` | Lock status |
-| `DELETE /api/v1/repos/{full-path...}/-/lock` + `X-Lock-Token` | Release the lock |
 | `GET /api/v1/repos/{full-path...}/-/graph` | Raw `graph.json` of one repo |
 | `GET /api/v1/repos/{full-path...}/-/report` | `GRAPH_REPORT.md` audit report |
 | `GET /api/v1/repos/{full-path...}/-/html` | Interactive graph visualization |
@@ -145,8 +149,8 @@ other tools (doc generators, linters, indexers) are free to read it:
 
 ```
 ~/.krabby/
-├── repos/<host>/<group>/.../   # plain git clones
-│   └── graphify-out/
+├── repos/.snapshots/<host>/<group>/.../  # immutable versioned git snapshots
+│   └── <version>/graphify-out/
 │       ├── graph.json          # raw graph (GraphRAG-ready)
 │       ├── GRAPH_REPORT.md     # human-readable audit report
 │       ├── graph.html          # interactive visualization
@@ -163,23 +167,15 @@ other tools (doc generators, linters, indexers) are free to read it:
 artifact endpoints above serve the same files over HTTP for tools that have no
 filesystem access.
 
-### Read locks
+### Immutable repository snapshots
 
-A background refresh may `git pull` while an external tool reads the clone.
-To avoid racing, take a read lock first — refreshes are deferred while it is
-held and fire automatically on release or TTL expiry (default 10m, max 1h):
-
-```sh
-TOKEN=$(curl -s -X POST localhost:8080/api/v1/repos/git.example.com/myorg/app/-/lock \
-  -H 'Content-Type: application/json' -d '{"owner":"docgen","ttl":"5m"}' | jq -r .token)
-
-# ... walk ~/.krabby/repos/myorg/app safely ...
-
-curl -X DELETE localhost:8080/api/v1/repos/git.example.com/myorg/app/-/lock -H "X-Lock-Token: $TOKEN"
-```
-
-Locks never block queries or artifact downloads — only git mutations. A crashed
-consumer cannot wedge the pipeline: the TTL reaps the lock.
+Refreshes fetch remote state without changing the active working tree. Krabby
+clones and rebuilds the graph in a private version directory, then publishes the
+source and graph together by atomically replacing the registry path. Failed or
+cancelled builds leave the previous version active. The newest previous snapshot
+is retained, and older versions receive a short grace period (5m by default) for
+readers that resolved an earlier path; a read replaying a reaped snapshot token
+transparently falls back to the current version instead of failing.
 
 ## Git credentials
 
@@ -229,16 +225,3 @@ dimensions are safe.
 Generated markdown is stored outside clones under
 `data_dir/docs/<owner>/<repo>/`; older in-clone `krabby-docs/` trees are moved
 there at startup without regenerating documentation.
-
-## Docker
-
-```sh
-docker build -t krabby .
-docker run -p 8080:8080 -v krabby-data:/data \
-  -v ~/.ssh/id_ed25519:/ssh/key:ro -e KRABBY_GIT_SSH_KEY_PATH=/ssh/key \
-  krabby
-```
-
-## License
-
-See [LICENSE](LICENSE).
