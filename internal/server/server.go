@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"sort"
 	"strconv"
@@ -59,6 +60,17 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("OK"))
 	})
+
+	// Runtime profiling endpoints (goroutine, heap, CPU, ...) for diagnosing
+	// stuck/slow work such as a hung vector upsert. Mounted under
+	// <base>/debug/pprof/. Kept unauthenticated to match /healthz; the server is
+	// only reachable inside the cluster. Fetch e.g. /debug/pprof/goroutine?debug=2.
+	base.GET("/debug/pprof/", http.HandlerFunc(pprof.Index))
+	base.GET("/debug/pprof/cmdline", http.HandlerFunc(pprof.Cmdline))
+	base.GET("/debug/pprof/profile", http.HandlerFunc(pprof.Profile))
+	base.GET("/debug/pprof/symbol", http.HandlerFunc(pprof.Symbol))
+	base.GET("/debug/pprof/trace", http.HandlerFunc(pprof.Trace))
+	base.GET("/debug/pprof/{name}", http.HandlerFunc(pprof.Index))
 
 	// The profile is selected when the client connects. Omitting the header keeps
 	// the smaller standard catalog; full exposes administration tools as well.

@@ -168,7 +168,9 @@ var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
 func ValidName(name string) bool { return nameRe.MatchString(name) }
 
 // schemaVersion must be bumped whenever Collection or Page change shape.
-const schemaVersion = 5
+// v6: Page gained TeamsNorm (indexed, lowercase team tags) for store-level
+// case-insensitive team filtering.
+const schemaVersion = 6
 
 // Store persists collections and pages.
 type Store struct {
