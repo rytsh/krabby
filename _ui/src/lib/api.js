@@ -128,7 +128,14 @@ export const api = {
   // Web content sources (wikis, Confluence spaces).
   sources: () => req("/sources"),
   addSource: (body) => req("/sources", { method: "POST", keepalive: true, body: JSON.stringify(body) }),
-  source: (name, team = "") => req(`/sources/${name}${team ? `?team=${encodeURIComponent(team)}` : ""}`),
+  source: (name, team = "", page = 1, perPage = 50) => {
+    const q = new URLSearchParams();
+    if (team) q.set("team", team);
+    if (page > 1) q.set("page", String(page));
+    if (perPage !== 50) q.set("per_page", String(perPage));
+    const qs = q.toString();
+    return req(`/sources/${name}${qs ? `?${qs}` : ""}`);
+  },
   updateSource: (name, body) => req(`/sources/${name}`, { method: "PUT", body: JSON.stringify(body) }),
   deleteSource: (name) => req(`/sources/${name}`, { method: "DELETE", keepalive: true }),
   refreshSource: (name) => req(`/sources/${name}/refresh`, { method: "POST", keepalive: true }),

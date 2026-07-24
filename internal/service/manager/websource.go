@@ -202,32 +202,56 @@ func (m *Manager) WebPages(ctx context.Context, name string) ([]*websource.Page,
 	return m.webStore.Pages(ctx, name)
 }
 
+// WebPageCount returns the number of page records in one collection without
+// loading them, for listings that only need the size.
+func (m *Manager) WebPageCount(ctx context.Context, name string) (int, error) {
+	if m.webStore == nil {
+		return 0, ErrNoWebSources
+	}
+
+	return m.webStore.CountPages(ctx, name, "")
+}
+
+// WebSourceTeams returns the distinct team tags of one collection, sorted, for
+// the UI team filter. Intended for jira sources.
+func (m *Manager) WebSourceTeams(ctx context.Context, name string) ([]string, error) {
+	if m.webStore == nil {
+		return nil, ErrNoWebSources
+	}
+
+	return m.webStore.Teams(ctx, name)
+}
+
 // WebPagesByTeam returns the page records of one collection whose Teams
-// contain team (case-insensitive). An empty team returns all pages. Used to
-// list tickets filtered by team.
+// contain team (case-insensitive). An empty team returns all pages. Filtering
+// runs at the store level. Prefer WebPagesPaged for user-facing listings; this
+// unpaginated form is kept for callers that need the full matching set.
 func (m *Manager) WebPagesByTeam(ctx context.Context, name, team string) ([]*websource.Page, error) {
-	pages, err := m.WebPages(ctx, name)
-	if err != nil {
-		return nil, err
+	if m.webStore == nil {
+		return nil, ErrNoWebSources
 	}
 
-	team = strings.ToLower(strings.TrimSpace(team))
-	if team == "" {
-		return pages, nil
+	if strings.TrimSpace(team) == "" {
+		return m.webStore.Pages(ctx, name)
 	}
 
-	out := make([]*websource.Page, 0, len(pages))
-	for _, p := range pages {
-		for _, t := range p.Teams {
-			if strings.ToLower(strings.TrimSpace(t)) == team {
-				out = append(out, p)
+	// A very large upper bound acts as "all matching"; team-filtered sets are
+	// small (jira squads), so this stays bounded in practice.
+	pages, _, err := m.webStore.PagesPaged(ctx, name, team, 0, 1_000_000)
 
-				break
-			}
-		}
+	return pages, err
+}
+
+// WebPagesPaged returns one page (by offset/limit) of a collection's page
+// records plus the total count, optionally restricted to a team
+// (case-insensitive). Filtering and paging happen at the store level, so a
+// large collection is never fully loaded into memory.
+func (m *Manager) WebPagesPaged(ctx context.Context, name, team string, offset, limit int) ([]*websource.Page, int, error) {
+	if m.webStore == nil {
+		return nil, 0, ErrNoWebSources
 	}
 
-	return out, nil
+	return m.webStore.PagesPaged(ctx, name, team, offset, limit)
 }
 
 // AddWebPage registers a page URL on a "pages" collection and triggers a
@@ -399,6 +423,12 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 	m.setActivity(scope, "sync")
 	defer m.clearActivity(scope, "sync")
 
+	// Progress is published throughout the sync so the UI can show live state.
+	// The fetch phase count is unknown up front (the provider streams pages), so
+	// it is indeterminate; the index phase below reports embedded/total chunks.
+	m.setProgress(scope, Progress{Phase: "fetch"})
+	defer m.clearProgress(scope)
+
 	col.Status = websource.StatusFetching
 	col.LastError = ""
 	_ = m.webStore.UpsertCollection(ctx, col)
@@ -421,6 +451,10 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 		return fail(fmt.Errorf("fetch %s; %w", name, err))
 	}
 
+	// After fetch, report how many pages the provider returned this run so the
+	// "fetch" phase shows a concrete count while markdown is written to disk.
+	m.setProgress(scope, Progress{Phase: "write", Done: 0, Total: len(result.Pages)})
+
 	dir := m.sourcesDir(name)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fail(fmt.Errorf("mkdir %s; %w", dir, err))
@@ -438,7 +472,13 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 	seen := map[string]bool{}
 	now := time.Now()
 
-	for _, remote := range result.Pages {
+	total := len(result.Pages)
+	for i, remote := range result.Pages {
+		// Report write-phase progress every so often so a big source shows a
+		// moving bar without thrashing the progress map on every page.
+		if i%25 == 0 {
+			m.setProgress(scope, Progress{Phase: "write", Done: i, Total: total})
+		}
 		seen[remote.Slug] = true
 
 		rec := existing[remote.Slug]
@@ -518,15 +558,33 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 		}
 	}
 
+	// Re-embed the changed/removed docs. If indexing fails (e.g. the embeddings
+	// provider is down or a quota is exhausted even after retries), do NOT
+	// advance the fetch watermark: the markdown is already on disk, but the
+	// vectors are missing, so the next sync must re-attempt the same pages
+	// rather than skip them as "already seen". The collection is marked as
+	// errored so the failure is visible and a refresh retries the work.
+	indexOK := true
 	if len(changedPaths) > 0 || len(removedPaths) > 0 {
-		m.indexWebSourcePaths(ctx, name, changedPaths, removedPaths)
+		if err := m.indexWebSourcePaths(ctx, name, changedPaths, removedPaths); err != nil {
+			indexOK = false
+			slog.Error("web source indexing failed; watermark not advanced",
+				"source", name, "changed", len(changedPaths), "error", err)
+		}
 	}
 
-	col.Status = websource.StatusReady
-	col.LastError = ""
 	col.LastRefreshAt = time.Now()
-	if result.State != nil {
-		col.State = result.State
+	if indexOK {
+		col.Status = websource.StatusReady
+		col.LastError = ""
+		if result.State != nil {
+			col.State = result.State
+		}
+	} else {
+		col.Status = websource.StatusError
+		col.LastError = "indexing incomplete: embeddings failed; will retry on next sync"
+		// Leave col.State unchanged so the watermark does not advance and the
+		// unindexed pages are re-fetched and re-embedded next time.
 	}
 
 	if err := m.webStore.UpsertCollection(context.WithoutCancel(ctx), col); err != nil {
@@ -535,7 +593,7 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 
 	slog.Info("web source synced", "source", name,
 		"fetched", len(result.Pages), "changed", len(changedPaths),
-		"removed", len(removedPaths), "incremental", result.Incremental)
+		"removed", len(removedPaths), "incremental", result.Incremental, "indexed", indexOK)
 
 	return nil
 }
@@ -565,15 +623,18 @@ func (m *Manager) indexWebSource(ctx context.Context, name string) {
 
 // indexWebSourcePaths incrementally updates only the changed/removed docs of a
 // collection in the RAG index, so a large source (e.g. a JIRA project) is not
-// fully re-embedded when a few items change.
-func (m *Manager) indexWebSourcePaths(ctx context.Context, name string, changed, removed []string) {
+// fully re-embedded when a few items change. It returns an error when embedding
+// or upserting fails so the caller can avoid advancing the fetch watermark past
+// pages whose vectors were not written. A disabled RAG subsystem is not an
+// error: files stay on disk for the next reindex-all.
+func (m *Manager) indexWebSourcePaths(ctx context.Context, name string, changed, removed []string) error {
 	d, releaseDocs := m.acquireDocs()
 	defer releaseDocs()
 
 	if d.rag == nil {
 		slog.Debug("rag disabled; web source not indexed", "source", name)
 
-		return
+		return nil
 	}
 
 	scope := websource.ScopeKey(name)
@@ -581,9 +642,21 @@ func (m *Manager) indexWebSourcePaths(ctx context.Context, name string, changed,
 	m.setActivity(scope, "docs_index")
 	defer m.clearActivity(scope, "docs_index")
 
-	if err := d.rag.IndexPaths(ctx, scope, m.sourcesDir(name), changed, removed); err != nil {
-		slog.Error("index web source (incremental)", "source", name, "error", err)
+	// Publish live embedding progress so the UI can show a determinate bar
+	// ("1200/22697 chunks embedded"). Cleared when this step returns.
+	m.setProgress(scope, Progress{Phase: "index"})
+	defer m.clearProgress(scope)
+	onProgress := func(done, total int) {
+		m.setProgress(scope, Progress{Phase: "index", Done: done, Total: total})
 	}
+
+	if err := d.rag.IndexPathsProgress(ctx, scope, m.sourcesDir(name), changed, removed, onProgress); err != nil {
+		slog.Error("index web source (incremental)", "source", name, "error", err)
+
+		return err
+	}
+
+	return nil
 }
 
 // enqueueWebReindex submits a reindex task for every web-source collection so

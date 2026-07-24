@@ -26,6 +26,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/worldline-go/types"
+
 	"github.com/rytsh/krabby/internal/service/websource"
 )
 
@@ -45,23 +47,27 @@ type Fetcher struct {
 // Config is owned entirely by the JIRA provider. Auth follows the Atlassian
 // conventions: User+APIToken does basic auth (Cloud API tokens), APIToken
 // alone is sent as a Bearer token (Data Center PATs).
+//
+// Every field is a types.Null so a partial update merges precisely onto the
+// stored config (see MergeConfig): absent = keep, null = clear, value =
+// override. Use resolve() for plain values in the sync logic.
 type Config struct {
-	BaseURL  string `json:"base_url"`
-	User     string `json:"user,omitempty"`
-	APIToken string `json:"api_token,omitempty"`
+	BaseURL  types.Null[string] `json:"base_url"`
+	User     types.Null[string] `json:"user,omitempty"`
+	APIToken types.Null[string] `json:"api_token,omitempty"`
 
 	// Project selects all issues of a project key (e.g. "PROJ"). Ignored when
 	// JQL is set.
-	Project string `json:"project,omitempty"`
+	Project types.Null[string] `json:"project,omitempty"`
 	// JQL is a raw JIRA query. When set it takes precedence over Project and
 	// gives full control over which tickets are indexed.
-	JQL string `json:"jql,omitempty"`
+	JQL types.Null[string] `json:"jql,omitempty"`
 
 	// IncludeLabels, when non-empty, keeps only tickets carrying at least one
 	// of these labels. ExcludeLabels (the "skip labels") drop any ticket
 	// carrying one of them; excludes win over includes.
-	IncludeLabels []string `json:"include_labels,omitempty"`
-	ExcludeLabels []string `json:"exclude_labels,omitempty"`
+	IncludeLabels types.Null[[]string] `json:"include_labels,omitempty"`
+	ExcludeLabels types.Null[[]string] `json:"exclude_labels,omitempty"`
 
 	// TeamFields are the JIRA field ids that hold team/squad ownership. These
 	// are instance-specific custom fields (e.g. "customfield_104705" for a
@@ -69,15 +75,46 @@ type Config struct {
 	// indexed markdown (so team names are searchable) and stored on the ticket
 	// record so tickets can be listed and filtered by team. The standard
 	// "components" field id is also accepted.
-	TeamFields []string `json:"team_fields,omitempty"`
+	TeamFields types.Null[[]string] `json:"team_fields,omitempty"`
 
 	// MaxIssues caps how many tickets a single sync ingests (0 = default).
-	MaxIssues int `json:"max_issues,omitempty"`
+	MaxIssues types.Null[int] `json:"max_issues,omitempty"`
 
 	// FullResyncEvery is a Go duration ("24h") controlling how often a full,
 	// non-incremental pass runs to reconcile remotely-deleted tickets. Empty or
 	// invalid uses the default (24h).
-	FullResyncEvery string `json:"full_resync_every,omitempty"`
+	FullResyncEvery types.Null[string] `json:"full_resync_every,omitempty"`
+}
+
+// resolvedConfig is the plain, validated view of a Config used by the sync
+// logic (strings trimmed, base URL de-slashed).
+type resolvedConfig struct {
+	BaseURL         string
+	User            string
+	APIToken        string
+	Project         string
+	JQL             string
+	IncludeLabels   []string
+	ExcludeLabels   []string
+	TeamFields      []string
+	MaxIssues       int
+	FullResyncEvery string
+}
+
+// resolve flattens the nullable config into plain values.
+func (c Config) resolve() resolvedConfig {
+	return resolvedConfig{
+		BaseURL:         strings.TrimRight(strings.TrimSpace(c.BaseURL.ValueOrZero()), "/"),
+		User:            strings.TrimSpace(c.User.ValueOrZero()),
+		APIToken:        c.APIToken.ValueOrZero(),
+		Project:         strings.TrimSpace(c.Project.ValueOrZero()),
+		JQL:             strings.TrimSpace(c.JQL.ValueOrZero()),
+		IncludeLabels:   c.IncludeLabels.ValueOrZero(),
+		ExcludeLabels:   c.ExcludeLabels.ValueOrZero(),
+		TeamFields:      c.TeamFields.ValueOrZero(),
+		MaxIssues:       c.MaxIssues.ValueOrZero(),
+		FullResyncEvery: strings.TrimSpace(c.FullResyncEvery.ValueOrZero()),
+	}
 }
 
 type configView struct {
@@ -94,7 +131,7 @@ type configView struct {
 }
 
 // fullResyncEvery parses the configured interval, falling back to the default.
-func (c Config) fullResyncEvery() time.Duration {
+func (c resolvedConfig) fullResyncEvery() time.Duration {
 	if c.FullResyncEvery == "" {
 		return websource.DefaultFullResyncEvery
 	}
@@ -111,19 +148,37 @@ func New() *Fetcher {
 	return &Fetcher{client: &http.Client{Timeout: 60 * time.Second}}
 }
 
-func decodeConfig(raw json.RawMessage) (Config, error) {
+// decodeConfig unmarshals the raw config and returns its resolved (plain) form.
+func decodeConfig(raw json.RawMessage) (resolvedConfig, error) {
+	cfg, err := decodeRawConfig(raw)
+	if err != nil {
+		return resolvedConfig{}, err
+	}
+
+	return cfg.resolve(), nil
+}
+
+// decodeRawConfig unmarshals the raw config keeping the nullable fields, so
+// MergeConfig can tell set fields from absent ones.
+func decodeRawConfig(raw json.RawMessage) (Config, error) {
 	var cfg Config
 	if len(raw) != 0 {
 		if err := json.Unmarshal(raw, &cfg); err != nil {
 			return Config{}, fmt.Errorf("decode jira config; %w", err)
 		}
 	}
-	cfg.BaseURL = strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
-	cfg.User = strings.TrimSpace(cfg.User)
-	cfg.Project = strings.TrimSpace(cfg.Project)
-	cfg.JQL = strings.TrimSpace(cfg.JQL)
 
 	return cfg, nil
+}
+
+// mergeNull returns the update value when the field was present in the update
+// JSON (a value OR explicit null), otherwise the stored value.
+func mergeNull[T any](update, stored types.Null[T]) types.Null[T] {
+	if update.Valid || update.ParsedNull {
+		return update
+	}
+
+	return stored
 }
 
 func (f *Fetcher) Validate(raw json.RawMessage) error {
@@ -141,19 +196,37 @@ func (f *Fetcher) Validate(raw json.RawMessage) error {
 	return nil
 }
 
+// MergeConfig merges an update onto the stored config using types.Null
+// semantics: a field absent from the update keeps the stored value, an explicit
+// null clears it, and a value overrides it. A blank api_token keeps the stored
+// secret (tokens are write-only).
 func (f *Fetcher) MergeConfig(current, update json.RawMessage) (json.RawMessage, error) {
-	next, err := decodeConfig(update)
+	next, err := decodeRawConfig(update)
 	if err != nil {
 		return nil, err
 	}
-	// Secret-preserving: a blank incoming token keeps the stored one.
-	if next.APIToken == "" && len(current) != 0 {
-		prev, err := decodeConfig(current)
+
+	if len(current) != 0 {
+		prev, err := decodeRawConfig(current)
 		if err != nil {
 			return nil, err
 		}
-		next.APIToken = prev.APIToken
+
+		next.BaseURL = mergeNull(next.BaseURL, prev.BaseURL)
+		next.User = mergeNull(next.User, prev.User)
+		next.Project = mergeNull(next.Project, prev.Project)
+		next.JQL = mergeNull(next.JQL, prev.JQL)
+		next.IncludeLabels = mergeNull(next.IncludeLabels, prev.IncludeLabels)
+		next.ExcludeLabels = mergeNull(next.ExcludeLabels, prev.ExcludeLabels)
+		next.TeamFields = mergeNull(next.TeamFields, prev.TeamFields)
+		next.MaxIssues = mergeNull(next.MaxIssues, prev.MaxIssues)
+		next.FullResyncEvery = mergeNull(next.FullResyncEvery, prev.FullResyncEvery)
+
+		if next.APIToken.ValueOrZero() == "" {
+			next.APIToken = prev.APIToken
+		}
 	}
+
 	raw, err := json.Marshal(next)
 	if err != nil {
 		return nil, fmt.Errorf("encode jira config; %w", err)
@@ -364,7 +437,7 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 // watermark clause is AND-ed on for incremental runs); otherwise a project
 // filter is built. Results are ordered by updated ascending so a watermark can
 // advance monotonically even when the run is capped by MaxIssues.
-func buildJQL(cfg Config, watermark string) string {
+func buildJQL(cfg resolvedConfig, watermark string) string {
 	base := cfg.JQL
 	if base == "" {
 		base = fmt.Sprintf("project = %q", cfg.Project)
@@ -406,7 +479,7 @@ func parseJiraTime(s string) time.Time {
 }
 
 // search fetches one page of the issue search.
-func (f *Fetcher) search(ctx context.Context, cfg Config, jql string, start int) (*searchResult, error) {
+func (f *Fetcher) search(ctx context.Context, cfg resolvedConfig, jql string, start int) (*searchResult, error) {
 	fields := []string{
 		"summary", "description", "labels", "status", "issuetype",
 		"priority", "assignee", "reporter", "created", "updated",

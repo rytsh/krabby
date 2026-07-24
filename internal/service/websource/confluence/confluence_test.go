@@ -92,20 +92,20 @@ func TestValidateSpaceOrRootPage(t *testing.T) {
 
 func TestFirstEndpoint(t *testing.T) {
 	// Subtree mode: CQL descendant query.
-	sub := firstEndpoint(Config{RootPage: "1254228318"}, "")
+	sub := firstEndpoint(resolvedConfig{RootPage: "1254228318"}, "")
 	if !strings.Contains(sub, "/rest/api/content/search") ||
 		!strings.Contains(sub, "ancestor") {
 		t.Fatalf("subtree endpoint = %q", sub)
 	}
 
 	// Subtree scoped to a space adds a space clause.
-	subSpace := firstEndpoint(Config{RootPage: "1", Space: "FIN"}, "")
+	subSpace := firstEndpoint(resolvedConfig{RootPage: "1", Space: "FIN"}, "")
 	if !strings.Contains(subSpace, "space") {
 		t.Fatalf("scoped subtree endpoint = %q", subSpace)
 	}
 
 	// Space mode: CQL space query (uniform CQL for incremental support).
-	space := firstEndpoint(Config{Space: "FIN"}, "")
+	space := firstEndpoint(resolvedConfig{Space: "FIN"}, "")
 	if !strings.Contains(space, "/rest/api/content/search") || !strings.Contains(space, "space") {
 		t.Fatalf("space endpoint = %q", space)
 	}
@@ -114,10 +114,92 @@ func TestFirstEndpoint(t *testing.T) {
 	}
 
 	// Incremental: watermark adds a lastmodified clause.
-	inc := firstEndpoint(Config{RootPage: "1"}, "2025-01-02 15:04")
+	inc := firstEndpoint(resolvedConfig{RootPage: "1"}, "2025-01-02 15:04")
 	if !strings.Contains(inc, "lastmodified") {
 		t.Fatalf("incremental endpoint missing lastmodified: %q", inc)
 	}
+}
+
+func TestMergeConfig(t *testing.T) {
+	f := New()
+	stored := json.RawMessage(`{"base_url":"https://c.example.com","root_page":"123","include_root":true,"api_token":"SECRET","space":"FIN"}`)
+
+	decode := func(t *testing.T, raw json.RawMessage) resolvedConfig {
+		t.Helper()
+		cfg, err := decodeConfig(raw)
+		if err != nil {
+			t.Fatalf("decode merged config: %v", err)
+		}
+
+		return cfg
+	}
+
+	// Description-only update (empty config object): every stored field is kept,
+	// including the write-only token.
+	t.Run("empty update keeps everything", func(t *testing.T) {
+		merged, err := f.MergeConfig(stored, json.RawMessage(`{}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := decode(t, merged)
+		if got.BaseURL != "https://c.example.com" || got.RootPage != "123" ||
+			got.Space != "FIN" || got.APIToken != "SECRET" || !got.IncludeRoot {
+			t.Fatalf("empty update lost fields: %+v", got)
+		}
+	})
+
+	// A value overrides only that field; others (and the token) are kept.
+	t.Run("value overrides one field", func(t *testing.T) {
+		merged, err := f.MergeConfig(stored, json.RawMessage(`{"root_page":"999"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := decode(t, merged)
+		if got.RootPage != "999" {
+			t.Fatalf("root_page not overridden: %q", got.RootPage)
+		}
+		if got.BaseURL != "https://c.example.com" || got.APIToken != "SECRET" {
+			t.Fatalf("override wiped other fields: %+v", got)
+		}
+	})
+
+	// A blank api_token keeps the stored secret (tokens are write-only).
+	t.Run("blank token keeps secret", func(t *testing.T) {
+		merged, err := f.MergeConfig(stored, json.RawMessage(`{"api_token":""}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := decode(t, merged); got.APIToken != "SECRET" {
+			t.Fatalf("blank token should keep secret, got %q", got.APIToken)
+		}
+	})
+
+	// A new api_token replaces the stored one.
+	t.Run("new token replaces", func(t *testing.T) {
+		merged, err := f.MergeConfig(stored, json.RawMessage(`{"api_token":"NEW"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := decode(t, merged); got.APIToken != "NEW" {
+			t.Fatalf("token not replaced, got %q", got.APIToken)
+		}
+	})
+
+	// An explicit null clears an optional field (space), while a space or root
+	// page must remain for the config to stay valid.
+	t.Run("explicit null clears field", func(t *testing.T) {
+		merged, err := f.MergeConfig(stored, json.RawMessage(`{"space":null}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := decode(t, merged)
+		if got.Space != "" {
+			t.Fatalf("space should be cleared, got %q", got.Space)
+		}
+		if got.RootPage != "123" {
+			t.Fatalf("root_page should remain: %q", got.RootPage)
+		}
+	})
 }
 
 func TestParseConfluenceTime(t *testing.T) {

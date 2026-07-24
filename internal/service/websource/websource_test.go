@@ -112,6 +112,106 @@ func TestStoreCollectionsAndPages(t *testing.T) {
 	}
 }
 
+func TestPagesPagedAndTeamFilter(t *testing.T) {
+	db, err := bw.Open(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	store, err := New(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	if err := store.UpsertCollection(ctx, &Collection{Name: "proj", Type: TypeJira}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Six pages; some tagged with teams (mixed casing), some untagged.
+	specs := []struct {
+		slug  string
+		teams []string
+	}{
+		{"01", []string{"Alpha"}},
+		{"02", []string{"beta"}},
+		{"03", []string{"ALPHA", "Gamma"}},
+		{"04", nil},
+		{"05", []string{"Beta"}},
+		{"06", []string{"gamma"}},
+	}
+	for _, s := range specs {
+		if err := store.UpsertPage(ctx, &Page{
+			ID: PageID("proj", s.slug), Collection: "proj", Slug: s.slug,
+			URL: "https://x/" + s.slug, Teams: s.teams,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Unfiltered count is every page.
+	if n, err := store.CountPages(ctx, "proj", ""); err != nil || n != 6 {
+		t.Fatalf("CountPages all = %d, %v; want 6", n, err)
+	}
+
+	// Team filter is case-insensitive and matches "has any".
+	if n, err := store.CountPages(ctx, "proj", "alpha"); err != nil || n != 2 {
+		t.Fatalf("CountPages alpha = %d, %v; want 2", n, err)
+	}
+	if n, err := store.CountPages(ctx, "proj", "BETA"); err != nil || n != 2 {
+		t.Fatalf("CountPages BETA = %d, %v; want 2", n, err)
+	}
+	if n, err := store.CountPages(ctx, "proj", "gamma"); err != nil || n != 2 {
+		t.Fatalf("CountPages gamma = %d, %v; want 2", n, err)
+	}
+	if n, err := store.CountPages(ctx, "proj", "missing"); err != nil || n != 0 {
+		t.Fatalf("CountPages missing = %d, %v; want 0", n, err)
+	}
+
+	// Pagination returns a bounded, slug-sorted window with the full total.
+	first, total, err := store.PagesPaged(ctx, "proj", "", 0, 2)
+	if err != nil || total != 6 || len(first) != 2 {
+		t.Fatalf("page1 = %d items total %d, %v; want 2 items total 6", len(first), total, err)
+	}
+	if first[0].Slug != "01" || first[1].Slug != "02" {
+		t.Fatalf("page1 slugs = %q,%q; want 01,02", first[0].Slug, first[1].Slug)
+	}
+
+	second, _, err := store.PagesPaged(ctx, "proj", "", 2, 2)
+	if err != nil || len(second) != 2 || second[0].Slug != "03" {
+		t.Fatalf("page2 = %+v, %v; want start 03", second, err)
+	}
+
+	// Team-filtered pagination scopes both the total and the window.
+	alpha, aTotal, err := store.PagesPaged(ctx, "proj", "Alpha", 0, 10)
+	if err != nil || aTotal != 2 || len(alpha) != 2 {
+		t.Fatalf("alpha page = %d items total %d, %v; want 2/2", len(alpha), aTotal, err)
+	}
+	for _, p := range alpha {
+		if p.Slug != "01" && p.Slug != "03" {
+			t.Fatalf("unexpected alpha page slug %q", p.Slug)
+		}
+	}
+
+	// Distinct teams preserve first-seen casing (by slug order) and are sorted
+	// case-insensitively. "beta" is first seen on page 02 in lowercase; "Alpha"
+	// on page 01; "Gamma" on page 03.
+	teams, err := store.Teams(ctx, "proj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"Alpha", "beta", "Gamma"}
+	if len(teams) != len(want) {
+		t.Fatalf("teams = %v; want %v", teams, want)
+	}
+	for i := range want {
+		if teams[i] != want[i] {
+			t.Fatalf("teams = %v; want %v", teams, want)
+		}
+	}
+}
+
 func TestFullResyncDue(t *testing.T) {
 	// First run (zero time) always forces a full pass.
 	if !FullResyncDue(time.Time{}, time.Hour) {

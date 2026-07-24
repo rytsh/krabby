@@ -160,6 +160,13 @@ func (s *Service) Index(ctx context.Context, repo string, docsDir string) error 
 // a JIRA project) when only a few items changed. A changed path whose file is
 // missing on disk is treated as removed.
 func (s *Service) IndexPaths(ctx context.Context, repo, docsDir string, changed, removed []string) error {
+	return s.IndexPathsProgress(ctx, repo, docsDir, changed, removed, nil)
+}
+
+// IndexPathsProgress is IndexPaths with an optional callback invoked as chunks
+// are embedded (done out of total), so a caller can drive a determinate
+// progress bar for a large source. The callback may run concurrently.
+func (s *Service) IndexPathsProgress(ctx context.Context, repo, docsDir string, changed, removed []string, onProgress func(done, total int)) error {
 	// Drop prior vectors for everything we are about to touch so stale chunks
 	// (including those of now-removed docs) disappear.
 	stale := make([]string, 0, len(changed)+len(removed))
@@ -216,7 +223,7 @@ func (s *Service) IndexPaths(ctx context.Context, repo, docsDir string, changed,
 		return nil
 	}
 
-	vecs, err := s.emb.Embed(ctx, texts)
+	vecs, err := s.emb.EmbedWithProgress(ctx, texts, onProgress)
 	if err != nil {
 		return fmt.Errorf("embed %d chunks; %w", len(texts), err)
 	}

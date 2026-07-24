@@ -28,6 +28,14 @@
   // Per-collection distinct team names and the active team filter (JIRA).
   let teams = $state({});
   let teamFilter = $state({});
+  // Per-collection pagination: current page (1-based), total matching items and
+  // whether more pages exist. The server pages the item list so large sources
+  // (thousands of pages) are never loaded whole.
+  const PER_PAGE = 50;
+  let pageNum = $state({});
+  let pageTotal = $state({});
+  let pageHasMore = $state({});
+  let pageLoading = $state({});
 
   // Doc viewer state.
   let docContent = $state("");
@@ -75,25 +83,82 @@
     }
   }
 
-  async function loadPages(name) {
+  // Poll the source list while any source is actively syncing/indexing, so the
+  // progress bar and page counts update live without a manual refresh.
+  let pollTimer = null;
+  function anyRunning() {
+    return sources.some((s) => s.running || s.status === "fetching" || s.progress);
+  }
+  $effect(() => {
+    if (anyRunning() && !pollTimer) {
+      pollTimer = setInterval(load, 2000);
+    } else if (!anyRunning() && pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  });
+  onMount(() => () => {
+    if (pollTimer) clearInterval(pollTimer);
+  });
+
+  // Human progress label + percentage for a source's current phase.
+  function progressPct(p) {
+    if (!p || !p.total) return null;
+    return Math.min(100, Math.round((p.done / p.total) * 100));
+  }
+  function progressLabel(p) {
+    if (!p) return "";
+    const phase = { fetch: "Fetching", write: "Saving", index: "Embedding" }[p.phase] || p.phase;
+    if (!p.total) return `${phase}…`;
+    return `${phase} ${p.done}/${p.total}`;
+  }
+
+  async function loadPages(name, page = pageNum[name] || 1) {
+    pageLoading = { ...pageLoading, [name]: true };
     try {
-      const res = await api.source(name, teamFilter[name] || "");
+      const res = await api.source(name, teamFilter[name] || "", page, PER_PAGE);
       pages = { ...pages, [name]: res?.pages || [] };
-      // teams is the full set across the collection (unfiltered by the server).
+      pageNum = { ...pageNum, [name]: res?.page || page };
+      pageTotal = { ...pageTotal, [name]: res?.total ?? (res?.pages?.length || 0) };
+      pageHasMore = { ...pageHasMore, [name]: !!res?.has_more };
+      // teams is the full distinct set across the collection (server-provided).
       if (res?.teams) teams = { ...teams, [name]: res.teams };
     } catch (e) {
       error = e.message;
+    } finally {
+      pageLoading = { ...pageLoading, [name]: false };
     }
+  }
+
+  function goToPage(name, page) {
+    if (page < 1) return;
+    pageNum = { ...pageNum, [name]: page };
+    loadPages(name, page);
   }
 
   function setTeamFilter(name, value) {
     teamFilter = { ...teamFilter, [name]: value };
-    loadPages(name);
+    pageNum = { ...pageNum, [name]: 1 }; // reset to first page on filter change
+    loadPages(name, 1);
   }
 
   function toggle(name) {
     expanded = { ...expanded, [name]: !expanded[name] };
-    if (expanded[name]) loadPages(name);
+    if (expanded[name] && !pages[name]) loadPages(name, pageNum[name] || 1);
+  }
+
+  // Human 1-based range of the current page, e.g. "1–50 of 4634".
+  function pageRange(name) {
+    const total = pageTotal[name] || 0;
+    if (total === 0) return "0";
+    const p = pageNum[name] || 1;
+    const from = (p - 1) * PER_PAGE + 1;
+    const to = Math.min(p * PER_PAGE, total);
+    return `${from}\u2013${to} of ${total}`;
+  }
+
+  function lastPage(name) {
+    return Math.max(1, Math.ceil((pageTotal[name] || 0) / PER_PAGE));
   }
 
   function splitLabels(s) {
@@ -474,7 +539,21 @@
             <span class="rounded border border-line px-1.5 text-[11px] text-dim">{s.type}</span>
             <span class="font-mono text-[11px] text-faint">web:{s.name}</span>
             <span class="ml-auto flex items-center gap-2.5 text-[12px] text-faint">
-              {#if s.running}
+              {#if s.progress}
+                <span class="flex items-center gap-1.5 text-busy">
+                  {#if progressPct(s.progress) !== null}
+                    <span class="inline-block h-1.5 w-20 overflow-hidden rounded-full bg-surface-3">
+                      <span
+                        class="block h-full rounded-full bg-busy transition-all"
+                        style="width: {progressPct(s.progress)}%"
+                      ></span>
+                    </span>
+                    <span class="font-mono">{progressLabel(s.progress)} ({progressPct(s.progress)}%)</span>
+                  {:else}
+                    <span>{progressLabel(s.progress)}</span>
+                  {/if}
+                </span>
+              {:else if s.running}
                 <span class="text-busy">({s.running})</span>
               {/if}
               <span>{s.page_count} {s.page_count === 1 ? "page" : "pages"}</span>
@@ -579,6 +658,49 @@
                     {/each}
                   </tbody>
                 </table>
+
+                <!-- Pagination: items are paged server-side so large sources
+                     (thousands of pages) load one window at a time. -->
+                {#if (pageTotal[s.name] || 0) > PER_PAGE}
+                  <div class="mt-2.5 flex items-center justify-between text-[12px] text-dim">
+                    <span>{pageRange(s.name)}</span>
+                    <div class="flex items-center gap-1">
+                      <button
+                        class="btn btn-sm"
+                        disabled={(pageNum[s.name] || 1) <= 1 || pageLoading[s.name]}
+                        onclick={() => goToPage(s.name, 1)}
+                        title="First page"
+                      >
+                        «
+                      </button>
+                      <button
+                        class="btn btn-sm"
+                        disabled={(pageNum[s.name] || 1) <= 1 || pageLoading[s.name]}
+                        onclick={() => goToPage(s.name, (pageNum[s.name] || 1) - 1)}
+                      >
+                        Prev
+                      </button>
+                      <span class="px-1.5 font-mono">
+                        {pageNum[s.name] || 1} / {lastPage(s.name)}
+                      </span>
+                      <button
+                        class="btn btn-sm"
+                        disabled={!pageHasMore[s.name] || pageLoading[s.name]}
+                        onclick={() => goToPage(s.name, (pageNum[s.name] || 1) + 1)}
+                      >
+                        Next
+                      </button>
+                      <button
+                        class="btn btn-sm"
+                        disabled={!pageHasMore[s.name] || pageLoading[s.name]}
+                        onclick={() => goToPage(s.name, lastPage(s.name))}
+                        title="Last page"
+                      >
+                        »
+                      </button>
+                    </div>
+                  </div>
+                {/if}
               {/if}
             </div>
           {/if}

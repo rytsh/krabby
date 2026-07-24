@@ -20,6 +20,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/worldline-go/types"
+
 	"github.com/rytsh/krabby/internal/service/websource"
 )
 
@@ -38,29 +40,69 @@ type Fetcher struct {
 // Config is owned entirely by the Confluence provider. Auth follows the
 // Atlassian conventions: User+APIToken does basic auth (Cloud API tokens),
 // APIToken alone is sent as a Bearer token (Data Center PATs).
+//
+// Every field is a types.Null so a partial update can be merged onto the stored
+// config precisely (see MergeConfig): a field absent from the update JSON keeps
+// the stored value, an explicit null clears it, and a value overrides it. Use
+// resolve() to get plain values for the sync logic.
 type Config struct {
-	BaseURL  string `json:"base_url"`
-	Space    string `json:"space,omitempty"`
-	User     string `json:"user,omitempty"`
-	APIToken string `json:"api_token,omitempty"`
+	BaseURL  types.Null[string] `json:"base_url"`
+	Space    types.Null[string] `json:"space,omitempty"`
+	User     types.Null[string] `json:"user,omitempty"`
+	APIToken types.Null[string] `json:"api_token,omitempty"`
 
 	// RootPage, when set, restricts the sync to that page and every page below
 	// it in the tree (its descendants), instead of the whole space. This lets
 	// several sub-trees of one space be tracked as separate keyed sources
 	// (e.g. one collection for "Delivery Support Documentation" and its
 	// children). It is a Confluence page id (numeric, as in the page URL).
-	RootPage string `json:"root_page,omitempty"`
+	RootPage types.Null[string] `json:"root_page,omitempty"`
 	// IncludeRoot controls whether the RootPage page itself is indexed in
 	// addition to its descendants (default: true).
-	IncludeRoot *bool `json:"include_root,omitempty"`
+	IncludeRoot types.Null[bool] `json:"include_root,omitempty"`
 
-	IncludeLabels []string `json:"include_labels,omitempty"`
-	ExcludeLabels []string `json:"exclude_labels,omitempty"`
+	IncludeLabels types.Null[[]string] `json:"include_labels,omitempty"`
+	ExcludeLabels types.Null[[]string] `json:"exclude_labels,omitempty"`
 
 	// FullResyncEvery is a Go duration ("24h") controlling how often a full,
 	// non-incremental pass runs to reconcile remotely-deleted pages. Empty or
 	// invalid uses the default (24h).
-	FullResyncEvery string `json:"full_resync_every,omitempty"`
+	FullResyncEvery types.Null[string] `json:"full_resync_every,omitempty"`
+}
+
+// resolvedConfig is the plain, validated view of a Config used by the sync
+// logic. Strings are trimmed, the base URL has its trailing slash removed and
+// IncludeRoot defaults to true.
+type resolvedConfig struct {
+	BaseURL         string
+	Space           string
+	User            string
+	APIToken        string
+	RootPage        string
+	IncludeRoot     bool
+	IncludeLabels   []string
+	ExcludeLabels   []string
+	FullResyncEvery string
+}
+
+// resolve flattens the nullable config into plain values with defaults applied.
+func (c Config) resolve() resolvedConfig {
+	includeRoot := true // default when unset
+	if c.IncludeRoot.Valid {
+		includeRoot = c.IncludeRoot.V
+	}
+
+	return resolvedConfig{
+		BaseURL:         strings.TrimRight(strings.TrimSpace(c.BaseURL.ValueOrZero()), "/"),
+		Space:           strings.TrimSpace(c.Space.ValueOrZero()),
+		User:            strings.TrimSpace(c.User.ValueOrZero()),
+		APIToken:        c.APIToken.ValueOrZero(),
+		RootPage:        strings.TrimSpace(c.RootPage.ValueOrZero()),
+		IncludeRoot:     includeRoot,
+		IncludeLabels:   c.IncludeLabels.ValueOrZero(),
+		ExcludeLabels:   c.ExcludeLabels.ValueOrZero(),
+		FullResyncEvery: strings.TrimSpace(c.FullResyncEvery.ValueOrZero()),
+	}
 }
 
 type configView struct {
@@ -76,7 +118,7 @@ type configView struct {
 }
 
 // fullResyncEvery parses the configured interval, falling back to the default.
-func (c Config) fullResyncEvery() time.Duration {
+func (c resolvedConfig) fullResyncEvery() time.Duration {
 	if c.FullResyncEvery == "" {
 		return websource.DefaultFullResyncEvery
 	}
@@ -93,23 +135,39 @@ func New() *Fetcher {
 	return &Fetcher{client: &http.Client{Timeout: 60 * time.Second}}
 }
 
-func decodeConfig(raw json.RawMessage) (Config, error) {
+// decodeConfig unmarshals the raw config and returns its resolved (plain) form.
+func decodeConfig(raw json.RawMessage) (resolvedConfig, error) {
+	cfg, err := decodeRawConfig(raw)
+	if err != nil {
+		return resolvedConfig{}, err
+	}
+
+	return cfg.resolve(), nil
+}
+
+// decodeRawConfig unmarshals the raw config keeping the nullable fields, so
+// MergeConfig can tell set fields from absent ones.
+func decodeRawConfig(raw json.RawMessage) (Config, error) {
 	var cfg Config
 	if len(raw) != 0 {
 		if err := json.Unmarshal(raw, &cfg); err != nil {
 			return Config{}, fmt.Errorf("decode confluence config; %w", err)
 		}
 	}
-	cfg.BaseURL = strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
-	cfg.Space = strings.TrimSpace(cfg.Space)
-	cfg.User = strings.TrimSpace(cfg.User)
-	cfg.RootPage = strings.TrimSpace(cfg.RootPage)
+
 	return cfg, nil
 }
 
-// includeRoot reports whether the root page itself is indexed (default true).
-func (c Config) includeRoot() bool {
-	return c.IncludeRoot == nil || *c.IncludeRoot
+// mergeNull returns the update value when the field was present in the update
+// JSON (set to a value OR explicitly null), otherwise the stored value. It
+// implements the "absent = keep, null = clear, value = override" merge rule
+// backed by types.Null's ParsedNull marker.
+func mergeNull[T any](update, stored types.Null[T]) types.Null[T] {
+	if update.Valid || update.ParsedNull {
+		return update
+	}
+
+	return stored
 }
 
 func (f *Fetcher) Validate(raw json.RawMessage) error {
@@ -126,18 +184,40 @@ func (f *Fetcher) Validate(raw json.RawMessage) error {
 	return nil
 }
 
+// MergeConfig merges an update onto the stored config so partial updates (e.g.
+// changing only the description, which sends no config) do not wipe connection
+// settings. Each field uses types.Null semantics: a field absent from the
+// update keeps the stored value, an explicit null clears it, and a value
+// overrides it. A blank api_token is treated as "keep the stored secret" since
+// tokens are write-only and never round-trip to the client.
 func (f *Fetcher) MergeConfig(current, update json.RawMessage) (json.RawMessage, error) {
-	next, err := decodeConfig(update)
+	next, err := decodeRawConfig(update)
 	if err != nil {
 		return nil, err
 	}
-	if next.APIToken == "" && len(current) != 0 {
-		prev, err := decodeConfig(current)
+
+	if len(current) != 0 {
+		prev, err := decodeRawConfig(current)
 		if err != nil {
 			return nil, err
 		}
-		next.APIToken = prev.APIToken
+
+		next.BaseURL = mergeNull(next.BaseURL, prev.BaseURL)
+		next.Space = mergeNull(next.Space, prev.Space)
+		next.User = mergeNull(next.User, prev.User)
+		next.RootPage = mergeNull(next.RootPage, prev.RootPage)
+		next.IncludeRoot = mergeNull(next.IncludeRoot, prev.IncludeRoot)
+		next.IncludeLabels = mergeNull(next.IncludeLabels, prev.IncludeLabels)
+		next.ExcludeLabels = mergeNull(next.ExcludeLabels, prev.ExcludeLabels)
+		next.FullResyncEvery = mergeNull(next.FullResyncEvery, prev.FullResyncEvery)
+
+		// Tokens are write-only: an absent or blank incoming token keeps the
+		// stored one; only a non-empty value replaces it.
+		if next.APIToken.ValueOrZero() == "" {
+			next.APIToken = prev.APIToken
+		}
 	}
+
 	raw, err := json.Marshal(next)
 	if err != nil {
 		return nil, fmt.Errorf("encode confluence config; %w", err)
@@ -145,6 +225,7 @@ func (f *Fetcher) MergeConfig(current, update json.RawMessage) (json.RawMessage,
 	if err := f.Validate(raw); err != nil {
 		return nil, err
 	}
+
 	return raw, nil
 }
 
@@ -153,10 +234,12 @@ func (f *Fetcher) ConfigView(raw json.RawMessage) any {
 	if err != nil {
 		return nil
 	}
+	includeRoot := cfg.IncludeRoot
+
 	return configView{
 		BaseURL: cfg.BaseURL, Space: cfg.Space, User: cfg.User,
 		APITokenSet: cfg.APIToken != "", RootPage: cfg.RootPage,
-		IncludeRoot:   cfg.IncludeRoot,
+		IncludeRoot:   &includeRoot,
 		IncludeLabels: cfg.IncludeLabels, ExcludeLabels: cfg.ExcludeLabels,
 		FullResyncEvery: cfg.FullResyncEvery,
 	}
@@ -280,7 +363,7 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 	// In subtree mode also index the root page itself (the CQL descendant query
 	// returns only pages below it). Skip it on incremental runs when it was not
 	// modified since the watermark.
-	if cfg.RootPage != "" && cfg.includeRoot() {
+	if cfg.RootPage != "" && cfg.IncludeRoot {
 		if root, err := f.fetchOne(ctx, cfg, base, cfg.RootPage); err != nil {
 			out = append(out, websource.RemotePage{
 				Slug: cfg.RootPage + "-root",
@@ -344,7 +427,7 @@ func pageToRemote(base string, page contentPage) websource.RemotePage {
 // and subtree mode use CQL so the incremental "lastmodified" clause and the
 // ascending order (for a monotonic watermark) apply uniformly. Both return a
 // "_links.next" cursor for subsequent pages.
-func firstEndpoint(cfg Config, watermark string) string {
+func firstEndpoint(cfg resolvedConfig, watermark string) string {
 	clauses := []string{"type = page"}
 	if cfg.Space != "" {
 		clauses = append(clauses, fmt.Sprintf("space = %q", cfg.Space))
@@ -386,7 +469,7 @@ func parseConfluenceTime(s string) time.Time {
 
 // fetchOne retrieves a single page by id with body + labels (used for the root
 // page in subtree mode).
-func (f *Fetcher) fetchOne(ctx context.Context, cfg Config, base, id string) (*contentPage, error) {
+func (f *Fetcher) fetchOne(ctx context.Context, cfg resolvedConfig, base, id string) (*contentPage, error) {
 	params := url.Values{}
 	params.Set("expand", "body.storage,metadata.labels,version")
 	endpoint := base + "/rest/api/content/" + url.PathEscape(id) + "?" + params.Encode()
@@ -405,7 +488,7 @@ func (f *Fetcher) fetchOne(ctx context.Context, cfg Config, base, id string) (*c
 }
 
 // listContent fetches one result page from a fully-formed endpoint URL.
-func (f *Fetcher) listContent(ctx context.Context, cfg Config, endpoint string) (*contentList, error) {
+func (f *Fetcher) listContent(ctx context.Context, cfg resolvedConfig, endpoint string) (*contentList, error) {
 	body, err := f.get(ctx, cfg, endpoint)
 	if err != nil {
 		return nil, err
@@ -420,7 +503,7 @@ func (f *Fetcher) listContent(ctx context.Context, cfg Config, endpoint string) 
 }
 
 // get performs an authenticated GET and returns the response body.
-func (f *Fetcher) get(ctx context.Context, cfg Config, endpoint string) ([]byte, error) {
+func (f *Fetcher) get(ctx context.Context, cfg resolvedConfig, endpoint string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request; %w", err)

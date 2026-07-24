@@ -3,7 +3,7 @@ package server
 import (
 	"encoding/json"
 	"net/http"
-	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -53,11 +53,12 @@ func (r sourceRequest) collection() (*websource.Collection, error) {
 // key + live activity are included for the UI.
 type sourceView struct {
 	*websource.Collection
-	RefreshInterval string `json:"refresh_interval"`
-	Config          any    `json:"config,omitempty"`
-	ScopeKey        string `json:"scope_key"`
-	PageCount       int    `json:"page_count"`
-	Running         string `json:"running,omitempty"`
+	RefreshInterval string            `json:"refresh_interval"`
+	Config          any               `json:"config,omitempty"`
+	ScopeKey        string            `json:"scope_key"`
+	PageCount       int               `json:"page_count"`
+	Running         string            `json:"running,omitempty"`
+	Progress        *manager.Progress `json:"progress,omitempty"`
 }
 
 func viewSource(mgr *manager.Manager, col *websource.Collection, pageCount int) sourceView {
@@ -66,13 +67,20 @@ func viewSource(mgr *manager.Manager, col *websource.Collection, pageCount int) 
 		interval = col.RefreshInterval.String()
 	}
 
+	scope := websource.ScopeKey(col.Name)
+	var progress *manager.Progress
+	if p, ok := mgr.Progress(scope); ok {
+		progress = &p
+	}
+
 	return sourceView{
 		Collection:      col,
 		RefreshInterval: interval,
 		Config:          mgr.WebSourceConfigView(col),
-		ScopeKey:        websource.ScopeKey(col.Name),
+		ScopeKey:        scope,
 		PageCount:       pageCount,
-		Running:         mgr.Activity(websource.ScopeKey(col.Name)),
+		Running:         mgr.Activity(scope),
+		Progress:        progress,
 	}
 }
 
@@ -85,12 +93,12 @@ func listSources(mgr *manager.Manager) ada.HandlerFunc {
 
 		views := make([]sourceView, 0, len(cols))
 		for _, col := range cols {
-			pages, err := mgr.WebPages(c.Request.Context(), col.Name)
+			count, err := mgr.WebPageCount(c.Request.Context(), col.Name)
 			if err != nil {
 				return c.Err(err)
 			}
 
-			views = append(views, viewSource(mgr, col, len(pages)))
+			views = append(views, viewSource(mgr, col, count))
 		}
 
 		return c.SendJSON(views)
@@ -117,6 +125,10 @@ func addSource(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
+// getSource returns a source plus one page of its items. Items are paged at the
+// store level (?page, ?per_page) and optionally filtered by ?team, so a large
+// source (thousands of pages) is never loaded whole. The response carries the
+// total matching count and the paging cursor for the UI.
 func getSource(mgr *manager.Manager) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		name := c.Request.PathValue("name")
@@ -130,52 +142,59 @@ func getSource(mgr *manager.Manager) ada.HandlerFunc {
 			return c.SetStatus(http.StatusNotFound).SendJSON(map[string]string{"error": "not found"})
 		}
 
-		allPages, err := mgr.WebPages(c.Request.Context(), name)
+		page := queryInt(c.Request.URL.Query().Get("page"), 1)
+		perPage := queryInt(c.Request.URL.Query().Get("per_page"), 50)
+		if page < 1 {
+			page = 1
+		}
+		if perPage < 1 {
+			perPage = 50
+		}
+		if perPage > 200 {
+			perPage = 200
+		}
+
+		team := c.Request.URL.Query().Get("team")
+
+		pages, total, err := mgr.WebPagesPaged(c.Request.Context(), name, team, (page-1)*perPage, perPage)
 		if err != nil {
 			return c.Err(err)
 		}
 
-		// Optional ?team= filters the listed tickets by team (JIRA sources).
-		pages := allPages
-		if team := c.Request.URL.Query().Get("team"); team != "" {
-			pages, err = mgr.WebPagesByTeam(c.Request.Context(), name, team)
+		// The distinct team list (for the UI filter) is meaningful only for
+		// jira sources, which are comparatively small; skip the full scan for
+		// large discovery sources like Confluence.
+		var teams []string
+		if col.Type == websource.TypeJira {
+			teams, err = mgr.WebSourceTeams(c.Request.Context(), name)
 			if err != nil {
 				return c.Err(err)
 			}
 		}
 
 		return c.SendJSON(map[string]any{
-			"source": viewSource(mgr, col, len(allPages)),
-			"pages":  pages,
-			"teams":  collectTeams(allPages),
+			"source":   viewSource(mgr, col, total),
+			"pages":    pages,
+			"teams":    teams,
+			"total":    total,
+			"page":     page,
+			"per_page": perPage,
+			"has_more": page*perPage < total,
 		})
 	}
 }
 
-// collectTeams returns the distinct team names across a collection's pages,
-// sorted, so the UI can offer a team filter for JIRA sources.
-func collectTeams(pages []*websource.Page) []string {
-	seen := map[string]string{} // lowercase -> original
-	for _, p := range pages {
-		for _, t := range p.Teams {
-			t = strings.TrimSpace(t)
-			if t == "" {
-				continue
-			}
-			key := strings.ToLower(t)
-			if _, ok := seen[key]; !ok {
-				seen[key] = t
-			}
-		}
+// queryInt parses a query-param integer, returning def when empty or invalid.
+func queryInt(s string, def int) int {
+	if s == "" {
+		return def
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return def
 	}
 
-	out := make([]string, 0, len(seen))
-	for _, v := range seen {
-		out = append(out, v)
-	}
-	sort.Strings(out)
-
-	return out
+	return n
 }
 
 func updateSource(mgr *manager.Manager) ada.HandlerFunc {

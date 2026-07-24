@@ -24,6 +24,7 @@ require (
 	github.com/rakunlabs/query v0.4.6
 	github.com/rakunlabs/tell v0.1.5
 	github.com/worldline-go/hardloop v0.3.2
+	github.com/worldline-go/types v0.6.0
 	golang.org/x/sync v0.22.0
 	golang.org/x/text v0.40.0
 )
@@ -51,6 +52,7 @@ require (
 	github.com/gogs/chardet v0.0.0-20211120154057-b7413eaefb8f // indirect
 	github.com/google/flatbuffers v25.2.10+incompatible // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/greatcloak/decimal v1.5.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0 // indirect
 	github.com/hashicorp/consul/api v1.33.0 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
@@ -87,6 +89,7 @@ require (
 	github.com/worldline-go/struct2 v1.4.0 // indirect
 	github.com/xhit/go-str2duration/v2 v2.1.0 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
+	go.mongodb.org/mongo-driver/v2 v2.3.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.68.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/runtime v0.69.0 // indirect

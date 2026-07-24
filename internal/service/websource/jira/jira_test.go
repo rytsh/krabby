@@ -90,19 +90,19 @@ func TestValidate(t *testing.T) {
 
 func TestBuildJQL(t *testing.T) {
 	// Raw JQL is preserved, with our ordering appended.
-	if got := buildJQL(Config{JQL: "status = Done"}, ""); got != "status = Done ORDER BY updated ASC" {
+	if got := buildJQL(resolvedConfig{JQL: "status = Done"}, ""); got != "status = Done ORDER BY updated ASC" {
 		t.Fatalf("raw jql = %q", got)
 	}
 
 	// Project builds a project filter ordered ascending (monotonic watermark).
-	got := buildJQL(Config{Project: "PROJ"}, "")
+	got := buildJQL(resolvedConfig{Project: "PROJ"}, "")
 	if !strings.Contains(got, "project =") || !strings.Contains(got, "ORDER BY updated ASC") {
 		t.Fatalf("project jql = %q", got)
 	}
 
 	// Incremental: the watermark clause is AND-ed on and any prior ORDER BY is
 	// stripped before re-appending ours.
-	inc := buildJQL(Config{JQL: "status = Done ORDER BY created DESC"}, "2024-01-02 15:04")
+	inc := buildJQL(resolvedConfig{JQL: "status = Done ORDER BY created DESC"}, "2024-01-02 15:04")
 	if !strings.Contains(inc, `updated >= "2024-01-02 15:04"`) {
 		t.Fatalf("watermark clause missing: %q", inc)
 	}

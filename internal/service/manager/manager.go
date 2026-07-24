@@ -86,6 +86,12 @@ type Manager struct {
 	activityMu sync.Mutex
 	activity   map[string]map[string]struct{}
 
+	// progress tracks live counters for a long-running step per id (transient,
+	// in-memory), so the UI can show "1200/4634 embedded, ~26%". Keyed by id
+	// (repo id or web-source scope key). Cleared when the step ends.
+	progressMu sync.Mutex
+	progress   map[string]Progress
+
 	// stageMu serializes stage-state mutation + persistence on the shared repo
 	// record so stages may run concurrently for the same repo.
 	stageMu sync.Mutex
@@ -172,6 +178,7 @@ func New(
 		baseCtx:  baseCtx,
 		locks:    map[string]*sync.Mutex{},
 		activity: map[string]map[string]struct{}{},
+		progress: map[string]Progress{},
 		jobs:     map[string]*job{},
 		codeWarm: map[string]*sync.Mutex{},
 	}
@@ -327,6 +334,43 @@ func (m *Manager) clearRepoActivity(id string) {
 	defer m.activityMu.Unlock()
 
 	delete(m.activity, id)
+}
+
+// Progress is a live view of a long-running step's counters, so the UI can show
+// a determinate progress bar. Phase names the current work ("fetch",
+// "index"); Done/Total are its item counters (e.g. embedded chunks). All fields
+// are transient and reset when the step ends.
+type Progress struct {
+	Phase string `json:"phase"`
+	Done  int    `json:"done"`
+	Total int    `json:"total"`
+}
+
+// setProgress records the live counters for id's current step, replacing any
+// prior value. A zero Total means "indeterminate" (the UI shows a spinner).
+func (m *Manager) setProgress(id string, p Progress) {
+	m.progressMu.Lock()
+	defer m.progressMu.Unlock()
+
+	m.progress[id] = p
+}
+
+// clearProgress removes id's progress counters (step finished or aborted).
+func (m *Manager) clearProgress(id string) {
+	m.progressMu.Lock()
+	defer m.progressMu.Unlock()
+
+	delete(m.progress, id)
+}
+
+// Progress returns id's live step counters and whether any are set.
+func (m *Manager) Progress(id string) (Progress, bool) {
+	m.progressMu.Lock()
+	defer m.progressMu.Unlock()
+
+	p, ok := m.progress[id]
+
+	return p, ok
 }
 
 // Activity returns the pipeline steps currently running for a repo ("sync",

@@ -68,9 +68,9 @@ type listSourcesArgs struct {
 // confluence or jira). Config is the opaque provider-owned object; its shape
 // depends on Type (discover shapes with source_types).
 type addSourceArgs struct {
-	Name            string          `json:"name" jsonschema:"collection name; lowercase [a-z0-9._-]; becomes the search scope key web:<name>. Choose a meaningful key, e.g. 'delivery-support'"`
-	Type            string          `json:"type" jsonschema:"source type: 'pages', 'confluence' or 'jira' (see source_types)"`
-	Description     string          `json:"description,omitempty" jsonschema:"short human summary of what this source holds (e.g. 'Delivery Support runbooks and TERs'); shown to models by list_sources so they can pick the right source to search"`
+	Name            string `json:"name" jsonschema:"collection name; lowercase [a-z0-9._-]; becomes the search scope key web:<name>. Choose a meaningful key, e.g. 'delivery-support'"`
+	Type            string `json:"type" jsonschema:"source type: 'pages', 'confluence' or 'jira' (see source_types)"`
+	Description     string `json:"description,omitempty" jsonschema:"short human summary of what this source holds (e.g. 'Delivery Support runbooks and TERs'); shown to models by list_sources so they can pick the right source to search"`
 	RefreshInterval string `json:"refresh_interval,omitempty" jsonschema:"Go duration between automatic re-syncs, e.g. '1h' or '24h'; empty or 'manual' means manual only"`
 	Config          string `json:"config,omitempty" jsonschema:"provider-owned config as a JSON object encoded in a string, e.g. '{\"base_url\":\"https://...\",\"root_page\":\"123\",\"api_token\":\"...\"}'. jira: base_url, user, api_token, project or jql, include_labels, exclude_labels, team_fields, max_issues. confluence: base_url, and either space (whole space) or root_page (a page id to index that page and all its descendants as one keyed source), optional include_root, user, api_token, include_labels, exclude_labels. API tokens are write-only; blank on update keeps the stored secret"`
 }
@@ -135,10 +135,11 @@ func (a addSourceArgs) collection() (*websource.Collection, error) {
 // set/unset flag by the fetcher's ConfigView).
 type sourceResult struct {
 	*websource.Collection
-	RefreshInterval string `json:"refresh_interval"`
-	Config          any    `json:"config,omitempty"`
-	ScopeKey        string `json:"scope_key"`
-	Running         string `json:"running,omitempty"`
+	RefreshInterval string            `json:"refresh_interval"`
+	Config          any               `json:"config,omitempty"`
+	ScopeKey        string            `json:"scope_key"`
+	Running         string            `json:"running,omitempty"`
+	Progress        *manager.Progress `json:"progress,omitempty"`
 }
 
 func viewSourceMCP(mgr *manager.Manager, col *websource.Collection) sourceResult {
@@ -147,12 +148,19 @@ func viewSourceMCP(mgr *manager.Manager, col *websource.Collection) sourceResult
 		interval = col.RefreshInterval.String()
 	}
 
+	scope := websource.ScopeKey(col.Name)
+	var progress *manager.Progress
+	if p, ok := mgr.Progress(scope); ok {
+		progress = &p
+	}
+
 	return sourceResult{
 		Collection:      col,
 		RefreshInterval: interval,
 		Config:          mgr.WebSourceConfigView(col),
-		ScopeKey:        websource.ScopeKey(col.Name),
-		Running:         mgr.Activity(websource.ScopeKey(col.Name)),
+		ScopeKey:        scope,
+		Running:         mgr.Activity(scope),
+		Progress:        progress,
 	}
 }
 
@@ -348,15 +356,32 @@ func addSourceAdminTools(server *mcp.Server, mgr *manager.Manager) {
 			return nil, nil, fmt.Errorf("source %s not found", name)
 		}
 
-		pages, err := mgr.WebPagesByTeam(ctx, name, args.Team)
+		page, perPage := args.Page, args.Per
+		if page <= 0 {
+			page = 1
+		}
+		if perPage <= 0 {
+			perPage = 50
+		}
+		if perPage > 200 {
+			perPage = 200
+		}
+
+		pages, total, err := mgr.WebPagesPaged(ctx, name, args.Team, (page-1)*perPage, perPage)
 		if err != nil {
 			return nil, nil, err
 		}
 
 		return jsonResult(map[string]any{
 			"source": viewSourceMCP(mgr, col),
-			"count":  len(pages),
-			"items":  pageSlice(pages, args.Page, args.Per, 50),
+			"count":  total,
+			"items": pageResult[*websource.Page]{
+				Items:   pages,
+				Total:   total,
+				Page:    page,
+				PerPage: perPage,
+				HasMore: page*perPage < total,
+			},
 		}), nil, nil
 	})
 }

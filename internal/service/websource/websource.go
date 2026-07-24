@@ -100,6 +100,12 @@ type Page struct {
 	// Teams are optional provider tags (e.g. JIRA team/squad values) used to
 	// list and filter tickets by team.
 	Teams []string `bw:"teams" json:"teams,omitempty"`
+	// TeamsNorm holds the lowercase/trimmed form of every Teams value. It backs
+	// case-insensitive team filtering at the store level (via the JSON "has
+	// any" operator on this field), so listing a large source by team does not
+	// load and scan the whole collection in memory. It is derived from Teams on
+	// upsert and never set by callers.
+	TeamsNorm []string `bw:"teams_norm,index" json:"-"`
 	// Hash fingerprints the converted markdown so unchanged pages skip
 	// re-embedding.
 	Hash        string    `bw:"hash"       json:"-"`
@@ -272,6 +278,117 @@ func (s *Store) Pages(ctx context.Context, collection string) ([]*Page, error) {
 	return pages, nil
 }
 
+// pagesWhere builds the filter for one collection, optionally restricted to
+// pages tagged with team (case-insensitive, matched against the normalized
+// teams field via the JSON "has any" operator so the scan happens in the
+// store, not in memory). An empty team matches the whole collection.
+func pagesWhere(collection, team string) []query.Expression {
+	where := []query.Expression{
+		query.NewExpressionCmp(query.OperatorEq, "collection", collection).Expression(),
+	}
+
+	team = strings.ToLower(strings.TrimSpace(team))
+	if team != "" {
+		where = append(where,
+			query.NewExpressionCmp(query.OperatorJIn, "teams_norm", []string{team}).Expression())
+	}
+
+	return where
+}
+
+// CountPages returns the number of page records in one collection, optionally
+// restricted to a team (case-insensitive).
+func (s *Store) CountPages(ctx context.Context, collection, team string) (int, error) {
+	q := query.New()
+	q.Where = pagesWhere(collection, team)
+
+	n, err := s.pages.Count(ctx, q)
+	if err != nil {
+		return 0, fmt.Errorf("count pages of %s; %w", collection, err)
+	}
+
+	return int(n), nil
+}
+
+// PagesPaged returns one page (offset/limit) of a collection's page records
+// sorted by slug, together with the total count of matching records. When team
+// is non-empty only pages tagged with that team (case-insensitive) are counted
+// and returned. Filtering and paging happen at the store level so a large
+// source (e.g. a Confluence sub-tree with thousands of pages) is not loaded
+// into memory. offset < 0 is treated as 0; limit <= 0 returns no records (only
+// the count).
+func (s *Store) PagesPaged(ctx context.Context, collection, team string, offset, limit int) ([]*Page, int, error) {
+	total, err := s.CountPages(ctx, collection, team)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 || offset >= total {
+		return []*Page{}, total, nil
+	}
+
+	q := query.New()
+	q.Where = pagesWhere(collection, team)
+	q.Sort = []query.ExpressionSort{{Field: "slug"}}
+	q.SetOffset(uint64(offset))
+	q.SetLimit(uint64(limit))
+
+	pages, err := s.pages.Find(ctx, q)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list pages of %s; %w", collection, err)
+	}
+
+	if pages == nil {
+		pages = []*Page{}
+	}
+
+	return pages, total, nil
+}
+
+// Teams returns the distinct team tags across one collection's pages, sorted,
+// preserving the original casing of the first occurrence. Used to populate the
+// UI team filter for jira sources. It scans the collection's page records, so
+// callers should reserve it for small sources (jira), not large discovery
+// sources.
+func (s *Store) Teams(ctx context.Context, collection string) ([]string, error) {
+	q := query.New()
+	q.Where = append(q.Where,
+		query.NewExpressionCmp(query.OperatorEq, "collection", collection).Expression())
+	q.SetLimit(100000)
+
+	pages, err := s.pages.Find(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("list pages of %s; %w", collection, err)
+	}
+
+	seen := map[string]string{} // lowercase -> original casing
+	for _, p := range pages {
+		for _, t := range p.Teams {
+			t = strings.TrimSpace(t)
+			if t == "" {
+				continue
+			}
+			key := strings.ToLower(t)
+			if _, ok := seen[key]; !ok {
+				seen[key] = t
+			}
+		}
+	}
+
+	out := make([]string, 0, len(seen))
+	for _, v := range seen {
+		out = append(out, v)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return strings.ToLower(out[i]) < strings.ToLower(out[j])
+	})
+
+	return out, nil
+}
+
 // GetPage returns a page by id, or nil if it does not exist.
 func (s *Store) GetPage(ctx context.Context, id string) (*Page, error) {
 	p, err := s.pages.Get(ctx, id)
@@ -286,13 +403,45 @@ func (s *Store) GetPage(ctx context.Context, id string) (*Page, error) {
 	return p, nil
 }
 
-// UpsertPage inserts or replaces a page record.
+// UpsertPage inserts or replaces a page record. It derives TeamsNorm from Teams
+// so team filtering can run at the store level, case-insensitively.
 func (s *Store) UpsertPage(ctx context.Context, p *Page) error {
+	p.TeamsNorm = normalizeTeams(p.Teams)
+
 	if err := s.pages.Insert(ctx, p); err != nil {
 		return fmt.Errorf("upsert page %s; %w", p.ID, err)
 	}
 
 	return nil
+}
+
+// normalizeTeams returns the lowercased, trimmed, de-duplicated team tags,
+// dropping empties. Returns nil when there are no usable tags so the stored
+// field stays absent for pages without teams.
+func normalizeTeams(teams []string) []string {
+	if len(teams) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(teams))
+	out := make([]string, 0, len(teams))
+	for _, t := range teams {
+		t = strings.ToLower(strings.TrimSpace(t))
+		if t == "" {
+			continue
+		}
+		if _, ok := seen[t]; ok {
+			continue
+		}
+		seen[t] = struct{}{}
+		out = append(out, t)
+	}
+
+	if len(out) == 0 {
+		return nil
+	}
+
+	return out
 }
 
 // DeletePage removes a page record.
