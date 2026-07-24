@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +30,7 @@ import (
 	"github.com/rytsh/krabby/internal/service/registry"
 	"github.com/rytsh/krabby/internal/service/repofs"
 	"github.com/rytsh/krabby/internal/service/settings"
+	"github.com/rytsh/krabby/internal/service/taskstore"
 	"github.com/rytsh/krabby/internal/service/vectorstore"
 	"github.com/rytsh/krabby/internal/service/websource"
 )
@@ -62,6 +64,11 @@ type Manager struct {
 	// configurable concurrency limit governs how many run at once, instead of
 	// each trigger spawning its own unbounded goroutine.
 	queue *queue.Queue
+
+	// taskStore persists queued/running tasks so the backlog survives a
+	// restart. Set via SetTaskStore before RestoreTasks; nil disables
+	// persistence (tests, or when the store failed to open).
+	taskStore TaskStore
 
 	// Optional docs+RAG subsystem, held as an atomically swappable bundle so
 	// settings changes rebuild the clients live. docsMu guards the bundle.
@@ -217,17 +224,119 @@ func (m *Manager) BumpTask(seq uint64) bool {
 	return m.queue.Bump(seq)
 }
 
-// CancelTask removes the single queued task with the given seq, marking it
-// canceled. It reports whether a matching queued task was found. Running tasks
-// are not affected here; cancel those with CancelJob.
+// CancelTask cancels the task with the given seq. A queued task is dropped from
+// the backlog; a running task has its underlying job aborted (its context is
+// cancelled, killing the in-flight git/graphify/index work). It reports whether
+// a matching task was found in either state.
 func (m *Manager) CancelTask(seq uint64) bool {
-	return m.queue.CancelSeq(seq)
+	if m.queue.CancelSeq(seq) {
+		return true
+	}
+
+	// Not queued: it may be the task currently running. Translate the per-task
+	// cancel into cancelling that task's job context via its repo/scope id.
+	if id, ok := m.queue.RunningID(seq); ok {
+		return m.CancelJob(id)
+	}
+
+	return false
 }
 
 // CancelPendingForRepo drops every queued (not-yet-started) task for a repo id
 // and returns how many were removed. Running work is left alone.
 func (m *Manager) CancelPendingForRepo(id string) int {
 	return m.queue.CancelPending(id)
+}
+
+// TaskStore persists queued/running tasks so the work queue survives a restart.
+// It is the queue.Persister plus a List used to replay records on startup.
+type TaskStore interface {
+	queue.Persister
+	List(ctx context.Context) ([]taskstore.PersistedTask, error)
+}
+
+// SetTaskStore installs the durable task store and wires it into the queue as
+// the persister. Call it once at startup, before RestoreTasks and before any
+// trigger enqueues work, so every submit is recorded.
+func (m *Manager) SetTaskStore(store TaskStore) {
+	m.taskStore = store
+	m.queue.SetPersister(store)
+}
+
+// RestoreTasks re-enqueues tasks that were queued (or running) when the process
+// last stopped. Records are read in FIFO seq order and rebuilt from their spec;
+// a task that was running before the restart comes back as queued (its previous
+// run died with the process). Unknown or malformed specs are dropped so a bad
+// record cannot wedge startup. It is a no-op when no store is configured.
+func (m *Manager) RestoreTasks(ctx context.Context) error {
+	if m.taskStore == nil {
+		return nil
+	}
+
+	tasks, err := m.taskStore.List(ctx)
+	if err != nil {
+		return err
+	}
+
+	restored := 0
+	for _, pt := range tasks {
+		t, ok := m.rebuildTask(pt.Spec)
+		if !ok {
+			// Drop records we can no longer interpret so they are not retried
+			// on every restart.
+			m.taskStore.Remove(pt.Seq)
+
+			continue
+		}
+
+		m.queue.Restore(pt.Seq, t)
+		restored++
+	}
+
+	if restored > 0 {
+		slog.Info("restored persisted background tasks", "count", restored)
+	}
+
+	return nil
+}
+
+// rebuildTask reconstructs a queue.Task (including its Run closure) from a
+// persisted spec. It reports ok=false for specs whose target no longer exists
+// or whose kind is unknown, so the caller can drop the record.
+func (m *Manager) rebuildTask(spec queue.Spec) (queue.Task, bool) {
+	switch spec.Kind {
+	case taskKindRefresh:
+		return m.refreshTask(spec.ID), true
+
+	case taskKindGenerate:
+		targets := splitTargets(spec.Params["targets"])
+		if len(targets) == 0 {
+			return queue.Task{}, false
+		}
+		force := spec.Params["force"] == "true"
+
+		return m.generateTask(spec.ID, targets, force), true
+
+	case taskKindWebSync:
+		// Persisted websync IDs are the scope key ("web:<name>"); recover the
+		// collection name for the rebuilt closure.
+		name := websource.CollectionName(spec.ID)
+		if name == "" {
+			return queue.Task{}, false
+		}
+
+		return m.webSyncTask(name), true
+
+	case taskKindReindex:
+		if spec.ID == "*" {
+			return m.reindexAllTask(), true
+		}
+
+		return m.reindexTask(spec.ID), true
+
+	default:
+		return queue.Task{}, false
+	}
 }
 
 // acquireDocs leases the active bundle until the returned release function is
@@ -696,15 +805,15 @@ func (m *Manager) RefreshWait(ctx context.Context, id string) (*registry.Repo, b
 	return repo, done, nil
 }
 
-// submitRefresh enqueues a repo refresh on the central work queue and returns
-// its handle. Concurrent refreshes for the same repo coalesce onto one queued
-// task (queue dedup), and the queue bounds how many refreshes run at once.
-func (m *Manager) submitRefresh(id string) *queue.Handle {
-	return m.queue.Submit(queue.Task{
+// refreshTask builds the queue task for a repo refresh, including its Spec so
+// the work is persisted and can be rebuilt after a restart.
+func (m *Manager) refreshTask(id string) queue.Task {
+	return queue.Task{
 		ID:    id,
 		Kind:  taskKindRefresh,
 		Title: "Refresh " + id,
 		Key:   taskKindRefresh + ":" + id,
+		Spec:  queue.Spec{Kind: taskKindRefresh, ID: id},
 		Run: func(ctx context.Context) error {
 			if err := m.Refresh(ctx, id); err != nil {
 				slog.Error("refresh repo", "repo", id, "error", err)
@@ -714,7 +823,14 @@ func (m *Manager) submitRefresh(id string) *queue.Handle {
 
 			return nil
 		},
-	})
+	}
+}
+
+// submitRefresh enqueues a repo refresh on the central work queue and returns
+// its handle. Concurrent refreshes for the same repo coalesce onto one queued
+// task (queue dedup), and the queue bounds how many refreshes run at once.
+func (m *Manager) submitRefresh(id string) *queue.Handle {
+	return m.queue.Submit(m.refreshTask(id))
 }
 
 // refreshAsync enqueues a refresh and returns a channel closed when that
@@ -1207,15 +1323,23 @@ func (m *Manager) Generate(ctx context.Context, id string, targets []string, for
 	return errors.Join(errs...)
 }
 
-// submitGenerate enqueues a selective generation on the central work queue and
-// returns its handle. Identical requests (same repo, targets and force) coalesce
-// onto one queued task.
-func (m *Manager) submitGenerate(id string, targets []string, force bool) *queue.Handle {
-	return m.queue.Submit(queue.Task{
+// generateTask builds the queue task for a selective generation, including its
+// Spec (targets + force) so the work is persisted and rebuildable after a
+// restart.
+func (m *Manager) generateTask(id string, targets []string, force bool) queue.Task {
+	return queue.Task{
 		ID:    id,
 		Kind:  taskKindGenerate,
 		Title: fmt.Sprintf("Generate %s for %s", strings.Join(targets, ", "), id),
 		Key:   fmt.Sprintf("%s:%s:%s:%t", taskKindGenerate, id, strings.Join(targets, ","), force),
+		Spec: queue.Spec{
+			Kind: taskKindGenerate,
+			ID:   id,
+			Params: map[string]string{
+				"targets": strings.Join(targets, ","),
+				"force":   strconv.FormatBool(force),
+			},
+		},
 		Run: func(ctx context.Context) error {
 			if err := m.Generate(ctx, id, targets, force); err != nil {
 				slog.Error("generate", "repo", id, "targets", targets, "error", err)
@@ -1225,7 +1349,28 @@ func (m *Manager) submitGenerate(id string, targets []string, force bool) *queue
 
 			return nil
 		},
-	})
+	}
+}
+
+// submitGenerate enqueues a selective generation on the central work queue and
+// returns its handle. Identical requests (same repo, targets and force) coalesce
+// onto one queued task.
+func (m *Manager) submitGenerate(id string, targets []string, force bool) *queue.Handle {
+	return m.queue.Submit(m.generateTask(id, targets, force))
+}
+
+// splitTargets parses a persisted comma-separated generate targets list,
+// dropping blanks. The empty string yields no targets.
+func splitTargets(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+
+	return out
 }
 
 // TriggerGenerate queues a background selective generation for a repo. When
@@ -1286,13 +1431,20 @@ func (m *Manager) generateAsync(id string, targets []string, force bool) <-chan 
 // previous behavior, which avoided multiplying LLM/embedder load); a higher
 // limit fans out within that bound.
 func (m *Manager) TriggerReindexAll() {
-	m.queue.Submit(queue.Task{
+	m.queue.Submit(m.reindexAllTask())
+}
+
+// reindexAllTask builds the reindex coordinator task with a Spec so a restart
+// replays the whole reindex (which then re-enqueues per-repo/per-source work).
+func (m *Manager) reindexAllTask() queue.Task {
+	return queue.Task{
 		ID:    "*",
 		Kind:  taskKindReindex,
 		Title: "Reindex all repositories and sources",
 		Key:   taskKindReindex + ":all",
+		Spec:  queue.Spec{Kind: taskKindReindex, ID: "*"},
 		Run:   m.reindexAll,
-	})
+	}
 }
 
 // reindexAll is the queue coordinator for TriggerReindexAll: it enqueues a
@@ -1318,17 +1470,46 @@ func (m *Manager) reindexAll(ctx context.Context) error {
 	return nil
 }
 
-// scheduleReindex enqueues a deduplicated background reindex of one repo's
-// docs/code indexes. The queue key collapses repeats, so calling it while an
-// identical reindex is already queued/running is a no-op.
-func (m *Manager) scheduleReindex(id string) {
-	m.queue.Submit(queue.Task{
+// reindexTask builds a deduplicated reindex task for one repo (or, when id is a
+// web-source scope key, one collection), carrying a Spec so a restart replays
+// it. The rebuilt closure dispatches on the id's shape the same way.
+func (m *Manager) reindexTask(id string) queue.Task {
+	if name := websource.CollectionName(id); name != "" {
+		scope := id
+
+		return queue.Task{
+			ID:    scope,
+			Kind:  taskKindReindex,
+			Title: "Reindex " + scope,
+			Key:   taskKindReindex + ":" + scope,
+			Spec:  queue.Spec{Kind: taskKindReindex, ID: scope},
+			Run: func(ctx context.Context) error {
+				l := m.lock(scope)
+				l.Lock()
+				defer l.Unlock()
+
+				m.indexWebSource(ctx, name)
+
+				return nil
+			},
+		}
+	}
+
+	return queue.Task{
 		ID:    id,
 		Kind:  taskKindReindex,
 		Title: "Reindex " + id,
 		Key:   taskKindReindex + ":" + id,
+		Spec:  queue.Spec{Kind: taskKindReindex, ID: id},
 		Run:   func(ctx context.Context) error { return m.reindexRepo(ctx, id) },
-	})
+	}
+}
+
+// scheduleReindex enqueues a deduplicated background reindex of one repo's
+// docs/code indexes. The queue key collapses repeats, so calling it while an
+// identical reindex is already queued/running is a no-op.
+func (m *Manager) scheduleReindex(id string) {
+	m.queue.Submit(m.reindexTask(id))
 }
 
 // reindexRepo rebuilds a single ready repo's docs/code indexes from its

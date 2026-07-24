@@ -70,7 +70,15 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	base.GET("/debug/pprof/profile", http.HandlerFunc(pprof.Profile))
 	base.GET("/debug/pprof/symbol", http.HandlerFunc(pprof.Symbol))
 	base.GET("/debug/pprof/trace", http.HandlerFunc(pprof.Trace))
-	base.GET("/debug/pprof/{name}", http.HandlerFunc(pprof.Index))
+	// Named profiles (goroutine, heap, allocs, ...) are served by their own
+	// handler rather than pprof.Index, because Index only recognises a named
+	// profile when the URL path is exactly "/debug/pprof/<name>". Under a base
+	// path (e.g. "/krabby/debug/pprof/goroutine") that check fails and Index
+	// would always return the profile list. Resolving the handler by the {name}
+	// segment keeps ?debug=2 (full text dump) working behind the base path.
+	base.GET("/debug/pprof/{name}", func(w http.ResponseWriter, r *http.Request) {
+		pprof.Handler(r.PathValue("name")).ServeHTTP(w, r)
+	})
 
 	// The profile is selected when the client connects. Omitting the header keeps
 	// the smaller standard catalog; full exposes administration tools as well.
@@ -615,8 +623,8 @@ func bumpTask(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-// cancelTask removes a single queued task by seq. Running work is unaffected;
-// cancel that through the repo job endpoint.
+// cancelTask cancels a single task by seq: a queued task is dropped from the
+// backlog, while a running task has its underlying job aborted.
 func cancelTask(mgr *manager.Manager) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		seq, err := strconv.ParseUint(c.Request.PathValue("seq"), 10, 64)
@@ -626,7 +634,7 @@ func cancelTask(mgr *manager.Manager) ada.HandlerFunc {
 
 		if !mgr.CancelTask(seq) {
 			return c.SetStatus(http.StatusConflict).SendJSON(map[string]string{
-				"error": "no queued task with that seq (it may be running or already finished)",
+				"error": "no task with that seq (it may already be finished)",
 			})
 		}
 

@@ -22,6 +22,7 @@ import (
 	"github.com/rytsh/krabby/internal/service/registry"
 	"github.com/rytsh/krabby/internal/service/scheduler"
 	"github.com/rytsh/krabby/internal/service/settings"
+	"github.com/rytsh/krabby/internal/service/taskstore"
 	"github.com/rytsh/krabby/internal/service/websource"
 	"github.com/rytsh/krabby/internal/service/websource/confluence"
 	"github.com/rytsh/krabby/internal/service/websource/jira"
@@ -78,6 +79,13 @@ func run(ctx context.Context) error {
 		return err
 	}
 
+	// Durable work queue: queued (and interrupted running) background tasks
+	// survive a restart instead of being lost with the process.
+	taskStore, err := taskstore.New(db)
+	if err != nil {
+		return err
+	}
+
 	// graphify CLI + python discovery.
 	gfy, err := graphify.New(cfg.Graphify.Bin, cfg.Graphify.Python, cfg.Graphify.BuildTimeout, cfg.Graphify.Exclude)
 	if err != nil {
@@ -122,6 +130,9 @@ func run(ctx context.Context) error {
 		}
 	}()
 	mgr.SetSettingsStore(settingsStore)
+	// Wire the durable task store into the queue before anything enqueues work,
+	// so every submitted task is recorded and can be replayed after a restart.
+	mgr.SetTaskStore(taskStore)
 
 	// Web content sources (wikis, Confluence spaces). Each collection type has
 	// a fetcher; new source types plug in here.
@@ -173,6 +184,14 @@ func run(ctx context.Context) error {
 			slog.Error("warm normal code search index", "error", err)
 		}
 	}()
+
+	// Re-enqueue background tasks that were queued (or running) when the
+	// process last stopped. Done after the docs/RAG bundle is configured so a
+	// restored refresh/generate can run its index stages, and after the
+	// concurrency limit is applied so the backlog drains under the same bound.
+	if err := mgr.RestoreTasks(ctx); err != nil {
+		slog.Error("restore persisted background tasks", "error", err)
+	}
 
 	// Background poller. Repo cadence and per-source intervals are read from
 	// persisted runtime settings, so changes apply without a restart.

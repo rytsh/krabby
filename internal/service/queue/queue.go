@@ -42,6 +42,26 @@ const DefaultConcurrency = 3
 // maxRecent bounds the finished-task history kept for the UI.
 const maxRecent = 30
 
+// Spec is the serializable description of a task, sufficient to rebuild its
+// Run closure after a restart. The queue never interprets it; it hands the Spec
+// to the Persister so the manager can round-trip queued/running work across
+// restarts. Params carries kind-specific fields (e.g. generate targets/force).
+type Spec struct {
+	Kind   string            `json:"kind"`
+	ID     string            `json:"id"`
+	Params map[string]string `json:"params,omitempty"`
+}
+
+// Persister records queued/running tasks durably so they survive a restart.
+// The queue calls Save when a task is enqueued and Remove once it reaches a
+// terminal state (done/error/canceled) or is dropped. Implementations must be
+// safe for concurrent use; errors are logged by the implementation, not the
+// queue. A nil Persister disables persistence.
+type Persister interface {
+	Save(seq uint64, spec Spec, enqueuedAt time.Time)
+	Remove(seq uint64)
+}
+
 // Task describes one unit of background work submitted to the queue.
 type Task struct {
 	// ID is the primary subject of the work, typically a repo id or web-source
@@ -60,6 +80,17 @@ type Task struct {
 	// Run performs the work. ctx is derived from the queue's base context and
 	// is cancelled on queue shutdown.
 	Run func(ctx context.Context) error
+	// Spec, when set, is the serializable description persisted so the task can
+	// be rebuilt after a restart. Tasks with a zero Spec (empty Kind) are not
+	// persisted; use it for transient/coordinator work.
+	Spec Spec
+	// seq, when non-zero, restores a task's sequence number instead of
+	// allocating a new one. Used only by Restore when re-enqueuing persisted
+	// work so the UI keeps stable ids across a restart.
+	seq uint64
+	// noPersist suppresses the Save callback for this submit. Restore sets it
+	// because the record is already on disk; re-saving would be redundant.
+	noPersist bool
 }
 
 // Handle lets a caller wait for a submitted task to finish.
@@ -107,6 +138,8 @@ type task struct {
 	kind       string
 	title      string
 	key        string
+	spec       Spec
+	persisted  bool // a Save was issued for this task and no Remove yet
 	run        func(ctx context.Context) error
 	state      State
 	err        error
@@ -150,8 +183,21 @@ type Queue struct {
 	recent  []*task          // finished tasks, oldest first, capped at maxRecent
 	closed  bool
 
+	// persist records queued/running tasks so they survive a restart. It is set
+	// once via SetPersister before any Submit and is read without the lock.
+	persist Persister
+
 	wake           chan struct{}
 	dispatcherDone chan struct{}
+}
+
+// SetPersister installs the durable store for queued/running tasks. It must be
+// called during setup, before Submit/Restore are used. A nil persister keeps
+// persistence disabled.
+func (q *Queue) SetPersister(p Persister) {
+	q.mu.Lock()
+	q.persist = p
+	q.mu.Unlock()
 }
 
 // New creates a queue bound to baseCtx and starts its dispatcher. A limit <= 0
@@ -224,16 +270,27 @@ func (q *Queue) Submit(t Task) *Handle {
 		}
 	}
 
-	q.seq++
+	// Restore reuses the persisted seq; a normal Submit allocates the next one
+	// and keeps q.seq monotonic across restarts.
+	seq := t.seq
+	if seq == 0 {
+		q.seq++
+		seq = q.seq
+	} else if seq > q.seq {
+		q.seq = seq
+	}
+
+	enqueuedAt := time.Now()
 	nt := &task{
-		seq:        q.seq,
+		seq:        seq,
 		id:         t.ID,
 		kind:       t.Kind,
 		title:      firstNonEmpty(t.Title, t.Kind),
 		key:        t.Key,
+		spec:       t.Spec,
 		run:        t.Run,
 		state:      StateQueued,
-		enqueuedAt: time.Now(),
+		enqueuedAt: enqueuedAt,
 		handle:     &Handle{done: make(chan struct{})},
 	}
 
@@ -242,9 +299,33 @@ func (q *Queue) Submit(t Task) *Handle {
 		q.byKey[t.Key] = nt
 	}
 
+	// Persist queued work so it survives a restart. A Restore replaying an
+	// existing record skips the Save but still tracks the task so its terminal
+	// Remove fires; tasks without a serializable spec are never persisted.
+	switch {
+	case nt.spec.Kind == "":
+		// transient/coordinator task: not persisted
+	case t.noPersist:
+		nt.persisted = true
+	case q.persist != nil:
+		nt.persisted = true
+		q.persist.Save(nt.seq, nt.spec, enqueuedAt)
+	}
+
 	q.wakeUp()
 
 	return nt.handle
+}
+
+// Restore re-enqueues a task read from the Persister after a restart, reusing
+// its original seq so UI ids stay stable and skipping the Save (the record
+// already exists on disk). Terminal states still trigger Remove. It behaves
+// like Submit otherwise, including dedup by Key.
+func (q *Queue) Restore(seq uint64, t Task) *Handle {
+	t.seq = seq
+	t.noPersist = true
+
+	return q.Submit(t)
 }
 
 // CancelPending drops queued (not-yet-started) tasks whose ID matches id,
@@ -267,6 +348,7 @@ func (q *Queue) CancelPending(id string) int {
 		t.state = StateCanceled
 		t.endedAt = time.Now()
 		q.removeKeyLocked(t)
+		q.removePersistedLocked(t)
 		q.pushRecentLocked(t)
 		close(t.handle.done)
 		n++
@@ -293,6 +375,7 @@ func (q *Queue) CancelSeq(seq uint64) bool {
 		t.state = StateCanceled
 		t.endedAt = time.Now()
 		q.removeKeyLocked(t)
+		q.removePersistedLocked(t)
 		q.pushRecentLocked(t)
 		close(t.handle.done)
 
@@ -300,6 +383,21 @@ func (q *Queue) CancelSeq(seq uint64) bool {
 	}
 
 	return false
+}
+
+// RunningID returns the ID of the currently running task with the given seq and
+// true when such a task is running. The manager uses it to translate a
+// per-task cancel (by seq) into canceling that task's underlying job context,
+// since the queue itself does not own job cancellation.
+func (q *Queue) RunningID(seq uint64) (string, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if t, ok := q.active[seq]; ok {
+		return t.id, true
+	}
+
+	return "", false
 }
 
 // Bump moves the queued task with the given seq to the front of the backlog so
@@ -420,13 +518,18 @@ func (q *Queue) finish(t *task, err error) {
 	t.endedAt = time.Now()
 	switch {
 	case err != nil && q.ctx.Err() != nil:
+		// The whole queue is shutting down: this run was interrupted by the
+		// process exiting, not by the user. Keep its durable record so the
+		// task is re-enqueued (as queued) on the next start instead of lost.
 		t.state = StateCanceled
 		t.err = err
 	case err != nil:
 		t.state = StateError
 		t.err = err
+		q.removePersistedLocked(t)
 	default:
 		t.state = StateDone
+		q.removePersistedLocked(t)
 	}
 	q.pushRecentLocked(t)
 	q.mu.Unlock()
@@ -449,6 +552,9 @@ func (q *Queue) stopAccepting() {
 		t.state = StateCanceled
 		t.endedAt = time.Now()
 		q.removeKeyLocked(t)
+		// Durable records are intentionally KEPT here: these tasks are being
+		// canceled only because the process is shutting down, so they must be
+		// restored (as queued) on the next start rather than discarded.
 		q.pushRecentLocked(t)
 		close(t.handle.done)
 	}
@@ -461,6 +567,16 @@ func (q *Queue) stopAccepting() {
 func (q *Queue) removeKeyLocked(t *task) {
 	if t.key != "" && q.byKey[t.key] == t {
 		delete(q.byKey, t.key)
+	}
+}
+
+// removePersistedLocked drops a task's durable record once it reaches a
+// terminal state, so restart never replays finished/canceled work. A no-op for
+// tasks that were never persisted.
+func (q *Queue) removePersistedLocked(t *task) {
+	if q.persist != nil && t.persisted {
+		q.persist.Remove(t.seq)
+		t.persisted = false
 	}
 }
 

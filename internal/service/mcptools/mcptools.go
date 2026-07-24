@@ -388,16 +388,17 @@ func addQueueTools(server *mcp.Server, mgr *manager.Manager) {
 
 	addTool(server, &mcp.Tool{
 		Name: "cancel_task",
-		Description: "Remove queued (not-yet-started) work from the backlog. Pass seq to cancel one task " +
-			"(from queue_status), or repo to cancel every queued task for a repo id. Running work is not " +
-			"affected; use cancel_repo_job for that. seq takes precedence when both are given.",
+		Description: "Cancel background work. Pass seq to cancel one task (from queue_status): a queued task " +
+			"is dropped from the backlog and a running task has its job aborted. Or pass repo to cancel every " +
+			"queued task for a repo id (running work for a repo is aborted with cancel_repo_job). seq takes " +
+			"precedence when both are given.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, args cancelTaskArgs) (*mcp.CallToolResult, any, error) {
 		if args.Seq != 0 {
 			if !mgr.CancelTask(args.Seq) {
-				return nil, nil, fmt.Errorf("no queued task with seq %d (it may be running or already finished)", args.Seq)
+				return nil, nil, fmt.Errorf("no task with seq %d (it may already be finished)", args.Seq)
 			}
 
-			return textResult(fmt.Sprintf("cancelled queued task %d", args.Seq)), nil, nil
+			return textResult(fmt.Sprintf("cancelled task %d", args.Seq)), nil, nil
 		}
 
 		if args.Repo == "" {

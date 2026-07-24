@@ -345,12 +345,20 @@ func (m *Manager) WebSourceDoc(ctx context.Context, name, docPath string) (*repo
 // replacing the previous in-flight de-dup set, and the queue's concurrency
 // limit bounds how many syncs run at once.
 func (m *Manager) TriggerWebRefresh(name string) {
+	m.queue.Submit(m.webSyncTask(name))
+}
+
+// webSyncTask builds the queue task for a web-source sync, carrying a Spec (the
+// scope key as ID) so the sync is persisted and rebuildable after a restart.
+func (m *Manager) webSyncTask(name string) queue.Task {
 	scope := websource.ScopeKey(name)
-	m.queue.Submit(queue.Task{
+
+	return queue.Task{
 		ID:    scope,
 		Kind:  taskKindWebSync,
 		Title: "Sync " + scope,
 		Key:   taskKindWebSync + ":" + name,
+		Spec:  queue.Spec{Kind: taskKindWebSync, ID: scope},
 		Run: func(ctx context.Context) error {
 			if err := m.RefreshWebSource(ctx, name); err != nil {
 				slog.Error("refresh web source", "source", name, "error", err)
@@ -360,7 +368,7 @@ func (m *Manager) TriggerWebRefresh(name string) {
 
 			return nil
 		},
-	})
+	}
 }
 
 // RefreshDueWebSources triggers a sync for every collection whose refresh
@@ -675,23 +683,7 @@ func (m *Manager) enqueueWebReindex(ctx context.Context) {
 	}
 
 	for _, col := range cols {
-		name := col.Name
-		scope := websource.ScopeKey(name)
-		m.queue.Submit(queue.Task{
-			ID:    scope,
-			Kind:  taskKindReindex,
-			Title: "Reindex " + scope,
-			Key:   taskKindReindex + ":" + scope,
-			Run: func(ctx context.Context) error {
-				l := m.lock(scope)
-				l.Lock()
-				defer l.Unlock()
-
-				m.indexWebSource(ctx, name)
-
-				return nil
-			},
-		})
+		m.queue.Submit(m.reindexTask(websource.ScopeKey(col.Name)))
 	}
 }
 
