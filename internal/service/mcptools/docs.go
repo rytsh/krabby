@@ -71,15 +71,31 @@ type addSourceArgs struct {
 	Name            string          `json:"name" jsonschema:"collection name; lowercase [a-z0-9._-]; becomes the search scope key web:<name>. Choose a meaningful key, e.g. 'delivery-support'"`
 	Type            string          `json:"type" jsonschema:"source type: 'pages', 'confluence' or 'jira' (see source_types)"`
 	Description     string          `json:"description,omitempty" jsonschema:"short human summary of what this source holds (e.g. 'Delivery Support runbooks and TERs'); shown to models by list_sources so they can pick the right source to search"`
-	RefreshInterval string          `json:"refresh_interval,omitempty" jsonschema:"Go duration between automatic re-syncs, e.g. '1h' or '24h'; empty or 'manual' means manual only"`
-	Config          json.RawMessage `json:"config,omitempty" jsonschema:"provider-owned config object. jira: base_url, user, api_token, project or jql, include_labels, exclude_labels, team_fields, max_issues. confluence: base_url, and either space (whole space) or root_page (a page id to index that page and all its descendants as one keyed source), optional include_root, user, api_token, include_labels, exclude_labels. API tokens are write-only; blank on update keeps the stored secret"`
+	RefreshInterval string         `json:"refresh_interval,omitempty" jsonschema:"Go duration between automatic re-syncs, e.g. '1h' or '24h'; empty or 'manual' means manual only"`
+	Config          map[string]any `json:"config,omitempty" jsonschema:"provider-owned config object. jira: base_url, user, api_token, project or jql, include_labels, exclude_labels, team_fields, max_issues. confluence: base_url, and either space (whole space) or root_page (a page id to index that page and all its descendants as one keyed source), optional include_root, user, api_token, include_labels, exclude_labels. API tokens are write-only; blank on update keeps the stored secret"`
 }
 
 type updateSourceArgs struct {
-	Name            string          `json:"name" jsonschema:"existing collection name to update; the type is immutable"`
-	Description     string          `json:"description,omitempty" jsonschema:"short human summary of what this source holds; shown to models by list_sources"`
-	RefreshInterval string          `json:"refresh_interval,omitempty" jsonschema:"Go duration between automatic re-syncs, e.g. '1h'; empty or 'manual' means manual only"`
-	Config          json.RawMessage `json:"config,omitempty" jsonschema:"provider-owned config object; a blank api_token keeps the stored secret"`
+	Name            string         `json:"name" jsonschema:"existing collection name to update; the type is immutable"`
+	Description     string         `json:"description,omitempty" jsonschema:"short human summary of what this source holds; shown to models by list_sources"`
+	RefreshInterval string         `json:"refresh_interval,omitempty" jsonschema:"Go duration between automatic re-syncs, e.g. '1h'; empty or 'manual' means manual only"`
+	Config          map[string]any `json:"config,omitempty" jsonschema:"provider-owned config object; a blank api_token keeps the stored secret"`
+}
+
+// rawConfig marshals the decoded config object back to JSON for the provider
+// layer, which owns the concrete shape. MCP represents json.RawMessage as a
+// byte array in the generated tool schema, so config arrives as a decoded
+// map[string]any here and is re-encoded to json.RawMessage.
+func rawConfig(cfg map[string]any) (json.RawMessage, error) {
+	if len(cfg) == 0 {
+		return nil, nil
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("encode source config; %w", err)
+	}
+
+	return raw, nil
 }
 
 type sourceNameArgs struct {
@@ -94,11 +110,15 @@ type getSourceArgs struct {
 }
 
 func (a addSourceArgs) collection() (*websource.Collection, error) {
+	raw, err := rawConfig(a.Config)
+	if err != nil {
+		return nil, err
+	}
 	col := &websource.Collection{
 		Name:        strings.TrimSpace(strings.ToLower(a.Name)),
 		Type:        strings.TrimSpace(a.Type),
 		Description: strings.TrimSpace(a.Description),
-		Config:      a.Config,
+		Config:      raw,
 	}
 	if a.RefreshInterval != "" && a.RefreshInterval != "manual" {
 		d, err := time.ParseDuration(a.RefreshInterval)
@@ -261,10 +281,14 @@ func addSourceAdminTools(server *mcp.Server, mgr *manager.Manager) {
 		Description: "Update a web source's refresh interval and/or provider config. The type is immutable. " +
 			"A blank api_token in config keeps the stored secret. Does not re-sync by itself; call refresh_source.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args updateSourceArgs) (*mcp.CallToolResult, any, error) {
+		raw, err := rawConfig(args.Config)
+		if err != nil {
+			return nil, nil, err
+		}
 		col := &websource.Collection{
 			Name:        strings.TrimSpace(strings.ToLower(args.Name)),
 			Description: strings.TrimSpace(args.Description),
-			Config:      args.Config,
+			Config:      raw,
 		}
 		if args.RefreshInterval != "" && args.RefreshInterval != "manual" {
 			d, err := time.ParseDuration(args.RefreshInterval)
