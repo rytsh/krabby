@@ -18,8 +18,8 @@ func TestToolProfiles(t *testing.T) {
 		count   int
 		admin   bool
 	}{
-		{profile: ToolProfileStandard, count: 28},
-		{profile: ToolProfileFull, count: 42, admin: true},
+		{profile: ToolProfileStandard, count: 29},
+		{profile: ToolProfileFull, count: 43, admin: true},
 	}
 
 	for _, tt := range tests {
@@ -84,7 +84,7 @@ func TestToolProfiles(t *testing.T) {
 }
 
 func TestModelGuidanceIsSearchFirstAndBounded(t *testing.T) {
-	if len(serverInstructions) > 1800 {
+	if len(serverInstructions) > 2200 {
 		t.Fatalf("server instructions grew to %d bytes", len(serverInstructions))
 	}
 	for _, phrase := range []string{"Use search_code first", "Use list_* only", "Always pass repo"} {

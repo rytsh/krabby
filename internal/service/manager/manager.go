@@ -2342,6 +2342,99 @@ func (m *Manager) ReadRepoFileAt(ctx context.Context, repoID, relPath, snapshot 
 	return result, nil
 }
 
+// BlameCommit is the per-commit metadata referenced by blame hunks. It is held
+// once in BlameFileResult.Commits and keyed by commit sha so the same commit is
+// never repeated across hunks.
+type BlameCommit struct {
+	Author  string `json:"author"`
+	Email   string `json:"email,omitempty"`
+	Time    int64  `json:"time,omitempty"` // author time, unix seconds
+	Summary string `json:"summary,omitempty"`
+}
+
+// BlameHunk is a run of consecutive lines attributed to the same commit.
+type BlameHunk struct {
+	Commit    string   `json:"commit"`     // sha; look up details in BlameFileResult.Commits
+	LineStart int      `json:"line_start"` // 1-based, inclusive
+	LineEnd   int      `json:"line_end"`   // 1-based, inclusive
+	Lines     []string `json:"lines"`      // source lines for LineStart..LineEnd
+}
+
+// BlameFileResult carries structured git blame for a repo file. Consecutive
+// lines from the same commit are grouped into hunks, and commit metadata is
+// deduplicated into Commits (keyed by sha) so nothing is repeated.
+type BlameFileResult struct {
+	Repo     string                  `json:"repo"`
+	Path     string                  `json:"path"`
+	Start    int                     `json:"start,omitempty"`
+	End      int                     `json:"end,omitempty"`
+	Snapshot string                  `json:"snapshot,omitempty"`
+	Commits  map[string]*BlameCommit `json:"commits"`
+	Hunks    []BlameHunk             `json:"hunks"`
+}
+
+// BlameRepoFile runs `git blame` on a source file inside a tracked repo's clone.
+// start/end limit the output to a line range (start<=0 blames the whole file,
+// end<=0 blames start..EOF). When snapshot is set the blame is produced against
+// that immutable snapshot; otherwise the active clone is used. Consecutive lines
+// sharing a commit are collapsed into hunks and commit metadata is deduplicated.
+func (m *Manager) BlameRepoFile(ctx context.Context, repoID, relPath, snapshot string, start, end int) (*BlameFileResult, error) {
+	cleaned, err := repofs.CleanPath(relPath)
+	if err != nil {
+		return nil, err
+	}
+
+	dir, token, err := m.repoCloneDirAt(ctx, repoID, snapshot)
+	if err != nil {
+		return nil, err
+	}
+
+	blameLines, err := m.git.Blame(ctx, dir, cleaned, start, end)
+	if err != nil {
+		return nil, err
+	}
+
+	res := &BlameFileResult{
+		Repo:     repoID,
+		Path:     cleaned,
+		Start:    start,
+		End:      end,
+		Snapshot: token,
+		Commits:  make(map[string]*BlameCommit),
+	}
+
+	for _, bl := range blameLines {
+		if _, ok := res.Commits[bl.Commit]; !ok {
+			res.Commits[bl.Commit] = &BlameCommit{
+				Author:  bl.Author,
+				Email:   bl.Email,
+				Time:    bl.Time,
+				Summary: bl.Summary,
+			}
+		}
+
+		// Extend the current hunk when this line continues the same commit and
+		// is contiguous; otherwise start a new hunk.
+		if n := len(res.Hunks); n > 0 &&
+			res.Hunks[n-1].Commit == bl.Commit &&
+			res.Hunks[n-1].LineEnd+1 == bl.Line {
+			res.Hunks[n-1].LineEnd = bl.Line
+			res.Hunks[n-1].Lines = append(res.Hunks[n-1].Lines, bl.Content)
+
+			continue
+		}
+
+		res.Hunks = append(res.Hunks, BlameHunk{
+			Commit:    bl.Commit,
+			LineStart: bl.Line,
+			LineEnd:   bl.Line,
+			Lines:     []string{bl.Content},
+		})
+	}
+
+	return res, nil
+}
+
 // ListRepoFiles lists files under subdir ("" = repo root) in a tracked repo's
 // clone. When recursive is true it walks the whole subtree.
 func (m *Manager) ListRepoFiles(ctx context.Context, repoID, subdir string, recursive bool) ([]repofs.Entry, error) {

@@ -83,6 +83,23 @@ func clean(rel string) (string, error) {
 	return cleaned, nil
 }
 
+// CleanPath normalises a user-supplied repo-relative path and rejects anything
+// that would escape the repository root. Callers that hand the path to an
+// external tool (e.g. `git blame`) instead of os.Root must run it through this
+// first so path traversal cannot reach outside the clone. The returned path is
+// slash-separated and never "." for a concrete file.
+func CleanPath(rel string) (string, error) {
+	cleaned, err := clean(rel)
+	if err != nil {
+		return "", err
+	}
+	if cleaned == "." {
+		return "", fmt.Errorf("path is a directory, not a file")
+	}
+
+	return cleaned, nil
+}
+
 // ReadFile returns up to maxBytes of a file, starting at byte offset. maxBytes
 // <= 0 uses MaxFileBytes; anything larger is capped at MaxFileBytes.
 func ReadFile(rootDir, rel string, offset int64, maxBytes int) (*FileContent, error) {

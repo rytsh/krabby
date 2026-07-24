@@ -19,17 +19,21 @@ import (
 // initialize. Most MCP clients surface it to the LLM as high-level context, so
 // it explains what krabby is, the add->poll->query lifecycle, and which tool to
 // reach for first. Per-tool specifics stay in each tool's Description.
-const serverInstructions = `Krabby indexes tracked git repositories for source search, documentation retrieval, and code-relationship analysis.
+const serverInstructions = `Krabby tracks git repositories and builds a searchable knowledge graph over each one, so you can locate code, read the actual source from the clone, understand how it fits together, attribute changes to commits, and search its documentation - without cloning anything yourself.
 
-Tool selection:
+Tool selection (roughly what to reach for, in order):
 - Use search_code first for symbols, paths, literals, definitions, usages, and implementation locations. Use normal mode for exact text and semantic mode for conceptual source search.
+- Use read_file to view the actual source behind a result (node 'src' fields give the path); reads are sandboxed to the clone and paginated.
 - Use query_graph for architecture, dependencies, call/data flow, and relationships across files. It is not a keyword or symbol search.
-- Use search_docs for documentation, guides, wikis, and Confluence content.
+- Use git_blame to attribute lines to their last commit (who changed a snippet, when, in which commit); pass start_line/end_line to blame just a range.
+- Use search_docs for documentation and knowledge; it covers both generated repo docs and connected web sources (Confluence, Jira, pages) - scope a web source with repo=web:<collection>.
 - Use list_* only when an identifier is unknown or the user explicitly requests an inventory. Do not exhaust pages or request a recursive file tree without a clear need.
 - Use get_* tools only after a search/query identifies the target.
 - If a graph tool returns "Repository selection required", retry it with one of the provided repo ids instead of treating the result as a failure.
 
 Always pass repo when it is known. Omit repo only when the user explicitly requests cross-repository analysis and merged search is intended.
+
+Repos are grouped into namespaces. When the repo is unknown a search covers only the 'default' namespace, so the answer may live elsewhere: before concluding nothing was found, check list_namespaces and pass the matching namespace, or namespace:'*' to search them all.
 
 add_repo and refresh_repo run in the background by default. Poll repo_status until ready or error before querying.`
 
@@ -674,6 +678,14 @@ type listFilesArgs struct {
 	PerPage   int    `json:"per_page,omitempty" jsonschema:"entries per page (default 100, max 200)"`
 }
 
+type gitBlameArgs struct {
+	Repo      string `json:"repo" jsonschema:"repository id (owner/name) whose clone to blame"`
+	Path      string `json:"path" jsonschema:"repo-relative file path to blame (as shown in graph node src fields)"`
+	StartLine int    `json:"start_line,omitempty" jsonschema:"first line to blame (1-based); omit or <=0 to blame the whole file"`
+	EndLine   int    `json:"end_line,omitempty" jsonschema:"last line to blame (inclusive); omit or <=0 to blame from start_line to end of file"`
+	Snapshot  string `json:"snapshot,omitempty" jsonschema:"snapshot token from an earlier read_file/list_files call; pass it to blame the same commit"`
+}
+
 func addFileTools(server *mcp.Server, mgr *manager.Manager) {
 	addTool(server, &mcp.Tool{
 		Name: "read_file",
@@ -700,6 +712,20 @@ func addFileTools(server *mcp.Server, mgr *manager.Manager) {
 		}
 
 		return jsonResult(entries), nil, nil
+	})
+
+	addTool(server, &mcp.Tool{
+		Name: "git_blame",
+		Description: "Show git blame for a file inside a tracked repository's clone: who last changed each line, in which commit and when. " +
+			"Use it after read_file/search_code locates code to attribute a specific snippet - pass start_line/end_line to blame just that range instead of the whole file. " +
+			"Pass the snapshot token from an earlier read to attribute the same commit.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args gitBlameArgs) (*mcp.CallToolResult, any, error) {
+		res, err := mgr.BlameRepoFile(ctx, args.Repo, args.Path, args.Snapshot, args.StartLine, args.EndLine)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return jsonResult(res), nil, nil
 	})
 }
 

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/rytsh/krabby/internal/service/credentials"
@@ -150,6 +151,88 @@ func (g *Git) DiffNames(ctx context.Context, dir, from, to string) ([]string, er
 	}
 
 	return files, nil
+}
+
+// BlameLine is one attributed source line from `git blame`.
+type BlameLine struct {
+	Line    int    `json:"line"`              // 1-based line number in the current file
+	Commit  string `json:"commit"`            // full commit sha that last touched the line
+	Author  string `json:"author"`            // author name
+	Email   string `json:"email,omitempty"`   // author email (angle brackets stripped)
+	Time    int64  `json:"time,omitempty"`    // author time, unix seconds
+	Summary string `json:"summary,omitempty"` // first line of the commit message
+	Content string `json:"content"`           // the source line itself (no trailing newline)
+}
+
+// Blame returns structured `git blame` output for a repo-relative file. When
+// start > 0 it limits the output to the line range [start, end] via -L; end <= 0
+// (or end < start) blames from start to the end of the file. start <= 0 blames
+// the whole file. The path is passed after "--" so it is never treated as a
+// revision or option.
+func (g *Git) Blame(ctx context.Context, dir, file string, start, end int) ([]BlameLine, error) {
+	args := []string{"blame", "--line-porcelain"}
+	if start > 0 {
+		rng := fmt.Sprintf("%d,", start)
+		if end >= start {
+			rng = fmt.Sprintf("%d,%d", start, end)
+		}
+		args = append(args, "-L", rng)
+	}
+	args = append(args, "--", file)
+
+	out, err := g.run(ctx, dir, nil, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	return parseBlamePorcelain(out), nil
+}
+
+// parseBlamePorcelain parses `git blame --line-porcelain` output. Each line is
+// a header ("<sha> <origLine> <finalLine> [group]"), a repeated block of
+// key-value metadata, and finally the source content prefixed by a tab.
+func parseBlamePorcelain(out string) []BlameLine {
+	var (
+		lines []BlameLine
+		cur   BlameLine
+		have  bool
+	)
+
+	for _, ln := range strings.Split(out, "\n") {
+		switch {
+		case strings.HasPrefix(ln, "\t"):
+			// Source content: closes the current record.
+			cur.Content = ln[1:]
+			lines = append(lines, cur)
+			cur = BlameLine{}
+			have = false
+		case !have:
+			// Header line: "<40-hex-sha> <orig> <final> [group-size]".
+			fields := strings.Fields(ln)
+			if len(fields) >= 3 && len(fields[0]) == 40 {
+				cur.Commit = fields[0]
+				cur.Line, _ = strconv.Atoi(fields[2])
+				have = true
+			}
+		default:
+			key, val, ok := strings.Cut(ln, " ")
+			if !ok {
+				continue
+			}
+			switch key {
+			case "author":
+				cur.Author = val
+			case "author-mail":
+				cur.Email = strings.Trim(val, "<>")
+			case "author-time":
+				cur.Time, _ = strconv.ParseInt(val, 10, 64)
+			case "summary":
+				cur.Summary = val
+			}
+		}
+	}
+
+	return lines
 }
 
 // repoIDRe validates a full repo id: two or more "/"-separated segments of
