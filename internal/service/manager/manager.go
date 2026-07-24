@@ -101,6 +101,14 @@ type Manager struct {
 	mcpKeyMu     sync.RWMutex
 	mcpKey       string
 	mcpConfigKey string
+
+	// codeWarm tracks background warming of the normal (full-text) code search
+	// index. pending holds repo ids whose index has not been built yet; a
+	// per-repo mutex (inflight) serializes on-demand warming so a search that
+	// races the background pass never returns partial results. See
+	// WarmCodeSearch and ensureCodeIndex.
+	codeWarmMu sync.Mutex
+	codeWarm   map[string]*sync.Mutex
 }
 
 // docsBundle is an immutable snapshot of the docs/RAG clients. A nil field means
@@ -165,6 +173,7 @@ func New(
 		locks:    map[string]*sync.Mutex{},
 		activity: map[string]map[string]struct{}{},
 		jobs:     map[string]*job{},
+		codeWarm: map[string]*sync.Mutex{},
 	}
 	// The queue's limit is updated from persisted settings at startup and on
 	// every settings change (see SetTaskConcurrency); it starts at the default.
@@ -813,6 +822,12 @@ func pathWithin(path, root string) bool {
 // WarmCodeSearch creates missing bw FTS indexes for repositories that were
 // tracked before normal code search was introduced. Existing indexes are left
 // untouched; regular refreshes keep them current afterwards.
+//
+// It is safe to run in the background: repos whose index is still missing are
+// first marked pending, so a concurrent SearchCodeText for such a repo warms it
+// on demand (ensureCodeIndex) and never returns partial results. Per-repo
+// locking makes the background pass and an on-demand warm cooperate instead of
+// double-indexing.
 func (m *Manager) WarmCodeSearch(ctx context.Context) error {
 	if m.codeText == nil {
 		return nil
@@ -823,13 +838,10 @@ func (m *Manager) WarmCodeSearch(ctx context.Context) error {
 		return err
 	}
 
-	d, releaseDocs := m.acquireDocs()
-	defer releaseDocs()
-	if d.codeRag == nil {
-		return nil
-	}
-
-	var errs []error
+	// Mark every repo with a missing index as pending up front, so a search
+	// that races this pass knows to warm on demand rather than read an empty or
+	// half-filled index.
+	pending := make([]*registry.Repo, 0, len(repos))
 	for _, repo := range repos {
 		if repo.Path == "" || !fileExists(filepath.Join(repo.Path, ".git")) {
 			continue
@@ -837,19 +849,97 @@ func (m *Manager) WarmCodeSearch(ctx context.Context) error {
 
 		hasIndex, err := m.codeText.HasRepo(ctx, repo.ID)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("check code index for %s: %w", repo.ID, err))
+			slog.Error("check code index", "repo", repo.ID, "error", err)
 			continue
 		}
 		if hasIndex {
 			continue
 		}
 
-		if err := d.codeRag.IndexText(ctx, repo.ID, repo.Path); err != nil {
+		m.markCodeWarmPending(repo.ID)
+		pending = append(pending, repo)
+	}
+
+	var errs []error
+	for _, repo := range pending {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := m.ensureCodeIndex(ctx, repo.ID, repo.Path); err != nil {
 			errs = append(errs, fmt.Errorf("warm code index for %s: %w", repo.ID, err))
 		}
 	}
 
 	return errors.Join(errs...)
+}
+
+// markCodeWarmPending records that repo's normal code index still needs
+// building, creating its per-repo warm lock if absent.
+func (m *Manager) markCodeWarmPending(repoID string) {
+	m.codeWarmMu.Lock()
+	defer m.codeWarmMu.Unlock()
+	if _, ok := m.codeWarm[repoID]; !ok {
+		m.codeWarm[repoID] = &sync.Mutex{}
+	}
+}
+
+// codeWarmLock returns the per-repo warm lock and whether repo is pending. When
+// not pending, the index is already built (or was never scheduled) and callers
+// need not warm it.
+func (m *Manager) codeWarmLock(repoID string) (*sync.Mutex, bool) {
+	m.codeWarmMu.Lock()
+	defer m.codeWarmMu.Unlock()
+	lk, ok := m.codeWarm[repoID]
+	return lk, ok
+}
+
+// clearCodeWarmPending drops repo from the pending set once its index exists.
+func (m *Manager) clearCodeWarmPending(repoID string) {
+	m.codeWarmMu.Lock()
+	defer m.codeWarmMu.Unlock()
+	delete(m.codeWarm, repoID)
+}
+
+// ensureCodeIndex builds the normal (full-text) code index for repo if it is
+// still pending, serialized per repo so the background warm pass and an
+// on-demand warm triggered by a search never index the same repo twice. A
+// no-op once the index exists.
+func (m *Manager) ensureCodeIndex(ctx context.Context, repoID, clonePath string) error {
+	if m.codeText == nil {
+		return nil
+	}
+
+	lk, pending := m.codeWarmLock(repoID)
+	if !pending {
+		return nil
+	}
+
+	lk.Lock()
+	defer lk.Unlock()
+
+	// Re-check under the lock: another caller may have finished warming while we
+	// waited, in which case the repo is no longer pending.
+	if _, still := m.codeWarmLock(repoID); !still {
+		return nil
+	}
+
+	if clonePath == "" || !fileExists(filepath.Join(clonePath, ".git")) {
+		m.clearCodeWarmPending(repoID)
+		return nil
+	}
+
+	d, releaseDocs := m.acquireDocs()
+	defer releaseDocs()
+	if d.codeRag == nil {
+		return nil
+	}
+
+	if err := d.codeRag.IndexText(ctx, repoID, clonePath); err != nil {
+		return err
+	}
+
+	m.clearCodeWarmPending(repoID)
+	return nil
 }
 
 // TriggerRefresh queues a background refresh for a repo on the central work

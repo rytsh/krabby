@@ -896,6 +896,14 @@ func (m *Manager) SearchCodeText(
 	if err != nil {
 		return coderag.SearchPage{}, err
 	}
+
+	// The normal index may still be warming in the background at startup. Build
+	// any in-scope repo's index on demand before searching so results are never
+	// partial. Cheap when nothing is pending.
+	if err := m.ensureCodeIndexForSearch(ctx, repoID, scope); err != nil {
+		return coderag.SearchPage{}, err
+	}
+
 	if scope.single != "" {
 		return m.codeText.Search(ctx, scope.single, query, page, perPage)
 	}
@@ -907,6 +915,54 @@ func (m *Manager) SearchCodeText(
 	// out over the namespace's repos and merge by score. Results are already
 	// per-repo ranked; a stable score sort keeps the strongest hits on top.
 	return m.searchCodeTextNamespace(ctx, scope, query, page, perPage)
+}
+
+// ensureCodeIndexForSearch warms the normal code index for every repo a
+// SearchCodeText call will read, so a search issued while the background warm
+// pass is still running blocks on the exact repos it needs instead of returning
+// partial results. It resolves the in-scope repo ids from repoID/scope, skips
+// any that are not pending, and builds the rest on demand (serialized per repo
+// by ensureCodeIndex).
+func (m *Manager) ensureCodeIndexForSearch(ctx context.Context, repoID string, scope namespaceScope) error {
+	var ids []string
+	switch {
+	case scope.single != "":
+		ids = []string{scope.single}
+	case len(scope.repos) > 0:
+		ids = scope.repos
+	case scope.all && repoID != "":
+		// Explicit single repo.
+		ids = []string{repoID}
+	case scope.all:
+		// Cross-repo search ("*" or empty): every tracked repo participates.
+		repos, err := m.reg.List(ctx)
+		if err != nil {
+			return err
+		}
+		ids = make([]string, 0, len(repos))
+		for _, r := range repos {
+			ids = append(ids, r.ID)
+		}
+	}
+
+	var errs []error
+	for _, id := range ids {
+		if _, pending := m.codeWarmLock(id); !pending {
+			continue
+		}
+
+		repo, err := m.reg.Get(ctx, id)
+		if err != nil {
+			// Repo vanished from the registry; drop it from pending and skip.
+			m.clearCodeWarmPending(id)
+			continue
+		}
+		if err := m.ensureCodeIndex(ctx, id, repo.Path); err != nil {
+			errs = append(errs, fmt.Errorf("warm code index for %s: %w", id, err))
+		}
+	}
+
+	return errors.Join(errs...)
 }
 
 func (m *Manager) searchCodeTextNamespace(

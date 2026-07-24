@@ -163,9 +163,16 @@ func run(ctx context.Context) error {
 	if err := mgr.MigrateRepoIDs(ctx); err != nil {
 		slog.Error("migrate legacy repo ids", "error", err)
 	}
-	if err := mgr.WarmCodeSearch(ctx); err != nil {
-		slog.Error("warm normal code search index", "error", err)
-	}
+	// Warm the normal (full-text) code index in the background so the server
+	// starts listening immediately instead of waiting for every un-indexed repo
+	// to be re-read and chunked. Repos are marked pending first, so a search
+	// that arrives before the pass finishes warms just the repos it needs on
+	// demand (see Manager.SearchCodeText) and never returns partial results.
+	go func() {
+		if err := mgr.WarmCodeSearch(ctx); err != nil {
+			slog.Error("warm normal code search index", "error", err)
+		}
+	}()
 
 	// Background poller. Repo cadence and per-source intervals are read from
 	// persisted runtime settings, so changes apply without a restart.
