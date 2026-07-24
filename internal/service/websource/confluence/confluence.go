@@ -266,9 +266,33 @@ type contentPage struct {
 		// incremental-sync watermark.
 		When string `json:"when"`
 	} `json:"version"`
+	// Ancestors are the page's parent chain from the space root down to its
+	// immediate parent (Confluence returns them in that order). Their titles
+	// form a breadcrumb prepended to the markdown so a page with a weak title
+	// (e.g. "Core implementation", "QA") carries its position in the tree into
+	// its embedding and to the model, without mixing in sibling content.
+	Ancestors []struct {
+		Title string `json:"title"`
+	} `json:"ancestors"`
 	Links struct {
 		WebUI string `json:"webui"`
 	} `json:"_links"`
+}
+
+// breadcrumb renders the ancestor titles as "A › B › C" (excluding the page
+// itself). Empty when the page has no ancestors.
+func (p contentPage) breadcrumb() string {
+	if len(p.Ancestors) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(p.Ancestors))
+	for _, a := range p.Ancestors {
+		if t := strings.TrimSpace(a.Title); t != "" {
+			parts = append(parts, t)
+		}
+	}
+
+	return strings.Join(parts, " › ")
 }
 
 type contentList struct {
@@ -418,6 +442,12 @@ func pageToRemote(base string, page contentPage) websource.RemotePage {
 	if md, err := websource.MarkdownFromHTML(page.Body.Storage.Value); err != nil {
 		remote.Err = fmt.Errorf("convert page %s (%s); %w", page.ID, page.Title, err)
 	} else {
+		// Prepend the ancestor breadcrumb so a weakly-titled page carries its
+		// place in the space tree into both its embedding and the model's view,
+		// without mixing in sibling content.
+		if bc := page.breadcrumb(); bc != "" {
+			md = "> " + bc + "\n\n" + md
+		}
 		remote.Markdown = md
 	}
 
@@ -445,7 +475,7 @@ func firstEndpoint(cfg resolvedConfig, watermark string) string {
 	params := url.Values{}
 	params.Set("cql", cql)
 	params.Set("limit", strconv.Itoa(pageLimit))
-	params.Set("expand", "body.storage,metadata.labels,version")
+	params.Set("expand", "body.storage,metadata.labels,version,ancestors")
 
 	return "/rest/api/content/search?" + params.Encode()
 }
@@ -472,7 +502,7 @@ func parseConfluenceTime(s string) time.Time {
 // page in subtree mode).
 func (f *Fetcher) fetchOne(ctx context.Context, cfg resolvedConfig, base, id string) (*contentPage, error) {
 	params := url.Values{}
-	params.Set("expand", "body.storage,metadata.labels,version")
+	params.Set("expand", "body.storage,metadata.labels,version,ancestors")
 	endpoint := base + "/rest/api/content/" + url.PathEscape(id) + "?" + params.Encode()
 
 	body, err := f.get(ctx, cfg, endpoint)

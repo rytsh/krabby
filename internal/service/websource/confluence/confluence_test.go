@@ -202,6 +202,28 @@ func TestMergeConfig(t *testing.T) {
 	})
 }
 
+func TestBreadcrumb(t *testing.T) {
+	// No ancestors: empty breadcrumb.
+	if got := (contentPage{}).breadcrumb(); got != "" {
+		t.Fatalf("no ancestors = %q, want empty", got)
+	}
+
+	// Ancestor titles joined root->parent order, blanks skipped.
+	var p contentPage
+	p.Ancestors = []struct {
+		Title string `json:"title"`
+	}{
+		{Title: "Financial Operations"},
+		{Title: " "},
+		{Title: "Landscapes"},
+		{Title: "SDD Brazil Invoicing"},
+	}
+	want := "Financial Operations › Landscapes › SDD Brazil Invoicing"
+	if got := p.breadcrumb(); got != want {
+		t.Fatalf("breadcrumb = %q, want %q", got, want)
+	}
+}
+
 func TestParseConfluenceTime(t *testing.T) {
 	if parseConfluenceTime("2026-07-23T12:44:38.000Z").IsZero() {
 		t.Fatal("failed to parse RFC3339 version.when")
