@@ -1,7 +1,10 @@
 // Package vectorstore defines krabby's embedded bw vector index.
 package vectorstore
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Payload is the metadata carried with each stored vector. It is enough to
 // locate and display the source document without re-reading the index.
@@ -13,6 +16,12 @@ type Payload struct {
 	DocPath string `json:"doc_path"` // repo-relative markdown or source path
 	Title   string `json:"title"`
 	Chunk   string `json:"chunk"` // the chunk text
+
+	// UpdatedAt is the source document's last-modified time (JIRA "updated",
+	// Confluence version.when), when known. It lets retrieval surface recency to
+	// the model and apply a mild recency bias so a stale item does not outrank a
+	// fresh, similarly-relevant one. Zero when the source has no such timestamp.
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
 
 	Symbol    string `json:"symbol,omitempty"`     // code: leading symbol in the chunk
 	StartLine int    `json:"start_line,omitempty"` // code: 1-based inclusive
@@ -72,6 +81,11 @@ type Store interface {
 	// repo. Used to detect a missing/empty index so callers can force a
 	// rebuild even when higher-level stage state claims success.
 	HasRepo(ctx context.Context, repo string) (bool, error)
+	// IndexedPaths returns the distinct payload DocPaths that have at least one
+	// vector for the repo. Used to reconcile the index against the docs on disk
+	// so pages whose markdown exists but whose vectors are missing (e.g. an
+	// interrupted embed run) are re-embedded on the next sync.
+	IndexedPaths(ctx context.Context, repo string) (map[string]struct{}, error)
 	// DeletePaths removes a repo's vectors whose payload DocPath is in paths.
 	// Used for incremental re-indexing of changed/deleted files.
 	DeletePaths(ctx context.Context, repo string, paths []string) error

@@ -410,9 +410,10 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 // per-page conversion error rather than failing the whole sync.
 func pageToRemote(base string, page contentPage) websource.RemotePage {
 	remote := websource.RemotePage{
-		Slug:  page.ID + "-" + websource.Slugify(page.Title),
-		Title: page.Title,
-		URL:   base + page.Links.WebUI,
+		Slug:      page.ID + "-" + websource.Slugify(page.Title),
+		Title:     page.Title,
+		URL:       base + page.Links.WebUI,
+		UpdatedAt: parseConfluenceTime(page.Version.When),
 	}
 	if md, err := websource.MarkdownFromHTML(page.Body.Storage.Value); err != nil {
 		remote.Err = fmt.Errorf("convert page %s (%s); %w", page.ID, page.Title, err)

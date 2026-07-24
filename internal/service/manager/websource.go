@@ -10,7 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/worldline-go/hardloop"
+
 	"github.com/rytsh/krabby/internal/service/queue"
+	"github.com/rytsh/krabby/internal/service/rag"
 	"github.com/rytsh/krabby/internal/service/repofs"
 	"github.com/rytsh/krabby/internal/service/websource"
 )
@@ -18,6 +21,22 @@ import (
 // ErrNoWebSources is returned when web-source methods are called before the
 // store has been attached.
 var ErrNoWebSources = errors.New("web sources are not configured")
+
+// validateWebSpecs checks that every cron spec parses (hardloop syntax, e.g.
+// "0 2 * * *" or "@every 6h"), so create/update fail fast with a clear error
+// instead of the scheduler silently dropping an unparseable schedule.
+func validateWebSpecs(specs []string) error {
+	for _, spec := range specs {
+		if strings.TrimSpace(spec) == "" {
+			continue // empty entries are ignored by EffectiveSpecs
+		}
+		if _, err := hardloop.ParseStandard(spec); err != nil {
+			return fmt.Errorf("invalid cron spec %q; %w", spec, err)
+		}
+	}
+
+	return nil
+}
 
 // SetWebSources attaches the web-source store and the fetcher per collection
 // type. Called once at startup.
@@ -50,6 +69,10 @@ func (m *Manager) AddWebCollection(ctx context.Context, col *websource.Collectio
 
 	if !websource.ValidName(col.Name) {
 		return fmt.Errorf("invalid collection name %q (want lowercase [a-z0-9._-])", col.Name)
+	}
+
+	if err := validateWebSpecs(col.Specs); err != nil {
+		return err
 	}
 
 	fetcher, ok := m.webFetchers[col.Type]
@@ -94,6 +117,10 @@ func (m *Manager) UpdateWebCollection(ctx context.Context, col *websource.Collec
 
 	if existing == nil {
 		return fmt.Errorf("collection %s not found", col.Name)
+	}
+
+	if err := validateWebSpecs(col.Specs); err != nil {
+		return err
 	}
 
 	col.Type = existing.Type // the type is immutable once created
@@ -387,6 +414,12 @@ func (m *Manager) RefreshDueWebSources(ctx context.Context) {
 
 	now := time.Now()
 	for _, col := range cols {
+		// Cron-scheduled collections are driven by the scheduler's hardloop
+		// cron set (see WebSourceSchedules); skip them here so they are not
+		// also polled on the fixed interval-tick.
+		if len(col.Specs) > 0 {
+			continue
+		}
 		if col.RefreshInterval <= 0 {
 			continue
 		}
@@ -399,6 +432,42 @@ func (m *Manager) RefreshDueWebSources(ctx context.Context) {
 			m.TriggerWebRefresh(col.Name)
 		}
 	}
+}
+
+// WebSourceSchedule is one web collection's cron schedule, used by the
+// scheduler to build a hardloop cron per source (mirroring RepoSchedule).
+type WebSourceSchedule struct {
+	Name  string
+	Specs []string
+}
+
+// WebSourceSchedules returns the effective cron schedules of every collection
+// that has one (explicit Specs, or an "@every <RefreshInterval>" fallback).
+// Collections with neither are manual-only and omitted. The scheduler rebuilds
+// its web-source cron set from this on every reconcile tick, so UI/REST changes
+// take effect without a restart.
+func (m *Manager) WebSourceSchedules(ctx context.Context) []WebSourceSchedule {
+	if m.webStore == nil {
+		return nil
+	}
+
+	cols, err := m.webStore.ListCollections(ctx)
+	if err != nil {
+		slog.Error("list web sources for schedule", "error", err)
+
+		return nil
+	}
+
+	out := make([]WebSourceSchedule, 0, len(cols))
+	for _, col := range cols {
+		specs := col.EffectiveSpecs()
+		if len(specs) == 0 {
+			continue
+		}
+		out = append(out, WebSourceSchedule{Name: col.Name, Specs: specs})
+	}
+
+	return out
 }
 
 // RefreshWebSource synchronously fetches a collection, writes changed pages
@@ -478,6 +547,9 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 	// so a large collection is not fully re-embedded when a few items change.
 	var changedPaths, removedPaths []string
 	seen := map[string]bool{}
+	// updatedAt maps each page's doc path ("<slug>.md") to its source
+	// last-modified time, so indexing can stamp it onto the page's vectors.
+	updatedAt := map[string]time.Time{}
 	now := time.Now()
 
 	total := len(result.Pages)
@@ -515,6 +587,8 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 		}
 
 		rec.Teams = remote.Teams
+		rec.UpdatedAt = remote.UpdatedAt
+		updatedAt[remote.Slug+".md"] = remote.UpdatedAt
 
 		markdown := withTitleHeading(remote.Markdown, rec.Title)
 		hash := websource.Hash(markdown)
@@ -566,6 +640,25 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 		}
 	}
 
+	// Reconcile the index against the docs on disk: re-embed any page whose
+	// markdown exists but has no vectors yet. This repairs collections whose
+	// first embed run was interrupted (e.g. a restart mid-sync): the markdown
+	// was written and hashed, so a later incremental sync sees no change and
+	// would otherwise never embed those pages, leaving them unsearchable.
+	if missing := m.missingIndexedPaths(ctx, name, seen, changedPaths); len(missing) > 0 {
+		slog.Info("web source reindex: repairing pages missing from the index",
+			"source", name, "missing", len(missing))
+		changedPaths = append(changedPaths, missing...)
+		// Reconciled pages were not fetched this run (unchanged markdown), so
+		// their UpdatedAt is not in the map yet; take it from the stored record.
+		for _, path := range missing {
+			slug := strings.TrimSuffix(path, ".md")
+			if rec := existing[slug]; rec != nil {
+				updatedAt[path] = rec.UpdatedAt
+			}
+		}
+	}
+
 	// Re-embed the changed/removed docs. If indexing fails (e.g. the embeddings
 	// provider is down or a quota is exhausted even after retries), do NOT
 	// advance the fetch watermark: the markdown is already on disk, but the
@@ -574,7 +667,7 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 	// errored so the failure is visible and a refresh retries the work.
 	indexOK := true
 	if len(changedPaths) > 0 || len(removedPaths) > 0 {
-		if err := m.indexWebSourcePaths(ctx, name, changedPaths, removedPaths); err != nil {
+		if err := m.indexWebSourcePaths(ctx, name, changedPaths, removedPaths, updatedAt); err != nil {
 			indexOK = false
 			slog.Error("web source indexing failed; watermark not advanced",
 				"source", name, "changed", len(changedPaths), "error", err)
@@ -629,13 +722,56 @@ func (m *Manager) indexWebSource(ctx context.Context, name string) {
 	}
 }
 
+// missingIndexedPaths returns the doc paths ("<slug>.md") that exist on disk
+// this run (seen) but have no vectors in the docs index, excluding those
+// already queued for embedding (alreadyQueued). It powers the sync-time
+// reconcile that repairs interrupted embed runs. RAG being disabled, or any
+// scan error, yields no extra paths (best-effort; never blocks a sync).
+func (m *Manager) missingIndexedPaths(ctx context.Context, name string, seen map[string]bool, alreadyQueued []string) []string {
+	if len(seen) == 0 {
+		return nil
+	}
+
+	d, releaseDocs := m.acquireDocs()
+	defer releaseDocs()
+	if d.rag == nil {
+		return nil
+	}
+
+	indexed, err := d.rag.IndexedPaths(ctx, websource.ScopeKey(name))
+	if err != nil {
+		slog.Error("web source reindex: scan indexed paths", "source", name, "error", err)
+
+		return nil
+	}
+
+	queued := make(map[string]struct{}, len(alreadyQueued))
+	for _, p := range alreadyQueued {
+		queued[p] = struct{}{}
+	}
+
+	var missing []string
+	for slug := range seen {
+		path := slug + ".md"
+		if _, ok := indexed[path]; ok {
+			continue // already embedded
+		}
+		if _, ok := queued[path]; ok {
+			continue // already about to be embedded this run
+		}
+		missing = append(missing, path)
+	}
+
+	return missing
+}
+
 // indexWebSourcePaths incrementally updates only the changed/removed docs of a
 // collection in the RAG index, so a large source (e.g. a JIRA project) is not
 // fully re-embedded when a few items change. It returns an error when embedding
 // or upserting fails so the caller can avoid advancing the fetch watermark past
 // pages whose vectors were not written. A disabled RAG subsystem is not an
 // error: files stay on disk for the next reindex-all.
-func (m *Manager) indexWebSourcePaths(ctx context.Context, name string, changed, removed []string) error {
+func (m *Manager) indexWebSourcePaths(ctx context.Context, name string, changed, removed []string, updatedAt map[string]time.Time) error {
 	d, releaseDocs := m.acquireDocs()
 	defer releaseDocs()
 
@@ -658,7 +794,13 @@ func (m *Manager) indexWebSourcePaths(ctx context.Context, name string, changed,
 		m.setProgress(scope, Progress{Phase: "index", Done: done, Total: total})
 	}
 
-	if err := d.rag.IndexPathsProgress(ctx, scope, m.sourcesDir(name), changed, removed, onProgress); err != nil {
+	// Carry each page's source last-modified time onto its vectors so retrieval
+	// can surface and weigh recency.
+	opts := &rag.IndexOptions{
+		UpdatedAt: func(path string) time.Time { return updatedAt[path] },
+	}
+
+	if err := d.rag.IndexPathsProgress(ctx, scope, m.sourcesDir(name), changed, removed, onProgress, opts); err != nil {
 		slog.Error("index web source (incremental)", "source", name, "error", err)
 
 		return err

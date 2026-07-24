@@ -69,8 +69,16 @@ type Collection struct {
 	// clients via list_sources so a model can pick the right source to search.
 	Description string `bw:"description" json:"description,omitempty"`
 	// RefreshInterval is how often the scheduler re-syncs the collection.
-	// 0 disables automatic refresh (manual only).
+	// 0 disables automatic refresh (manual only). Kept for backward
+	// compatibility and as the fallback when Specs is empty: the scheduler then
+	// polls the collection on an "@every <RefreshInterval>" cron.
 	RefreshInterval time.Duration `bw:"refresh_interval" json:"refresh_interval"`
+	// Specs are cron schedules (github.com/worldline-go/hardloop syntax, e.g.
+	// "0 2 * * *" or "@every 6h") on which the scheduler re-syncs this
+	// collection, mirroring per-namespace repository schedules. When non-empty
+	// they are authoritative and RefreshInterval is ignored. An empty slice
+	// falls back to RefreshInterval (or manual-only when that is 0 too).
+	Specs []string `bw:"specs" json:"specs,omitempty"`
 
 	Status        string    `bw:"status"     json:"status"`
 	LastError     string    `bw:"last_error" json:"last_error,omitempty"`
@@ -86,6 +94,28 @@ type Collection struct {
 	// cursor for incremental fetches). It is written by the fetcher via
 	// FetchResult.State and never exposed over the API.
 	State json.RawMessage `bw:"state" json:"-"`
+}
+
+// EffectiveSpecs returns the cron schedules the scheduler should run for this
+// collection: the explicit Specs when set, otherwise a single "@every
+// <RefreshInterval>" derived from the legacy interval. It returns nil when the
+// collection has neither (manual-only), so the scheduler skips it.
+func (c Collection) EffectiveSpecs() []string {
+	specs := make([]string, 0, len(c.Specs))
+	for _, s := range c.Specs {
+		if strings.TrimSpace(s) != "" {
+			specs = append(specs, strings.TrimSpace(s))
+		}
+	}
+	if len(specs) > 0 {
+		return specs
+	}
+
+	if c.RefreshInterval > 0 {
+		return []string{"@every " + c.RefreshInterval.String()}
+	}
+
+	return nil
 }
 
 // Page is one synced document of a collection.
@@ -108,7 +138,12 @@ type Page struct {
 	TeamsNorm []string `bw:"teams_norm,index" json:"-"`
 	// Hash fingerprints the converted markdown so unchanged pages skip
 	// re-embedding.
-	Hash        string    `bw:"hash"       json:"-"`
+	Hash string `bw:"hash"       json:"-"`
+	// UpdatedAt is the source item's last-modified time (JIRA "updated",
+	// Confluence version.when). Persisted so it can be re-applied to the page's
+	// vectors during an index reconcile without re-fetching, and surfaced in
+	// listings.
+	UpdatedAt   time.Time `bw:"updated_at" json:"updated_at,omitzero"`
 	Status      string    `bw:"status"     json:"status"`
 	LastError   string    `bw:"last_error" json:"last_error,omitempty"`
 	LastFetchAt time.Time `bw:"last_fetch" json:"last_fetch_at,omitzero"`
@@ -124,6 +159,10 @@ type RemotePage struct {
 	// Teams are optional provider-supplied tags (e.g. JIRA team/squad field
 	// values) recorded on the page so tickets can be listed/filtered by team.
 	Teams []string
+	// UpdatedAt is the source item's last-modified time (JIRA "updated",
+	// Confluence version.when), when the provider supplies one. Recorded on the
+	// page and its vectors so retrieval can surface recency and bias ranking.
+	UpdatedAt time.Time
 	// Err marks a page that failed to fetch/convert; the sync records the
 	// error on the page record and keeps the previous content.
 	Err error
@@ -170,7 +209,9 @@ func ValidName(name string) bool { return nameRe.MatchString(name) }
 // schemaVersion must be bumped whenever Collection or Page change shape.
 // v6: Page gained TeamsNorm (indexed, lowercase team tags) for store-level
 // case-insensitive team filtering.
-const schemaVersion = 6
+// v7: Collection gained Specs (per-source cron schedules).
+// v8: Page gained UpdatedAt (source last-modified time for recency).
+const schemaVersion = 8
 
 // Store persists collections and pages.
 type Store struct {

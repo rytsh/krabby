@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/rakunlabs/bw"
 	"github.com/rakunlabs/query"
@@ -34,6 +35,7 @@ type chunkRecord struct {
 	DocPath   string    `bw:"doc_path"`
 	Title     string    `bw:"title"`
 	Chunk     string    `bw:"chunk"`
+	UpdatedAt time.Time `bw:"updated_at"`
 	Symbol    string    `bw:"symbol"`
 	StartLine int       `bw:"start_line"`
 	EndLine   int       `bw:"end_line"`
@@ -42,6 +44,14 @@ type chunkRecord struct {
 
 // bucketName is the bw bucket holding all chunks (all repos).
 const bucketName = "chunks"
+
+// bucketVersion is bumped whenever chunkRecord changes shape so bw performs a
+// migration instead of refusing to open on a schema-fingerprint mismatch. The
+// vector index is derived data (rebuilt from the docs on disk), so a version
+// bump that drops incompatible rows is acceptable; sources re-embed on their
+// next sync.
+//   - v2: added UpdatedAt for recency-aware retrieval.
+const bucketVersion = 2
 
 // deleteBatch bounds how many records are deleted per Badger transaction so
 // large repos do not hit ErrTxnTooBig.
@@ -89,7 +99,7 @@ func newEmbedded(dir string) (*embedded, error) {
 		return nil, fmt.Errorf("open vector db %s; %w", dir, err)
 	}
 
-	bucket, err := bw.RegisterBucket[chunkRecord](db, bucketName)
+	bucket, err := bw.RegisterBucket[chunkRecord](db, bucketName, bw.WithVersion[chunkRecord](bucketVersion))
 	if err != nil {
 		_ = db.Close()
 
@@ -115,6 +125,7 @@ func (s *embedded) Upsert(ctx context.Context, items []Item) error {
 			DocPath:   it.Payload.DocPath,
 			Title:     it.Payload.Title,
 			Chunk:     it.Payload.Chunk,
+			UpdatedAt: it.Payload.UpdatedAt,
 			Symbol:    it.Payload.Symbol,
 			StartLine: it.Payload.StartLine,
 			EndLine:   it.Payload.EndLine,
@@ -208,6 +219,7 @@ func (s *embedded) Search(ctx context.Context, filter Filter, vec []float32, top
 				DocPath:   h.Record.DocPath,
 				Title:     h.Record.Title,
 				Chunk:     h.Record.Chunk,
+				UpdatedAt: h.Record.UpdatedAt,
 				Symbol:    h.Record.Symbol,
 				StartLine: h.Record.StartLine,
 				EndLine:   h.Record.EndLine,
@@ -244,6 +256,27 @@ func (s *embedded) HasRepo(ctx context.Context, repo string) (bool, error) {
 
 // errStopWalk short-circuits a bw.Walk once the first record is seen.
 var errStopWalk = errors.New("stop walk")
+
+// IndexedPaths returns the distinct DocPaths that have at least one vector for
+// the repo, by scanning the repo's chunk records.
+func (s *embedded) IndexedPaths(ctx context.Context, repo string) (map[string]struct{}, error) {
+	s.h.opMu.RLock()
+	defer s.h.opMu.RUnlock()
+
+	paths := map[string]struct{}{}
+	err := s.h.bucket.Walk(ctx, repoQuery(repo), func(rec *chunkRecord) error {
+		if rec.DocPath != "" {
+			paths[rec.DocPath] = struct{}{}
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("scan repo vectors; %w", err)
+	}
+
+	return paths, nil
+}
 
 func (s *embedded) DeletePaths(ctx context.Context, repo string, paths []string) error {
 	if len(paths) == 0 {

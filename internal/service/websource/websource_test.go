@@ -212,6 +212,32 @@ func TestPagesPagedAndTeamFilter(t *testing.T) {
 	}
 }
 
+func TestEffectiveSpecs(t *testing.T) {
+	// Explicit specs win and are trimmed; blanks dropped.
+	c := Collection{Specs: []string{" 0 2 * * * ", "", "@every 6h"}, RefreshInterval: time.Hour}
+	got := c.EffectiveSpecs()
+	if len(got) != 2 || got[0] != "0 2 * * *" || got[1] != "@every 6h" {
+		t.Fatalf("explicit specs = %#v", got)
+	}
+
+	// No specs: fall back to an @every derived from RefreshInterval.
+	c = Collection{RefreshInterval: 24 * time.Hour}
+	got = c.EffectiveSpecs()
+	if len(got) != 1 || got[0] != "@every 24h0m0s" {
+		t.Fatalf("interval fallback = %#v", got)
+	}
+
+	// Neither: manual-only, no schedule.
+	if got := (Collection{}).EffectiveSpecs(); got != nil {
+		t.Fatalf("manual-only should have no specs, got %#v", got)
+	}
+
+	// Only blank specs and no interval: still manual-only.
+	if got := (Collection{Specs: []string{"", "  "}}).EffectiveSpecs(); got != nil {
+		t.Fatalf("blank specs should be manual-only, got %#v", got)
+	}
+}
+
 func TestFullResyncDue(t *testing.T) {
 	// First run (zero time) always forces a full pass.
 	if !FullResyncDue(time.Time{}, time.Hour) {

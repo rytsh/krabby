@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rytsh/krabby/internal/config"
 	"github.com/rytsh/krabby/internal/service/embedder"
@@ -235,5 +236,39 @@ func TestRetrieveEmptyQuestion(t *testing.T) {
 
 	if _, err := s.Retrieve(context.Background(), vectorstore.FilterKey(""), "  ", 5); err == nil {
 		t.Fatal("expected error for empty question")
+	}
+}
+
+func TestRankScore(t *testing.T) {
+	now := time.Now()
+	const base float32 = 0.80
+
+	// Unknown timestamp: score unchanged (untimestamped sources not penalised).
+	if got := rankScore(base, time.Time{}, now); got != base {
+		t.Fatalf("zero updatedAt = %v, want unchanged %v", got, base)
+	}
+
+	// Fresh doc: essentially unchanged (within a rounding hair of base).
+	if got := rankScore(base, now.Add(-24*time.Hour), now); got < base*0.999 || got > base {
+		t.Fatalf("fresh doc = %v, want ~%v", got, base)
+	}
+
+	// Older docs decay monotonically but never below the floor.
+	twoYears := rankScore(base, now.Add(-recencyHalfLife), now)
+	tenYears := rankScore(base, now.Add(-5*recencyHalfLife), now)
+	floor := base * recencyFloor
+	if !(twoYears < base && tenYears < twoYears) {
+		t.Fatalf("expected base > 2y(%v) > 10y(%v)", twoYears, tenYears)
+	}
+	if tenYears < floor {
+		t.Fatalf("10y score %v dropped below floor %v", tenYears, floor)
+	}
+
+	// A fresh, slightly-less-relevant doc should outrank a decade-old, slightly
+	// more-relevant one (recency breaks near-ties).
+	freshLower := rankScore(0.78, now.Add(-30*24*time.Hour), now)
+	oldHigher := rankScore(0.80, now.Add(-10*365*24*time.Hour), now)
+	if freshLower <= oldHigher {
+		t.Fatalf("recency should break the tie: fresh %v vs old %v", freshLower, oldHigher)
 	}
 }

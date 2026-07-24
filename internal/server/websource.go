@@ -21,7 +21,12 @@ type sourceRequest struct {
 	Name            string `json:"name"`
 	Type            string `json:"type"`
 	Description     string `json:"description"`
-	RefreshInterval string `json:"refresh_interval"` // Go duration, e.g. "24h"; empty = manual only
+	RefreshInterval string `json:"refresh_interval"` // Go duration, e.g. "24h"; empty = manual only. Used only when Specs is empty.
+
+	// Specs are cron schedules (hardloop syntax, e.g. "0 2 * * *" or "@every
+	// 6h") on which the scheduler re-syncs the source, mirroring repository
+	// schedules. Authoritative over RefreshInterval when set.
+	Specs []string `json:"specs"`
 
 	// Config is an opaque provider-owned object. The registered fetcher
 	// validates, merges and redacts it.
@@ -29,11 +34,19 @@ type sourceRequest struct {
 }
 
 func (r sourceRequest) collection() (*websource.Collection, error) {
+	specs := make([]string, 0, len(r.Specs))
+	for _, s := range r.Specs {
+		if s = strings.TrimSpace(s); s != "" {
+			specs = append(specs, s)
+		}
+	}
+
 	col := &websource.Collection{
 		Name:        strings.TrimSpace(strings.ToLower(r.Name)),
 		Type:        strings.TrimSpace(r.Type),
 		Description: strings.TrimSpace(r.Description),
 		Config:      r.Config,
+		Specs:       specs,
 	}
 
 	if r.RefreshInterval != "" {

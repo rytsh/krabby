@@ -71,15 +71,34 @@ type addSourceArgs struct {
 	Name            string `json:"name" jsonschema:"collection name; lowercase [a-z0-9._-]; becomes the search scope key web:<name>. Choose a meaningful key, e.g. 'delivery-support'"`
 	Type            string `json:"type" jsonschema:"source type: 'pages', 'confluence' or 'jira' (see source_types)"`
 	Description     string `json:"description,omitempty" jsonschema:"short human summary of what this source holds (e.g. 'Delivery Support runbooks and TERs'); shown to models by list_sources so they can pick the right source to search"`
-	RefreshInterval string `json:"refresh_interval,omitempty" jsonschema:"Go duration between automatic re-syncs, e.g. '1h' or '24h'; empty or 'manual' means manual only"`
+	RefreshInterval string `json:"refresh_interval,omitempty" jsonschema:"legacy fixed interval as a Go duration, e.g. '1h' or '24h'; used only when schedule is empty. Empty or 'manual' means manual only. Prefer schedule for cron-style timing"`
+	Schedule        string `json:"schedule,omitempty" jsonschema:"comma-separated cron schedules (hardloop syntax, e.g. '0 2 * * *' for daily 02:00, or '@every 6h'); mirrors repository schedules and is authoritative over refresh_interval when set"`
 	Config          string `json:"config,omitempty" jsonschema:"provider-owned config as a JSON object encoded in a string, e.g. '{\"base_url\":\"https://...\",\"root_page\":\"123\",\"api_token\":\"...\"}'. jira: base_url, user, api_token, project or jql, include_labels, exclude_labels, team_fields, max_issues. confluence: base_url, and either space (whole space) or root_page (a page id to index that page and all its descendants as one keyed source), optional include_root, user, api_token, include_labels, exclude_labels. API tokens are write-only; blank on update keeps the stored secret"`
 }
 
 type updateSourceArgs struct {
 	Name            string `json:"name" jsonschema:"existing collection name to update; the type is immutable"`
 	Description     string `json:"description,omitempty" jsonschema:"short human summary of what this source holds; shown to models by list_sources"`
-	RefreshInterval string `json:"refresh_interval,omitempty" jsonschema:"Go duration between automatic re-syncs, e.g. '1h'; empty or 'manual' means manual only"`
+	RefreshInterval string `json:"refresh_interval,omitempty" jsonschema:"legacy fixed interval as a Go duration, e.g. '1h'; used only when schedule is empty. Empty or 'manual' means manual only"`
+	Schedule        string `json:"schedule,omitempty" jsonschema:"comma-separated cron schedules (hardloop syntax, e.g. '0 2 * * *' or '@every 6h'); authoritative over refresh_interval when set"`
 	Config          string `json:"config,omitempty" jsonschema:"provider-owned config as a JSON object encoded in a string; a blank api_token keeps the stored secret"`
+}
+
+// parseSchedule splits a comma-separated cron schedule string into specs,
+// trimming blanks. Empty input yields nil (no cron schedule).
+func parseSchedule(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+
+	return out
 }
 
 // rawConfig parses the config JSON string into json.RawMessage for the
@@ -119,6 +138,7 @@ func (a addSourceArgs) collection() (*websource.Collection, error) {
 		Type:        strings.TrimSpace(a.Type),
 		Description: strings.TrimSpace(a.Description),
 		Config:      raw,
+		Specs:       parseSchedule(a.Schedule),
 	}
 	if a.RefreshInterval != "" && a.RefreshInterval != "manual" {
 		d, err := time.ParseDuration(a.RefreshInterval)
@@ -297,6 +317,7 @@ func addSourceAdminTools(server *mcp.Server, mgr *manager.Manager) {
 			Name:        strings.TrimSpace(strings.ToLower(args.Name)),
 			Description: strings.TrimSpace(args.Description),
 			Config:      raw,
+			Specs:       parseSchedule(args.Schedule),
 		}
 		if args.RefreshInterval != "" && args.RefreshInterval != "manual" {
 			d, err := time.ParseDuration(args.RefreshInterval)

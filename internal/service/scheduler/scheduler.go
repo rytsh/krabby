@@ -33,12 +33,17 @@ type cronRunner interface {
 	Stop()
 }
 
-// scheduler owns the currently loaded repo cron set and the signature of the
-// schedules that produced it, so reconcile can detect changes cheaply.
+// scheduler owns the currently loaded repo and web-source cron sets and the
+// signatures of the schedules that produced them, so reconcile can detect
+// changes cheaply and rebuild only the set that changed.
 type scheduler struct {
-	mgr  *manager.Manager
+	mgr *manager.Manager
+
 	cron cronRunner
 	sig  string
+
+	webCron cronRunner
+	webSig  string
 }
 
 // Run evaluates repo and web-source schedules until ctx is cancelled. Repo
@@ -52,9 +57,10 @@ func Run(ctx context.Context, mgr *manager.Manager) {
 
 	slog.Info("scheduler started", "check_interval", checkInterval.String())
 
-	// Load the initial cron set before the first tick so polling starts
+	// Load the initial cron sets before the first tick so polling starts
 	// immediately rather than after one interval.
 	s.reconcile(ctx)
+	s.reconcileWeb(ctx)
 
 	for {
 		select {
@@ -63,8 +69,11 @@ func Run(ctx context.Context, mgr *manager.Manager) {
 
 			return
 		case <-ticker.C:
+			// Interval-based fallback for web sources without a cron spec
+			// (legacy RefreshInterval-only collections).
 			mgr.RefreshDueWebSources(ctx)
 			s.reconcile(ctx)
+			s.reconcileWeb(ctx)
 		}
 	}
 }
@@ -126,11 +135,89 @@ func (s *scheduler) buildCrons(schedules []settings.RepoSchedule) []hardloop.Cro
 	return crons
 }
 
-// stop cancels the loaded cron set (if any) and waits for in-flight jobs.
+// reconcileWeb rebuilds the web-source cron set when the effective per-source
+// schedules have changed since the last load. Mirrors reconcile for repos: a
+// build/parse failure leaves the previously loaded set running and is retried
+// on the next tick.
+func (s *scheduler) reconcileWeb(ctx context.Context) {
+	schedules := s.mgr.WebSourceSchedules(ctx)
+	sig := webScheduleSignature(schedules)
+	if s.webCron != nil && sig == s.webSig {
+		return
+	}
+
+	crons := s.buildWebCrons(schedules)
+
+	// No web schedules: tear down any existing set and remember the empty
+	// signature so we do not rebuild every tick.
+	if len(crons) == 0 {
+		s.stopWeb()
+		s.webSig = sig
+
+		return
+	}
+
+	job, err := hardloop.NewCron(crons...)
+	if err != nil {
+		slog.Error("build web-source poll schedules", "error", err)
+
+		return
+	}
+
+	if err := job.Start(ctx); err != nil {
+		slog.Error("start web-source poll schedules", "error", err)
+
+		return
+	}
+
+	s.stopWeb()
+	s.webCron = job
+	s.webSig = sig
+
+	slog.Info("web-source poll schedules loaded", "jobs", len(crons))
+}
+
+// buildWebCrons turns per-source schedules into hardloop cron jobs, one per
+// collection. Each job's function triggers a background refresh of that source;
+// triggers coalesce and the work queue bounds concurrency.
+func (s *scheduler) buildWebCrons(schedules []manager.WebSourceSchedule) []hardloop.Cron {
+	crons := make([]hardloop.Cron, 0, len(schedules))
+
+	for _, sc := range schedules {
+		if len(sc.Specs) == 0 {
+			continue
+		}
+
+		name := sc.Name
+		crons = append(crons, hardloop.Cron{
+			Name:  "websource-poll:" + name,
+			Specs: sc.Specs,
+			Func: func(_ context.Context) error {
+				s.mgr.TriggerWebRefresh(name)
+
+				return nil
+			},
+		})
+	}
+
+	return crons
+}
+
+// stop cancels the loaded repo and web-source cron sets (if any) and waits for
+// in-flight jobs.
 func (s *scheduler) stop() {
 	if s.cron != nil {
 		s.cron.Stop()
 		s.cron = nil
+	}
+	s.stopWeb()
+}
+
+// stopWeb cancels the loaded web-source cron set (if any).
+func (s *scheduler) stopWeb() {
+	if s.webCron != nil {
+		s.webCron.Stop()
+		s.webCron = nil
 	}
 }
 
@@ -157,6 +244,21 @@ func scheduleSignature(schedules []settings.RepoSchedule) string {
 		}
 
 		b.WriteString(sc.Namespace)
+		b.WriteString("=")
+		b.WriteString(strings.Join(sc.Specs, ","))
+		b.WriteString(";")
+	}
+
+	return b.String()
+}
+
+// webScheduleSignature is a stable fingerprint of the effective web-source
+// schedules so reconcileWeb only rebuilds crons when they actually change.
+func webScheduleSignature(schedules []manager.WebSourceSchedule) string {
+	var b strings.Builder
+
+	for _, sc := range schedules {
+		b.WriteString(sc.Name)
 		b.WriteString("=")
 		b.WriteString(strings.Join(sc.Specs, ","))
 		b.WriteString(";")

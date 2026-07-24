@@ -68,6 +68,36 @@ func TestEmbeddedHasRepo(t *testing.T) {
 	}
 }
 
+func TestEmbeddedIndexedPaths(t *testing.T) {
+	ctx := context.Background()
+	s := openEmbedded(t, t.TempDir())
+
+	if err := s.Upsert(ctx, testItems()); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	// o/a has one distinct doc path (doc.md), across two chunks.
+	paths, err := s.IndexedPaths(ctx, "o/a")
+	if err != nil {
+		t.Fatalf("IndexedPaths(o/a): %v", err)
+	}
+	if len(paths) != 1 {
+		t.Fatalf("IndexedPaths(o/a) = %v, want 1 path", paths)
+	}
+	if _, ok := paths["doc.md"]; !ok {
+		t.Fatalf("IndexedPaths(o/a) missing doc.md: %v", paths)
+	}
+
+	// A repo with no vectors yields an empty set.
+	empty, err := s.IndexedPaths(ctx, "o/missing")
+	if err != nil {
+		t.Fatalf("IndexedPaths(o/missing): %v", err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("IndexedPaths(o/missing) = %v, want empty", empty)
+	}
+}
+
 func TestEmbeddedSearchRanksAndFilters(t *testing.T) {
 	ctx := context.Background()
 	s := openEmbedded(t, t.TempDir())

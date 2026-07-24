@@ -53,6 +53,9 @@
       type: "pages",
       description: "",
       refresh_interval: "24h",
+      // Cron schedule(s), comma-separated (hardloop syntax, e.g. "0 2 * * *").
+      // When set it is authoritative over refresh_interval, like repo schedules.
+      schedule: "",
       base_url: "",
       space: "",
       user: "",
@@ -198,11 +201,18 @@
           full_resync_every: form.full_resync_every.trim(),
         };
       }
+      const specs = form.schedule
+        .split(",")
+        .map((x) => x.trim())
+        .filter(Boolean);
       const body = {
         name: form.name.trim(),
         type: form.type,
         description: form.description.trim(),
-        refresh_interval: form.refresh_interval === "manual" ? "" : form.refresh_interval,
+        // A cron schedule, when given, is authoritative; otherwise the interval.
+        refresh_interval:
+          specs.length || form.refresh_interval === "manual" ? "" : form.refresh_interval,
+        specs,
         config,
       };
       if (editingName) await api.updateSource(editingName, body);
@@ -227,6 +237,7 @@
       type: source.type,
       description: source.description || "",
       refresh_interval: source.refresh_interval || "manual",
+      schedule: (source.specs || []).join(", "),
       base_url: source.config?.base_url || "",
       space: source.config?.space || "",
       user: source.config?.user || "",
@@ -386,8 +397,8 @@
             </select>
           </label>
           <label class="flex flex-col gap-1 text-[13px] text-dim">
-            Auto refresh
-            <select class="input" bind:value={form.refresh_interval}>
+            Auto refresh {form.schedule.trim() ? "(overridden by schedule)" : ""}
+            <select class="input" bind:value={form.refresh_interval} disabled={!!form.schedule.trim()}>
               <option value="manual">manual only</option>
               <option value="1h">every hour</option>
               <option value="6h">every 6 hours</option>
@@ -396,6 +407,19 @@
             </select>
           </label>
         </div>
+
+        <label class="flex flex-col gap-1 text-[13px] text-dim">
+          Cron schedule (optional; comma-separated, overrides auto refresh — same as repos)
+          <input
+            class="input font-mono"
+            placeholder="0 2 * * *,  @every 6h"
+            bind:value={form.schedule}
+          />
+          <span class="text-[11px] text-faint">
+            e.g. <code class="font-mono">0 2 * * *</code> (daily 02:00),
+            <code class="font-mono">@every 6h</code>, or several separated by commas. Leave empty to use Auto refresh.
+          </span>
+        </label>
 
         <label class="flex flex-col gap-1 text-[13px] text-dim">
           Description (what this source holds — shown to MCP/AI to pick the right source)
@@ -568,7 +592,11 @@
               {/if}
               <div class="mb-3 flex flex-wrap items-center gap-x-5 gap-y-1 text-[12px] text-faint">
                 <span>Last sync: {s.last_refresh_at ? fmtDate(s.last_refresh_at) : "never"}</span>
-                <span>Auto refresh: {s.refresh_interval || "manual"}</span>
+                {#if s.specs?.length}
+                  <span>Schedule: <span class="font-mono">{s.specs.join(", ")}</span></span>
+                {:else}
+                  <span>Auto refresh: {s.refresh_interval || "manual"}</span>
+                {/if}
                 {#if s.type === "confluence"}
                   <span class="font-mono">
                     {s.config?.base_url}

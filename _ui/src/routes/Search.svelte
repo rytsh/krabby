@@ -4,6 +4,7 @@
   import { onMount } from "svelte";
   import { api } from "../lib/api.js";
   import { navigate } from "../lib/router.js";
+  import { fmtDate } from "../lib/format.js";
   import Icon from "../lib/Icon.svelte";
 
   // Repo ids for the filter dropdown, loaded once. Capped so a huge fleet does
@@ -241,7 +242,12 @@
             <div class="flex items-center gap-2 border-b border-line bg-surface-2/50 px-3.5 py-2">
               <span class="truncate text-[13px] font-medium text-fg">{r.title || r.path}</span>
               <span class="font-mono text-[11px] text-faint">{r.repo} / {r.path}</span>
-              <span class="ml-auto text-[11px] text-faint">{pct(r.score)}</span>
+              <span class="ml-auto flex items-center gap-2 text-[11px] text-faint">
+                {#if r.updated_at && !r.updated_at.startsWith("0001")}
+                  <span title="last updated">{fmtDate(r.updated_at)}</span>
+                {/if}
+                <span>{pct(r.score)}</span>
+              </span>
             </div>
             <pre class="m-0 max-h-56 overflow-hidden whitespace-pre-wrap px-3.5 py-2.5 font-mono text-[12px] leading-relaxed text-dim">{docExcerpt(r.excerpt)}</pre>
           </button>

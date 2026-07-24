@@ -395,11 +395,12 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 			out = append(out, websource.RemotePage{
 				// Slug is derived from the immutable issue key so ticket
 				// updates map to the same markdown file across syncs.
-				Slug:     strings.ToLower(iss.Key),
-				Title:    title,
-				URL:      cfg.BaseURL + "/browse/" + iss.Key,
-				Teams:    teams,
-				Markdown: renderIssue(iss, teams),
+				Slug:      strings.ToLower(iss.Key),
+				Title:     title,
+				URL:       cfg.BaseURL + "/browse/" + iss.Key,
+				Teams:     teams,
+				UpdatedAt: parseJiraTime(iss.Fields.Updated),
+				Markdown:  renderIssue(iss, teams),
 			})
 		}
 
