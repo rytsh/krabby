@@ -11,6 +11,7 @@ import (
 	"github.com/rakunlabs/query"
 
 	"github.com/rytsh/krabby/internal/service/vectorstore"
+	"github.com/rytsh/krabby/internal/storage"
 )
 
 const (
@@ -43,6 +44,12 @@ type SearchPage struct {
 type TextStore struct {
 	db     *bw.DB
 	bucket *bw.Bucket[textRecord]
+
+	// A full-text write expands into one key per distinct term, and source
+	// chunks are three times the size of documentation ones, so how many
+	// records fit in one Badger transaction is discovered rather than assumed.
+	writes  *storage.Batcher
+	deletes *storage.Batcher
 }
 
 func NewTextStore(db *bw.DB) (*TextStore, error) {
@@ -51,7 +58,12 @@ func NewTextStore(db *bw.DB) (*TextStore, error) {
 		return nil, fmt.Errorf("register code search bucket; %w", err)
 	}
 
-	return &TextStore{db: db, bucket: bucket}, nil
+	return &TextStore{
+		db:      db,
+		bucket:  bucket,
+		writes:  storage.NewBatcher(textBatchSize),
+		deletes: storage.NewBatcher(textBatchSize),
+	}, nil
 }
 
 // ReplaceRepo replaces all searchable chunks for a repository.
@@ -78,11 +90,10 @@ func (s *TextStore) InsertItems(ctx context.Context, items []vectorstore.Item) e
 		})
 	}
 
-	for start := 0; start < len(records); start += textBatchSize {
-		end := min(start+textBatchSize, len(records))
-		if err := s.bucket.InsertMany(ctx, records[start:end]); err != nil {
-			return fmt.Errorf("insert code search chunks; %w", err)
-		}
+	if err := storage.Run(s.writes, records, func(batch []*textRecord) error {
+		return s.bucket.InsertMany(ctx, batch)
+	}); err != nil {
+		return fmt.Errorf("insert code search chunks; %w", err)
 	}
 
 	return nil
@@ -250,18 +261,18 @@ func (s *TextStore) DeleteRepo(ctx context.Context, repo string) error {
 }
 
 func (s *TextStore) deleteIDs(ids []string) error {
-	for start := 0; start < len(ids); start += textBatchSize {
-		end := min(start+textBatchSize, len(ids))
-		if err := s.db.Update(func(tx *bw.Tx) error {
-			for _, id := range ids[start:end] {
+	if err := storage.Run(s.deletes, ids, func(batch []string) error {
+		return s.db.Update(func(tx *bw.Tx) error {
+			for _, id := range batch {
 				if err := s.bucket.DeleteTx(tx, id); err != nil && !errors.Is(err, bw.ErrNotFound) {
 					return err
 				}
 			}
+
 			return nil
-		}); err != nil {
-			return fmt.Errorf("delete code search chunks; %w", err)
-		}
+		})
+	}); err != nil {
+		return fmt.Errorf("delete code search chunks; %w", err)
 	}
 
 	return nil

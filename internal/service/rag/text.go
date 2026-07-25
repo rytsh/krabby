@@ -14,6 +14,7 @@ import (
 	"github.com/rakunlabs/query"
 
 	"github.com/rytsh/krabby/internal/service/vectorstore"
+	"github.com/rytsh/krabby/internal/storage"
 )
 
 const (
@@ -40,6 +41,12 @@ type TextStore struct {
 	// statsBucket holds the corpus-derived query tuning; see textstats.go.
 	statsBucket *bw.Bucket[textStats]
 	stats       statsCache
+
+	// A full-text write expands into one key per distinct term, so how many
+	// records fit in one Badger transaction depends on how long and how varied
+	// the documents are. The batchers discover that instead of assuming it.
+	writes  *storage.Batcher
+	deletes *storage.Batcher
 }
 
 func NewTextStore(db *bw.DB) (*TextStore, error) {
@@ -53,7 +60,13 @@ func NewTextStore(db *bw.DB) (*TextStore, error) {
 		return nil, fmt.Errorf("register docs search stats bucket; %w", err)
 	}
 
-	return &TextStore{db: db, bucket: bucket, statsBucket: statsBucket}, nil
+	return &TextStore{
+		db:          db,
+		bucket:      bucket,
+		statsBucket: statsBucket,
+		writes:      storage.NewBatcher(docsTextBatchSize),
+		deletes:     storage.NewBatcher(docsTextBatchSize),
+	}, nil
 }
 
 // Index rebuilds one repository or web collection from its markdown files.
@@ -200,11 +213,10 @@ func streamTextRecords(
 }
 
 func (s *TextStore) insert(ctx context.Context, records []*textRecord) error {
-	for start := 0; start < len(records); start += docsTextBatchSize {
-		end := min(start+docsTextBatchSize, len(records))
-		if err := s.bucket.InsertMany(ctx, records[start:end]); err != nil {
-			return fmt.Errorf("insert docs search chunks; %w", err)
-		}
+	if err := storage.Run(s.writes, records, func(batch []*textRecord) error {
+		return s.bucket.InsertMany(ctx, batch)
+	}); err != nil {
+		return fmt.Errorf("insert docs search chunks; %w", err)
 	}
 
 	return nil
@@ -317,19 +329,18 @@ func (s *TextStore) deleteWhere(ctx context.Context, q *query.Query, paths map[s
 		return fmt.Errorf("collect docs search chunks; %w", err)
 	}
 
-	for start := 0; start < len(ids); start += docsTextBatchSize {
-		end := min(start+docsTextBatchSize, len(ids))
-		if err := s.db.Update(func(tx *bw.Tx) error {
-			for _, id := range ids[start:end] {
+	if err := storage.Run(s.deletes, ids, func(batch []string) error {
+		return s.db.Update(func(tx *bw.Tx) error {
+			for _, id := range batch {
 				if err := s.bucket.DeleteTx(tx, id); err != nil && !errors.Is(err, bw.ErrNotFound) {
 					return err
 				}
 			}
 
 			return nil
-		}); err != nil {
-			return fmt.Errorf("delete docs search chunks; %w", err)
-		}
+		})
+	}); err != nil {
+		return fmt.Errorf("delete docs search chunks; %w", err)
 	}
 
 	return nil

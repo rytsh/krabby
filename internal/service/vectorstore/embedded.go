@@ -56,15 +56,14 @@ const bucketName = "chunks"
 //   - v2: added UpdatedAt for recency-aware retrieval.
 const bucketVersion = 2
 
-// deleteBatch bounds how many records are deleted per Badger transaction so
-// large repos do not hit ErrTxnTooBig.
-const deleteBatch = 500
-
-// upsertBatch bounds how many vectors are inserted per Badger transaction.
-// Each record carries a full embedding (often 768-1536 float32s, several KB),
-// so a single InsertMany of a large repo's chunks overflows Badger's
-// transaction size limit (ErrTxnTooBig). Insert in bounded batches instead.
-const upsertBatch = 64
+// deleteBatch and upsertBatch are the starting points for the adaptive
+// batchers below, not hard limits. Each vector record carries a full embedding
+// whose width is set by the model, so how many fit in one Badger transaction
+// cannot be known ahead of time; storage.Run discovers it.
+const (
+	deleteBatch = 500
+	upsertBatch = 64
+)
 
 // sharedHandle is a refcounted bw DB. Manager.Configure builds the new bundle
 // (opening the store) before closing the previous one; Badger's directory lock
@@ -75,6 +74,11 @@ type sharedHandle struct {
 	db     *bw.DB
 	bucket *bw.Bucket[chunkRecord]
 	refs   int
+
+	// Batch sizes are per database, not per handle: they describe how wide
+	// this store's records are, which every handle sharing it observes.
+	upserts *storage.Batcher
+	deletes *storage.Batcher
 
 	// opMu lets ordinary operations run concurrently but makes a dimension
 	// migration (Wipe + first insert) exclusive across every handle sharing the
@@ -111,7 +115,11 @@ func newEmbedded(dir string) (*embedded, error) {
 		return nil, fmt.Errorf("register vector bucket; %w", err)
 	}
 
-	h := &sharedHandle{dir: dir, db: db, bucket: bucket, refs: 1}
+	h := &sharedHandle{
+		dir: dir, db: db, bucket: bucket, refs: 1,
+		upserts: storage.NewBatcher(upsertBatch),
+		deletes: storage.NewBatcher(deleteBatch),
+	}
 	sharedDBs.m[dir] = h
 
 	return &embedded{h: h}, nil
@@ -139,7 +147,7 @@ func (s *embedded) Upsert(ctx context.Context, items []Item) error {
 	}
 
 	s.h.opMu.RLock()
-	err := insertBatched(ctx, s.h.bucket, records)
+	err := s.insertBatched(ctx, records)
 	s.h.opMu.RUnlock()
 	if err == nil {
 		return nil
@@ -158,7 +166,7 @@ func (s *embedded) Upsert(ctx context.Context, items []Item) error {
 
 	// Another concurrent upsert may have completed the migration while this
 	// call waited. Recheck before wiping so completed repo indexes are not lost.
-	err = insertBatched(ctx, s.h.bucket, records)
+	err = s.insertBatched(ctx, records)
 	if err == nil {
 		return nil
 	}
@@ -174,22 +182,16 @@ func (s *embedded) Upsert(ctx context.Context, items []Item) error {
 		return fmt.Errorf("wipe vector db after dim change; %w", werr)
 	}
 
-	return insertBatched(ctx, s.h.bucket, records)
+	return s.insertBatched(ctx, records)
 }
 
-// insertBatched inserts records in bounded batches so a large upsert never
-// exceeds Badger's per-transaction size limit (ErrTxnTooBig). On a dimension
-// mismatch it returns immediately with that error so the caller's wipe+retry
-// path can run.
-func insertBatched(ctx context.Context, bucket *bw.Bucket[chunkRecord], records []*chunkRecord) error {
-	for start := 0; start < len(records); start += upsertBatch {
-		end := min(start+upsertBatch, len(records))
-		if err := bucket.InsertMany(ctx, records[start:end]); err != nil {
-			return err
-		}
-	}
-
-	return nil
+// insertBatched inserts records in batches sized to fit Badger's
+// per-transaction limit. On a dimension mismatch it returns immediately with
+// that error so the caller's wipe+retry path can run.
+func (s *embedded) insertBatched(ctx context.Context, records []*chunkRecord) error {
+	return storage.Run(s.h.upserts, records, func(batch []*chunkRecord) error {
+		return s.h.bucket.InsertMany(ctx, batch)
+	})
 }
 
 func (s *embedded) Search(ctx context.Context, filter Filter, vec []float32, topK int) ([]Match, error) {
@@ -319,11 +321,9 @@ func (s *embedded) deleteWhere(ctx context.Context, repo string, paths map[strin
 		return fmt.Errorf("collect repo vectors; %w", err)
 	}
 
-	for start := 0; start < len(ids); start += deleteBatch {
-		end := min(start+deleteBatch, len(ids))
-
-		err := s.h.db.Update(func(tx *bw.Tx) error {
-			for _, id := range ids[start:end] {
+	if err := storage.Run(s.h.deletes, ids, func(batch []string) error {
+		return s.h.db.Update(func(tx *bw.Tx) error {
+			for _, id := range batch {
 				if err := s.h.bucket.DeleteTx(tx, id); err != nil && !errors.Is(err, bw.ErrNotFound) {
 					return err
 				}
@@ -331,9 +331,8 @@ func (s *embedded) deleteWhere(ctx context.Context, repo string, paths map[strin
 
 			return nil
 		})
-		if err != nil {
-			return fmt.Errorf("delete repo vectors; %w", err)
-		}
+	}); err != nil {
+		return fmt.Errorf("delete repo vectors; %w", err)
 	}
 
 	return nil

@@ -258,6 +258,12 @@ Three things about the design are worth knowing when tuning it:
 - **The startup warm passes are sequential.** Backfilling the code and docs
   search indexes runs one after the other in the background, so a restart never
   pays for both at once.
+- **Write batches size themselves.** Badger caps a transaction at 15% of the
+  memtable, so tuning the memtable for memory also changes how much can be
+  written at once — and how much a batch costs depends on the embedding model's
+  width, the document's vocabulary and, for vectors, how large the HNSW graph
+  already is. None of that is knowable in advance, so the write paths start
+  optimistic and halve on `ErrTxnTooBig`, keeping the size they find.
 
 The vector cache deserves a note because it is the one bound `GOMEMLIMIT`
 cannot enforce: its contents are live, so the collector can only thrash against
