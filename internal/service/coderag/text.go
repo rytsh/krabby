@@ -156,29 +156,66 @@ func (s *TextStore) Search(ctx context.Context, repo, search string, page, perPa
 		return result, nil
 	}
 
-	// bw FTS currently has no structured-filter option. Hydrate the ranked hit
-	// set once, then filter by the indexed repo field before slicing the page.
-	hits, _, err := s.bucket.Search(ctx, search, math.MaxInt, 0)
-	if err != nil {
+	// A repository filter used to be applied by asking bw for every ranked hit
+	// at once, building a second slice of the ones that matched, and taking
+	// twenty rows out of it. Nothing leaked — both slices were garbage by the
+	// time the caller saw the result — but while the call ran the live heap
+	// grew with the corpus, and a few concurrent searches on a common term
+	// could take a container down.
+	//
+	// Paging is pushed all the way down instead: bw hydrates only the page and
+	// reports how many hits matched without decoding the ones outside it. The
+	// total therefore stays exact, which a paged search needs — a count that
+	// stopped at some ceiling would make the pager lie about how deep the
+	// results go — while the cost of a search follows the page, not the index.
+	//
+	// The filter is on the key rather than the indexed repo field because the
+	// repository is the first segment of every chunk id (see the id built in
+	// coderag.streamItems). Judging a hit by its key costs a string compare;
+	// judging it by its field costs a point read and a partial decode, per hit,
+	// which is the difference between an exact total being free and costing
+	// the whole repository.
+	offset := math.MaxInt
+	if offset64 <= math.MaxInt {
+		offset = int(offset64)
+	}
+
+	var (
+		matched uint64
+		window  = make([]bw.SearchResult[textRecord], 0, perPage)
+	)
+
+	if _, err := s.bucket.SearchWalk(ctx, search,
+		bw.SearchOptions{
+			KeyFilter: repoKeyPrefix(repo),
+			Offset:    offset,
+			Limit:     perPage,
+			Matched:   &matched,
+		},
+		func(hit bw.SearchResult[textRecord]) (bool, error) {
+			if hit.Record != nil {
+				window = append(window, hit)
+			}
+
+			return true, nil
+		},
+	); err != nil {
 		return result, err
 	}
 
-	filtered := make([]bw.SearchResult[textRecord], 0, len(hits))
-	for _, hit := range hits {
-		if hit.Record != nil && hit.Record.Repo == repo {
-			filtered = append(filtered, hit)
-		}
-	}
-	result.Total = uint64(len(filtered))
-	if offset64 >= result.Total {
-		return result, nil
-	}
-
-	start := int(offset64)
-	end := min(start+perPage, len(filtered))
-	result.Results = textSnippets(filtered[start:end], search)
+	result.Total = matched
+	result.Results = textSnippets(window, search)
 
 	return result, nil
+}
+
+// repoKeyPrefix matches the chunk ids belonging to one repository. The
+// trailing separator matters: without it "acme/app" would also claim
+// "acme/apple"'s chunks.
+func repoKeyPrefix(repo string) func(string) bool {
+	prefix := repo + "/"
+
+	return func(id string) bool { return strings.HasPrefix(id, prefix) }
 }
 
 func textSnippets(hits []bw.SearchResult[textRecord], search string) []Snippet {

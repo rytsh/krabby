@@ -2,6 +2,15 @@ version: 2
 
 project_name: krabby
 
+# The web UI is embedded from internal/server/dist, which is generated rather
+# than committed (see .gitignore). Without this hook a release embeds whatever
+# happens to be in that directory on the build machine — a stale UI from an
+# older checkout, or the empty placeholder — and ships a binary whose frontend
+# silently does not match its backend.
+before:
+  hooks:
+    - make build-ui
+
 builds:
   - main: ./cmd/krabby
     env:

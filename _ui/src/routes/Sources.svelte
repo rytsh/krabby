@@ -2,7 +2,7 @@
   // Web content sources: named collections (wikis, Confluence spaces) whose
   // pages are synced to markdown and indexed into the docs RAG. Each
   // collection is searchable on the Search page as "web:<name>".
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { api } from "../lib/api.js";
   import { path as routePath, navigate, link } from "../lib/router.js";
   import { fmtDate, fmtEta } from "../lib/format.js";
@@ -352,8 +352,27 @@
     return list.find((p) => p.slug === slug)?.url || "";
   }
 
+  // A search result opens this page with the doc routed but the collection's
+  // page list never fetched, and docPageURL() needs that list to link back to
+  // the original Jira/Confluence page. Fetching it from an effect needs two
+  // guards, because neither is sufficient alone:
+  //
+  //   - untrack, because loadPages() writes pageLoading (and reads pageNum and
+  //     teamFilter) synchronously, before its first await. Those reads would
+  //     otherwise become dependencies of this effect and the write would
+  //     re-dirty it on the spot.
+  //   - the sentinel, because pages[name] — the condition that is supposed to
+  //     end the loop — is only assigned after the request resolves, which
+  //     cannot happen within the same flush. It is a plain let, not $state, so
+  //     that setting it is not itself a reactive write. It also stops the
+  //     effect from retrying forever when the request fails.
+  let pagesRequestedFor = "";
   $effect(() => {
-    if (sourceName && docParam && !pages[sourceName]) loadPages(sourceName);
+    const name = sourceName;
+    if (!name || !docParam || pages[name] || pagesRequestedFor === name) return;
+
+    pagesRequestedFor = name;
+    untrack(() => loadPages(name));
   });
 
   onMount(load);

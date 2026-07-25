@@ -321,8 +321,10 @@ html.theme-anim * {
   counter-reset: line;
 }
 
-/* Highlighted target line for deep links from code search. */
-.code-view .line-target {
+/* The matched line: highlighted the same way in a search result and in the
+   file the result links to, so the eye lands in the same place after the jump. */
+.code-view .line-target,
+.snippet-view .line-target {
   display: inline-block;
   width: 100%;
   background: rgb(250 204 21 / 0.2);
@@ -330,13 +332,32 @@ html.theme-anim * {
   border-radius: 3px;
 }
 
-.code-view code .line::before {
+.code-view code .line::before,
+.snippet-view code .line::before {
   counter-increment: line;
   content: counter(line);
   display: inline-block;
   width: 2.25rem;
   margin-right: 1rem;
   text-align: right;
+  color: #6e7681;
+  user-select: none;
+}
+
+/* Code search results: the same numbered gutter as the viewer, but the counter
+   starts at the chunk's own first line (set inline per result) so the numbers
+   are the file's, not the excerpt's. */
+.snippet-view {
+  background: #24292e;
+  color: #e1e4e8;
+}
+
+/* Marks where context was trimmed away around the match. Aligned with the
+   gutter rather than numbered, because it stands for lines rather than being
+   one. */
+.snippet-view .line-elided {
+  display: inline-block;
+  padding-left: 3.25rem;
   color: #6e7681;
   user-select: none;
 }

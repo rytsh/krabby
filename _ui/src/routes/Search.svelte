@@ -150,6 +150,42 @@
     return text.length > 700 ? `${text.slice(0, 700)}…` : text;
   }
 
+  // How many lines of context to keep either side of the matching line. A code
+  // chunk is up to 3000 characters, so showing all of it buries the one line
+  // the query actually hit — usually below the fold of the result card.
+  const SNIPPET_CONTEXT = 6;
+
+  /**
+   * codeSnippet turns a result's chunk into numbered lines centred on the
+   * match. The numbers are the file's own, not the chunk's, so they can be
+   * read straight across to the editor or to the file viewer this card links
+   * to. Lexical search reports the matching line; semantic search does not, in
+   * which case the chunk is shown from its start with nothing highlighted.
+   */
+  function codeSnippet(r) {
+    const lines = (r.snippet || "").replace(/\n+$/, "").split("\n");
+    const first = r.start_line || 1;
+    const match = r.line || 0;
+
+    // Without a match to centre on, or with a chunk short enough to show
+    // whole, the window is the chunk itself.
+    const offset = match ? match - first : -1;
+    if (offset < 0 || lines.length <= SNIPPET_CONTEXT * 2 + 1) {
+      return { first, match, lines, clippedAbove: false, clippedBelow: false };
+    }
+
+    const from = Math.max(0, offset - SNIPPET_CONTEXT);
+    const to = Math.min(lines.length, offset + SNIPPET_CONTEXT + 1);
+
+    return {
+      first: first + from,
+      match,
+      lines: lines.slice(from, to),
+      clippedAbove: from > 0,
+      clippedBelow: to < lines.length,
+    };
+  }
+
   function searchPlaceholder() {
     if (scope === "code") {
       return codeMode === "normal" ? "Search code, symbols or paths…" : "Describe the code you are looking for…";
@@ -319,6 +355,7 @@
             <pre class="m-0 max-h-56 overflow-hidden whitespace-pre-wrap px-3.5 py-2.5 font-mono text-[12px] leading-relaxed text-dim">{docExcerpt(r.excerpt)}</pre>
           </button>
         {:else}
+          {@const snip = codeSnippet(r)}
           <button class="card block w-full cursor-pointer overflow-hidden text-left transition-colors hover:border-accent" onclick={() => open(r)}>
             <div class="flex items-center gap-2 border-b border-line bg-surface-2/50 px-3.5 py-2">
               <span class="font-mono text-[12.5px] text-fg">{r.repo}</span>
@@ -334,7 +371,11 @@
                 {codeMode === "semantic" ? pct(r.score) : `BM25 ${r.score.toFixed(2)}`}
               </span>
             </div>
-            <pre class="m-0 max-h-56 overflow-hidden px-3.5 py-2.5 font-mono text-[12px] leading-relaxed text-dim">{r.snippet}</pre>
+            <pre
+              class="snippet-view m-0 max-h-72 overflow-auto px-3.5 py-2.5 font-mono text-[12px] leading-relaxed text-dim"
+              style={`counter-reset: line ${snip.first - 1}`}
+            ><code>{#if snip.clippedAbove}<span class="line-elided">⋯</span>{"\n"}{/if}{#each snip.lines as l, li}<span
+                  class="line {snip.match === snip.first + li ? 'line-target' : ''}">{l}</span>{"\n"}{/each}{#if snip.clippedBelow}<span class="line-elided">⋯</span>{/if}</code></pre>
           </button>
         {/if}
       {/each}
