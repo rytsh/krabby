@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/rytsh/krabby/internal/config"
 	"github.com/rytsh/krabby/internal/service/coderag"
 	"github.com/rytsh/krabby/internal/service/docgen"
@@ -865,6 +867,8 @@ func (m *Manager) ensureDocsTextKey(ctx context.Context, key, docsDir string) er
 // or web:<collection> and wins over scope. Namespace scopes only repository
 // docs. topDocs <= 0 uses the default.
 func (m *Manager) SearchDocs(ctx context.Context, scope, key, namespace, mode, question string, topDocs int) ([]rag.Doc, error) {
+	searchStarted := time.Now()
+
 	mode, err := NormalizeDocsSearchMode(mode)
 	if err != nil {
 		return nil, err
@@ -912,19 +916,39 @@ func (m *Manager) SearchDocs(ctx context.Context, scope, key, namespace, mode, q
 		}
 	}
 
-	var semanticDocs, lexicalDocs []rag.Doc
+	// The two rankers read different stores — vectors from the embedded vector
+	// database, BM25 from the state database — and share no mutable state, so
+	// hybrid runs them together. Sequentially its latency was the sum of both
+	// arms; now it is the slower one. The first failure cancels the other arm,
+	// which matches the old behaviour of returning as soon as either failed.
+	var (
+		semanticDocs, lexicalDocs []rag.Doc
+		semanticTook, lexicalTook time.Duration
+	)
+
+	group, groupCtx := errgroup.WithContext(ctx)
 	if mode != DocsSearchLexical {
-		semanticDocs, err = m.retrieveSemanticCandidates(ctx, filter, question, fetch)
-		if err != nil {
-			return nil, err
-		}
+		group.Go(func() error {
+			started := time.Now()
+			docs, err := m.retrieveSemanticCandidates(groupCtx, filter, question, fetch)
+			semanticDocs, semanticTook = docs, time.Since(started)
+
+			return err
+		})
 	}
 
 	if mode != DocsSearchSemantic {
-		lexicalDocs, err = m.searchLexical(ctx, filter, question, fetch, ragCfg)
-		if err != nil {
-			return nil, err
-		}
+		group.Go(func() error {
+			started := time.Now()
+			docs, err := m.searchLexical(groupCtx, filter, question, fetch, ragCfg)
+			lexicalDocs, lexicalTook = docs, time.Since(started)
+
+			return err
+		})
+	}
+
+	if err := group.Wait(); err != nil {
+		return nil, err
 	}
 
 	if nsFilter {
@@ -950,7 +974,46 @@ func (m *Manager) SearchDocs(ctx context.Context, scope, key, namespace, mode, q
 
 	m.enrichWebDocs(ctx, docs)
 
+	logDocsSearch(mode, scope, key, time.Since(searchStarted), semanticTook, lexicalTook, len(docs))
+
 	return docs, nil
+}
+
+// docsSearchSlowThreshold is when one search is worth a log line of its own.
+// Retrieval cost grows with how much of the corpus shares the question's
+// vocabulary, which is a property of the data rather than of the query, so the
+// only way to know whether it has become a problem for a given installation is
+// to record it.
+const docsSearchSlowThreshold = 500 * time.Millisecond
+
+// logDocsSearch records what a search cost, per ranker. Debug for the normal
+// case, a warning past the threshold, so a corpus that has outgrown the lexical
+// index announces itself instead of being felt as "search is sluggish".
+func logDocsSearch(mode, scope, key string, total, semantic, lexical time.Duration, results int) {
+	attrs := []any{
+		"mode", mode,
+		"total_ms", total.Milliseconds(),
+		"results", results,
+	}
+	if key != "" {
+		attrs = append(attrs, "key", key)
+	} else if scope != "" {
+		attrs = append(attrs, "scope", scope)
+	}
+	if semantic > 0 {
+		attrs = append(attrs, "semantic_ms", semantic.Milliseconds())
+	}
+	if lexical > 0 {
+		attrs = append(attrs, "lexical_ms", lexical.Milliseconds())
+	}
+
+	if total >= docsSearchSlowThreshold {
+		slog.Warn("slow docs search", attrs...)
+
+		return
+	}
+
+	slog.Debug("docs search", attrs...)
 }
 
 // searchLexical runs the BM25 arm.
