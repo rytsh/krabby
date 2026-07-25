@@ -126,7 +126,7 @@ func newReconcileManager(t *testing.T, fetcher websource.Fetcher) (*Manager, *we
 		queue:          queue.New(ctx, 1),
 		locks:          map[string]*sync.Mutex{},
 		activity:       map[string]map[string]struct{}{},
-		progress:       map[string]Progress{},
+		progress:       map[string]map[string]Progress{},
 		sourcesRootDir: t.TempDir(),
 		webStore:       webStore,
 		webFetchers:    map[string]websource.Fetcher{"fake": fetcher},

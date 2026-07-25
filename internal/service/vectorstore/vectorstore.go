@@ -4,6 +4,8 @@ package vectorstore
 import (
 	"context"
 	"time"
+
+	"github.com/rakunlabs/query"
 )
 
 // Payload is the metadata carried with each stored vector. It is enough to
@@ -66,6 +68,40 @@ func FilterKey(key string) Filter {
 // IsZero reports whether the filter matches everything.
 func (f Filter) IsZero() bool {
 	return len(f.Keys) == 0 && f.Prefix == "" && f.ExcludePrefix == ""
+}
+
+// Query translates the filter into a bw where clause over the indexed "repo"
+// field, or nil when it matches everything. Both index backends (vectors and
+// the lexical text index) push the same filter down to bw, so the two arms of a
+// hybrid search agree on what is in scope.
+func (f Filter) Query() *query.Query {
+	if f.IsZero() {
+		return nil
+	}
+
+	q := query.New()
+
+	switch len(f.Keys) {
+	case 0:
+	case 1:
+		q.Where = append(q.Where,
+			query.NewExpressionCmp(query.OperatorEq, "repo", f.Keys[0]).Expression())
+	default:
+		q.Where = append(q.Where,
+			query.NewExpressionCmp(query.OperatorIn, "repo", f.Keys).Expression())
+	}
+
+	if f.Prefix != "" {
+		q.Where = append(q.Where,
+			query.NewExpressionCmp(query.OperatorLike, "repo", f.Prefix+"%").Expression())
+	}
+
+	if f.ExcludePrefix != "" {
+		q.Where = append(q.Where,
+			query.NewExpressionCmp(query.OperatorNLike, "repo", f.ExcludePrefix+"%").Expression())
+	}
+
+	return q
 }
 
 // Store is the vector index used by docs and code RAG.

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -25,6 +26,7 @@ import (
 	"github.com/rytsh/krabby/internal/service/gitops"
 	"github.com/rytsh/krabby/internal/service/graphify"
 	"github.com/rytsh/krabby/internal/service/graphquery"
+	"github.com/rytsh/krabby/internal/service/progress"
 	"github.com/rytsh/krabby/internal/service/queue"
 	"github.com/rytsh/krabby/internal/service/rag"
 	"github.com/rytsh/krabby/internal/service/registry"
@@ -98,7 +100,11 @@ type Manager struct {
 	// in-memory), so the UI can show "1200/4634 embedded, ~26%". Keyed by id
 	// (repo id or web-source scope key). Cleared when the step ends.
 	progressMu sync.Mutex
-	progress   map[string]Progress
+	// progress is id -> phase -> counters. A repo runs code_index alongside
+	// docs/docs_index (different backends, no data dependency), so an id can
+	// have several phases in flight and a single slot per id would let them
+	// overwrite each other.
+	progress map[string]map[string]Progress
 
 	// stageMu serializes stage-state mutation + persistence on the shared repo
 	// record so stages may run concurrently for the same repo.
@@ -194,7 +200,7 @@ func New(
 		baseCtx:  baseCtx,
 		locks:    map[string]*sync.Mutex{},
 		activity: map[string]map[string]struct{}{},
-		progress: map[string]Progress{},
+		progress: map[string]map[string]Progress{},
 		jobs:     map[string]*job{},
 		codeWarm: map[string]*sync.Mutex{},
 	}
@@ -462,33 +468,133 @@ type Progress struct {
 	Phase string `json:"phase"`
 	Done  int    `json:"done"`
 	Total int    `json:"total"`
+
+	// StartedAt is when the current phase began. It is kept across updates
+	// within a phase so the observed rate is measured over the whole phase
+	// rather than between two samples.
+	StartedAt time.Time `json:"started_at,omitzero"`
+
+	// ETASeconds estimates the time left in this phase, computed on read from
+	// the rate achieved so far. Zero means "not predictable yet": an
+	// indeterminate phase, one that has not produced a usable sample, or one
+	// that is already finished.
+	ETASeconds int `json:"eta_seconds,omitempty"`
 }
 
-// setProgress records the live counters for id's current step, replacing any
-// prior value. A zero Total means "indeterminate" (the UI shows a spinner).
+// etaWarmup is how much of a phase must be observed before its remaining time
+// is estimated. An estimate drawn from the first few items of a long run swings
+// wildly (the first embedding batch pays connection setup, the first pages of a
+// sync are cached), and a number that jumps from "3 hours" to "2 minutes" is
+// worse than no number at all.
+const (
+	etaWarmupDuration = 3 * time.Second
+	etaWarmupItems    = 5
+)
+
+// eta estimates the seconds remaining in the phase from the throughput observed
+// since it started. It returns 0 when there is nothing meaningful to say.
+func (p Progress) eta(now time.Time) int {
+	if p.Total <= 0 || p.Done <= 0 || p.Done >= p.Total || p.StartedAt.IsZero() {
+		return 0
+	}
+
+	elapsed := now.Sub(p.StartedAt)
+	if elapsed < etaWarmupDuration || p.Done < etaWarmupItems {
+		return 0
+	}
+
+	perItem := elapsed.Seconds() / float64(p.Done)
+	remaining := perItem * float64(p.Total-p.Done)
+	if remaining < 1 {
+		return 1
+	}
+
+	return int(math.Round(remaining))
+}
+
+// setProgress records the live counters for one phase of id's work, replacing
+// any prior value for that phase. A zero Total means "indeterminate" (the UI
+// shows a spinner).
+//
+// The phase start time is preserved while the phase's counters are updated, so
+// callers publish counters without tracking timing themselves and the rate is
+// measured over the whole phase.
 func (m *Manager) setProgress(id string, p Progress) {
 	m.progressMu.Lock()
 	defer m.progressMu.Unlock()
 
-	m.progress[id] = p
+	phases := m.progress[id]
+	if phases == nil {
+		phases = map[string]Progress{}
+		m.progress[id] = phases
+	}
+
+	if prev, ok := phases[p.Phase]; ok && !prev.StartedAt.IsZero() {
+		p.StartedAt = prev.StartedAt
+	} else if p.StartedAt.IsZero() {
+		p.StartedAt = time.Now()
+	}
+
+	phases[p.Phase] = p
 }
 
-// clearProgress removes id's progress counters (step finished or aborted).
-func (m *Manager) clearProgress(id string) {
+// clearProgress removes one phase's counters (that step finished or aborted).
+func (m *Manager) clearProgress(id, phase string) {
+	m.progressMu.Lock()
+	defer m.progressMu.Unlock()
+
+	phases := m.progress[id]
+	if phases == nil {
+		return
+	}
+
+	delete(phases, phase)
+	if len(phases) == 0 {
+		delete(m.progress, id)
+	}
+}
+
+// progressReporter returns a callback that publishes counters for one phase of
+// id. It is the adapter between the services' (done, total) callbacks and the
+// per-phase progress map, so a caller only names the phase once.
+func (m *Manager) progressReporter(id, phase string) progress.Func {
+	return func(done, total int) {
+		m.setProgress(id, Progress{Phase: phase, Done: done, Total: total})
+	}
+}
+
+// clearAllProgress drops every phase recorded for id. Used on the paths that
+// own the whole job and must not leak counters if a phase returns early.
+func (m *Manager) clearAllProgress(id string) {
 	m.progressMu.Lock()
 	defer m.progressMu.Unlock()
 
 	delete(m.progress, id)
 }
 
-// Progress returns id's live step counters and whether any are set.
-func (m *Manager) Progress(id string) (Progress, bool) {
+// Progress returns the live counters for every phase id is running, ordered by
+// phase name so the UI does not reshuffle between polls. The estimates are
+// computed on read, so they reflect the time since the last counter update
+// rather than the moment it was published.
+func (m *Manager) Progress(id string) ([]Progress, bool) {
 	m.progressMu.Lock()
 	defer m.progressMu.Unlock()
 
-	p, ok := m.progress[id]
+	phases := m.progress[id]
+	if len(phases) == 0 {
+		return nil, false
+	}
 
-	return p, ok
+	now := time.Now()
+	out := make([]Progress, 0, len(phases))
+	for _, p := range phases {
+		p.ETASeconds = p.eta(now)
+		out = append(out, p)
+	}
+
+	sort.Slice(out, func(i, j int) bool { return out[i].Phase < out[j].Phase })
+
+	return out, true
 }
 
 // Activity returns the pipeline steps currently running for a repo ("sync",
@@ -1685,13 +1791,18 @@ func (m *Manager) buildDocsAndIndex(ctx context.Context, repo *registry.Repo, de
 		go func() {
 			defer wg.Done()
 
+			// Embedding a whole repository's source is the long pole of a first
+			// build, so publish chunk counters for it.
+			onProgress := m.progressReporter(repo.ID, registry.StageCodeIndex)
+			defer m.clearProgress(repo.ID, registry.StageCodeIndex)
+
 			//nolint:errcheck // recorded on the stage state; never fails the build
 			_ = m.runStage(ctx, repo, registry.StageCodeIndex, func() error {
 				if incremental {
-					return d.codeRag.IndexChanged(ctx, repo.ID, repo.Path, changed)
+					return d.codeRag.IndexChangedProgress(ctx, repo.ID, repo.Path, changed, onProgress)
 				}
 
-				return d.codeRag.Index(ctx, repo.ID, repo.Path)
+				return d.codeRag.IndexProgress(ctx, repo.ID, repo.Path, onProgress)
 			})
 		}()
 	}
@@ -1710,12 +1821,17 @@ func (m *Manager) buildDocsAndIndex(ctx context.Context, repo *registry.Repo, de
 
 	docsChanged := true
 	if d.gen != nil {
+		// Documentation is written by an LLM, one call per file group: the
+		// slowest stage of a build and the one most worth estimating.
+		genCtx := progress.With(ctx, m.progressReporter(repo.ID, registry.StageDocs))
+		defer m.clearProgress(repo.ID, registry.StageDocs)
+
 		var man *docgen.Manifest
 		if err := m.runStage(ctx, repo, registry.StageDocs, func() error {
 			var gerr error
 			// A normal refresh stays incremental; force is exposed only via the
 			// explicit Generate path (refresh_repo force flag / API).
-			man, gerr = d.gen.Generate(ctx, repo.ID, repo.Path, docsDir, false)
+			man, gerr = d.gen.Generate(genCtx, repo.ID, repo.Path, docsDir, false)
 
 			return gerr
 		}); err != nil {
@@ -1782,7 +1898,11 @@ func (m *Manager) indexDocs(ctx context.Context, d *docsBundle, repo, docsDir st
 		}
 	}
 	if d.rag != nil {
-		if err := d.rag.Index(ctx, repo, docsDir); err != nil {
+		// Only the vector arm is worth reporting: the lexical index is local
+		// work that finishes in a fraction of the embedding time.
+		defer m.clearProgress(repo, registry.StageDocsIndex)
+
+		if err := d.rag.IndexProgress(ctx, repo, docsDir, m.progressReporter(repo, registry.StageDocsIndex)); err != nil {
 			errs = append(errs, err)
 		}
 	}

@@ -70,6 +70,13 @@ func New(
 // files, chunks them (symbol-aware via the repo's graph when available), embeds
 // the chunks and upserts them, replacing any prior vectors for the repo.
 func (s *Service) Index(ctx context.Context, repo, clonePath string) error {
+	return s.IndexProgress(ctx, repo, clonePath, nil)
+}
+
+// IndexProgress is Index with an optional progress callback, invoked as chunks
+// are embedded (done, total). It runs from several goroutines, so it must be
+// safe for concurrent use; pass nil to disable reporting.
+func (s *Service) IndexProgress(ctx context.Context, repo, clonePath string, onProgress func(done, total int)) error {
 	items, fileCount, err := s.indexItems(clonePath, repo)
 	if err != nil {
 		return err
@@ -95,7 +102,7 @@ func (s *Service) Index(ctx context.Context, repo, clonePath string) error {
 		texts[i] = items[i].Payload.Chunk
 	}
 
-	vecs, err := s.emb.Embed(ctx, texts)
+	vecs, err := s.emb.EmbedWithProgress(ctx, texts, onProgress)
 	if err != nil {
 		return fmt.Errorf("embed %d code chunks; %w", len(texts), err)
 	}
@@ -128,6 +135,12 @@ func (s *Service) Index(ctx context.Context, repo, clonePath string) error {
 // just have their rows dropped. Unchanged files keep their existing FTS rows
 // and vectors, so refreshes touching few files cost a fraction of a full Index.
 func (s *Service) IndexChanged(ctx context.Context, repo, clonePath string, changed []string) error {
+	return s.IndexChangedProgress(ctx, repo, clonePath, changed, nil)
+}
+
+// IndexChangedProgress is IndexChanged with an optional progress callback; see
+// IndexProgress.
+func (s *Service) IndexChangedProgress(ctx context.Context, repo, clonePath string, changed []string, onProgress func(done, total int)) error {
 	if len(changed) == 0 {
 		return nil
 	}
@@ -204,7 +217,7 @@ func (s *Service) IndexChanged(ctx context.Context, repo, clonePath string, chan
 			texts[i] = items[i].Payload.Chunk
 		}
 
-		vecs, err := s.emb.Embed(ctx, texts)
+		vecs, err := s.emb.EmbedWithProgress(ctx, texts, onProgress)
 		if err != nil {
 			return fmt.Errorf("embed %d code chunks; %w", len(texts), err)
 		}

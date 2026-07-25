@@ -28,6 +28,7 @@ import (
 
 	"github.com/worldline-go/types"
 
+	"github.com/rytsh/krabby/internal/service/progress"
 	"github.com/rytsh/krabby/internal/service/websource"
 )
 
@@ -404,7 +405,12 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 			})
 		}
 
-		if len(res.Issues) == 0 || res.StartAt+len(res.Issues) >= res.Total {
+		// Report raw discovery progress (issues scanned, not issues kept), so
+		// the bar tracks the remote paging rather than the label filter.
+		scanned := res.StartAt + len(res.Issues)
+		progress.Report(ctx, min(scanned, maxIssues), min(res.Total, maxIssues))
+
+		if len(res.Issues) == 0 || scanned >= res.Total {
 			break
 		}
 	}

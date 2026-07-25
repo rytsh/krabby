@@ -365,32 +365,4 @@ func repoQuery(repo string) *query.Query {
 
 // filterQuery translates a search Filter into a bw where clause, or nil when
 // the filter matches everything.
-func filterQuery(f Filter) *query.Query {
-	if f.IsZero() {
-		return nil
-	}
-
-	q := query.New()
-
-	switch len(f.Keys) {
-	case 0:
-	case 1:
-		q.Where = append(q.Where,
-			query.NewExpressionCmp(query.OperatorEq, "repo", f.Keys[0]).Expression())
-	default:
-		q.Where = append(q.Where,
-			query.NewExpressionCmp(query.OperatorIn, "repo", f.Keys).Expression())
-	}
-
-	if f.Prefix != "" {
-		q.Where = append(q.Where,
-			query.NewExpressionCmp(query.OperatorLike, "repo", f.Prefix+"%").Expression())
-	}
-
-	if f.ExcludePrefix != "" {
-		q.Where = append(q.Where,
-			query.NewExpressionCmp(query.OperatorNLike, "repo", f.ExcludePrefix+"%").Expression())
-	}
-
-	return q
-}
+func filterQuery(f Filter) *query.Query { return f.Query() }

@@ -12,6 +12,7 @@ import (
 
 	"github.com/worldline-go/hardloop"
 
+	"github.com/rytsh/krabby/internal/service/progress"
 	"github.com/rytsh/krabby/internal/service/queue"
 	"github.com/rytsh/krabby/internal/service/rag"
 	"github.com/rytsh/krabby/internal/service/repofs"
@@ -509,7 +510,9 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 	// The fetch phase count is unknown up front (the provider streams pages), so
 	// it is indeterminate; the index phase below reports embedded/total chunks.
 	m.setProgress(scope, Progress{Phase: "fetch"})
-	defer m.clearProgress(scope)
+	// The sync owns the scope's phases end to end, so clear them all: an early
+	// return between phases must not leave a stale bar on screen.
+	defer m.clearAllProgress(scope)
 
 	col.Status = websource.StatusFetching
 	col.LastError = ""
@@ -528,13 +531,22 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 		return fail(err)
 	}
 
-	result, err := fetcher.Fetch(ctx, col, pages, col.State)
+	// Providers that page through a known result set (JIRA's issue count,
+	// Confluence's page count, the registered URL list) report as they go, so
+	// the fetch phase shows a determinate bar and a time estimate instead of an
+	// open-ended spinner. Providers that cannot simply never report.
+	fetchCtx := progress.With(ctx, func(done, total int) {
+		m.setProgress(scope, Progress{Phase: "fetch", Done: done, Total: total})
+	})
+
+	result, err := fetcher.Fetch(fetchCtx, col, pages, col.State)
 	if err != nil {
 		return fail(fmt.Errorf("fetch %s; %w", name, err))
 	}
 
-	// After fetch, report how many pages the provider returned this run so the
-	// "fetch" phase shows a concrete count while markdown is written to disk.
+	// Fetching is done; hand over to the write phase with the concrete page
+	// count the provider returned this run.
+	m.clearProgress(scope, "fetch")
 	m.setProgress(scope, Progress{Phase: "write", Done: 0, Total: len(result.Pages)})
 
 	dir := m.sourcesDir(name)
@@ -826,7 +838,7 @@ func (m *Manager) indexWebSourcePaths(ctx context.Context, name string, changed,
 	// Publish live embedding progress so the UI can show a determinate bar
 	// ("1200/22697 chunks embedded"). Cleared when this step returns.
 	m.setProgress(scope, Progress{Phase: "index"})
-	defer m.clearProgress(scope)
+	defer m.clearProgress(scope, "index")
 	onProgress := func(done, total int) {
 		m.setProgress(scope, Progress{Phase: "index", Done: done, Total: total})
 	}

@@ -2,8 +2,11 @@ package rag
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -71,6 +74,142 @@ func TestTextStoreSearchExactTermsAndFilters(t *testing.T) {
 	}
 	if len(docs) != 1 || docs[0].Repo != "acme/payments" {
 		t.Fatalf("repo-only filter search = %#v", docs)
+	}
+}
+
+// TestTextStoreSearchFiltersDeepInTheRanking is the regression test for the
+// docs search that hung on a large corpus. The filter selects a small
+// partition while a much bigger one dominates the ranking, so every matching
+// document of the target repo sits far below the cut of any fixed-size page.
+//
+// The previous implementation paged through the ranked hits in fixed batches,
+// re-evaluating the whole query for every page, which made this shape
+// quadratic in corpus size. The behavioural contract it must still satisfy is
+// simply that the results are complete and correctly ordered.
+func TestTextStoreSearchFiltersDeepInTheRanking(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newTestTextStore(t)
+
+	// A large web source whose documents match the query terms repeatedly, so
+	// they take every top rank.
+	bulk := make([]*textRecord, 0, 1200)
+	for i := range 1200 {
+		bulk = append(bulk, &textRecord{
+			ID:      fmt.Sprintf("web:jira/PAY-%d.md#0", i),
+			Repo:    "web:jira",
+			Path:    fmt.Sprintf("PAY-%d.md", i),
+			Title:   fmt.Sprintf("PAY-%d payment gateway timeout capture", i),
+			Excerpt: strings.Repeat("payment gateway timeout capture. ", 4),
+		})
+	}
+	// Two documents in a small repository. They match the same terms but only
+	// once each, in a longer text, so BM25 ranks them below the whole bulk.
+	padding := strings.Repeat("unrelated background prose. ", 40)
+	bulk = append(bulk,
+		&textRecord{
+			ID:      "acme/payments/runbook.md#0",
+			Repo:    "acme/payments",
+			Path:    "runbook.md",
+			Title:   "Runbook",
+			Excerpt: "Restart the worker: payment gateway timeout on capture. " + padding,
+		},
+		&textRecord{
+			ID:      "acme/payments/design.md#0",
+			Repo:    "acme/payments",
+			Path:    "design.md",
+			Title:   "Design",
+			Excerpt: "Capture path: payment gateway timeout handling. " + padding + padding,
+		},
+	)
+	if err := store.insert(ctx, bulk); err != nil {
+		t.Fatal(err)
+	}
+
+	docs, err := store.Search(ctx, vectorstore.FilterKey("acme/payments"), "payment gateway timeout capture", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docs) != 2 {
+		t.Fatalf("filtered search found %d of 2 documents: %#v", len(docs), docs)
+	}
+	for _, doc := range docs {
+		if doc.Repo != "acme/payments" {
+			t.Fatalf("filter leaked %q", doc.Repo)
+		}
+	}
+	if docs[0].Score < docs[1].Score {
+		t.Fatalf("results are not ordered by score: %#v", docs)
+	}
+}
+
+// TestTextStoreSearchCountsDocumentsNotChunks pins that topDocs is a document
+// budget: the index stores one record per chunk, so a document with many
+// chunks must not consume several slots.
+func TestTextStoreSearchCountsDocumentsNotChunks(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newTestTextStore(t)
+
+	var records []*textRecord
+	for doc := range 4 {
+		for chunk := range 5 {
+			records = append(records, &textRecord{
+				ID:      fmt.Sprintf("web:wiki/doc-%d.md#%d", doc, chunk),
+				Repo:    "web:wiki",
+				Path:    fmt.Sprintf("doc-%d.md", doc),
+				Title:   fmt.Sprintf("Doc %d", doc),
+				Excerpt: fmt.Sprintf("chunk %d of the deployment runbook", chunk),
+			})
+		}
+	}
+	if err := store.insert(ctx, records); err != nil {
+		t.Fatal(err)
+	}
+
+	docs, err := store.Search(ctx, vectorstore.FilterKey("web:wiki"), "deployment runbook", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docs) != 3 {
+		t.Fatalf("want 3 distinct documents, got %d: %#v", len(docs), docs)
+	}
+
+	seen := map[string]bool{}
+	for _, doc := range docs {
+		if seen[doc.Path] {
+			t.Fatalf("the same document was returned twice: %#v", docs)
+		}
+		seen[doc.Path] = true
+	}
+}
+
+// TestTextStoreSearchStopsOnCancelledContext checks that an abandoned query
+// (a cancelled HTTP request, say) does not run to completion.
+func TestTextStoreSearchStopsOnCancelledContext(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newTestTextStore(t)
+
+	var records []*textRecord
+	for i := range 3000 {
+		records = append(records, &textRecord{
+			ID:      fmt.Sprintf("web:wiki/doc-%d.md#0", i),
+			Repo:    "web:wiki",
+			Path:    fmt.Sprintf("doc-%d.md", i),
+			Title:   fmt.Sprintf("Doc %d", i),
+			Excerpt: "deployment runbook rollback procedure",
+		})
+	}
+	if err := store.insert(ctx, records); err != nil {
+		t.Fatal(err)
+	}
+
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+
+	if _, err := store.Search(cancelled, vectorstore.Filter{}, "deployment runbook rollback procedure", 5); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled search error = %v, want context.Canceled", err)
 	}
 }
 

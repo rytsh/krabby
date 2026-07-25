@@ -1,7 +1,7 @@
 <script>
   // Code search supports local BM25 and semantic vectors. Docs search adds a
   // hybrid mode that fuses BM25 and semantic document ranks.
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import { api } from "../lib/api.js";
   import { navigate } from "../lib/router.js";
   import { fmtDate } from "../lib/format.js";
@@ -56,6 +56,24 @@
   let loading = $state(false);
   let error = $state("");
   let searchSeq = 0;
+  // Controller for the in-flight request. A docs query over a large corpus can
+  // run for a long time, so the user must be able to abort it rather than wait
+  // on "Searching…"; aborting also frees the browser's connection.
+  let searchAbort = null;
+
+  function abortSearch() {
+    searchAbort?.abort();
+    searchAbort = null;
+  }
+
+  // cancelSearch is the explicit user action: stop the request and go back to
+  // whatever was on screen before.
+  function cancelSearch() {
+    if (!loading) return;
+    searchSeq++;
+    abortSearch();
+    loading = false;
+  }
 
   async function search(nextPage = 1) {
     const query = q.trim();
@@ -63,6 +81,9 @@
     const seq = ++searchSeq;
     const searchScope = scope;
     const searchMode = searchScope === "docs" ? docsMode : codeMode;
+    abortSearch();
+    const controller = new AbortController();
+    searchAbort = controller;
     loading = true;
     error = "";
     try {
@@ -72,26 +93,32 @@
       // through to both search kinds ("" = every namespace).
       const docsScope = repoFilter === "repos" || repoFilter === "sources" ? repoFilter : "";
       const key = docsScope ? "" : repoFilter;
+      const opts = { signal: controller.signal };
       const response =
         searchScope === "docs"
-          ? await api.searchDocs(query, key, 5, docsScope, namespaceFilter, searchMode)
-          : await api.searchCode(query, repoFilter, searchMode, nextPage, perPage, 0, namespaceFilter);
+          ? await api.searchDocs(query, key, 5, docsScope, namespaceFilter, searchMode, opts)
+          : await api.searchCode(query, repoFilter, searchMode, nextPage, perPage, 0, namespaceFilter, opts);
       if (seq !== searchSeq) return;
       results = searchScope === "docs" ? (Array.isArray(response) ? response : []) : response?.results || [];
       total = searchScope === "docs" ? results.length : response?.total || 0;
       page = searchScope === "docs" ? 1 : response?.page || nextPage;
     } catch (e) {
-      if (seq !== searchSeq) return;
+      // A cancelled request already restored the UI; it is not an error.
+      if (seq !== searchSeq || e?.name === "AbortError") return;
       error = e.message;
       results = [];
       total = 0;
     } finally {
-      if (seq === searchSeq) loading = false;
+      if (seq === searchSeq) {
+        loading = false;
+        searchAbort = null;
+      }
     }
   }
 
   function resetResults() {
     searchSeq++;
+    abortSearch();
     results = null;
     total = 0;
     page = 1;
@@ -138,6 +165,8 @@
   }
 
   onMount(loadRepoOptions);
+  // Leaving the page must not leave a long query holding a connection.
+  onDestroy(abortSearch);
 </script>
 
 <div class="mb-3 flex flex-wrap items-center gap-2">
@@ -212,7 +241,10 @@
       class="input w-full pl-8"
       placeholder={searchPlaceholder()}
       bind:value={q}
-      onkeydown={(e) => e.key === "Enter" && search()}
+      onkeydown={(e) => {
+        if (e.key === "Enter") search();
+        else if (e.key === "Escape") cancelSearch();
+      }}
     />
   </div>
   {#if scope === "code"}
@@ -244,9 +276,12 @@
       <option value="lexical">Lexical (BM25)</option>
     </select>
   {/if}
-  <button class="btn btn-primary" onclick={search} disabled={loading || !q.trim()}>
+  <button class="btn btn-primary" onclick={() => search()} disabled={loading || !q.trim()}>
     {loading ? "Searching…" : "Search"}
   </button>
+  {#if loading}
+    <button class="btn" onclick={cancelSearch} title="Stop the running search">Cancel</button>
+  {/if}
 </div>
 
 {#if scope === "docs"}

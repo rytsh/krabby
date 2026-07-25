@@ -160,11 +160,11 @@ func (a addSourceArgs) collection() (*websource.Collection, error) {
 // set/unset flag by the fetcher's ConfigView).
 type sourceResult struct {
 	*websource.Collection
-	RefreshInterval string            `json:"refresh_interval"`
-	Config          any               `json:"config,omitempty"`
-	ScopeKey        string            `json:"scope_key"`
-	Running         string            `json:"running,omitempty"`
-	Progress        *manager.Progress `json:"progress,omitempty"`
+	RefreshInterval string             `json:"refresh_interval"`
+	Config          any                `json:"config,omitempty"`
+	ScopeKey        string             `json:"scope_key"`
+	Running         string             `json:"running,omitempty"`
+	Progress        []manager.Progress `json:"progress,omitempty"`
 }
 
 func viewSourceMCP(mgr *manager.Manager, col *websource.Collection) sourceResult {
@@ -174,10 +174,7 @@ func viewSourceMCP(mgr *manager.Manager, col *websource.Collection) sourceResult
 	}
 
 	scope := websource.ScopeKey(col.Name)
-	var progress *manager.Progress
-	if p, ok := mgr.Progress(scope); ok {
-		progress = &p
-	}
+	progress, _ := mgr.Progress(scope)
 
 	return sourceResult{
 		Collection:      col,

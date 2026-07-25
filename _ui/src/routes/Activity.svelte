@@ -2,11 +2,12 @@
   import { onDestroy, onMount } from "svelte";
   import { api } from "../lib/api.js";
   import { link } from "../lib/router.js";
+  import { fmtEta } from "../lib/format.js";
   import Icon from "../lib/Icon.svelte";
 
   // Central work-queue snapshot: { limit, running, pending, tasks: [...] }.
   let snap = $state({ limit: 0, running: 0, pending: 0, tasks: [] });
-  // Per-step detail for running repos: [{ id, running, status }].
+  // Per-step detail for running repos: [{ id, running, status, progress }].
   let active = $state([]);
   let repoCount = $state(0);
   let loaded = $state(false);
@@ -42,6 +43,37 @@
     const s = stepsById[id];
     if (!s) return [];
     return s.split(",").map((step) => stepMeta[step] || step);
+  }
+
+  // Live counters per running step. A repository build reports several at once
+  // (code_index runs alongside docs/docs_index), a web-source sync one at a
+  // time. Each carries item counts and, once the rate has settled, an estimate
+  // of the time left.
+  let progressById = $derived(
+    Object.fromEntries(active.filter((r) => r.progress?.length).map((r) => [r.id, r.progress])),
+  );
+  function progressOf(id) {
+    return progressById[id] || [];
+  }
+  function pct(p) {
+    if (!p || !p.total) return null;
+    return Math.min(100, Math.round((p.done / p.total) * 100));
+  }
+  // Phase names are shared with the pipeline steps above where they overlap;
+  // the web-source phases are its own vocabulary.
+  const phaseLabel = {
+    fetch: "fetching",
+    write: "saving",
+    index: "embedding",
+    docs: "writing docs",
+    docs_index: "embedding docs",
+    code_index: "embedding code",
+  };
+  function progressText(p) {
+    if (!p) return "";
+    const counts = p.total ? `${p.done}/${p.total}` : p.done ? `${p.done}` : "";
+    const eta = fmtEta(p.eta_seconds);
+    return [phaseLabel[p.phase] || p.phase, counts, eta && `· ${eta} left`].filter(Boolean).join(" ");
   }
 
   // Running first (oldest first = longest running), then queued FIFO.
@@ -284,7 +316,7 @@
           <div class="min-w-0 px-5 py-3.5">
             <div class="flex flex-wrap items-center gap-2">
               <span class="inline-flex items-center gap-1.5 text-[11px] uppercase tracking-wide {meta.text}">
-                <span class="h-1.5 w-1.5 rounded-full {meta.dot} {task.state === 'running' ? 'animate-pulse' : ''}"></span>
+                <span class="inline-block h-[7px] w-[7px] flex-shrink-0 rounded-[1px] {meta.dot} {task.state === 'running' ? 'animate-pulse' : ''}"></span>
                 {meta.label}
               </span>
               <span class="rounded border border-line bg-surface-2 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-faint">
@@ -302,6 +334,16 @@
                   <span class="rounded border border-busy/40 bg-surface-2 px-1.5 py-0.5 text-[11px] text-busy">{label}</span>
                 {/each}
               </div>
+              {#each progressOf(task.id) as p (p.phase)}
+                <div class="mt-1.5 flex items-center gap-2 text-[11px] text-faint">
+                  <span>{progressText(p)}</span>
+                  {#if pct(p) !== null}
+                    <span class="inline-block h-1 w-16 overflow-hidden bg-surface-3">
+                      <span class="block h-full bg-busy transition-all" style="width: {pct(p)}%"></span>
+                    </span>
+                  {/if}
+                </div>
+              {/each}
             {:else if task.title}
               <div class="mt-1 text-[12px] text-faint">{task.title}</div>
             {/if}
@@ -377,7 +419,7 @@
         {@const meta = stateMeta[task.state] || stateMeta.done}
         <div class="flex items-center gap-3 px-4 py-2.5 text-[13px]">
           <span class="inline-flex w-20 shrink-0 items-center gap-1.5 text-[11px] uppercase tracking-wide {meta.text}">
-            <span class="h-1.5 w-1.5 rounded-full {meta.dot}"></span>
+            <span class="inline-block h-[7px] w-[7px] flex-shrink-0 rounded-[1px] {meta.dot}"></span>
             {meta.label}
           </span>
           <span class="w-16 shrink-0 font-mono text-[10px] uppercase tracking-wide text-faint">

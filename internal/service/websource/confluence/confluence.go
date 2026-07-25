@@ -22,6 +22,7 @@ import (
 
 	"github.com/worldline-go/types"
 
+	"github.com/rytsh/krabby/internal/service/progress"
 	"github.com/rytsh/krabby/internal/service/websource"
 )
 
@@ -380,6 +381,11 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 
 			out = append(out, pageToRemote(base, page))
 		}
+
+		// Confluence pages a cursor without publishing a result-set size, so
+		// only the running count is known; the caller shows it as an
+		// indeterminate phase with a live counter.
+		progress.Report(ctx, count, 0)
 
 		next = list.Links.Next
 	}

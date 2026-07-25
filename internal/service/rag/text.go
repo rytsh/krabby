@@ -19,7 +19,6 @@ import (
 const (
 	docsTextBucketName = "docs_search"
 	docsTextBatchSize  = 100
-	docsSearchBatch    = 200
 	maxTextCandidates  = 40
 )
 
@@ -185,6 +184,19 @@ func (s *TextStore) insert(ctx context.Context, records []*textRecord) error {
 }
 
 // Search performs BM25 search and returns the best matching chunk per document.
+//
+// The index is chunked, so several hits can belong to one document and the
+// caller's document budget cannot be expressed as a record limit. The hits are
+// therefore streamed in rank order and the walk stops at the first point where
+// topDocs distinct documents have been collected.
+//
+// This used to page through the ranked hits in fixed batches, re-issuing the
+// query for each page. bw evaluates the whole query per call and paginates by
+// slicing the result, so on a large corpus (tens of thousands of documents) the
+// scan cost was paid once per page: a filtered search that had to walk deep
+// into the ranking degenerated into a quadratic scan and effectively hung. One
+// streamed pass with the filter pushed down removes both the repeated
+// evaluation and the hydration of records the filter rejects.
 func (s *TextStore) Search(ctx context.Context, filter vectorstore.Filter, search string, topDocs int) ([]Doc, error) {
 	if strings.TrimSpace(search) == "" {
 		return nil, errors.New("question is empty")
@@ -199,66 +211,37 @@ func (s *TextStore) Search(ctx context.Context, filter vectorstore.Filter, searc
 	seen := make(map[string]struct{}, topDocs)
 	docs := make([]Doc, 0, topDocs)
 
-	// bw FTS has no structured-filter option. Walk ranked hits in bounded pages
-	// until enough documents survive the repo/web-source filter.
-	for offset := 0; ; offset += docsSearchBatch {
-		hits, total, err := s.bucket.Search(ctx, search, docsSearchBatch, offset)
-		if err != nil {
-			return nil, fmt.Errorf("docs text search; %w", err)
-		}
-		for _, hit := range hits {
-			if hit.Record == nil || !textFilterMatches(filter, hit.Record.Repo) {
-				continue
+	_, err := s.bucket.SearchWalk(ctx, search, bw.SearchOptions{Filter: filter.Query()},
+		func(hit bw.SearchResult[textRecord]) (bool, error) {
+			rec := hit.Record
+			if rec == nil {
+				return true, nil
 			}
-			key := hit.Record.Repo + "\x00" + hit.Record.Path
+
+			key := rec.Repo + "\x00" + rec.Path
 			if _, ok := seen[key]; ok {
-				continue
+				return true, nil
 			}
 			seen[key] = struct{}{}
 
-			excerpt, truncated := boundedExcerpt(hit.Record.Excerpt)
+			excerpt, truncated := boundedExcerpt(rec.Excerpt)
 			docs = append(docs, Doc{
-				Repo:      hit.Record.Repo,
-				Path:      hit.Record.Path,
-				Title:     hit.Record.Title,
+				Repo:      rec.Repo,
+				Path:      rec.Path,
+				Title:     rec.Title,
 				Score:     float32(hit.Score),
 				Excerpt:   excerpt,
 				Truncated: truncated,
-				UpdatedAt: hit.Record.UpdatedAt,
+				UpdatedAt: rec.UpdatedAt,
 			})
-			if len(docs) == topDocs {
-				return docs, nil
-			}
-		}
-		if uint64(offset+docsSearchBatch) >= total {
-			break
-		}
+
+			return len(docs) < topDocs, nil
+		})
+	if err != nil {
+		return nil, fmt.Errorf("docs text search; %w", err)
 	}
 
 	return docs, nil
-}
-
-func textFilterMatches(filter vectorstore.Filter, repo string) bool {
-	if len(filter.Keys) > 0 {
-		matched := false
-		for _, key := range filter.Keys {
-			if repo == key {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			return false
-		}
-	}
-	if filter.Prefix != "" && !strings.HasPrefix(repo, filter.Prefix) {
-		return false
-	}
-	if filter.ExcludePrefix != "" && strings.HasPrefix(repo, filter.ExcludePrefix) {
-		return false
-	}
-
-	return true
 }
 
 func (s *TextStore) HasRepo(ctx context.Context, repo string) (bool, error) {

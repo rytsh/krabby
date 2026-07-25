@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/rytsh/krabby/internal/config"
@@ -62,13 +63,21 @@ func TestEmbedBatchingAndDim(t *testing.T) {
 }
 
 func TestEmbedClampsBatchToSafeMax(t *testing.T) {
-	var maxSeen int
+	// Batches are dispatched concurrently, so the handler runs from several
+	// goroutines and the high-water mark needs guarding.
+	var (
+		mu      sync.Mutex
+		maxSeen int
+	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req embedRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
+
+		mu.Lock()
 		if len(req.Input) > maxSeen {
 			maxSeen = len(req.Input)
 		}
+		mu.Unlock()
 
 		var resp embedResponse
 		for range req.Input {
@@ -99,6 +108,8 @@ func TestEmbedClampsBatchToSafeMax(t *testing.T) {
 	if len(out) != len(inputs) {
 		t.Fatalf("got %d vectors want %d", len(out), len(inputs))
 	}
+	mu.Lock()
+	defer mu.Unlock()
 	if maxSeen > maxSafeBatch {
 		t.Fatalf("largest request batch = %d, want <= %d", maxSeen, maxSafeBatch)
 	}

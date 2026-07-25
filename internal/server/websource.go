@@ -66,12 +66,14 @@ func (r sourceRequest) collection() (*websource.Collection, error) {
 // key + live activity are included for the UI.
 type sourceView struct {
 	*websource.Collection
-	RefreshInterval string            `json:"refresh_interval"`
-	Config          any               `json:"config,omitempty"`
-	ScopeKey        string            `json:"scope_key"`
-	PageCount       int               `json:"page_count"`
-	Running         string            `json:"running,omitempty"`
-	Progress        *manager.Progress `json:"progress,omitempty"`
+	RefreshInterval string `json:"refresh_interval"`
+	Config          any    `json:"config,omitempty"`
+	ScopeKey        string `json:"scope_key"`
+	PageCount       int    `json:"page_count"`
+	Running         string `json:"running,omitempty"`
+	// Progress carries one entry per phase currently running, each with its
+	// counters and remaining-time estimate.
+	Progress []manager.Progress `json:"progress,omitempty"`
 }
 
 func viewSource(mgr *manager.Manager, col *websource.Collection, pageCount int) sourceView {
@@ -81,10 +83,7 @@ func viewSource(mgr *manager.Manager, col *websource.Collection, pageCount int) 
 	}
 
 	scope := websource.ScopeKey(col.Name)
-	var progress *manager.Progress
-	if p, ok := mgr.Progress(scope); ok {
-		progress = &p
-	}
+	progress, _ := mgr.Progress(scope)
 
 	return sourceView{
 		Collection:      col,

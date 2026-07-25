@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/rytsh/krabby/internal/service/progress"
 	"github.com/rytsh/krabby/internal/service/websource"
 )
 
@@ -63,6 +64,7 @@ func (f *Fetcher) Fetch(ctx context.Context, _ *websource.Collection, pages []*w
 		}
 
 		out = append(out, remote)
+		progress.Report(ctx, len(out), len(pages))
 	}
 
 	return &websource.FetchResult{Pages: out}, nil

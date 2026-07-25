@@ -773,17 +773,33 @@ func (m *Manager) ensureDocsTextForSearch(ctx context.Context, scope, key, names
 	return errors.Join(errs...)
 }
 
+// ensureDocsTextKey backfills one key's lexical index, but never at the cost of
+// the query it serves. The per-key lock is also held for the whole of a web
+// source sync or a repo refresh/generate, so taking it unconditionally made a
+// search block until an unrelated write job finished (and a scope-wide search
+// blocks on every key it walks). Reads therefore probe first and only take the
+// lock opportunistically: a key that is already indexed never touches it, and a
+// key owned by a running job is skipped, because that job indexes it on
+// completion anyway. Worst case the query runs against what is indexed now.
 func (m *Manager) ensureDocsTextKey(ctx context.Context, key, docsDir string) error {
 	if !dirHasMarkdown(docsDir) {
 		return nil
 	}
 
-	lock := m.lock(key)
-	lock.Lock()
-	defer lock.Unlock()
-
 	has, err := m.docsText.HasRepo(ctx, key)
 	if err != nil || has {
+		return err
+	}
+
+	lock := m.lock(key)
+	if !lock.TryLock() {
+		return nil
+	}
+	defer lock.Unlock()
+
+	// Re-probe under the lock: a concurrent backfill may have finished while
+	// this call was between the probe and the lock.
+	if has, err = m.docsText.HasRepo(ctx, key); err != nil || has {
 		return err
 	}
 

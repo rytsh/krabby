@@ -32,7 +32,10 @@ async function req(path, opts = {}) {
 
     return responseMeta ? { body, headers: res.headers } : body;
   } catch (error) {
-    errorToast(error);
+    // An aborted request is a deliberate user action (e.g. cancelling a slow
+    // search), not a failure: it must not raise a toast. Callers still see the
+    // rejection so they can tell it apart from a completed request.
+    if (error?.name !== "AbortError") errorToast(error);
     throw error;
   }
 }
@@ -116,13 +119,17 @@ export const api = {
   // ("web:<name>") and wins over scope; scope is all|repos|sources.
   // namespace scopes results to a single namespace; "" (or "*") searches all.
   // mode is hybrid (default), semantic, or lexical (BM25).
-  searchDocs: (q, repo = "", top = 0, scope = "", namespace = "", mode = "hybrid") =>
+  // Both search calls take an optional AbortSignal so the UI can cancel a
+  // long-running query instead of leaving the user stuck on "Searching…".
+  searchDocs: (q, repo = "", top = 0, scope = "", namespace = "", mode = "hybrid", { signal } = {}) =>
     req(
       `/docs/search?q=${encodeURIComponent(q)}&repo=${encodeURIComponent(repo)}&top=${top}&scope=${encodeURIComponent(scope)}&namespace=${encodeURIComponent(namespace)}&mode=${encodeURIComponent(mode)}`,
+      { signal },
     ),
-  searchCode: (q, repo = "", mode = "normal", page = 1, perPage = 20, top = 0, namespace = "") =>
+  searchCode: (q, repo = "", mode = "normal", page = 1, perPage = 20, top = 0, namespace = "", { signal } = {}) =>
     req(
       `/code/search?q=${encodeURIComponent(q)}&repo=${encodeURIComponent(repo)}&mode=${mode}&page=${page}&per_page=${perPage}&top=${top}&namespace=${encodeURIComponent(namespace)}`,
+      { signal },
     ),
   docs: (id) => req(`/repos/${id}/-/docs`),
   doc: (id, path) => req(`/repos/${id}/-/doc?path=${encodeURIComponent(path)}`),

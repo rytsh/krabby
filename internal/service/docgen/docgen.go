@@ -30,6 +30,7 @@ import (
 	"github.com/rytsh/krabby/internal/service/graphify"
 	"github.com/rytsh/krabby/internal/service/graphquery"
 	"github.com/rytsh/krabby/internal/service/llm"
+	"github.com/rytsh/krabby/internal/service/progress"
 	"github.com/rytsh/krabby/internal/service/repofs"
 )
 
@@ -298,10 +299,15 @@ func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir st
 		mu        sync.Mutex
 		summaries []DocMeta
 		regen     int
+		done      int
 		sem       = make(chan struct{}, concurrency)
 		wg        sync.WaitGroup
 		genErr    error
 	)
+
+	// Summarising is the bulk of a docs build: one LLM call per file group,
+	// with a known group count, so the caller can show a real estimate.
+	progress.Report(ctx, 0, len(groups))
 
 	for _, grp := range groups {
 		select {
@@ -333,7 +339,11 @@ func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir st
 			mu.Lock()
 			summaries = append(summaries, metas...)
 			regen += groupRegen
+			done++
+			at := done
 			mu.Unlock()
+
+			progress.Report(ctx, at, len(groups))
 		}(grp)
 	}
 

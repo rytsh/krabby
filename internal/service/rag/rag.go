@@ -75,6 +75,13 @@ func New(cfg config.RAG, emb *embedder.Client, store vectorstore.Store) *Service
 // embeds the chunks and upserts them into the store, replacing any prior
 // vectors for the repo.
 func (s *Service) Index(ctx context.Context, repo string, docsDir string) error {
+	return s.IndexProgress(ctx, repo, docsDir, nil)
+}
+
+// IndexProgress is Index with an optional progress callback, invoked as chunks
+// are embedded (done, total). It runs from several goroutines, so it must be
+// safe for concurrent use; pass nil to disable reporting.
+func (s *Service) IndexProgress(ctx context.Context, repo string, docsDir string, onProgress func(done, total int)) error {
 	titles := manifestTitles(docsDir)
 
 	var (
@@ -142,7 +149,7 @@ func (s *Service) Index(ctx context.Context, repo string, docsDir string) error 
 		return s.store.DeleteRepo(ctx, repo)
 	}
 
-	vecs, err := s.emb.Embed(ctx, texts)
+	vecs, err := s.emb.EmbedWithProgress(ctx, texts, onProgress)
 	if err != nil {
 		return fmt.Errorf("embed %d chunks; %w", len(texts), err)
 	}

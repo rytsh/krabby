@@ -5,7 +5,7 @@
   import { onMount } from "svelte";
   import { api } from "../lib/api.js";
   import { path as routePath, navigate, link } from "../lib/router.js";
-  import { fmtDate } from "../lib/format.js";
+  import { fmtDate, fmtEta } from "../lib/format.js";
   import Icon from "../lib/Icon.svelte";
   import Status from "../lib/Status.svelte";
   import MarkdownView from "../lib/MarkdownView.svelte";
@@ -90,7 +90,7 @@
   // progress bar and page counts update live without a manual refresh.
   let pollTimer = null;
   function anyRunning() {
-    return sources.some((s) => s.running || s.status === "fetching" || s.progress);
+    return sources.some((s) => s.running || s.status === "fetching" || s.progress?.length);
   }
   $effect(() => {
     if (anyRunning() && !pollTimer) {
@@ -104,6 +104,12 @@
     if (pollTimer) clearInterval(pollTimer);
   });
 
+  // A sync runs one phase at a time, but the API reports a list (a repository
+  // build runs several at once), so take the first.
+  function phase(s) {
+    return s?.progress?.[0] || null;
+  }
+
   // Human progress label + percentage for a source's current phase.
   function progressPct(p) {
     if (!p || !p.total) return null;
@@ -112,8 +118,16 @@
   function progressLabel(p) {
     if (!p) return "";
     const phase = { fetch: "Fetching", write: "Saving", index: "Embedding" }[p.phase] || p.phase;
-    if (!p.total) return `${phase}…`;
+    // Some providers page a cursor without publishing a result-set size: the
+    // running count is still worth showing, just without a percentage.
+    if (!p.total) return p.done ? `${phase} ${p.done}…` : `${phase}…`;
     return `${phase} ${p.done}/${p.total}`;
+  }
+  // The server only sends an estimate once the phase has run long enough to
+  // produce a stable one, so an empty label here means "not known yet".
+  function progressEta(p) {
+    const eta = fmtEta(p?.eta_seconds);
+    return eta ? `${eta} left` : "";
   }
 
   async function loadPages(name, page = pageNum[name] || 1) {
@@ -563,18 +577,19 @@
             <span class="rounded border border-line px-1.5 text-[11px] text-dim">{s.type}</span>
             <span class="font-mono text-[11px] text-faint">web:{s.name}</span>
             <span class="ml-auto flex items-center gap-2.5 text-[12px] text-faint">
-              {#if s.progress}
+              {#if phase(s)}
+                {@const p = phase(s)}
                 <span class="flex items-center gap-1.5 text-busy">
-                  {#if progressPct(s.progress) !== null}
+                  {#if progressPct(p) !== null}
                     <span class="inline-block h-1.5 w-20 overflow-hidden rounded-full bg-surface-3">
-                      <span
-                        class="block h-full rounded-full bg-busy transition-all"
-                        style="width: {progressPct(s.progress)}%"
-                      ></span>
+                      <span class="block h-full rounded-full bg-busy transition-all" style="width: {progressPct(p)}%"></span>
                     </span>
-                    <span class="font-mono">{progressLabel(s.progress)} ({progressPct(s.progress)}%)</span>
+                    <span class="font-mono">{progressLabel(p)} ({progressPct(p)}%)</span>
+                    {#if progressEta(p)}
+                      <span class="text-faint" title="Estimated from the rate so far">· {progressEta(p)}</span>
+                    {/if}
                   {:else}
-                    <span>{progressLabel(s.progress)}</span>
+                    <span>{progressLabel(p)}</span>
                   {/if}
                 </span>
               {:else if s.running}

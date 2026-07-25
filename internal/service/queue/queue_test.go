@@ -318,8 +318,8 @@ func TestBump(t *testing.T) {
 			return nil
 		}
 	}
-	q.Submit(Task{ID: "a", Run: mk("a")})
-	q.Submit(Task{ID: "b", Run: mk("b")})
+	first := q.Submit(Task{ID: "a", Run: mk("a")})
+	second := q.Submit(Task{ID: "b", Run: mk("b")})
 	last := q.Submit(Task{ID: "c", Run: mk("c")})
 
 	// Bump the last one (c) to the front.
@@ -331,9 +331,13 @@ func TestBump(t *testing.T) {
 		t.Fatal("Bump returned false for a queued task")
 	}
 
-	// Let the backlog drain.
+	// Let the backlog drain. Every task must be awaited, not just the bumped
+	// one: it now runs first, and "nothing running" is also true in the gap
+	// between two runs, so either condition alone can observe a partial order.
 	close(release)
 	<-last.Done()
+	<-first.Done()
+	<-second.Done()
 	waitFor(t, time.Second, func() bool { return q.Snapshot().Running == 0 })
 
 	mu.Lock()

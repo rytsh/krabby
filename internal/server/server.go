@@ -553,6 +553,11 @@ type activeRepoView struct {
 	ID      string `json:"id"`
 	Running string `json:"running"`
 	Status  string `json:"status,omitempty"`
+	// Progress carries the live counters and remaining-time estimate of every
+	// step that publishes them (docs_index and code_index run in parallel, so
+	// there can be several). Web-source scopes ("web:<name>") appear here too,
+	// so the Activity page shows their sync the same way.
+	Progress []manager.Progress `json:"progress,omitempty"`
 }
 
 // listActiveRepos returns only the repos that have running jobs, so the
@@ -567,6 +572,7 @@ func listActiveRepos(mgr *manager.Manager) ada.HandlerFunc {
 			if repo, err := mgr.Registry().Get(c.Request.Context(), id); err == nil && repo != nil {
 				v.Status = repo.Status
 			}
+			v.Progress, _ = mgr.Progress(id)
 			views = append(views, v)
 		}
 
