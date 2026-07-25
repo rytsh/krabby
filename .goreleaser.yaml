@@ -36,18 +36,32 @@ archives:
       - README.md
       - krabby.example.yaml
 
-dockers:
-  - image_templates:
-      - "ghcr.io/rytsh/krabby:{{ .Version }}"
-      - "ghcr.io/rytsh/krabby:latest"
+# dockers_v2 builds a single multi-arch manifest with `docker buildx build`,
+# reusing the linux binaries produced above. It needs a buildx builder that can
+# target linux/amd64 and linux/arm64 (see `make build-container` for a local
+# single-arch smoke test):
+#   docker buildx create --name=goreleaser --use
+#   docker run --privileged --rm tonistiigi/binfmt --install all
+dockers_v2:
+  - images:
+      - "ghcr.io/rytsh/krabby"
+    tags:
+      - "{{ .Version }}"
+      - "latest"
     dockerfile: Dockerfile
-    build_flag_templates:
+    labels: &image_metadata
+      "org.opencontainers.image.title": "{{ .ProjectName }}"
+      "org.opencontainers.image.version": "{{ .Version }}"
+      "org.opencontainers.image.revision": "{{ .FullCommit }}"
+      "org.opencontainers.image.created": "{{ .Date }}"
+      "org.opencontainers.image.source": "{{ .GitURL }}"
+    # Labels live on each per-platform image config; registries read the
+    # equivalent annotations off the manifest index, so set both.
+    annotations: *image_metadata
+    # Parity with the old --pull build flag: always re-resolve the base image so
+    # a release never bakes in a stale locally-cached python:3.12-slim.
+    flags:
       - "--pull"
-      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
-      - "--label=org.opencontainers.image.version={{ .Version }}"
-      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
-      - "--label=org.opencontainers.image.created={{ .Date }}"
-      - "--label=org.opencontainers.image.source={{ .GitURL }}"
 
 snapshot:
   version_template: "{{ incpatch .Version }}-snapshot"

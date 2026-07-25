@@ -6,7 +6,11 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir graphifyy
 
-COPY krabby /usr/local/bin/krabby
+# goreleaser lays the build context out as <os>/<arch>/krabby, one directory per
+# target platform, so the COPY must be platform-qualified for buildx to pick the
+# right binary for each entry in the manifest.
+ARG TARGETPLATFORM
+COPY $TARGETPLATFORM/krabby /usr/local/bin/krabby
 
 ENV KRABBY_DATA_DIR=/data
 VOLUME /data
