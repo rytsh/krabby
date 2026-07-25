@@ -11,6 +11,7 @@ import (
 	"github.com/rakunlabs/tell"
 
 	"github.com/rytsh/krabby/internal/config"
+	"github.com/rytsh/krabby/internal/memlimit"
 	"github.com/rytsh/krabby/internal/server"
 	"github.com/rytsh/krabby/internal/service/coderag"
 	"github.com/rytsh/krabby/internal/service/credentials"
@@ -56,6 +57,24 @@ func run(ctx context.Context) error {
 		return err
 	}
 
+	// Resolve the memory budget before anything allocates. It installs Go's
+	// soft heap limit and sizes the embedded databases' caches, the parsed
+	// graph cache and the indexing batches; without it the defaults of three
+	// Badger stores plus an unbounded GC target exceed a typical container
+	// limit on their own.
+	budget := memlimit.New(cfg.Memory.LimitBytes, cfg.Memory.Ratio)
+	budget.Apply()
+	memlimit.Set(budget)
+
+	slog.Info("memory budget",
+		"limit", memlimit.Bytes(budget.Total), "source", budget.Source,
+		"go_soft_limit", memlimit.Bytes(budget.GoLimit),
+		"db_block_cache", memlimit.Bytes(budget.BlockCache),
+		"db_memtable", memlimit.Bytes(budget.MemTable),
+		"vector_cache", memlimit.Bytes(budget.VectorCache),
+		"graph_cache", memlimit.Bytes(budget.GraphCache),
+	)
+
 	// Telemetry first so everything downstream is observable.
 	collector, err := tell.New(ctx, cfg.Telemetry)
 	if err != nil {
@@ -68,6 +87,7 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+
 	defer db.Close()
 
 	reg, err := registry.New(db)
@@ -101,8 +121,9 @@ func run(ctx context.Context) error {
 
 	// Native in-process graph query engine (replaces the python serve pool).
 	// Bounded by an estimated-memory budget so tracking many repos cannot pin
-	// every parsed graph in RAM and OOM-kill the process.
-	engine := graphquery.NewEngine(cfg.Graphify.CacheMaxBytes)
+	// every parsed graph in RAM and OOM-kill the process. An unset cap follows
+	// the process budget; a negative one opts out of eviction entirely.
+	engine := graphquery.NewEngine(graphCacheBytes(cfg.Graphify.CacheMaxBytes, budget))
 
 	// Per-host SSH/token credentials are managed in the persisted credential
 	// store through the UI/REST API; there is no global file-config fallback.
@@ -185,12 +206,16 @@ func run(ctx context.Context) error {
 	// to be re-read and chunked. Repos are marked pending first, so a search
 	// that arrives before the pass finishes warms just the repos it needs on
 	// demand (see Manager.SearchCodeText) and never returns partial results.
+	//
+	// The two passes run one after the other in a single goroutine rather than
+	// concurrently: each walks the whole corpus and buffers chunks, so running
+	// them together doubles peak memory during the most fragile moment of the
+	// process's life while halving nothing that matters — neither pass is on
+	// the critical path for serving requests.
 	go func() {
 		if err := mgr.WarmCodeSearch(ctx); err != nil {
 			slog.Error("warm normal code search index", "error", err)
 		}
-	}()
-	go func() {
 		if err := mgr.WarmDocsSearch(ctx); err != nil {
 			slog.Error("warm lexical docs search index", "error", err)
 		}
@@ -217,6 +242,20 @@ func run(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// graphCacheBytes resolves the parsed-graph cache cap. Zero (unset) follows the
+// process memory budget so the cache stays proportional to the container limit;
+// a negative value opts out of eviction, which the query engine expresses as 0.
+func graphCacheBytes(configured int64, budget memlimit.Budget) int64 {
+	switch {
+	case configured > 0:
+		return configured
+	case configured < 0:
+		return 0
+	default:
+		return budget.GraphCache
+	}
 }
 
 // pageCredentials adapts the git credential store to web-page fetching: a

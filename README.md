@@ -231,3 +231,43 @@ dimensions are safe.
 Generated markdown is stored outside clones under
 `data_dir/docs/<owner>/<repo>/`; older in-clone `krabby-docs/` trees are moved
 there at startup without regenerating documentation.
+
+### Memory
+
+krabby sizes itself from one number: the `memory.limit_bytes` setting, or — when
+it is unset, which is the norm — the cgroup limit of the container it runs in,
+falling back to total system memory. From that budget it derives Go's soft heap
+limit (`GOMEMLIMIT`), the block/index caches and memtable size of each embedded
+database, and the parsed-graph cache. Run the container with an explicit memory
+limit (`docker run -m 4g`, or `resources.limits.memory`) so it has a real number
+to work from. An explicit `GOMEMLIMIT` in the environment always wins.
+
+Three things about the design are worth knowing when tuning it:
+
+- **Memtables dominate restart cost.** Badger allocates a full arena per
+  write-ahead log it finds at startup, and a kill (including an OOM kill) leaves
+  those logs unflushed — so an under-sized budget makes the next start more
+  expensive than the last. Krabby drains logs written under an older, larger
+  memtable size before applying a smaller one, because replaying such a log into
+  a smaller arena aborts the process outright.
+- **Indexing is streaming.** Chunking, embedding and upserting happen in fixed
+  batches, so peak memory does not grow with the size of a repository or a
+  synced JIRA/Confluence collection. The trade-off is that a failure part-way
+  through a full rebuild leaves a partial index rather than the previous one;
+  the next refresh repairs it.
+- **The startup warm passes are sequential.** Backfilling the code and docs
+  search indexes runs one after the other in the background, so a restart never
+  pays for both at once.
+
+The vector cache deserves a note because it is the one bound `GOMEMLIMIT`
+cannot enforce: its contents are live, so the collector can only thrash against
+them. The embedded vector store ([bw](https://github.com/rakunlabs/bw)) keeps
+decoded embeddings in memory to serve HNSW traversal, and their cost is decided
+by the embedding model — the same number of vectors is ~75 MiB at 96 dimensions
+and ~1.2 GiB at 1536. krabby therefore gives bw a **byte** budget derived from
+the process limit (`bw.WithVectorCacheBytes`, bw v0.3.7+) rather than letting a
+vector count stand in for one. A narrower embedding model buys a larger working
+set for the same memory; a wider one buys better recall for less.
+
+`GET <base>/debug/pprof/heap` is mounted for when the numbers still do not add
+up.

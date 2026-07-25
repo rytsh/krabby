@@ -4,6 +4,7 @@ go 1.26
 
 require (
 	github.com/JohannesKaufmann/html-to-markdown/v2 v2.5.2
+	github.com/dgraph-io/badger/v4 v4.9.1
 	github.com/go-shiori/go-readability v0.0.0-20251205110129-5db1dc9836f0
 	github.com/google/jsonschema-go v0.4.3
 	github.com/modelcontextprotocol/go-sdk v1.6.1
@@ -15,7 +16,7 @@ require (
 	github.com/rakunlabs/ada/middleware/requestid v0.4.7
 	github.com/rakunlabs/ada/middleware/server v0.4.7
 	github.com/rakunlabs/ada/middleware/telemetry v0.4.7
-	github.com/rakunlabs/bw v0.3.6
+	github.com/rakunlabs/bw v0.3.7
 	github.com/rakunlabs/chu v0.4.7
 	github.com/rakunlabs/chu/loader/external/loaderconsul v0.0.0-20260529215824-15c48ce668ec
 	github.com/rakunlabs/chu/loader/external/loadervault v0.0.0-20260529215824-15c48ce668ec
@@ -38,7 +39,6 @@ require (
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/dgraph-io/badger/v4 v4.9.1 // indirect
 	github.com/dgraph-io/ristretto/v2 v2.2.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fatih/color v1.18.0 // indirect

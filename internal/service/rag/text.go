@@ -57,25 +57,22 @@ func NewTextStore(db *bw.DB) (*TextStore, error) {
 }
 
 // Index rebuilds one repository or web collection from its markdown files.
+//
+// The background warm pass runs this for every repository and every web
+// collection at startup, so it streams: a synced JIRA project or Confluence
+// space is thousands of documents, and holding all of their excerpts in memory
+// made startup cost scale with the corpus.
 func (s *TextStore) Index(ctx context.Context, repo, docsDir string) error {
-	records, err := textRecords(docsDir, nil, nil)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("docs dir %s does not exist; generate docs first", docsDir)
-		}
-
-		return err
-	}
-	for _, record := range records {
-		record.Repo = repo
-		record.ID = repo + "/" + record.ID
-	}
-
 	if err := s.DeleteRepo(ctx, repo); err != nil {
 		return err
 	}
 
-	return s.insert(ctx, records)
+	err := streamTextRecords(ctx, docsDir, repo, nil, nil, s.insert)
+	if err != nil && errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("docs dir %s does not exist; generate docs first", docsDir)
+	}
+
+	return err
 }
 
 // IndexPaths updates only changed markdown paths and removes stale paths.
@@ -87,23 +84,42 @@ func (s *TextStore) IndexPaths(ctx context.Context, repo, docsDir string, change
 		return err
 	}
 
-	records, err := textRecords(docsDir, changed, opts)
-	if err != nil {
-		return err
-	}
-	for _, record := range records {
-		record.Repo = repo
-		record.ID = repo + "/" + record.ID
-	}
-
-	return s.insert(ctx, records)
+	return streamTextRecords(ctx, docsDir, repo, changed, opts, s.insert)
 }
 
-func textRecords(docsDir string, paths []string, opts *IndexOptions) ([]*textRecord, error) {
+// streamTextRecords reads the markdown under docsDir (all of it, or just paths
+// when non-nil), turns it into search records and hands them to flush in
+// batches of docsTextBatchSize. flush must not retain the slice.
+func streamTextRecords(
+	ctx context.Context,
+	docsDir, repo string,
+	paths []string,
+	opts *IndexOptions,
+	flush func(context.Context, []*textRecord) error,
+) error {
 	titles := manifestTitles(docsDir)
-	var records []*textRecord
+	batch := make([]*textRecord, 0, docsTextBatchSize)
+
+	drain := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		if err := flush(ctx, batch); err != nil {
+			return err
+		}
+		// Clear before reslicing so the flushed excerpts become collectable
+		// immediately rather than at the next overwrite.
+		clear(batch)
+		batch = batch[:0]
+
+		return nil
+	}
 
 	add := func(docPath string) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		docPath = filepath.ToSlash(docPath)
 		content, err := os.ReadFile(filepath.Join(docsDir, filepath.FromSlash(docPath)))
 		if err != nil {
@@ -128,13 +144,20 @@ func textRecords(docsDir string, paths []string, opts *IndexOptions) ([]*textRec
 		}
 
 		for i, excerpt := range chunk(string(content), 1200, 200) {
-			records = append(records, &textRecord{
-				ID:        fmt.Sprintf("%s#%d", docPath, i),
+			batch = append(batch, &textRecord{
+				ID:        fmt.Sprintf("%s/%s#%d", repo, docPath, i),
+				Repo:      repo,
 				Path:      docPath,
 				Title:     title,
 				Excerpt:   excerpt,
 				UpdatedAt: updatedAt,
 			})
+
+			if len(batch) >= docsTextBatchSize {
+				if err := drain(); err != nil {
+					return err
+				}
+			}
 		}
 
 		return nil
@@ -143,16 +166,16 @@ func textRecords(docsDir string, paths []string, opts *IndexOptions) ([]*textRec
 	if paths != nil {
 		for _, docPath := range paths {
 			if err := add(docPath); err != nil {
-				return nil, fmt.Errorf("read docs text path %s; %w", docPath, err)
+				return fmt.Errorf("read docs text path %s; %w", docPath, err)
 			}
 		}
 
-		return records, nil
+		return drain()
 	}
 
-	err := filepath.WalkDir(docsDir, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
+	err := filepath.WalkDir(docsDir, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
 			return nil
@@ -166,10 +189,14 @@ func textRecords(docsDir string, paths []string, opts *IndexOptions) ([]*textRec
 		return add(rel)
 	})
 	if err != nil {
-		return nil, fmt.Errorf("walk docs text dir; %w", err)
+		if errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+
+		return fmt.Errorf("walk docs text dir; %w", err)
 	}
 
-	return records, nil
+	return drain()
 }
 
 func (s *TextStore) insert(ctx context.Context, records []*textRecord) error {

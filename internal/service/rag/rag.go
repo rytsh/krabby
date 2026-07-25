@@ -81,19 +81,89 @@ func (s *Service) Index(ctx context.Context, repo string, docsDir string) error 
 // IndexProgress is Index with an optional progress callback, invoked as chunks
 // are embedded (done, total). It runs from several goroutines, so it must be
 // safe for concurrent use; pass nil to disable reporting.
+// It walks the docs directory twice: once to rebuild nothing but the chunk and
+// document counts, and once to embed and upsert in bounded batches. A large
+// collection (a synced JIRA project is thousands of documents) used to hold
+// every chunk and every embedding in memory simultaneously, so peak usage grew
+// with the corpus; it is now a constant.
 func (s *Service) IndexProgress(ctx context.Context, repo string, docsDir string, onProgress func(done, total int)) error {
-	titles := manifestTitles(docsDir)
+	total, docs, err := s.countDir(docsDir)
+	if err != nil {
+		return err
+	}
 
-	var (
-		items []vectorstore.Item
-		texts []string
-	)
+	if total == 0 {
+		// No docs -> make the index match (empty).
+		return s.store.DeleteRepo(ctx, repo)
+	}
 
-	err := filepath.WalkDir(docsDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
+	// Full rebuild: drop prior vectors so removed docs disappear. A failure
+	// part-way through now leaves a partial index rather than the previous one
+	// intact; the next refresh rebuilds it.
+	if err := s.store.DeleteRepo(ctx, repo); err != nil {
+		return fmt.Errorf("clear prior vectors; %w", err)
+	}
+
+	done := 0
+	flush := s.embedFlusher(ctx, total, &done, onProgress)
+
+	if err := s.streamDir(ctx, repo, docsDir, flush); err != nil {
+		return err
+	}
+
+	if err := flush.drain(); err != nil {
+		return err
+	}
+
+	slog.Info("rag index rebuilt", "repo", repo, "docs", docs, "chunks", total)
+
+	return nil
+}
+
+// countDir reports how many chunks and documents docsDir yields, without
+// retaining any of them, so a streaming index can still report determinate
+// progress.
+func (s *Service) countDir(docsDir string) (chunks, docs int, err error) {
+	err = filepath.WalkDir(docsDir, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() || !strings.HasSuffix(d.Name(), ".md") {
+			return nil
 		}
 
+		b, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+
+		chunks += len(chunk(string(b), s.cfg.ChunkSize, s.cfg.ChunkOverlap))
+		docs++
+
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return 0, 0, fmt.Errorf("docs dir %s does not exist; generate docs first", docsDir)
+		}
+
+		return 0, 0, fmt.Errorf("walk docs dir; %w", err)
+	}
+
+	return chunks, docs, nil
+}
+
+// streamDir walks docsDir and feeds every chunk to batch.
+func (s *Service) streamDir(ctx context.Context, repo, docsDir string, batch *chunkBatch) error {
+	titles := manifestTitles(docsDir)
+
+	err := filepath.WalkDir(docsDir, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if d.IsDir() || !strings.HasSuffix(d.Name(), ".md") {
 			return nil
 		}
@@ -102,7 +172,6 @@ func (s *Service) IndexProgress(ctx context.Context, repo string, docsDir string
 		if err != nil {
 			return err
 		}
-
 		docPath := filepath.ToSlash(rel)
 
 		b, err := os.ReadFile(path)
@@ -111,27 +180,12 @@ func (s *Service) IndexProgress(ctx context.Context, repo string, docsDir string
 		}
 
 		content := string(b)
-
-		title := titles[docPath]
-		if title == "" {
-			title = firstHeading(content)
-		}
-
-		if title == "" {
-			title = docPath
-		}
+		title := docTitle(titles, docPath, content)
 
 		for i, c := range chunk(content, s.cfg.ChunkSize, s.cfg.ChunkOverlap) {
-			items = append(items, vectorstore.Item{
-				ID: fmt.Sprintf("%s/%s#%d", repo, docPath, i),
-				Payload: vectorstore.Payload{
-					Repo:    repo,
-					DocPath: docPath,
-					Title:   title,
-					Chunk:   c,
-				},
-			})
-			texts = append(texts, c)
+			if err := batch.add(chunkItem(repo, docPath, title, c, i, time.Time{})); err != nil {
+				return err
+			}
 		}
 
 		return nil
@@ -143,35 +197,6 @@ func (s *Service) IndexProgress(ctx context.Context, repo string, docsDir string
 
 		return fmt.Errorf("walk docs dir; %w", err)
 	}
-
-	if len(items) == 0 {
-		// No docs -> make the index match (empty).
-		return s.store.DeleteRepo(ctx, repo)
-	}
-
-	vecs, err := s.emb.EmbedWithProgress(ctx, texts, onProgress)
-	if err != nil {
-		return fmt.Errorf("embed %d chunks; %w", len(texts), err)
-	}
-
-	if len(vecs) != len(items) {
-		return fmt.Errorf("embedder returned %d vectors for %d chunks", len(vecs), len(items))
-	}
-
-	for i := range items {
-		items[i].Vector = vecs[i]
-	}
-
-	// Full rebuild: drop prior vectors so removed docs disappear, then upsert.
-	if err := s.store.DeleteRepo(ctx, repo); err != nil {
-		return fmt.Errorf("clear prior vectors; %w", err)
-	}
-
-	if err := s.store.Upsert(ctx, items); err != nil {
-		return fmt.Errorf("upsert %d vectors; %w", len(items), err)
-	}
-
-	slog.Info("rag index rebuilt", "repo", repo, "docs", len(titlesIndexed(items)), "chunks", len(items))
 
 	return nil
 }
@@ -211,75 +236,191 @@ func (s *Service) IndexPathsProgress(ctx context.Context, repo, docsDir string, 
 		}
 	}
 
-	titles := manifestTitles(docsDir)
+	// Count first so progress is determinate, then stream. A full JIRA or
+	// Confluence resync arrives here as thousands of changed paths, which is
+	// precisely the case that must not scale in memory.
+	total := 0
+	if err := s.streamPaths(ctx, repo, docsDir, changed, opts, nil, &total); err != nil {
+		return err
+	}
 
-	var (
-		items []vectorstore.Item
-		texts []string
-	)
+	if total == 0 {
+		return nil
+	}
+
+	done := 0
+	flush := s.embedFlusher(ctx, total, &done, onProgress)
+
+	if err := s.streamPaths(ctx, repo, docsDir, changed, opts, flush, nil); err != nil {
+		return err
+	}
+
+	if err := flush.drain(); err != nil {
+		return err
+	}
+
+	slog.Info("rag index updated", "repo", repo, "changed", len(changed), "removed", len(removed), "chunks", total)
+
+	return nil
+}
+
+// streamPaths reads each changed document and feeds its chunks to batch. When
+// batch is nil it only counts into count, which lets the caller make a cheap
+// first pass for a determinate progress total.
+func (s *Service) streamPaths(
+	ctx context.Context,
+	repo, docsDir string,
+	changed []string,
+	opts *IndexOptions,
+	batch *chunkBatch,
+	count *int,
+) error {
+	var titles map[string]string
+	if batch != nil {
+		titles = manifestTitles(docsDir)
+	}
 
 	for _, docPath := range changed {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		docPath = filepath.ToSlash(docPath)
 		b, err := os.ReadFile(filepath.Join(docsDir, filepath.FromSlash(docPath)))
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
-				continue // treated as removed: vectors already dropped above
+				continue // treated as removed: vectors already dropped by the caller
 			}
 
 			return fmt.Errorf("read %s; %w", docPath, err)
 		}
 
 		content := string(b)
-		title := titles[docPath]
-		if title == "" {
-			title = firstHeading(content)
+		chunks := chunk(content, s.cfg.ChunkSize, s.cfg.ChunkOverlap)
+
+		if batch == nil {
+			*count += len(chunks)
+
+			continue
 		}
-		if title == "" {
-			title = docPath
-		}
+
+		title := docTitle(titles, docPath, content)
 
 		var updatedAt time.Time
 		if opts != nil && opts.UpdatedAt != nil {
 			updatedAt = opts.UpdatedAt(docPath)
 		}
 
-		for i, c := range chunk(content, s.cfg.ChunkSize, s.cfg.ChunkOverlap) {
-			items = append(items, vectorstore.Item{
-				ID: fmt.Sprintf("%s/%s#%d", repo, docPath, i),
-				Payload: vectorstore.Payload{
-					Repo:      repo,
-					DocPath:   docPath,
-					Title:     title,
-					Chunk:     c,
-					UpdatedAt: updatedAt,
-				},
-			})
-			texts = append(texts, c)
+		for i, c := range chunks {
+			if err := batch.add(chunkItem(repo, docPath, title, c, i, updatedAt)); err != nil {
+				return err
+			}
 		}
 	}
 
-	if len(items) == 0 {
+	return nil
+}
+
+// chunkFlushSize bounds how many chunks are embedded and upserted at a time.
+// It is the knob that decouples peak memory from corpus size: at any moment at
+// most this many chunk texts and this many embeddings are resident.
+const chunkFlushSize = 512
+
+// chunkBatch accumulates chunks and hands them to flush once chunkFlushSize is
+// reached. It is not safe for concurrent use; a single indexing pass owns it.
+type chunkBatch struct {
+	items []vectorstore.Item
+	flush func([]vectorstore.Item) error
+}
+
+func (b *chunkBatch) add(item vectorstore.Item) error {
+	b.items = append(b.items, item)
+	if len(b.items) < chunkFlushSize {
 		return nil
 	}
 
-	vecs, err := s.emb.EmbedWithProgress(ctx, texts, onProgress)
-	if err != nil {
-		return fmt.Errorf("embed %d chunks; %w", len(texts), err)
-	}
-	if len(vecs) != len(items) {
-		return fmt.Errorf("embedder returned %d vectors for %d chunks", len(vecs), len(items))
-	}
-	for i := range items {
-		items[i].Vector = vecs[i]
+	return b.drain()
+}
+
+func (b *chunkBatch) drain() error {
+	if len(b.items) == 0 {
+		return nil
 	}
 
-	if err := s.store.Upsert(ctx, items); err != nil {
-		return fmt.Errorf("upsert %d vectors; %w", len(items), err)
+	if err := b.flush(b.items); err != nil {
+		return err
 	}
 
-	slog.Info("rag index updated", "repo", repo, "changed", len(changed), "removed", len(removed), "chunks", len(items))
+	// Clear before reslicing so the flushed chunk text and embeddings become
+	// collectable immediately rather than at the next overwrite.
+	clear(b.items)
+	b.items = b.items[:0]
 
 	return nil
+}
+
+// embedFlusher returns a batch whose flush embeds the chunks and upserts them,
+// advancing done and reporting progress against total.
+func (s *Service) embedFlusher(ctx context.Context, total int, done *int, onProgress func(done, total int)) *chunkBatch {
+	batch := &chunkBatch{items: make([]vectorstore.Item, 0, chunkFlushSize)}
+	batch.flush = func(items []vectorstore.Item) error {
+		texts := make([]string, len(items))
+		for i := range items {
+			texts[i] = items[i].Payload.Chunk
+		}
+
+		vecs, err := s.emb.Embed(ctx, texts)
+		if err != nil {
+			return fmt.Errorf("embed %d chunks; %w", len(texts), err)
+		}
+		if len(vecs) != len(items) {
+			return fmt.Errorf("embedder returned %d vectors for %d chunks", len(vecs), len(items))
+		}
+
+		for i := range items {
+			items[i].Vector = vecs[i]
+		}
+
+		if err := s.store.Upsert(ctx, items); err != nil {
+			return fmt.Errorf("upsert %d vectors; %w", len(items), err)
+		}
+
+		*done += len(items)
+		if onProgress != nil {
+			onProgress(min(*done, total), total)
+		}
+
+		return nil
+	}
+
+	return batch
+}
+
+// chunkItem builds the store item for one chunk of a document.
+func chunkItem(repo, docPath, title, text string, index int, updatedAt time.Time) vectorstore.Item {
+	return vectorstore.Item{
+		ID: fmt.Sprintf("%s/%s#%d", repo, docPath, index),
+		Payload: vectorstore.Payload{
+			Repo:      repo,
+			DocPath:   docPath,
+			Title:     title,
+			Chunk:     text,
+			UpdatedAt: updatedAt,
+		},
+	}
+}
+
+// docTitle resolves a document's display title: the manifest wins, then the
+// first markdown heading, then the path itself.
+func docTitle(titles map[string]string, docPath, content string) string {
+	if title := titles[docPath]; title != "" {
+		return title
+	}
+	if title := firstHeading(content); title != "" {
+		return title
+	}
+
+	return docPath
 }
 
 // DeleteRepo removes a repo's vectors from the index (on repo removal).
@@ -494,13 +635,3 @@ func manifestTitles(docsDir string) map[string]string {
 	return out
 }
 
-// titlesIndexed counts distinct documents in an item batch (for logging).
-func titlesIndexed(items []vectorstore.Item) map[string]struct{} {
-	docs := map[string]struct{}{}
-
-	for _, it := range items {
-		docs[it.Payload.DocPath] = struct{}{}
-	}
-
-	return docs
-}

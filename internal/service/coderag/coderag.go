@@ -76,25 +76,80 @@ func (s *Service) Index(ctx context.Context, repo, clonePath string) error {
 // IndexProgress is Index with an optional progress callback, invoked as chunks
 // are embedded (done, total). It runs from several goroutines, so it must be
 // safe for concurrent use; pass nil to disable reporting.
+// It walks the clone twice. The first pass rebuilds the full-text index and
+// counts chunks; the second embeds and upserts them in batches, reporting
+// progress against that exact count. Chunking twice costs a fraction of one
+// embedding round trip, and in exchange neither the chunk text nor the vectors
+// of a whole repository are ever resident at once — peak memory becomes a
+// constant instead of scaling with the largest tracked repository.
 func (s *Service) IndexProgress(ctx context.Context, repo, clonePath string, onProgress func(done, total int)) error {
-	items, fileCount, err := s.indexItems(clonePath, repo)
-	if err != nil {
-		return err
-	}
-
 	if s.text != nil {
-		if err := s.text.ReplaceRepo(ctx, repo, items); err != nil {
-			return fmt.Errorf("replace normal code index; %w", err)
+		if err := s.text.DeleteRepo(ctx, repo); err != nil {
+			return fmt.Errorf("clear prior code search chunks; %w", err)
 		}
 	}
 
+	total := 0
+	fileCount, err := s.streamItems(ctx, clonePath, repo, func(batch []vectorstore.Item) error {
+		total += len(batch)
+		if s.text == nil {
+			return nil
+		}
+
+		return s.text.InsertItems(ctx, batch)
+	})
+	if err != nil {
+		return fmt.Errorf("replace normal code index; %w", err)
+	}
+
 	if s.emb == nil || s.store == nil {
-		slog.Info("code text index rebuilt", "repo", repo, "files", fileCount, "chunks", len(items))
+		slog.Info("code text index rebuilt", "repo", repo, "files", fileCount, "chunks", total)
+
 		return nil
 	}
 
-	if len(items) == 0 {
+	if total == 0 {
 		return s.store.DeleteRepo(ctx, repo)
+	}
+
+	// Full rebuild: drop prior vectors so deleted files disappear. Unlike the
+	// previous embed-everything-then-swap approach, a failure part-way through
+	// now leaves a partial index rather than the old one intact; the next
+	// refresh rebuilds it, and an OOM kill mid-index had the same effect.
+	if err := s.store.DeleteRepo(ctx, repo); err != nil {
+		return fmt.Errorf("clear prior code vectors; %w", err)
+	}
+
+	done := 0
+	if _, err := s.streamItems(ctx, clonePath, repo, func(batch []vectorstore.Item) error {
+		if err := s.embedInto(ctx, batch); err != nil {
+			return err
+		}
+
+		if err := s.store.Upsert(ctx, batch); err != nil {
+			return fmt.Errorf("upsert %d code vectors; %w", len(batch), err)
+		}
+
+		done += len(batch)
+		if onProgress != nil {
+			onProgress(min(done, total), total)
+		}
+
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	slog.Info("code indexes rebuilt", "repo", repo, "files", fileCount, "chunks", total)
+
+	return nil
+}
+
+// embedInto embeds a batch's chunk text in place. The text slice aliases the
+// items' chunks, so it costs slice headers rather than a copy of the corpus.
+func (s *Service) embedInto(ctx context.Context, items []vectorstore.Item) error {
+	if len(items) == 0 {
+		return nil
 	}
 
 	texts := make([]string, len(items))
@@ -102,7 +157,7 @@ func (s *Service) IndexProgress(ctx context.Context, repo, clonePath string, onP
 		texts[i] = items[i].Payload.Chunk
 	}
 
-	vecs, err := s.emb.EmbedWithProgress(ctx, texts, onProgress)
+	vecs, err := s.emb.Embed(ctx, texts)
 	if err != nil {
 		return fmt.Errorf("embed %d code chunks; %w", len(texts), err)
 	}
@@ -114,17 +169,6 @@ func (s *Service) IndexProgress(ctx context.Context, repo, clonePath string, onP
 	for i := range items {
 		items[i].Vector = vecs[i]
 	}
-
-	// Full rebuild: drop prior vectors so deleted files disappear, then upsert.
-	if err := s.store.DeleteRepo(ctx, repo); err != nil {
-		return fmt.Errorf("clear prior code vectors; %w", err)
-	}
-
-	if err := s.store.Upsert(ctx, items); err != nil {
-		return fmt.Errorf("upsert %d code vectors; %w", len(items), err)
-	}
-
-	slog.Info("code indexes rebuilt", "repo", repo, "files", fileCount, "chunks", len(items))
 
 	return nil
 }
@@ -273,35 +317,77 @@ func (s *Service) selectedFile(clonePath, rel string) bool {
 }
 
 // IndexText builds only the local bw FTS index. It is used to bootstrap the
-// normal search index for repositories tracked before this index was added.
+// normal search index for repositories tracked before this index was added,
+// which is exactly what the background warm pass does for every repo at
+// startup — so it streams rather than materialising the whole repository.
 func (s *Service) IndexText(ctx context.Context, repo, clonePath string) error {
 	if s.text == nil {
 		return nil
 	}
 
-	items, fileCount, err := s.indexItems(clonePath, repo)
-	if err != nil {
-		return err
+	if err := s.text.DeleteRepo(ctx, repo); err != nil {
+		return fmt.Errorf("clear prior code search chunks; %w", err)
 	}
-	if err := s.text.ReplaceRepo(ctx, repo, items); err != nil {
+
+	chunks := 0
+	fileCount, err := s.streamItems(ctx, clonePath, repo, func(batch []vectorstore.Item) error {
+		chunks += len(batch)
+
+		return s.text.InsertItems(ctx, batch)
+	})
+	if err != nil {
 		return fmt.Errorf("replace normal code index; %w", err)
 	}
 
-	slog.Info("code text index rebuilt", "repo", repo, "files", fileCount, "chunks", len(items))
+	slog.Info("code text index rebuilt", "repo", repo, "files", fileCount, "chunks", chunks)
+
 	return nil
 }
 
-func (s *Service) indexItems(clonePath, repo string) ([]vectorstore.Item, int, error) {
+// indexFlushChunks bounds how many chunks streamItems buffers before handing
+// them to its callback. A whole repository's chunk text (chunks overlap, so the
+// total exceeds the source tree itself) used to be held in memory at once,
+// which put peak usage at the mercy of the largest tracked repository. The
+// batch is large enough to keep database transactions and embedder requests
+// efficient and small enough that its cost is a constant, not a variable.
+const indexFlushChunks = 512
+
+// streamItems walks the selected source files, chunks them symbol-aware and
+// hands the chunks to flush in batches of at most indexFlushChunks. It returns
+// the number of files selected. flush must not retain the slice it is given.
+func (s *Service) streamItems(
+	ctx context.Context,
+	clonePath, repo string,
+	flush func([]vectorstore.Item) error,
+) (int, error) {
 	files, err := s.selectFiles(clonePath)
 	if err != nil {
-		return nil, 0, fmt.Errorf("select source files; %w", err)
+		return 0, fmt.Errorf("select source files; %w", err)
 	}
 
 	symsByFile := s.fileSymbols(clonePath)
 
-	var items []vectorstore.Item
+	batch := make([]vectorstore.Item, 0, indexFlushChunks)
+	drain := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		if err := flush(batch); err != nil {
+			return err
+		}
+		// Reslice rather than reallocate, but clear the retained chunk text so
+		// the flushed strings become collectable immediately.
+		clear(batch)
+		batch = batch[:0]
+
+		return nil
+	}
 
 	for _, rel := range files {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+
 		fc, err := repofs.ReadFile(clonePath, rel, 0, 0)
 		if err != nil {
 			slog.Warn("coderag: skip unreadable file", "repo", repo, "file", rel, "error", err)
@@ -315,7 +401,7 @@ func (s *Service) indexItems(clonePath, repo string) ([]vectorstore.Item, int, e
 		}
 
 		for i, c := range chunkFile(fc.Content, symsByFile[rel], s.cfg.ChunkSize, s.cfg.ChunkOverlap) {
-			items = append(items, vectorstore.Item{
+			batch = append(batch, vectorstore.Item{
 				ID: fmt.Sprintf("%s/%s#%d", repo, rel, i),
 				Payload: vectorstore.Payload{
 					Repo:      repo,
@@ -326,10 +412,20 @@ func (s *Service) indexItems(clonePath, repo string) ([]vectorstore.Item, int, e
 					Chunk:     c.Text,
 				},
 			})
+
+			if len(batch) >= indexFlushChunks {
+				if err := drain(); err != nil {
+					return 0, err
+				}
+			}
 		}
 	}
 
-	return items, len(files), nil
+	if err := drain(); err != nil {
+		return 0, err
+	}
+
+	return len(files), nil
 }
 
 // DeleteRepo removes a repo's vectors from the code index (on repo removal).

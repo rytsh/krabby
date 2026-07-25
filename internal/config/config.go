@@ -43,8 +43,27 @@ type Config struct {
 	Server   Server   `cfg:"server"`
 	MCP      MCP      `cfg:"mcp"`
 	Graphify Graphify `cfg:"graphify"`
+	Memory   Memory   `cfg:"memory"`
 
 	Telemetry tell.Config `cfg:"telemetry"`
+}
+
+// Memory bounds the process footprint. krabby holds three embedded Badger
+// databases, a parsed-graph cache and transient indexing buffers, and shells
+// out to the graphify CLI inside the same container; left untuned those add up
+// to more than a typical few-gigabyte limit and the container is OOM-killed.
+// Every derived cache size comes from the single limit below.
+type Memory struct {
+	// LimitBytes is the total memory budget. 0 auto-detects the cgroup
+	// (container) limit, falling back to total system memory, which is the
+	// right answer in almost every deployment; set it explicitly only when
+	// krabby must share its cgroup with another workload.
+	LimitBytes int64 `cfg:"limit_bytes"`
+	// Ratio is the fraction of LimitBytes handed to the Go runtime as its soft
+	// heap limit (GOMEMLIMIT). The remainder covers the graphify subprocess,
+	// git, mmap'd database tables and runtime overhead outside the heap. An
+	// explicit GOMEMLIMIT environment variable overrides this.
+	Ratio float64 `cfg:"ratio" default:"0.75"`
 }
 
 // Server is the HTTP listen configuration.
@@ -94,8 +113,13 @@ type Graphify struct {
 	// without a cap every graph stays resident forever, so tracking many repos
 	// drives RSS up until the container OOM-kills. When the budget is exceeded
 	// the least-recently-used graphs are evicted (and transparently reloaded on
-	// the next query). 0 disables eviction (unbounded, the old behaviour).
-	CacheMaxBytes int64 `cfg:"cache_max_bytes" default:"536870912"`
+	// the next query).
+	//
+	// 0 (the default) derives the cap from the process memory budget, which
+	// keeps it proportional to the container limit instead of pinning a fixed
+	// 512 MiB of a 4 GiB allowance. A negative value disables eviction
+	// entirely (unbounded, the original behaviour).
+	CacheMaxBytes int64 `cfg:"cache_max_bytes"`
 }
 
 // The structs below are no longer part of the file/env configuration: they

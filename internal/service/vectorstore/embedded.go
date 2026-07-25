@@ -10,6 +10,9 @@ import (
 
 	"github.com/rakunlabs/bw"
 	"github.com/rakunlabs/query"
+
+	"github.com/rytsh/krabby/internal/memlimit"
+	"github.com/rytsh/krabby/internal/storage"
 )
 
 // embedded is the default vector store, backed by a bw (BadgerDB) database
@@ -94,7 +97,9 @@ func newEmbedded(dir string) (*embedded, error) {
 		return &embedded{h: h}, nil
 	}
 
-	db, err := bw.Open(dir, bw.WithLogger(nil))
+	// Vector databases are the largest of krabby's three Badger stores, so the
+	// shared tuning (bounded caches, small memtables) matters most here.
+	db, err := storage.OpenTuned(dir, memlimit.Current())
 	if err != nil {
 		return nil, fmt.Errorf("open vector db %s; %w", dir, err)
 	}
