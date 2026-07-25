@@ -57,6 +57,21 @@ type Settings struct {
 	RAGTopK         int  `bw:"rag_top_k"         json:"rag_top_k"`
 	RAGTopDocs      int  `bw:"rag_top_docs"      json:"rag_top_docs"`
 
+	// Hybrid docs search (rank fusion of the BM25 and semantic rankers). Zero
+	// values mean "use the built-in default", so records written before these
+	// fields existed keep working without a migration.
+	RAGHybridCandidates     int     `bw:"rag_hybrid_candidates"      json:"rag_hybrid_candidates"`
+	RAGHybridRRFK           int     `bw:"rag_hybrid_rrf_k"           json:"rag_hybrid_rrf_k"`
+	RAGHybridWeightLexical  float64 `bw:"rag_hybrid_weight_lexical"  json:"rag_hybrid_weight_lexical"`
+	RAGHybridWeightSemantic float64 `bw:"rag_hybrid_weight_semantic" json:"rag_hybrid_weight_semantic"`
+
+	// RAGLexicalStopWords are dropped from a question before it becomes a BM25
+	// query. Empty by default and intentionally not seeded with a built-in
+	// list: BM25's IDF already scores a term appearing in most documents near
+	// zero in any language, so this only trades recall breadth for latency and
+	// must match the corpus language.
+	RAGLexicalStopWords []string `bw:"rag_lexical_stop_words" json:"rag_lexical_stop_words"`
+
 	// Code embedder (embeddings) for code RAG. When BaseURL is empty the docs
 	// embedder settings above are used for code as well.
 	CodeEmbedBaseURL     string        `bw:"code_embed_base_url"    json:"code_embed_base_url"`
@@ -130,6 +145,11 @@ func Defaults() Settings {
 		RAGChunkOverlap: 200,
 		RAGTopK:         20,
 		RAGTopDocs:      3,
+
+		RAGHybridCandidates:     12,
+		RAGHybridRRFK:           20,
+		RAGHybridWeightLexical:  1,
+		RAGHybridWeightSemantic: 1,
 
 		CodeEmbedBatch:       64,
 		CodeEmbedConcurrency: 4,
@@ -253,6 +273,12 @@ type Patch struct {
 	RAGTopK         *int  `json:"rag_top_k"`
 	RAGTopDocs      *int  `json:"rag_top_docs"`
 
+	RAGHybridCandidates     *int      `json:"rag_hybrid_candidates"`
+	RAGHybridRRFK           *int      `json:"rag_hybrid_rrf_k"`
+	RAGHybridWeightLexical  *float64  `json:"rag_hybrid_weight_lexical"`
+	RAGHybridWeightSemantic *float64  `json:"rag_hybrid_weight_semantic"`
+	RAGLexicalStopWords     *[]string `json:"rag_lexical_stop_words"`
+
 	CodeEmbedBaseURL     *string        `json:"code_embed_base_url"`
 	CodeEmbedAPIKey      *string        `json:"code_embed_api_key"`
 	CodeEmbedModel       *string        `json:"code_embed_model"`
@@ -288,6 +314,9 @@ func (p Patch) RuntimeOnly() bool {
 		p.EmbedDim == nil && p.EmbedBatch == nil && p.EmbedConcurrency == nil && p.EmbedTimeout == nil &&
 		p.RAGEnabled == nil && p.RAGChunkSize == nil && p.RAGChunkOverlap == nil &&
 		p.RAGTopK == nil && p.RAGTopDocs == nil &&
+		p.RAGHybridCandidates == nil && p.RAGHybridRRFK == nil &&
+		p.RAGHybridWeightLexical == nil && p.RAGHybridWeightSemantic == nil &&
+		p.RAGLexicalStopWords == nil &&
 		p.CodeEmbedBaseURL == nil && p.CodeEmbedAPIKey == nil && p.CodeEmbedModel == nil &&
 		p.CodeEmbedDim == nil && p.CodeEmbedBatch == nil && p.CodeEmbedConcurrency == nil &&
 		p.CodeEmbedTimeout == nil && p.CodeRAGEnabled == nil && p.CodeRAGChunkSize == nil &&
@@ -367,6 +396,21 @@ func (p Patch) Apply(base Settings) Settings {
 	if p.RAGTopDocs != nil {
 		base.RAGTopDocs = *p.RAGTopDocs
 	}
+	if p.RAGHybridCandidates != nil {
+		base.RAGHybridCandidates = *p.RAGHybridCandidates
+	}
+	if p.RAGHybridRRFK != nil {
+		base.RAGHybridRRFK = *p.RAGHybridRRFK
+	}
+	if p.RAGHybridWeightLexical != nil {
+		base.RAGHybridWeightLexical = *p.RAGHybridWeightLexical
+	}
+	if p.RAGHybridWeightSemantic != nil {
+		base.RAGHybridWeightSemantic = *p.RAGHybridWeightSemantic
+	}
+	if p.RAGLexicalStopWords != nil {
+		base.RAGLexicalStopWords = *p.RAGLexicalStopWords
+	}
 	if p.CodeEmbedBaseURL != nil {
 		base.CodeEmbedBaseURL = *p.CodeEmbedBaseURL
 	}
@@ -436,14 +480,18 @@ type Store struct {
 	mcpBucket *bw.Bucket[MCPKey]
 }
 
-// settingsSchemaVersion v8 adds repo_schedules (per-namespace cron poll
+// settingsSchemaVersion v9 adds the hybrid docs-search knobs
+// (rag_hybrid_candidates, rag_hybrid_rrf_k, rag_hybrid_weight_lexical,
+// rag_hybrid_weight_semantic) and rag_lexical_stop_words; zero values there
+// mean "use the built-in default", so migrated records need no backfill. v8
+// added repo_schedules (per-namespace cron poll
 // schedules; empty records fall back to git_poll_interval). v7 added
 // task_concurrency (central work-queue limit). v6 added git_poll_interval and
 // webhook_secret (system settings moved out of the file/env config). v5 added
 // docs_summary_model; v4 docs_max_groups; v3 embed_concurrency /
 // code_embed_concurrency. Bumping the version lets bw migrate existing settings
 // records in place.
-const settingsSchemaVersion = 8
+const settingsSchemaVersion = 9
 
 // New opens the settings bucket. If no record exists yet, seed is persisted as
 // the initial configuration (seeded from file/env config by the caller).

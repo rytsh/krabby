@@ -174,6 +174,26 @@ type RAG struct {
 	TopK int `cfg:"top_k" default:"20"`
 	// TopDocs is how many ranked document excerpts to return after grouping.
 	TopDocs int `cfg:"top_docs" default:"3"`
+
+	// HybridCandidates is how many documents each ranker contributes to hybrid
+	// rank fusion. Both the semantic and the lexical arm are asked for this
+	// depth; an asymmetric depth silently biases fusion toward the longer list.
+	HybridCandidates int `cfg:"hybrid_candidates" default:"12"`
+	// HybridRRFK is the reciprocal-rank-fusion smoothing constant. The classic
+	// value of 60 was tuned for thousand-deep TREC runs and flattens a list
+	// this short to a ~18% score spread, so a much smaller k is used here.
+	HybridRRFK int `cfg:"hybrid_rrf_k" default:"20"`
+	// HybridWeightLexical scales the BM25 arm's fused contribution.
+	HybridWeightLexical float64 `cfg:"hybrid_weight_lexical" default:"1"`
+	// HybridWeightSemantic scales the embedding arm's fused contribution.
+	HybridWeightSemantic float64 `cfg:"hybrid_weight_semantic" default:"1"`
+
+	// LexicalStopWords are dropped from a question before it is turned into a
+	// BM25 query. It is empty by default and there is no built-in list: BM25's
+	// IDF already gives a term that appears in most documents a near-zero
+	// score in any language, so this is a latency knob, not a relevance one.
+	// Set it to your corpus language's function words on a large corpus.
+	LexicalStopWords []string `cfg:"lexical_stop_words"`
 }
 
 // CodeRAG configures semantic search over raw source code. It indexes into a

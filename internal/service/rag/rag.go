@@ -27,6 +27,15 @@ const (
 	DefaultTopDocs  = 3
 	MaxTopDocs      = 5
 	MaxExcerptRunes = 4000
+
+	// MaxCandidates bounds RetrieveCandidates. It mirrors the lexical index's
+	// own candidate ceiling so hybrid fusion can request the same depth from
+	// both rankers instead of silently starving the semantic side.
+	MaxCandidates = 40
+	// maxCandidateChunks bounds how many chunk matches a candidate retrieval
+	// fetches before grouping. Grouping collapses several chunks into one
+	// document, so the chunk budget must exceed the wanted document count.
+	maxCandidateChunks = 60
 )
 
 // Doc is a ranked documentation excerpt returned by retrieval.
@@ -34,7 +43,7 @@ type Doc struct {
 	Repo      string  `json:"repo"`
 	Path      string  `json:"path"` // path relative to the repo's docs directory
 	Title     string  `json:"title"`
-	Score     float32 `json:"score"` // recency-adjusted score used for ranking
+	Score     float32 `json:"score"` // mode-specific score used for ranking
 	Excerpt   string  `json:"excerpt"`
 	Truncated bool    `json:"truncated,omitempty"`
 
@@ -289,16 +298,12 @@ func (s *Service) IndexedPaths(ctx context.Context, repo string) (map[string]str
 // Retrieve returns up to topDocs bounded excerpts most relevant to the
 // question. The filter selects which keys (repos, web-source collections or
 // both) are searched; a zero filter searches everything. topDocs <= 0 uses
-// the configured default (RAG.TopDocs).
+// the configured default (RAG.TopDocs). The result is capped at MaxTopDocs
+// because it is served directly to callers.
 func (s *Service) Retrieve(ctx context.Context, filter vectorstore.Filter, question string, topDocs int) ([]Doc, error) {
-	if strings.TrimSpace(question) == "" {
-		return nil, errors.New("question is empty")
-	}
-
 	if topDocs <= 0 {
 		topDocs = s.cfg.TopDocs
 	}
-
 	if topDocs <= 0 {
 		topDocs = DefaultTopDocs
 	}
@@ -317,6 +322,43 @@ func (s *Service) Retrieve(ctx context.Context, filter vectorstore.Filter, quest
 	}
 	if topK > 40 {
 		topK = 40
+	}
+
+	return s.retrieve(ctx, filter, question, topDocs, topK)
+}
+
+// RetrieveCandidates returns up to candidates ranked documents for rank
+// fusion. Unlike Retrieve it is not capped at MaxTopDocs: hybrid search must
+// be able to ask both rankers for the same candidate depth, otherwise the
+// shorter list contributes structurally less fused score. The returned docs
+// are ordered exactly like Retrieve's (recency-adjusted semantic score), so
+// only their rank is meaningful to the caller.
+func (s *Service) RetrieveCandidates(ctx context.Context, filter vectorstore.Filter, question string, candidates int) ([]Doc, error) {
+	if candidates <= 0 {
+		candidates = DefaultTopDocs
+	}
+	if candidates > MaxCandidates {
+		candidates = MaxCandidates
+	}
+
+	// Grouping collapses chunks into documents, so ask for several chunks per
+	// wanted document instead of the plain configured TopK.
+	topK := s.cfg.TopK
+	if topK < candidates*3 {
+		topK = candidates * 3
+	}
+	if topK > maxCandidateChunks {
+		topK = maxCandidateChunks
+	}
+
+	return s.retrieve(ctx, filter, question, candidates, topK)
+}
+
+// retrieve embeds the question, searches the vector store for topK chunks and
+// groups them into at most topDocs documents ranked by recency-adjusted score.
+func (s *Service) retrieve(ctx context.Context, filter vectorstore.Filter, question string, topDocs, topK int) ([]Doc, error) {
+	if strings.TrimSpace(question) == "" {
+		return nil, errors.New("question is empty")
 	}
 
 	vecs, err := s.emb.Embed(ctx, []string{question})

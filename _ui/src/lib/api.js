@@ -115,9 +115,10 @@ export const api = {
   // searchDocs scoping: repo may be a repository id or a web-source key
   // ("web:<name>") and wins over scope; scope is all|repos|sources.
   // namespace scopes results to a single namespace; "" (or "*") searches all.
-  searchDocs: (q, repo = "", top = 0, scope = "", namespace = "") =>
+  // mode is hybrid (default), semantic, or lexical (BM25).
+  searchDocs: (q, repo = "", top = 0, scope = "", namespace = "", mode = "hybrid") =>
     req(
-      `/docs/search?q=${encodeURIComponent(q)}&repo=${encodeURIComponent(repo)}&top=${top}&scope=${encodeURIComponent(scope)}&namespace=${encodeURIComponent(namespace)}`,
+      `/docs/search?q=${encodeURIComponent(q)}&repo=${encodeURIComponent(repo)}&top=${top}&scope=${encodeURIComponent(scope)}&namespace=${encodeURIComponent(namespace)}&mode=${encodeURIComponent(mode)}`,
     ),
   searchCode: (q, repo = "", mode = "normal", page = 1, perPage = 20, top = 0, namespace = "") =>
     req(

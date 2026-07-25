@@ -1,6 +1,6 @@
 <script>
-  // Code search supports local BM25 and semantic code vectors. Docs search uses
-  // the generated-document vector index and returns bounded excerpts.
+  // Code search supports local BM25 and semantic vectors. Docs search adds a
+  // hybrid mode that fuses BM25 and semantic document ranks.
   import { onMount } from "svelte";
   import { api } from "../lib/api.js";
   import { navigate } from "../lib/router.js";
@@ -46,7 +46,8 @@
   // namespaceFilter scopes results to a single namespace; "" searches all.
   let namespaceFilter = $state("");
   let scope = $state("code");
-  let mode = $state("normal");
+  let codeMode = $state("normal");
+  let docsMode = $state("hybrid");
   let results = $state(null); // null = not searched yet
   let total = $state(0);
   let page = $state(1);
@@ -61,7 +62,7 @@
     if (!query) return;
     const seq = ++searchSeq;
     const searchScope = scope;
-    const searchMode = mode;
+    const searchMode = searchScope === "docs" ? docsMode : codeMode;
     loading = true;
     error = "";
     try {
@@ -73,7 +74,7 @@
       const key = docsScope ? "" : repoFilter;
       const response =
         searchScope === "docs"
-          ? await api.searchDocs(query, key, 5, docsScope, namespaceFilter)
+          ? await api.searchDocs(query, key, 5, docsScope, namespaceFilter, searchMode)
           : await api.searchCode(query, repoFilter, searchMode, nextPage, perPage, 0, namespaceFilter);
       if (seq !== searchSeq) return;
       results = searchScope === "docs" ? (Array.isArray(response) ? response : []) : response?.results || [];
@@ -118,6 +119,22 @@
   function docExcerpt(content) {
     const text = (content || "").trim();
     return text.length > 700 ? `${text.slice(0, 700)}…` : text;
+  }
+
+  function searchPlaceholder() {
+    if (scope === "code") {
+      return codeMode === "normal" ? "Search code, symbols or paths…" : "Describe the code you are looking for…";
+    }
+    if (docsMode === "lexical") return "Search exact terms, Jira keys, error codes or titles…";
+    if (docsMode === "semantic") return "Describe the documentation you are looking for…";
+    return "Search documentation by meaning, terms or issue key…";
+  }
+
+  function docsModeHelp() {
+    if (docsMode === "lexical")
+      return "BM25 keyword search; best for exact identifiers and titles. Quote a phrase or use OR/NOT for full control.";
+    if (docsMode === "semantic") return "Embedding search; best for concepts and paraphrased questions.";
+    return "Fuses BM25 and semantic ranks. Ask a full question; keys and error codes stay exact.";
   }
 
   onMount(loadRepoOptions);
@@ -193,11 +210,7 @@
     </span>
     <input
       class="input w-full pl-8"
-      placeholder={scope === "docs"
-        ? "Describe the documentation you are looking for…"
-        : mode === "normal"
-          ? "Search code, symbols or paths…"
-          : "Describe the code you are looking for…"}
+      placeholder={searchPlaceholder()}
       bind:value={q}
       onkeydown={(e) => e.key === "Enter" && search()}
     />
@@ -205,9 +218,9 @@
   {#if scope === "code"}
     <select
       class="input sm:basis-[130px]"
-      value={mode}
+      value={codeMode}
       onchange={(e) => {
-        mode = e.currentTarget.value;
+        codeMode = e.currentTarget.value;
         resetResults();
       }}
       aria-label="Search mode"
@@ -216,14 +229,29 @@
       <option value="semantic">Semantic</option>
     </select>
   {:else}
-    <div class="flex items-center rounded-md border border-line bg-surface px-3 text-[12px] text-faint sm:basis-[130px]">
-      Semantic
-    </div>
+    <select
+      class="input sm:basis-[130px]"
+      value={docsMode}
+      onchange={(e) => {
+        docsMode = e.currentTarget.value;
+        resetResults();
+      }}
+      aria-label="Documentation search mode"
+      title="Hybrid combines semantic and BM25 ranks. Lexical is best for exact keys, titles, and identifiers."
+    >
+      <option value="hybrid">Hybrid</option>
+      <option value="semantic">Semantic</option>
+      <option value="lexical">Lexical (BM25)</option>
+    </select>
   {/if}
   <button class="btn btn-primary" onclick={search} disabled={loading || !q.trim()}>
     {loading ? "Searching…" : "Search"}
   </button>
 </div>
+
+{#if scope === "docs"}
+  <div class="-mt-2 mb-4 text-[11px] text-faint">{docsModeHelp()}</div>
+{/if}
 
 {#if results !== null && !loading}
   {#if results.length === 0 && !error}
@@ -231,7 +259,7 @@
   {:else}
     <div class="mb-2 flex items-center justify-between text-[12px] text-faint">
       <span>{total} {total === 1 ? "match" : "matches"}</span>
-      {#if scope === "code" && mode === "normal" && pageCount > 1}
+      {#if scope === "code" && codeMode === "normal" && pageCount > 1}
         <span>Page {page} of {pageCount}</span>
       {/if}
     </div>
@@ -246,7 +274,9 @@
                 {#if r.updated_at && !r.updated_at.startsWith("0001")}
                   <span title="last updated">{fmtDate(r.updated_at)}</span>
                 {/if}
-                <span>{pct(r.score)}</span>
+                <span title={docsMode === "hybrid" ? "Fused rank score; comparable only within this result list." : ""}>
+                  {docsMode === "semantic" ? pct(r.score) : docsMode === "lexical" ? `BM25 ${r.score.toFixed(2)}` : `RRF ${r.score.toFixed(4)}`}
+                </span>
               </span>
             </div>
             <pre class="m-0 max-h-56 overflow-hidden whitespace-pre-wrap px-3.5 py-2.5 font-mono text-[12px] leading-relaxed text-dim">{docExcerpt(r.excerpt)}</pre>
@@ -258,13 +288,13 @@
               <span class="text-faint">/</span>
               <span class="truncate font-mono text-[12.5px] text-dim">{r.path}</span>
               <span class="font-mono text-[11px] text-faint">
-                {mode === "normal" && r.line ? `L${r.line}` : `L${r.start_line}–${r.end_line}`}
+                {codeMode === "normal" && r.line ? `L${r.line}` : `L${r.start_line}–${r.end_line}`}
               </span>
               {#if r.symbol}
                 <span class="rounded border border-line px-1.5 text-[11px] text-dim">{r.symbol}</span>
               {/if}
               <span class="ml-auto text-[11px] text-faint">
-                {mode === "semantic" ? pct(r.score) : `BM25 ${r.score.toFixed(2)}`}
+                {codeMode === "semantic" ? pct(r.score) : `BM25 ${r.score.toFixed(2)}`}
               </span>
             </div>
             <pre class="m-0 max-h-56 overflow-hidden px-3.5 py-2.5 font-mono text-[12px] leading-relaxed text-dim">{r.snippet}</pre>
@@ -272,7 +302,7 @@
         {/if}
       {/each}
     </div>
-    {#if scope === "code" && mode === "normal" && pageCount > 1}
+    {#if scope === "code" && codeMode === "normal" && pageCount > 1}
       <div class="mt-4 flex items-center justify-center gap-3">
         <button class="btn btn-sm" disabled={page <= 1} onclick={() => search(page - 1)}>Previous</button>
         <span class="text-[12px] text-dim">{page} / {pageCount}</span>

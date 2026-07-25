@@ -47,7 +47,7 @@
     { href: "/sources", label: "Sources", icon: "book", match: (v) => v === "sources" },
     { href: "/namespaces", label: "Namespaces", icon: "tag", match: (v) => v === "namespaces" },
     { href: "/activity", label: "Activity", icon: "activity", match: (v) => v === "activity" },
-    { href: "/search", label: "Code search", icon: "search", match: (v) => v === "search" },
+    { href: "/search", label: "Search", icon: "search", match: (v) => v === "search" },
     { href: "/settings", label: "Settings", icon: "settings", match: (v) => v === "settings" },
     { href: "/about", label: "About", icon: "book", match: (v) => v === "about" },
   ];
@@ -58,7 +58,7 @@
     sources: "Sources",
     namespaces: "Namespaces",
     activity: "Activity",
-    search: "Code search",
+    search: "Search",
     settings: "Settings",
     about: "About",
   };
@@ -289,7 +289,7 @@
           <div class="flex min-w-0 items-baseline gap-3">
             <h1 class="shrink-0 text-[15px] font-semibold">{title[view] || "krabby"}</h1>
             {#if view === "search"}
-              <span class="truncate text-[11px] text-faint">source code and generated documentation search</span>
+              <span class="truncate text-[11px] text-faint">source code, repository docs, and connected sources</span>
             {/if}
           </div>
         {/if}

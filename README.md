@@ -92,8 +92,8 @@ For the full profile, add a persistent header to the same server entry:
 | `query_graph` | Architecture, dependency, call/data-flow, and cross-file relationship questions |
 | `get_node` / `get_neighbors` / `get_community` | Node-level inspection |
 | `god_nodes` / `graph_stats` / `shortest_path` | Graph-level analysis |
-| `search_docs` / `list_docs` / `get_doc` | Search bounded excerpts and page through generated or synced Markdown |
-| `list_sources` | Discover named Custom web and Confluence collections (`web:<name>`) |
+| `search_docs` / `list_docs` / `get_doc` | Search generated or synced Markdown with hybrid (default), semantic, or lexical retrieval |
+| `list_sources` | Discover named Custom web, Confluence, and Jira collections (`web:<name>`) |
 | `get_docs_config` / `set_docs_config` | Read or live-update docs and code RAG settings |
 | `test_llm` / `test_embedder` / `test_code_embedder` | Validate model endpoints without saving |
 
@@ -134,7 +134,7 @@ administer them.
 | `GET/PUT/DELETE /api/v1/sources/{name}` | Read/update/delete a collection |
 | `POST /api/v1/sources/{name}/refresh` | Sync and reindex a collection |
 | `POST/DELETE /api/v1/sources/{name}/pages` | Add/remove Custom web URLs |
-| `GET /api/v1/docs/search?q=&scope=&repo=&top=` | Semantic docs search; `scope=all|repos|sources`, `repo=web:<name>` |
+| `GET /api/v1/docs/search?q=&mode=&scope=&repo=&top=` | Docs search; `mode=hybrid|semantic|lexical`, `scope=all|repos|sources`, `repo=web:<name>` |
 | `GET /api/v1/code/search?q=&repo=&top=` | Semantic source-code snippet search |
 | `GET/PUT /api/v1/docs/config` | Read/update docs and code RAG settings |
 | `GET /api/v1/credentials` | List credential patterns (secrets never returned) |

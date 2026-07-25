@@ -26,7 +26,7 @@ Tool selection (roughly what to reach for, in order):
 - Use read_file to view the actual source behind a result (node 'src' fields give the path); reads are sandboxed to the clone and paginated.
 - Use query_graph for architecture, dependencies, call/data flow, and relationships across files. It is not a keyword or symbol search.
 - Use git_blame to attribute lines to their last commit (who changed a snippet, when, in which commit); pass start_line/end_line to blame just a range.
-- Use search_docs for documentation and knowledge; it covers both generated repo docs and connected web sources (Confluence, Jira, pages) - scope a web source with repo=web:<collection>.
+- Use search_docs for documentation and knowledge; it covers both generated repo docs and connected web sources (Confluence, Jira, pages). Hybrid mode is the default; use lexical for exact keys/titles/identifiers and semantic for conceptual questions. Pass the user's full question rather than hand-picked keywords: it is rewritten for BM25 into an OR of its words, and keys, error codes and versions stay required. Scope a web source with repo=web:<collection>.
 - Use list_* only when an identifier is unknown or the user explicitly requests an inventory. Do not exhaust pages or request a recursive file tree without a clear need.
 - Use get_* tools only after a search/query identifies the target.
 - If a graph tool returns "Repository selection required", retry it with one of the provided repo ids instead of treating the result as a failure.

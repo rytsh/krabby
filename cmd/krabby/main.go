@@ -19,6 +19,7 @@ import (
 	"github.com/rytsh/krabby/internal/service/graphquery"
 	"github.com/rytsh/krabby/internal/service/manager"
 	"github.com/rytsh/krabby/internal/service/mcptools"
+	"github.com/rytsh/krabby/internal/service/rag"
 	"github.com/rytsh/krabby/internal/service/registry"
 	"github.com/rytsh/krabby/internal/service/scheduler"
 	"github.com/rytsh/krabby/internal/service/settings"
@@ -78,6 +79,10 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	docsText, err := rag.NewTextStore(db)
+	if err != nil {
+		return err
+	}
 
 	// Durable work queue: queued (and interrupted running) background tasks
 	// survive a restart instead of being lost with the process.
@@ -118,6 +123,7 @@ func run(ctx context.Context) error {
 	mgr := manager.New(ctx, reg, git, gfy, engine, creds, codeText, cfg.ReposDir(), cfg.MergedGraphPath(),
 		cfg.Graphify.Merge,
 		manager.DocsDeps{
+			TextStore:      docsText,
 			DocsRootDir:    cfg.DocsRootDir(),
 			DocsVectorsDir: cfg.DocsVectorsDir(),
 			CodeVectorsDir: cfg.CodeVectorsDir(),
@@ -182,6 +188,11 @@ func run(ctx context.Context) error {
 	go func() {
 		if err := mgr.WarmCodeSearch(ctx); err != nil {
 			slog.Error("warm normal code search index", "error", err)
+		}
+	}()
+	go func() {
+		if err := mgr.WarmDocsSearch(ctx); err != nil {
+			slog.Error("warm lexical docs search index", "error", err)
 		}
 	}()
 

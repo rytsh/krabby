@@ -18,11 +18,16 @@ import (
 // ---- docs + RAG tools -------------------------------------------------------
 
 type searchDocsArgs struct {
-	Question  string `json:"question" jsonschema:"natural language question to find relevant documentation for"`
+	Question  string `json:"question" jsonschema:"natural-language question or exact term to find relevant documentation for"`
 	Repo      string `json:"repo,omitempty" jsonschema:"one repository id or web:<collection>; always provide when known, omit only for explicit broad search"`
 	Namespace string `json:"namespace,omitempty" jsonschema:"when repo is omitted, scope repo docs to this namespace; empty means the 'default' namespace, '*' searches all namespaces. Web sources are never namespaced and always participate"`
 	Scope     string `json:"scope,omitempty" jsonschema:"when repo is unknown: 'all' (default), 'repos', or 'sources'"`
+	Mode      string `json:"mode,omitempty" jsonschema:"retrieval mode: 'hybrid' (default) fuses token-based BM25 and semantic ranks and is best for most questions; 'lexical' uses only local BM25 and is best for Jira keys, error codes, exact titles and identifiers; 'semantic' uses only embeddings and is best for conceptual natural-language questions"`
 	TopDocs   int    `json:"top_docs,omitempty" jsonschema:"number of ranked documents to return (default 3, max 5)"`
+}
+
+func (a searchDocsArgs) searchMode() (string, error) {
+	return manager.NormalizeDocsSearchMode(a.Mode)
 }
 
 type searchCodeArgs struct {
@@ -189,9 +194,14 @@ func viewSourceMCP(mgr *manager.Manager, col *websource.Collection) sourceResult
 func addDocTools(server *mcp.Server, mgr *manager.Manager, includeAdmin bool) {
 	addTool(server, &mcp.Tool{
 		Name:        "search_docs",
-		Description: "Search generated documentation, wikis, and Confluence content. Returns bounded ranked excerpts; use get_doc only when a result needs more context. Always scope with repo or web:<collection> when known. When repo is omitted the repo docs searched are limited to the 'default' namespace; pass namespace:'*' to search all namespaces (web sources always participate). Use list_sources only when the collection name is unknown.",
+		Description: "Search generated documentation and connected knowledge sources, including Confluence, Jira and pages. mode='hybrid' (default) combines semantic retrieval with local BM25 using weighted reciprocal rank fusion and is the best general choice. A natural-language question is rewritten for BM25 into an OR of its words, so any shared product name or technical term contributes and the whole sentence is not required verbatim; words that look like keys, error codes, versions or paths (they contain a digit or . - _ / + @) stay required, so they still constrain the result. Semantic retrieval supplies paraphrase and conceptual recall. Use mode='lexical' for exact Jira keys, error codes, identifiers, quoted terms or page titles; it does not call an embedding model. Quote a phrase (\"gateway timeout\"), prefix a word with '-' to exclude it, or use OR/NOT explicitly to bypass the rewrite and control matching yourself. Use mode='semantic' for purely conceptual natural-language questions. Hybrid requires both indexes and does not silently fall back when semantic search is disabled. Scores are mode-specific and must not be compared across modes. Returns bounded ranked excerpts; use get_doc only when a result needs more context. Always scope with repo or web:<collection> when known. When repo is omitted the repo docs searched are limited to the 'default' namespace; pass namespace:'*' to search all namespaces (web sources always participate). Use list_sources only when the collection name is unknown.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args searchDocsArgs) (*mcp.CallToolResult, any, error) {
-		docs, err := mgr.SearchDocs(ctx, args.Scope, args.Repo, args.Namespace, args.Question, args.TopDocs)
+		mode, err := args.searchMode()
+		if err != nil {
+			return nil, nil, err
+		}
+
+		docs, err := mgr.SearchDocs(ctx, args.Scope, args.Repo, args.Namespace, mode, args.Question, args.TopDocs)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -457,6 +467,12 @@ type setDocsConfigArgs struct {
 	RAGChunkOverlap int  `json:"rag_chunk_overlap,omitempty" jsonschema:"character overlap between chunks"`
 	RAGTopK         int  `json:"rag_top_k,omitempty" jsonschema:"chunk matches fetched before grouping"`
 	RAGTopDocs      int  `json:"rag_top_docs,omitempty" jsonschema:"ranked document excerpts returned (max 5)"`
+
+	RAGHybridCandidates     int      `json:"rag_hybrid_candidates,omitempty" jsonschema:"documents each ranker contributes to hybrid rank fusion (default 12, max 40); both rankers always use the same depth"`
+	RAGHybridRRFK           int      `json:"rag_hybrid_rrf_k,omitempty" jsonschema:"reciprocal rank fusion smoothing constant (default 20); larger values flatten the difference between ranks"`
+	RAGHybridWeightLexical  float64  `json:"rag_hybrid_weight_lexical,omitempty" jsonschema:"weight of the BM25 ranker in hybrid fusion (default 1)"`
+	RAGHybridWeightSemantic float64  `json:"rag_hybrid_weight_semantic,omitempty" jsonschema:"weight of the semantic ranker in hybrid fusion (default 1)"`
+	RAGLexicalStopWords     []string `json:"rag_lexical_stop_words,omitempty" jsonschema:"words dropped from a question before BM25 search; empty by default. BM25 already scores corpus-wide terms near zero in any language, so this only reduces query latency on a large corpus and must match the corpus language"`
 
 	CodeRAGEnabled      bool     `json:"code_rag_enabled,omitempty" jsonschema:"enable source-code indexing and semantic search"`
 	CodeRAGChunkSize    int      `json:"code_rag_chunk_size,omitempty" jsonschema:"target code chunk length in characters"`

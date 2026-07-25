@@ -887,6 +887,7 @@ func searchDocs(mgr *manager.Manager) ada.HandlerFunc {
 		repo := c.Request.URL.Query().Get("repo")
 		scope := c.Request.URL.Query().Get("scope")
 		namespace := namespaceParam(c.Request)
+		mode := c.Request.URL.Query().Get("mode")
 
 		var top int
 		if v := c.Request.URL.Query().Get("top"); v != "" {
@@ -895,7 +896,7 @@ func searchDocs(mgr *manager.Manager) ada.HandlerFunc {
 			}
 		}
 
-		docs, err := mgr.SearchDocs(c.Request.Context(), scope, repo, namespace, q, top)
+		docs, err := mgr.SearchDocs(c.Request.Context(), scope, repo, namespace, mode, q, top)
 		if err != nil {
 			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
 		}

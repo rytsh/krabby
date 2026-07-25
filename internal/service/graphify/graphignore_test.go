@@ -122,16 +122,16 @@ func TestMatchesExcluded(t *testing.T) {
 	patterns := mergedPatterns(nil)
 	cases := map[string]bool{
 		"pkg/plugins/extractor/xml2/testdata/result/sub/output_sub_5.json": true,
-		"testdata/mock/db.go":     true,
-		"a/b/fixtures/c.json":     true,
-		"foo/__mocks__/bar.js":    true,
-		"lib.min.js":              true,
+		"testdata/mock/db.go":                    true,
+		"a/b/fixtures/c.json":                    true,
+		"foo/__mocks__/bar.js":                   true,
+		"lib.min.js":                             true,
 		"vendor/github.com/pkg/errors/errors.go": true,
 		"vendor/modules.txt":                     true,
 		"internal/service/foo.go":                false,
-		"cmd/main.go":             false,
-		"pkg/testdatabase/x.go":   false, // substring must NOT match a dir segment
-		"exporter/testdatatofile.go": false,
+		"cmd/main.go":                            false,
+		"pkg/testdatabase/x.go":                  false, // substring must NOT match a dir segment
+		"exporter/testdatatofile.go":             false,
 	}
 	for rel, want := range cases {
 		if got := matchesExcluded(rel, patterns); got != want {

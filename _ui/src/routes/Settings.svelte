@@ -12,6 +12,7 @@
 
   // Docs & RAG runtime config.
   let docsCfg = $state(null); // redacted config from the server
+  let stopWordsText = $state(""); // rag_lexical_stop_words as a comma-separated field
   let docsErr = $state("");
   let docsMsg = $state("");
   let saving = $state(false);
@@ -57,6 +58,7 @@
     try {
       docsCfg = await api.docsConfig();
       if (docsCfg && !Array.isArray(docsCfg.repo_schedules)) docsCfg.repo_schedules = [];
+      stopWordsText = (docsCfg?.rag_lexical_stop_words ?? []).join(", ");
     } catch (e) {
       docsErr = e.message;
     }
@@ -67,6 +69,15 @@
     } catch {
       namespaceOptions = [];
     }
+  }
+
+  // Lexical stop words are edited as one comma-separated field but stored as a
+  // list. Empty entries are dropped so a trailing comma is harmless.
+  function parseStopWords(text) {
+    return (text ?? "")
+      .split(",")
+      .map((w) => w.trim())
+      .filter(Boolean);
   }
 
   // Repository poll schedule editor. Each schedule targets a namespace ("*" =
@@ -134,6 +145,7 @@
     delete patch.updated_at;
     // Never submit half-edited (empty-spec) schedules the backend would reject.
     patch.repo_schedules = cleanSchedules(docsCfg.repo_schedules);
+    patch.rag_lexical_stop_words = parseStopWords(stopWordsText);
     patch.llm_api_key = llmKey;
     patch.embed_api_key = embedKey;
     patch.code_embed_api_key = codeEmbedKey;
@@ -780,6 +792,42 @@
         <input class="input" type="number" bind:value={docsCfg.rag_top_k} />
       </label>
     </div>
+
+    <!-- Hybrid search -->
+    <div class="mb-2 mt-6 text-[13px] font-semibold text-dim">Hybrid search</div>
+    <p class="mb-3 text-[12px] text-faint">
+      Hybrid mode fuses the BM25 and semantic rankings with weighted reciprocal rank fusion.
+      Both rankers are always asked for the same candidate depth; weight a ranker here rather
+      than by changing depth.
+    </p>
+    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Candidates per ranker
+        <input class="input" type="number" bind:value={docsCfg.rag_hybrid_candidates} />
+      </label>
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        RRF k
+        <input class="input" type="number" bind:value={docsCfg.rag_hybrid_rrf_k} />
+      </label>
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Lexical weight
+        <input class="input" type="number" step="0.1" bind:value={docsCfg.rag_hybrid_weight_lexical} />
+      </label>
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Semantic weight
+        <input class="input" type="number" step="0.1" bind:value={docsCfg.rag_hybrid_weight_semantic} />
+      </label>
+    </div>
+    <label class="mt-3 flex flex-col gap-1 text-[13px] text-dim">
+      Lexical stop words (comma separated)
+      <input class="input" type="text" bind:value={stopWordsText} />
+    </label>
+    <p class="mt-1 text-[12px] text-faint">
+      Empty by default, and on purpose: BM25 already scores a word that appears in most
+      documents near zero, in any language, so this is a query-latency knob and not a
+      relevance one. Set it to your own corpus language's function words only if lexical
+      search is slow on a large corpus.
+    </p>
 
     <div class="mt-6">
       <button class="btn btn-primary" onclick={saveDocs} disabled={saving}>

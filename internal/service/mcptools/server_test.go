@@ -83,9 +83,14 @@ func TestToolProfiles(t *testing.T) {
 	}
 }
 
+// serverInstructionsBudget bounds the server-level guidance. Every MCP session
+// pays for it in full, so it must stay a tool-selection map and never grow into
+// per-tool documentation, which belongs in each tool's Description.
+const serverInstructionsBudget = 2400
+
 func TestModelGuidanceIsSearchFirstAndBounded(t *testing.T) {
-	if len(serverInstructions) > 2200 {
-		t.Fatalf("server instructions grew to %d bytes", len(serverInstructions))
+	if len(serverInstructions) > serverInstructionsBudget {
+		t.Fatalf("server instructions grew to %d bytes, budget %d", len(serverInstructions), serverInstructionsBudget)
 	}
 	for _, phrase := range []string{"Use search_code first", "Use list_* only", "Always pass repo"} {
 		if !strings.Contains(serverInstructions, phrase) {

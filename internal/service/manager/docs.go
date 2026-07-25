@@ -337,7 +337,7 @@ func (m *Manager) Configure(_ context.Context, s settings.Settings) error {
 // configuration (e.g. docs on, rag off) is valid. Store construction failures
 // leave the previous live bundle active.
 func (m *Manager) buildBundle(s settings.Settings) (*docsBundle, error) {
-	b := &docsBundle{}
+	b := &docsBundle{ragCfg: ragConfig(s)}
 	var (
 		codeEmb   *embedder.Client
 		codeStore vectorstore.Store
@@ -622,6 +622,12 @@ func ragConfig(s settings.Settings) config.RAG {
 		ChunkOverlap: s.RAGChunkOverlap,
 		TopK:         s.RAGTopK,
 		TopDocs:      s.RAGTopDocs,
+
+		HybridCandidates:     s.RAGHybridCandidates,
+		HybridRRFK:           s.RAGHybridRRFK,
+		HybridWeightLexical:  s.RAGHybridWeightLexical,
+		HybridWeightSemantic: s.RAGHybridWeightSemantic,
+		LexicalStopWords:     s.RAGLexicalStopWords,
 	}
 }
 
@@ -645,6 +651,27 @@ const (
 	ScopeSources = "sources"
 )
 
+// Documentation search modes. Hybrid is the default and combines semantic and
+// lexical ranks with reciprocal rank fusion (RRF).
+const (
+	DocsSearchHybrid   = "hybrid"
+	DocsSearchSemantic = "semantic"
+	DocsSearchLexical  = "lexical"
+)
+
+// NormalizeDocsSearchMode validates a public docs search mode and applies the
+// default used by REST, MCP and the UI.
+func NormalizeDocsSearchMode(mode string) (string, error) {
+	switch mode = strings.ToLower(strings.TrimSpace(mode)); mode {
+	case "", DocsSearchHybrid:
+		return DocsSearchHybrid, nil
+	case DocsSearchSemantic, DocsSearchLexical:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("mode must be hybrid, semantic or lexical")
+	}
+}
+
 // docsFilter translates a scope + optional key into a vector-store filter.
 // key may be a repo id or a web-source scope key ("web:<name>"); when set it
 // wins over the scope.
@@ -665,49 +692,371 @@ func docsFilter(scope, key string) (vectorstore.Filter, error) {
 	}
 }
 
-// SearchDocs returns bounded markdown excerpts most relevant to a question.
-// scope selects where to search (all/repos/sources); key restricts to one
-// repo id or web-source key ("web:<name>") and wins over scope. namespace
-// scopes the repo portion when key is empty (empty or "default" == the default
-// bucket; NamespaceAll searches every repo); web sources are never namespaced
-// and always participate. topDocs <= 0 uses the RAG default.
-func (m *Manager) SearchDocs(ctx context.Context, scope, key, namespace, question string, topDocs int) ([]rag.Doc, error) {
+// WarmDocsSearch builds the persistent lexical index for existing markdown.
+// It is local-only (no LLM or embedder calls) and safe to run in the background.
+func (m *Manager) WarmDocsSearch(ctx context.Context) error {
+	if m.docsText == nil {
+		return nil
+	}
+
+	if err := m.ensureDocsTextForSearch(ctx, ScopeAll, "", registry.NamespaceAll); err != nil {
+		return err
+	}
+
+	return m.docsText.RefreshStats(ctx)
+}
+
+// ensureDocsTextForSearch makes upgrade-safe lexical searches: installations
+// with markdown created before the docs_search bucket existed are indexed on
+// demand for exactly the keys participating in this query.
+func (m *Manager) ensureDocsTextForSearch(ctx context.Context, scope, key, namespace string) error {
+	if m.docsText == nil {
+		return nil
+	}
+
+	if key != "" {
+		if name := websource.CollectionName(key); name != "" {
+			if m.sourcesRootDir == "" {
+				return nil
+			}
+
+			return m.ensureDocsTextKey(ctx, key, m.sourcesDir(name))
+		}
+
+		repo, err := m.reg.Get(ctx, key)
+		if err != nil || repo == nil {
+			return err
+		}
+		docsDir, err := m.docsDirForRepo(repo)
+		if err != nil {
+			return err
+		}
+
+		return m.ensureDocsTextKey(ctx, repo.ID, docsDir)
+	}
+
+	var errs []error
+	if scope == "" || scope == ScopeAll || scope == ScopeRepos {
+		repos, err := m.reg.List(ctx)
+		if err != nil {
+			errs = append(errs, err)
+		} else {
+			for _, repo := range repos {
+				if !strings.EqualFold(strings.TrimSpace(namespace), registry.NamespaceAll) && !repoInNamespace(repo, namespace) {
+					continue
+				}
+				docsDir, derr := m.docsDirForRepo(repo)
+				if derr == nil {
+					derr = m.ensureDocsTextKey(ctx, repo.ID, docsDir)
+				}
+				if derr != nil {
+					errs = append(errs, fmt.Errorf("warm docs text for %s; %w", repo.ID, derr))
+				}
+			}
+		}
+	}
+
+	if (scope == "" || scope == ScopeAll || scope == ScopeSources) && m.webStore != nil && m.sourcesRootDir != "" {
+		collections, err := m.webStore.ListCollections(ctx)
+		if err != nil {
+			errs = append(errs, err)
+		} else {
+			for _, collection := range collections {
+				key := websource.ScopeKey(collection.Name)
+				if err := m.ensureDocsTextKey(ctx, key, m.sourcesDir(collection.Name)); err != nil {
+					errs = append(errs, fmt.Errorf("warm docs text for %s; %w", key, err))
+				}
+			}
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+func (m *Manager) ensureDocsTextKey(ctx context.Context, key, docsDir string) error {
+	if !dirHasMarkdown(docsDir) {
+		return nil
+	}
+
+	lock := m.lock(key)
+	lock.Lock()
+	defer lock.Unlock()
+
+	has, err := m.docsText.HasRepo(ctx, key)
+	if err != nil || has {
+		return err
+	}
+
+	return m.docsText.Index(ctx, key, docsDir)
+}
+
+// SearchDocs returns bounded markdown excerpts using hybrid, semantic or
+// lexical retrieval. scope selects all/repos/sources; key restricts to one repo
+// or web:<collection> and wins over scope. Namespace scopes only repository
+// docs. topDocs <= 0 uses the default.
+func (m *Manager) SearchDocs(ctx context.Context, scope, key, namespace, mode, question string, topDocs int) ([]rag.Doc, error) {
+	mode, err := NormalizeDocsSearchMode(mode)
+	if err != nil {
+		return nil, err
+	}
+
 	filter, err := docsFilter(scope, key)
 	if err != nil {
 		return nil, err
 	}
+	if strings.TrimSpace(question) == "" {
+		return nil, errors.New("question is empty")
+	}
+	if topDocs <= 0 {
+		topDocs = rag.DefaultTopDocs
+	}
+	if topDocs > rag.MaxTopDocs {
+		topDocs = rag.MaxTopDocs
+	}
 
-	// A namespace restricts only repo docs, and only when no explicit key was
-	// given. Fetch extra candidates so the post-filter does not starve results.
 	nsFilter := key == "" && !strings.EqualFold(strings.TrimSpace(namespace), registry.NamespaceAll)
-	fetch := topDocs
-	if nsFilter {
-		fetch = (namespaceScope{}).fetch(topDocs)
+	ragCfg := m.ragConfigSnapshot()
+
+	// Both rankers are asked for the same candidate depth. An asymmetric depth
+	// silently weights the longer list higher in rank fusion, because every
+	// extra rank contributes more fused score.
+	fetch := hybridCandidates(ragCfg)
+	if fetch < topDocs {
+		fetch = topDocs
 	}
 
-	d, releaseDocs := m.acquireDocs()
-	if d.rag == nil {
-		releaseDocs()
-
-		return nil, ErrDocsDisabled
+	if mode != DocsSearchSemantic {
+		if m.docsText == nil {
+			return nil, errors.New("lexical docs search is not configured")
+		}
+		if err := m.ensureDocsTextForSearch(ctx, scope, key, namespace); err != nil {
+			return nil, err
+		}
 	}
 
-	docs, err := d.rag.Retrieve(ctx, filter, question, fetch)
-	releaseDocs()
-	if err != nil {
-		return nil, err
-	}
-
-	if nsFilter {
-		docs, err = m.filterDocsByNamespace(ctx, docs, namespace, topDocs)
+	var semanticDocs, lexicalDocs []rag.Doc
+	if mode != DocsSearchLexical {
+		semanticDocs, err = m.retrieveSemanticCandidates(ctx, filter, question, fetch)
 		if err != nil {
 			return nil, err
 		}
 	}
 
+	if mode != DocsSearchSemantic {
+		lexicalDocs, err = m.searchLexical(ctx, filter, question, fetch, ragCfg)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if nsFilter {
+		semanticDocs, err = m.filterDocsByNamespace(ctx, semanticDocs, namespace, 0)
+		if err != nil {
+			return nil, err
+		}
+		lexicalDocs, err = m.filterDocsByNamespace(ctx, lexicalDocs, namespace, 0)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	var docs []rag.Doc
+	switch mode {
+	case DocsSearchSemantic:
+		docs = trimDocs(semanticDocs, topDocs)
+	case DocsSearchLexical:
+		docs = trimDocs(lexicalDocs, topDocs)
+	default:
+		docs = fuseDocs(lexicalDocs, semanticDocs, topDocs, fuseParamsFor(ragCfg))
+	}
+
 	m.enrichWebDocs(ctx, docs)
 
 	return docs, nil
+}
+
+// searchLexical runs the BM25 arm.
+//
+// bw ANDs a bare query's terms, so the raw question is first rewritten into an
+// OR chain plus required identifiers. Terms the corpus itself shows to be
+// ubiquitous are dropped from that chain: BM25 scores them near zero anyway,
+// while matching them costs a scan proportional to the whole index.
+//
+// Filtering is an optimisation and is never allowed to cost a result. On a
+// corpus whose vocabulary is narrow enough that the question's words are all
+// common, the filtered query can come back empty; the unfiltered query is then
+// retried, paying the slow path only when it actually buys something.
+func (m *Manager) searchLexical(ctx context.Context, filter vectorstore.Filter, question string, fetch int, ragCfg config.RAG) ([]rag.Doc, error) {
+	stop := m.docsText.FrequentTerms(ctx).Merge(rag.NewStopWords(ragCfg.LexicalStopWords))
+
+	query := rag.LexicalQuery(question, stop)
+	docs, err := m.docsText.Search(ctx, filter, query, fetch)
+	if err != nil || len(docs) > 0 {
+		return docs, err
+	}
+
+	if unfiltered := rag.LexicalQuery(question, nil); unfiltered != query {
+		return m.docsText.Search(ctx, filter, unfiltered, fetch)
+	}
+
+	return docs, nil
+}
+
+// ragConfigSnapshot returns the live docs retrieval tuning. It is read from the
+// bundle so a settings update swaps it atomically together with the clients.
+func (m *Manager) ragConfigSnapshot() config.RAG {
+	d, release := m.acquireDocs()
+	defer release()
+
+	return d.ragCfg
+}
+
+// retrieveSemanticCandidates runs the embedding arm under the bundle lease.
+func (m *Manager) retrieveSemanticCandidates(ctx context.Context, filter vectorstore.Filter, question string, candidates int) ([]rag.Doc, error) {
+	d, release := m.acquireDocs()
+	defer release()
+
+	if d.rag == nil {
+		return nil, fmt.Errorf("semantic docs search is not enabled; use mode %q", DocsSearchLexical)
+	}
+
+	return d.rag.RetrieveCandidates(ctx, filter, question, candidates)
+}
+
+func trimDocs(docs []rag.Doc, topDocs int) []rag.Doc {
+	if len(docs) > topDocs {
+		return docs[:topDocs]
+	}
+
+	return docs
+}
+
+// Hybrid rank-fusion defaults, applied when the corresponding setting is zero
+// (including records written before the settings existed).
+const (
+	defaultHybridCandidates = 12
+	// defaultHybridRRFK is deliberately far below the classic RRF constant of
+	// 60. That value was tuned for thousand-deep TREC runs; over a list of
+	// ~12 candidates it compresses rank 1 and rank 12 to within 18% of each
+	// other, which makes "appears in both lists" outweigh rank quality
+	// entirely.
+	defaultHybridRRFK    = 20
+	defaultHybridWeight  = 1.0
+	maxHybridCandidates  = rag.MaxCandidates
+	minHybridCandidates  = 1
+	minHybridRRFKAllowed = 0
+)
+
+// fuseParams tunes reciprocal rank fusion. Zero fields take the defaults.
+type fuseParams struct {
+	K          int
+	WLex, WSem float64
+}
+
+func fuseParamsFor(cfg config.RAG) fuseParams {
+	return fuseParams{
+		K:    cfg.HybridRRFK,
+		WLex: cfg.HybridWeightLexical,
+		WSem: cfg.HybridWeightSemantic,
+	}
+}
+
+func (p fuseParams) normalized() fuseParams {
+	if p.K <= minHybridRRFKAllowed {
+		p.K = defaultHybridRRFK
+	}
+	if p.WLex <= 0 {
+		p.WLex = defaultHybridWeight
+	}
+	if p.WSem <= 0 {
+		p.WSem = defaultHybridWeight
+	}
+
+	return p
+}
+
+// hybridCandidates is how many documents each ranker contributes to fusion.
+func hybridCandidates(cfg config.RAG) int {
+	n := cfg.HybridCandidates
+	if n <= 0 {
+		n = defaultHybridCandidates
+	}
+	if n < minHybridCandidates {
+		n = minHybridCandidates
+	}
+	if n > maxHybridCandidates {
+		n = maxHybridCandidates
+	}
+
+	return n
+}
+
+// fuseDocs combines BM25 and semantic ranks with weighted reciprocal rank
+// fusion, which avoids comparing the two rankers' unrelated raw score scales.
+//
+// Both lists must be fetched at the same depth: a ranker that contributes more
+// ranks also contributes more total fused score, so an asymmetric depth is an
+// implicit weight. Use p.WLex/p.WSem to weight a ranker on purpose instead.
+//
+// Ties are broken on repo+path so the result is independent of map iteration
+// and of which list happened to be scanned first. The excerpt of the
+// better-ranked occurrence is kept, so a document found by both rankers still
+// shows the text that matched exactly.
+func fuseDocs(lexical, semantic []rag.Doc, topDocs int, p fuseParams) []rag.Doc {
+	p = p.normalized()
+
+	type fusedDoc struct {
+		key      string
+		doc      rag.Doc
+		score    float64
+		bestRank int
+	}
+
+	byKey := map[string]*fusedDoc{}
+
+	for _, ranking := range []struct {
+		docs   []rag.Doc
+		weight float64
+	}{
+		{lexical, p.WLex},
+		{semantic, p.WSem},
+	} {
+		for i, doc := range ranking.docs {
+			key := doc.Repo + "\x00" + doc.Path
+			entry := byKey[key]
+			if entry == nil {
+				entry = &fusedDoc{key: key, doc: doc, bestRank: i}
+				byKey[key] = entry
+			} else if i < entry.bestRank {
+				entry.doc = doc
+				entry.bestRank = i
+			}
+			entry.score += ranking.weight / float64(p.K+i+1)
+		}
+	}
+
+	fused := make([]*fusedDoc, 0, len(byKey))
+	for _, entry := range byKey {
+		fused = append(fused, entry)
+	}
+	sort.Slice(fused, func(i, j int) bool {
+		if fused[i].score == fused[j].score {
+			return fused[i].key < fused[j].key
+		}
+
+		return fused[i].score > fused[j].score
+	})
+
+	if len(fused) > topDocs {
+		fused = fused[:topDocs]
+	}
+	docs := make([]rag.Doc, 0, len(fused))
+	for _, entry := range fused {
+		entry.doc.Score = float32(entry.score)
+		docs = append(docs, entry.doc)
+	}
+
+	return docs
 }
 
 // filterDocsByNamespace keeps web-source docs (which are never namespaced) and

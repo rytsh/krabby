@@ -109,8 +109,8 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
       tools: [
         ["list_docs", "Page through generated documentation metadata for a repository."],
         ["get_doc", "Read a bounded page of a known generated document."],
-        ["search_docs", "Return ranked excerpts from repo docs and named web-source collections."],
-        ["list_sources", "List Custom web and Confluence collections and their web:<name> search keys."],
+        ["search_docs", "Search repo docs and web sources with hybrid, semantic, or lexical retrieval."],
+        ["list_sources", "List Custom web, Confluence, and Jira collections and their web:<name> search keys."],
         ["search_code", "First choice for symbols, paths, definitions, usages, and implementation locations."],
       ],
     },

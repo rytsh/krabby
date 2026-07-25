@@ -158,7 +158,7 @@ func (m *Manager) WebSourceConfigView(col *websource.Collection) any {
 	return fetcher.ConfigView(col.Config)
 }
 
-// DeleteWebCollection removes the collection, its pages, files and vectors.
+// DeleteWebCollection removes the collection, its pages, files and indexes.
 func (m *Manager) DeleteWebCollection(ctx context.Context, name string) error {
 	if m.webStore == nil {
 		return ErrNoWebSources
@@ -179,11 +179,16 @@ func (m *Manager) DeleteWebCollection(ctx context.Context, name string) error {
 		return fmt.Errorf("collection %s not found", name)
 	}
 
-	// Best-effort: drop the collection's vectors from the docs index.
+	// Best-effort: drop the collection from both docs indexes.
 	d, releaseDocs := m.acquireDocs()
 	if d.rag != nil {
 		if err := d.rag.DeleteRepo(ctx, scope); err != nil {
 			slog.Error("delete web source from docs index", "source", name, "error", err)
+		}
+	}
+	if m.docsText != nil {
+		if err := m.docsText.DeleteRepo(ctx, scope); err != nil {
+			slog.Error("delete web source from docs text index", "source", name, "error", err)
 		}
 	}
 	releaseDocs()
@@ -640,17 +645,34 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 		}
 	}
 
-	// Reconcile the index against the docs on disk: re-embed any page whose
-	// markdown exists but has no vectors yet. This repairs collections whose
-	// first embed run was interrupted (e.g. a restart mid-sync): the markdown
-	// was written and hashed, so a later incremental sync sees no change and
-	// would otherwise never embed those pages, leaving them unsearchable.
-	if missing := m.missingIndexedPaths(ctx, name, seen, changedPaths); len(missing) > 0 {
+	// Reconcile the index against every page currently on disk, not just the
+	// pages fetched this run: re-embed any whose markdown exists but has no
+	// vectors yet. Incremental sources (Confluence/JIRA) return only items
+	// changed since the watermark, so on a routine sync the fetched set (seen)
+	// is a small subset — usually empty. Keying the reconcile off seen alone
+	// would then never repair pages whose markdown exists but whose vectors are
+	// absent: an interrupted embed run, or a vector-store migration that dropped
+	// rows, would leave them unsearchable until the next periodic full resync.
+	// Build the candidate set from all persisted page records (which mirror the
+	// on-disk markdown), minus those pruned this run, plus any new pages seen.
+	reconcile := make(map[string]bool, len(existing)+len(seen))
+	for slug := range existing {
+		reconcile[slug] = true
+	}
+	for _, path := range removedPaths {
+		delete(reconcile, strings.TrimSuffix(path, ".md"))
+	}
+	for slug := range seen {
+		reconcile[slug] = true
+	}
+
+	if missing := m.missingIndexedPaths(ctx, name, dir, reconcile, changedPaths); len(missing) > 0 {
 		slog.Info("web source reindex: repairing pages missing from the index",
 			"source", name, "missing", len(missing))
 		changedPaths = append(changedPaths, missing...)
-		// Reconciled pages were not fetched this run (unchanged markdown), so
-		// their UpdatedAt is not in the map yet; take it from the stored record.
+		// Reconciled pages were not necessarily fetched this run (unchanged
+		// markdown), so their UpdatedAt may not be in the map yet; take it from
+		// the stored record so the recency stamp is preserved on re-embed.
 		for _, path := range missing {
 			slug := strings.TrimSuffix(path, ".md")
 			if rec := existing[slug]; rec != nil {
@@ -659,8 +681,8 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 		}
 	}
 
-	// Re-embed the changed/removed docs. If indexing fails (e.g. the embeddings
-	// provider is down or a quota is exhausted even after retries), do NOT
+	// Reindex the changed/removed docs. If indexing fails (e.g. the embeddings
+	// provider is down or a local index write fails), do NOT
 	// advance the fetch watermark: the markdown is already on disk, but the
 	// vectors are missing, so the next sync must re-attempt the same pages
 	// rather than skip them as "already seen". The collection is marked as
@@ -683,9 +705,9 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 		}
 	} else {
 		col.Status = websource.StatusError
-		col.LastError = "indexing incomplete: embeddings failed; will retry on next sync"
+		col.LastError = "indexing incomplete; will retry on next sync"
 		// Leave col.State unchanged so the watermark does not advance and the
-		// unindexed pages are re-fetched and re-embedded next time.
+		// unindexed pages are re-fetched and indexed next time.
 	}
 
 	if err := m.webStore.UpsertCollection(context.WithoutCancel(ctx), col); err != nil {
@@ -699,15 +721,14 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 	return nil
 }
 
-// indexWebSource (re)indexes a collection's markdown into the docs RAG index.
-// A disabled RAG subsystem is not an error: files stay on disk and are picked
-// up by the next reindex-all after RAG is enabled.
+// indexWebSource rebuilds a collection's configured lexical and semantic docs
+// indexes. Semantic indexing is skipped when RAG is disabled.
 func (m *Manager) indexWebSource(ctx context.Context, name string) {
 	d, releaseDocs := m.acquireDocs()
 	defer releaseDocs()
 
-	if d.rag == nil {
-		slog.Debug("rag disabled; web source not indexed", "source", name)
+	if d.rag == nil && m.docsText == nil {
+		slog.Debug("docs search disabled; web source not indexed", "source", name)
 
 		return
 	}
@@ -717,32 +738,41 @@ func (m *Manager) indexWebSource(ctx context.Context, name string) {
 	m.setActivity(scope, "docs_index")
 	defer m.clearActivity(scope, "docs_index")
 
-	if err := d.rag.Index(ctx, scope, m.sourcesDir(name)); err != nil {
+	if err := m.indexDocs(ctx, d, scope, m.sourcesDir(name)); err != nil {
 		slog.Error("index web source", "source", name, "error", err)
 	}
 }
 
-// missingIndexedPaths returns the doc paths ("<slug>.md") that exist on disk
-// this run (seen) but have no vectors in the docs index, excluding those
-// already queued for embedding (alreadyQueued). It powers the sync-time
-// reconcile that repairs interrupted embed runs. RAG being disabled, or any
-// scan error, yields no extra paths (best-effort; never blocks a sync).
-func (m *Manager) missingIndexedPaths(ctx context.Context, name string, seen map[string]bool, alreadyQueued []string) []string {
-	if len(seen) == 0 {
+// missingIndexedPaths returns markdown paths absent from any configured docs
+// index, excluding paths already queued this run. It repairs interrupted runs
+// and post-migration gaps without blocking sync on scan errors.
+func (m *Manager) missingIndexedPaths(ctx context.Context, name, dir string, candidates map[string]bool, alreadyQueued []string) []string {
+	if len(candidates) == 0 {
 		return nil
 	}
 
 	d, releaseDocs := m.acquireDocs()
 	defer releaseDocs()
-	if d.rag == nil {
+	if d.rag == nil && m.docsText == nil {
 		return nil
 	}
 
-	indexed, err := d.rag.IndexedPaths(ctx, websource.ScopeKey(name))
-	if err != nil {
-		slog.Error("web source reindex: scan indexed paths", "source", name, "error", err)
-
-		return nil
+	indexedSets := make([]map[string]struct{}, 0, 2)
+	if d.rag != nil {
+		indexed, err := d.rag.IndexedPaths(ctx, websource.ScopeKey(name))
+		if err != nil {
+			slog.Error("web source reindex: scan vector paths", "source", name, "error", err)
+			return nil
+		}
+		indexedSets = append(indexedSets, indexed)
+	}
+	if m.docsText != nil {
+		indexed, err := m.docsText.IndexedPaths(ctx, websource.ScopeKey(name))
+		if err != nil {
+			slog.Error("web source reindex: scan text paths", "source", name, "error", err)
+			return nil
+		}
+		indexedSets = append(indexedSets, indexed)
 	}
 
 	queued := make(map[string]struct{}, len(alreadyQueued))
@@ -751,13 +781,23 @@ func (m *Manager) missingIndexedPaths(ctx context.Context, name string, seen map
 	}
 
 	var missing []string
-	for slug := range seen {
+	for slug := range candidates {
 		path := slug + ".md"
-		if _, ok := indexed[path]; ok {
-			continue // already embedded
+		indexedEverywhere := true
+		for _, indexed := range indexedSets {
+			if _, ok := indexed[path]; !ok {
+				indexedEverywhere = false
+				break
+			}
+		}
+		if indexedEverywhere {
+			continue
 		}
 		if _, ok := queued[path]; ok {
 			continue // already about to be embedded this run
+		}
+		if !fileExists(filepath.Join(dir, path)) {
+			continue // no markdown to embed (e.g. a pending, never-fetched page)
 		}
 		missing = append(missing, path)
 	}
@@ -765,18 +805,15 @@ func (m *Manager) missingIndexedPaths(ctx context.Context, name string, seen map
 	return missing
 }
 
-// indexWebSourcePaths incrementally updates only the changed/removed docs of a
-// collection in the RAG index, so a large source (e.g. a JIRA project) is not
-// fully re-embedded when a few items change. It returns an error when embedding
-// or upserting fails so the caller can avoid advancing the fetch watermark past
-// pages whose vectors were not written. A disabled RAG subsystem is not an
-// error: files stay on disk for the next reindex-all.
+// indexWebSourcePaths incrementally updates changed/removed docs in every
+// configured search index, avoiding a full rebuild for large JIRA projects. An
+// index failure prevents the fetch watermark from advancing.
 func (m *Manager) indexWebSourcePaths(ctx context.Context, name string, changed, removed []string, updatedAt map[string]time.Time) error {
 	d, releaseDocs := m.acquireDocs()
 	defer releaseDocs()
 
-	if d.rag == nil {
-		slog.Debug("rag disabled; web source not indexed", "source", name)
+	if d.rag == nil && m.docsText == nil {
+		slog.Debug("docs search disabled; web source not indexed", "source", name)
 
 		return nil
 	}
@@ -800,17 +837,28 @@ func (m *Manager) indexWebSourcePaths(ctx context.Context, name string, changed,
 		UpdatedAt: func(path string) time.Time { return updatedAt[path] },
 	}
 
-	if err := d.rag.IndexPathsProgress(ctx, scope, m.sourcesDir(name), changed, removed, onProgress, opts); err != nil {
-		slog.Error("index web source (incremental)", "source", name, "error", err)
-
-		return err
+	var errs []error
+	if m.docsText != nil {
+		if err := m.docsText.IndexPaths(ctx, scope, m.sourcesDir(name), changed, removed, opts); err != nil {
+			errs = append(errs, fmt.Errorf("index web source %s text; %w", name, err))
+		}
+		// Query tuning is derived from the corpus, so it follows the corpus.
+		// A failure here only costs lexical query speed, never correctness.
+		if err := m.docsText.RefreshStats(ctx); err != nil {
+			slog.Warn("refresh docs search stats", "source", name, "error", err)
+		}
+	}
+	if d.rag != nil {
+		if err := d.rag.IndexPathsProgress(ctx, scope, m.sourcesDir(name), changed, removed, onProgress, opts); err != nil {
+			errs = append(errs, fmt.Errorf("index web source %s vectors; %w", name, err))
+		}
 	}
 
-	return nil
+	return errors.Join(errs...)
 }
 
 // enqueueWebReindex submits a reindex task for every web-source collection so
-// their vectors are rebuilt from the on-disk markdown under the global
+// its indexes are rebuilt from the on-disk markdown under the global
 // concurrency limit. Used after live settings updates (see reindexAll).
 func (m *Manager) enqueueWebReindex(ctx context.Context) {
 	if m.webStore == nil {

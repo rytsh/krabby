@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rytsh/krabby/internal/service/manager"
 	"github.com/rytsh/krabby/internal/service/settings"
 )
 
@@ -63,5 +64,29 @@ func TestSearchCodeArgsMode(t *testing.T) {
 				t.Errorf("searchMode() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSearchDocsArgsMode(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		mode    string
+		want    string
+		wantErr bool
+	}{
+		{want: manager.DocsSearchHybrid},
+		{mode: manager.DocsSearchHybrid, want: manager.DocsSearchHybrid},
+		{mode: manager.DocsSearchSemantic, want: manager.DocsSearchSemantic},
+		{mode: manager.DocsSearchLexical, want: manager.DocsSearchLexical},
+		{mode: "normal", wantErr: true},
+	} {
+		got, err := (searchDocsArgs{Mode: tt.mode}).searchMode()
+		if (err != nil) != tt.wantErr {
+			t.Fatalf("searchMode(%q) error = %v, wantErr %v", tt.mode, err, tt.wantErr)
+		}
+		if got != tt.want {
+			t.Errorf("searchMode(%q) = %q, want %q", tt.mode, got, tt.want)
+		}
 	}
 }
