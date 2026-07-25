@@ -659,17 +659,43 @@ const (
 	DocsSearchLexical  = "lexical"
 )
 
-// NormalizeDocsSearchMode validates a public docs search mode and applies the
-// default used by REST, MCP and the UI.
+// NormalizeDocsSearchMode validates a public docs search mode. An empty mode is
+// left empty and resolved per request by resolveDocsSearchMode, because the
+// default depends on what the installation has configured.
 func NormalizeDocsSearchMode(mode string) (string, error) {
 	switch mode = strings.ToLower(strings.TrimSpace(mode)); mode {
-	case "", DocsSearchHybrid:
-		return DocsSearchHybrid, nil
-	case DocsSearchSemantic, DocsSearchLexical:
+	case "", DocsSearchHybrid, DocsSearchSemantic, DocsSearchLexical:
 		return mode, nil
 	default:
 		return "", fmt.Errorf("mode must be hybrid, semantic or lexical")
 	}
+}
+
+// resolveDocsSearchMode picks the mode for a request that did not name one.
+//
+// Semantic is the default. The lexical arm's cost is proportional to how much
+// of the corpus shares the question's vocabulary, and a large single-domain
+// collection (a JIRA project of tens of thousands of tickets, say) is exactly
+// the case where every term is common — so BM25 there scans most of the index
+// while the vector search stays bounded by its ANN structure. Hybrid pays the
+// lexical cost too, since it waits for both arms.
+//
+// Lexical remains the better tool for exact keys, error codes and identifiers,
+// and hybrid for combining the two; both stay one parameter away. An
+// installation with no embedder gets lexical, the only mode that works there.
+func (m *Manager) resolveDocsSearchMode(mode string) string {
+	if mode != "" {
+		return mode
+	}
+
+	d, release := m.acquireDocs()
+	defer release()
+
+	if d.rag != nil {
+		return DocsSearchSemantic
+	}
+
+	return DocsSearchLexical
 }
 
 // docsFilter translates a scope + optional key into a vector-store filter.
@@ -694,6 +720,10 @@ func docsFilter(scope, key string) (vectorstore.Filter, error) {
 
 // WarmDocsSearch builds the persistent lexical index for existing markdown.
 // It is local-only (no LLM or embedder calls) and safe to run in the background.
+//
+// Once it completes, every key that has markdown has a lexical index and the
+// indexing pipeline keeps it that way, so queries stop checking (see
+// SearchDocs).
 func (m *Manager) WarmDocsSearch(ctx context.Context) error {
 	if m.docsText == nil {
 		return nil
@@ -703,7 +733,13 @@ func (m *Manager) WarmDocsSearch(ctx context.Context) error {
 		return err
 	}
 
-	return m.docsText.RefreshStats(ctx)
+	if err := m.docsText.RefreshStats(ctx); err != nil {
+		return err
+	}
+
+	m.docsTextWarmed.Store(true)
+
+	return nil
 }
 
 // ensureDocsTextForSearch makes upgrade-safe lexical searches: installations
@@ -782,13 +818,24 @@ func (m *Manager) ensureDocsTextForSearch(ctx context.Context, scope, key, names
 // key owned by a running job is skipped, because that job indexes it on
 // completion anyway. Worst case the query runs against what is indexed now.
 func (m *Manager) ensureDocsTextKey(ctx context.Context, key, docsDir string) error {
+	// Keys already known to be indexed are never probed again: the pipeline
+	// only ever adds to a key's index, so the answer cannot go back to "no".
+	if _, ok := m.docsTextKeys.Load(key); ok {
+		return nil
+	}
+
 	if !dirHasMarkdown(docsDir) {
 		return nil
 	}
 
 	has, err := m.docsText.HasRepo(ctx, key)
-	if err != nil || has {
+	if err != nil {
 		return err
+	}
+	if has {
+		m.docsTextKeys.Store(key, struct{}{})
+
+		return nil
 	}
 
 	lock := m.lock(key)
@@ -799,11 +846,18 @@ func (m *Manager) ensureDocsTextKey(ctx context.Context, key, docsDir string) er
 
 	// Re-probe under the lock: a concurrent backfill may have finished while
 	// this call was between the probe and the lock.
-	if has, err = m.docsText.HasRepo(ctx, key); err != nil || has {
+	if has, err = m.docsText.HasRepo(ctx, key); err != nil {
 		return err
 	}
+	if !has {
+		if err := m.docsText.Index(ctx, key, docsDir); err != nil {
+			return err
+		}
+	}
 
-	return m.docsText.Index(ctx, key, docsDir)
+	m.docsTextKeys.Store(key, struct{}{})
+
+	return nil
 }
 
 // SearchDocs returns bounded markdown excerpts using hybrid, semantic or
@@ -815,6 +869,7 @@ func (m *Manager) SearchDocs(ctx context.Context, scope, key, namespace, mode, q
 	if err != nil {
 		return nil, err
 	}
+	mode = m.resolveDocsSearchMode(mode)
 
 	filter, err := docsFilter(scope, key)
 	if err != nil {
@@ -845,8 +900,15 @@ func (m *Manager) SearchDocs(ctx context.Context, scope, key, namespace, mode, q
 		if m.docsText == nil {
 			return nil, errors.New("lexical docs search is not configured")
 		}
-		if err := m.ensureDocsTextForSearch(ctx, scope, key, namespace); err != nil {
-			return nil, err
+		// The lexical index is maintained by the indexing pipeline. The only
+		// case a query could have to repair is an installation upgraded from
+		// before the index existed, and the startup warm handles that once, so
+		// this is skipped as soon as it has run. Probing per query and per key
+		// in scope costs more than the search it guards.
+		if !m.docsTextWarmed.Load() {
+			if err := m.ensureDocsTextForSearch(ctx, scope, key, namespace); err != nil {
+				return nil, err
+			}
 		}
 	}
 

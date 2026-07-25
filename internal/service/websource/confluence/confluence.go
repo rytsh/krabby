@@ -159,18 +159,6 @@ func decodeRawConfig(raw json.RawMessage) (Config, error) {
 	return cfg, nil
 }
 
-// mergeNull returns the update value when the field was present in the update
-// JSON (set to a value OR explicitly null), otherwise the stored value. It
-// implements the "absent = keep, null = clear, value = override" merge rule
-// backed by types.Null's ParsedNull marker.
-func mergeNull[T any](update, stored types.Null[T]) types.Null[T] {
-	if update.Valid || update.ParsedNull {
-		return update
-	}
-
-	return stored
-}
-
 func (f *Fetcher) Validate(raw json.RawMessage) error {
 	cfg, err := decodeConfig(raw)
 	if err != nil {
@@ -203,14 +191,14 @@ func (f *Fetcher) MergeConfig(current, update json.RawMessage) (json.RawMessage,
 			return nil, err
 		}
 
-		next.BaseURL = mergeNull(next.BaseURL, prev.BaseURL)
-		next.Space = mergeNull(next.Space, prev.Space)
-		next.User = mergeNull(next.User, prev.User)
-		next.RootPage = mergeNull(next.RootPage, prev.RootPage)
-		next.IncludeRoot = mergeNull(next.IncludeRoot, prev.IncludeRoot)
-		next.IncludeLabels = mergeNull(next.IncludeLabels, prev.IncludeLabels)
-		next.ExcludeLabels = mergeNull(next.ExcludeLabels, prev.ExcludeLabels)
-		next.FullResyncEvery = mergeNull(next.FullResyncEvery, prev.FullResyncEvery)
+		next.BaseURL = websource.MergeNull(next.BaseURL, prev.BaseURL)
+		next.Space = websource.MergeNull(next.Space, prev.Space)
+		next.User = websource.MergeNull(next.User, prev.User)
+		next.RootPage = websource.MergeNull(next.RootPage, prev.RootPage)
+		next.IncludeRoot = websource.MergeNull(next.IncludeRoot, prev.IncludeRoot)
+		next.IncludeLabels = websource.MergeNull(next.IncludeLabels, prev.IncludeLabels)
+		next.ExcludeLabels = websource.MergeNull(next.ExcludeLabels, prev.ExcludeLabels)
+		next.FullResyncEvery = websource.MergeNull(next.FullResyncEvery, prev.FullResyncEvery)
 
 		// Tokens are write-only: an absent or blank incoming token keeps the
 		// stored one; only a non-empty value replaces it.

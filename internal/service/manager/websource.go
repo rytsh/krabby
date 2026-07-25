@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -104,46 +105,53 @@ func (m *Manager) AddWebCollection(ctx context.Context, col *websource.Collectio
 	return nil
 }
 
-// UpdateWebCollection replaces the mutable configuration of a collection. An
-// empty inbound Confluence API token keeps the stored one.
-func (m *Manager) UpdateWebCollection(ctx context.Context, col *websource.Collection) error {
+// UpdateWebCollection applies a partial update to a collection: the envelope
+// fields the client actually sent (see websource.CollectionUpdate) plus the
+// provider config, which the fetcher merges under the same rules. Anything the
+// client did not mention — including the sync watermark, status and creation
+// time — is preserved.
+//
+// config may be nil, meaning "no config change"; a blank write-only secret
+// inside it keeps the stored one, which is the fetcher's business.
+func (m *Manager) UpdateWebCollection(ctx context.Context, name string, update websource.CollectionUpdate, config json.RawMessage) error {
 	if m.webStore == nil {
 		return ErrNoWebSources
 	}
 
-	existing, err := m.webStore.GetCollection(ctx, col.Name)
+	name = strings.TrimSpace(strings.ToLower(name))
+
+	existing, err := m.webStore.GetCollection(ctx, name)
 	if err != nil {
 		return err
 	}
 
 	if existing == nil {
-		return fmt.Errorf("collection %s not found", col.Name)
+		return fmt.Errorf("collection %s not found", name)
+	}
+
+	// Start from the stored record so every unmentioned field survives by
+	// construction rather than by remembering to copy it back.
+	col := *existing
+	if err := update.Apply(&col); err != nil {
+		return err
 	}
 
 	if err := validateWebSpecs(col.Specs); err != nil {
 		return err
 	}
 
-	col.Type = existing.Type // the type is immutable once created
-	fetcher, ok := m.webFetchers[col.Type]
+	fetcher, ok := m.webFetchers[col.Type] // the type is immutable once created
 	if !ok {
 		return fmt.Errorf("no fetcher for source type %q", col.Type)
 	}
-	config, err := fetcher.MergeConfig(existing.Config, col.Config)
+
+	merged, err := fetcher.MergeConfig(existing.Config, config)
 	if err != nil {
 		return err
 	}
-	col.Config = config
-	col.Status = existing.Status
-	col.LastError = existing.LastError
-	col.LastRefreshAt = existing.LastRefreshAt
-	col.CreatedAt = existing.CreatedAt
-	col.State = existing.State // preserve the provider sync watermark
-	if col.Description == "" {
-		col.Description = existing.Description // blank keeps the stored summary
-	}
+	col.Config = merged
 
-	return m.webStore.UpsertCollection(ctx, col)
+	return m.webStore.UpsertCollection(ctx, &col)
 }
 
 // WebSourceConfigView returns a provider-owned, redacted config shape for the

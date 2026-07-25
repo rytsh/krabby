@@ -27,6 +27,7 @@ import (
 	mrequestid "github.com/rakunlabs/ada/middleware/requestid"
 	mserver "github.com/rakunlabs/ada/middleware/server"
 	mtelemetry "github.com/rakunlabs/ada/middleware/telemetry"
+	"github.com/worldline-go/types"
 
 	"github.com/rytsh/krabby/internal/config"
 	"github.com/rytsh/krabby/internal/service/credentials"
@@ -491,8 +492,11 @@ func listRepoNamespaces(mgr *manager.Manager) ada.HandlerFunc {
 }
 
 type upsertNamespaceRequest struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
+	Name string `json:"name"`
+	// Description is nullable: omit it to keep the stored one, send null to
+	// clear it, send a value to replace it. The record is written whole, so
+	// without this an update that only meant to touch something else erased it.
+	Description types.Null[string] `json:"description"`
 }
 
 // upsertNamespace creates or updates a namespace's description record.

@@ -118,10 +118,11 @@ export const api = {
   // searchDocs scoping: repo may be a repository id or a web-source key
   // ("web:<name>") and wins over scope; scope is all|repos|sources.
   // namespace scopes results to a single namespace; "" (or "*") searches all.
-  // mode is hybrid (default), semantic, or lexical (BM25).
+  // mode is semantic (default), hybrid, or lexical (BM25). Passing "" lets
+  // the server pick: semantic when an embedder is configured, else lexical.
   // Both search calls take an optional AbortSignal so the UI can cancel a
   // long-running query instead of leaving the user stuck on "Searching…".
-  searchDocs: (q, repo = "", top = 0, scope = "", namespace = "", mode = "hybrid", { signal } = {}) =>
+  searchDocs: (q, repo = "", top = 0, scope = "", namespace = "", mode = "", { signal } = {}) =>
     req(
       `/docs/search?q=${encodeURIComponent(q)}&repo=${encodeURIComponent(repo)}&top=${top}&scope=${encodeURIComponent(scope)}&namespace=${encodeURIComponent(namespace)}&mode=${encodeURIComponent(mode)}`,
       { signal },

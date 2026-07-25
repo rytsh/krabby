@@ -15,8 +15,11 @@ import (
 
 // ---- web source handlers ----------------------------------------------------
 
-// sourceRequest is the create/update payload for a collection. The API token
-// is write-only: an empty value keeps the stored token on update.
+// sourceRequest is the create payload for a collection. The API token is
+// write-only: an empty value keeps the stored token on update.
+//
+// Updates use sourceUpdateRequest instead: creation states every field, an
+// update states only what changes.
 type sourceRequest struct {
 	Name            string `json:"name"`
 	Type            string `json:"type"`
@@ -30,6 +33,19 @@ type sourceRequest struct {
 
 	// Config is an opaque provider-owned object. The registered fetcher
 	// validates, merges and redacts it.
+	Config json.RawMessage `json:"config"`
+}
+
+// sourceUpdateRequest is the partial update payload. Every envelope field is
+// nullable so the three cases a client needs are distinguishable: omit to keep,
+// send null to clear, send a value to override — the same rule the provider
+// config has always used. Before this, omitting "specs" silently deleted a
+// collection's cron schedule.
+type sourceUpdateRequest struct {
+	websource.CollectionUpdate
+
+	// Config is merged by the provider's fetcher; omit it to leave the whole
+	// provider configuration untouched.
 	Config json.RawMessage `json:"config"`
 }
 
@@ -211,19 +227,22 @@ func queryInt(s string, def int) int {
 
 func updateSource(mgr *manager.Manager) ada.HandlerFunc {
 	return func(c *ada.Context) error {
-		var req sourceRequest
+		var req sourceUpdateRequest
 		if err := c.Bind(&req); err != nil {
 			return c.SetStatus(http.StatusBadRequest).Err(err)
 		}
 
-		req.Name = c.Request.PathValue("name")
+		name := c.Request.PathValue("name")
+		ctx := c.Request.Context()
 
-		col, err := req.collection()
-		if err != nil {
+		if err := mgr.UpdateWebCollection(ctx, name, req.CollectionUpdate, req.Config); err != nil {
 			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
 		}
 
-		if err := mgr.UpdateWebCollection(c.Request.Context(), col); err != nil {
+		// Read the stored record back so the response shows the merge result
+		// rather than the request that produced it.
+		col, err := mgr.WebCollection(ctx, name)
+		if err != nil {
 			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
 		}
 

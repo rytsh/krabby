@@ -92,7 +92,7 @@ For the full profile, add a persistent header to the same server entry:
 | `query_graph` | Architecture, dependency, call/data-flow, and cross-file relationship questions |
 | `get_node` / `get_neighbors` / `get_community` | Node-level inspection |
 | `god_nodes` / `graph_stats` / `shortest_path` | Graph-level analysis |
-| `search_docs` / `list_docs` / `get_doc` | Search generated or synced Markdown with hybrid (default), semantic, or lexical retrieval |
+| `search_docs` / `list_docs` / `get_doc` | Search generated or synced Markdown with semantic (default), hybrid, or lexical retrieval |
 | `list_sources` | Discover named Custom web, Confluence, and Jira collections (`web:<name>`) |
 | `get_docs_config` / `set_docs_config` | Read or live-update docs and code RAG settings |
 | `test_llm` / `test_embedder` / `test_code_embedder` | Validate model endpoints without saving |

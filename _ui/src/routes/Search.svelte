@@ -47,7 +47,9 @@
   let namespaceFilter = $state("");
   let scope = $state("code");
   let codeMode = $state("normal");
-  let docsMode = $state("hybrid");
+  // Semantic is the default: on a large single-domain collection the BM25
+  // arm has to score most of the corpus, and hybrid waits for it.
+  let docsMode = $state("semantic");
   let results = $state(null); // null = not searched yet
   let total = $state(0);
   let page = $state(1);
@@ -161,7 +163,7 @@
     if (docsMode === "lexical")
       return "BM25 keyword search; best for exact identifiers and titles. Quote a phrase or use OR/NOT for full control.";
     if (docsMode === "semantic") return "Embedding search; best for concepts and paraphrased questions.";
-    return "Fuses BM25 and semantic ranks. Ask a full question; keys and error codes stay exact.";
+    return "Fuses BM25 and semantic ranks. The most thorough mode, and the slowest on large collections.";
   }
 
   onMount(loadRepoOptions);
@@ -271,9 +273,9 @@
       aria-label="Documentation search mode"
       title="Hybrid combines semantic and BM25 ranks. Lexical is best for exact keys, titles, and identifiers."
     >
-      <option value="hybrid">Hybrid</option>
       <option value="semantic">Semantic</option>
       <option value="lexical">Lexical (BM25)</option>
+      <option value="hybrid">Hybrid</option>
     </select>
   {/if}
   <button class="btn btn-primary" onclick={() => search()} disabled={loading || !q.trim()}>

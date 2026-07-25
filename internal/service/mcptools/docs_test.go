@@ -75,7 +75,9 @@ func TestSearchDocsArgsMode(t *testing.T) {
 		want    string
 		wantErr bool
 	}{
-		{want: manager.DocsSearchHybrid},
+		// An omitted mode stays empty here: the manager resolves the default
+		// against what the installation has configured.
+		{want: ""},
 		{mode: manager.DocsSearchHybrid, want: manager.DocsSearchHybrid},
 		{mode: manager.DocsSearchSemantic, want: manager.DocsSearchSemantic},
 		{mode: manager.DocsSearchLexical, want: manager.DocsSearchLexical},

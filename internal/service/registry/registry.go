@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/worldline-go/types"
+
 	"github.com/rakunlabs/bw"
 	"github.com/rakunlabs/query"
 )
@@ -477,7 +479,12 @@ func (r *Registry) GetNamespace(ctx context.Context, name string) (*NamespaceRec
 // UpsertNamespace creates or updates a namespace metadata record. The name is
 // normalized ("default" folds to the empty stored form); NamespaceAll is
 // rejected. CreatedAt is preserved across updates.
-func (r *Registry) UpsertNamespace(ctx context.Context, name, description string) (*NamespaceRecord, error) {
+//
+// description is nullable so a caller can rename-in-place without restating it:
+// omitting the property keeps the stored description, an explicit null clears
+// it, and a value replaces it. Previously any request that left it out wiped
+// the description, because the record is written whole.
+func (r *Registry) UpsertNamespace(ctx context.Context, name string, description types.Null[string]) (*NamespaceRecord, error) {
 	if strings.TrimSpace(name) == NamespaceAll {
 		return nil, fmt.Errorf("namespace %q is reserved", NamespaceAll)
 	}
@@ -485,11 +492,18 @@ func (r *Registry) UpsertNamespace(ctx context.Context, name, description string
 	norm := NormalizeNamespace(name)
 	now := time.Now().UTC()
 
-	rec := &NamespaceRecord{Name: norm, Description: strings.TrimSpace(description), UpdatedAt: now, CreatedAt: now}
+	rec := &NamespaceRecord{Name: norm, UpdatedAt: now, CreatedAt: now}
+	if description.Valid || description.ParsedNull {
+		rec.Description = strings.TrimSpace(description.ValueOrZero())
+	}
+
 	if existing, err := r.GetNamespace(ctx, norm); err != nil {
 		return nil, err
 	} else if existing != nil {
 		rec.CreatedAt = existing.CreatedAt
+		if !description.Valid && !description.ParsedNull {
+			rec.Description = existing.Description
+		}
 	}
 
 	if err := r.nsBucket.Insert(ctx, rec); err != nil {

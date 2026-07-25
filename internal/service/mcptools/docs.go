@@ -22,7 +22,7 @@ type searchDocsArgs struct {
 	Repo      string `json:"repo,omitempty" jsonschema:"one repository id or web:<collection>; always provide when known, omit only for explicit broad search"`
 	Namespace string `json:"namespace,omitempty" jsonschema:"when repo is omitted, scope repo docs to this namespace; empty means the 'default' namespace, '*' searches all namespaces. Web sources are never namespaced and always participate"`
 	Scope     string `json:"scope,omitempty" jsonschema:"when repo is unknown: 'all' (default), 'repos', or 'sources'"`
-	Mode      string `json:"mode,omitempty" jsonschema:"retrieval mode: 'hybrid' (default) fuses token-based BM25 and semantic ranks and is best for most questions; 'lexical' uses only local BM25 and is best for Jira keys, error codes, exact titles and identifiers; 'semantic' uses only embeddings and is best for conceptual natural-language questions"`
+	Mode      string `json:"mode,omitempty" jsonschema:"retrieval mode: 'semantic' (default) uses embeddings and is best for conceptual natural-language questions; 'lexical' uses only local BM25 and is best for Jira keys, error codes, exact titles and identifiers; 'hybrid' fuses both ranks and is the most thorough but the slowest on large collections. When no embedder is configured the default is 'lexical'"`
 	TopDocs   int    `json:"top_docs,omitempty" jsonschema:"number of ranked documents to return (default 3, max 5)"`
 }
 
@@ -87,6 +87,23 @@ type updateSourceArgs struct {
 	RefreshInterval string `json:"refresh_interval,omitempty" jsonschema:"legacy fixed interval as a Go duration, e.g. '1h'; used only when schedule is empty. Empty or 'manual' means manual only"`
 	Schedule        string `json:"schedule,omitempty" jsonschema:"comma-separated cron schedules (hardloop syntax, e.g. '0 2 * * *' or '@every 6h'); authoritative over refresh_interval when set"`
 	Config          string `json:"config,omitempty" jsonschema:"provider-owned config as a JSON object encoded in a string; a blank api_token keeps the stored secret"`
+}
+
+// update turns the tool arguments into a partial collection update: only the
+// properties the client actually sent are applied, so updating a description
+// no longer wipes the collection's schedule. See null.go for why presence comes
+// from the raw arguments rather than from nullable typed fields.
+func (a updateSourceArgs) update(raw json.RawMessage) (websource.CollectionUpdate, error) {
+	fields, err := argFields(raw)
+	if err != nil {
+		return websource.CollectionUpdate{}, err
+	}
+
+	return websource.CollectionUpdate{
+		Description:     nullArg(fields, "description", a.Description),
+		RefreshInterval: nullArg(fields, "refresh_interval", a.RefreshInterval),
+		Specs:           nullArg(fields, "schedule", parseSchedule(a.Schedule)),
+	}, nil
 }
 
 // parseSchedule splits a comma-separated cron schedule string into specs,
@@ -191,7 +208,7 @@ func viewSourceMCP(mgr *manager.Manager, col *websource.Collection) sourceResult
 func addDocTools(server *mcp.Server, mgr *manager.Manager, includeAdmin bool) {
 	addTool(server, &mcp.Tool{
 		Name:        "search_docs",
-		Description: "Search generated documentation and connected knowledge sources, including Confluence, Jira and pages. mode='hybrid' (default) combines semantic retrieval with local BM25 using weighted reciprocal rank fusion and is the best general choice. A natural-language question is rewritten for BM25 into an OR of its words, so any shared product name or technical term contributes and the whole sentence is not required verbatim; words that look like keys, error codes, versions or paths (they contain a digit or . - _ / + @) stay required, so they still constrain the result. Semantic retrieval supplies paraphrase and conceptual recall. Use mode='lexical' for exact Jira keys, error codes, identifiers, quoted terms or page titles; it does not call an embedding model. Quote a phrase (\"gateway timeout\"), prefix a word with '-' to exclude it, or use OR/NOT explicitly to bypass the rewrite and control matching yourself. Use mode='semantic' for purely conceptual natural-language questions. Hybrid requires both indexes and does not silently fall back when semantic search is disabled. Scores are mode-specific and must not be compared across modes. Returns bounded ranked excerpts; use get_doc only when a result needs more context. Always scope with repo or web:<collection> when known. When repo is omitted the repo docs searched are limited to the 'default' namespace; pass namespace:'*' to search all namespaces (web sources always participate). Use list_sources only when the collection name is unknown.",
+		Description: "Search generated documentation and connected knowledge sources, including Confluence, Jira and pages. mode='semantic' (default) uses embedding retrieval and is the best general choice: its cost does not grow with how much of the collection shares the question's wording. mode='hybrid' combines semantic retrieval with local BM25 using weighted reciprocal rank fusion; it is the most thorough but waits for the BM25 arm, which on a large single-domain collection scores most of the corpus. A natural-language question is rewritten for BM25 into an OR of its words, so any shared product name or technical term contributes and the whole sentence is not required verbatim; words that look like keys, error codes, versions or paths (they contain a digit or . - _ / + @) stay required, so they still constrain the result. Semantic retrieval supplies paraphrase and conceptual recall. Use mode='lexical' for exact Jira keys, error codes, identifiers, quoted terms or page titles; it does not call an embedding model. Quote a phrase (\"gateway timeout\"), prefix a word with '-' to exclude it, or use OR/NOT explicitly to bypass the rewrite and control matching yourself. Use mode='semantic' for purely conceptual natural-language questions. Hybrid requires both indexes and does not silently fall back when semantic search is disabled. Scores are mode-specific and must not be compared across modes. Returns bounded ranked excerpts; use get_doc only when a result needs more context. Always scope with repo or web:<collection> when known. When repo is omitted the repo docs searched are limited to the 'default' namespace; pass namespace:'*' to search all namespaces (web sources always participate). Use list_sources only when the collection name is unknown.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args searchDocsArgs) (*mcp.CallToolResult, any, error) {
 		mode, err := args.searchMode()
 		if err != nil {
@@ -313,27 +330,29 @@ func addSourceAdminTools(server *mcp.Server, mgr *manager.Manager) {
 
 	addTool(server, &mcp.Tool{
 		Name: "update_source",
-		Description: "Update a web source's refresh interval and/or provider config. The type is immutable. " +
-			"A blank api_token in config keeps the stored secret. Does not re-sync by itself; call refresh_source.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args updateSourceArgs) (*mcp.CallToolResult, any, error) {
+		Description: "Update a web source's description, schedule and/or provider config. This is a partial update: " +
+			"properties you omit keep their stored value, so changing one setting never disturbs the others. " +
+			"Send a property with an empty value to clear it (e.g. schedule:'' removes the cron schedule). " +
+			"The type is immutable. A blank api_token in config keeps the stored secret. " +
+			"Does not re-sync by itself; call refresh_source.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args updateSourceArgs) (*mcp.CallToolResult, any, error) {
 		raw, err := rawConfig(args.Config)
 		if err != nil {
 			return nil, nil, err
 		}
-		col := &websource.Collection{
-			Name:        strings.TrimSpace(strings.ToLower(args.Name)),
-			Description: strings.TrimSpace(args.Description),
-			Config:      raw,
-			Specs:       parseSchedule(args.Schedule),
+
+		update, err := args.update(req.Params.Arguments)
+		if err != nil {
+			return nil, nil, err
 		}
-		if args.RefreshInterval != "" && args.RefreshInterval != "manual" {
-			d, err := time.ParseDuration(args.RefreshInterval)
-			if err != nil {
-				return nil, nil, fmt.Errorf("invalid refresh_interval; %w", err)
-			}
-			col.RefreshInterval = d
+
+		name := strings.TrimSpace(strings.ToLower(args.Name))
+		if err := mgr.UpdateWebCollection(ctx, name, update, raw); err != nil {
+			return nil, nil, err
 		}
-		if err := mgr.UpdateWebCollection(ctx, col); err != nil {
+
+		col, err := mgr.WebCollection(ctx, name)
+		if err != nil {
 			return nil, nil, err
 		}
 

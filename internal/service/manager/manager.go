@@ -15,9 +15,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/worldline-go/types"
 
 	"github.com/rytsh/krabby/internal/config"
 	"github.com/rytsh/krabby/internal/service/coderag"
@@ -99,6 +101,12 @@ type Manager struct {
 	// progress tracks live counters for a long-running step per id (transient,
 	// in-memory), so the UI can show "1200/4634 embedded, ~26%". Keyed by id
 	// (repo id or web-source scope key). Cleared when the step ends.
+	// docsTextWarmed records that the startup lexical backfill finished, and
+	// docsTextKeys the keys already known to be indexed. Together they keep the
+	// query path free of existence probes; see SearchDocs.
+	docsTextWarmed atomic.Bool
+	docsTextKeys   sync.Map
+
 	progressMu sync.Mutex
 	// progress is id -> phase -> counters. A repo runs code_index alongside
 	// docs/docs_index (different backends, no data dependency), so an id can
@@ -1010,7 +1018,8 @@ func (m *Manager) SetRepoNamespace(ctx context.Context, ref, namespace string) (
 }
 
 // UpsertNamespace creates or updates the description metadata for a namespace.
-func (m *Manager) UpsertNamespace(ctx context.Context, name, description string) (*registry.NamespaceRecord, error) {
+// An unset description keeps the stored one; see registry.UpsertNamespace.
+func (m *Manager) UpsertNamespace(ctx context.Context, name string, description types.Null[string]) (*registry.NamespaceRecord, error) {
 	return m.reg.UpsertNamespace(ctx, name, description)
 }
 

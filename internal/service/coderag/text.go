@@ -231,9 +231,10 @@ func matchingLine(record *textRecord, search string) int {
 	return bestLine
 }
 
+// HasRepo reports whether the repo has any indexed chunk, stopping at the
+// first one rather than counting them all.
 func (s *TextStore) HasRepo(ctx context.Context, repo string) (bool, error) {
-	n, err := s.bucket.Count(ctx, textRepoQuery(repo))
-	return n > 0, err
+	return s.bucket.Exists(ctx, textRepoQuery(repo))
 }
 
 func (s *TextStore) DeleteRepo(ctx context.Context, repo string) error {

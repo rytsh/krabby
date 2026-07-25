@@ -3,6 +3,8 @@ package registry
 import (
 	"context"
 	"testing"
+
+	"github.com/worldline-go/types"
 )
 
 func seedNamespaced(t *testing.T, reg *Registry, id, namespace string) {
@@ -114,7 +116,7 @@ func TestNamespaceDescriptionCRUD(t *testing.T) {
 	ctx := context.Background()
 
 	// A described-but-empty namespace shows up with count 0.
-	if _, err := reg.UpsertNamespace(ctx, "Payments", "payment services"); err != nil {
+	if _, err := reg.UpsertNamespace(ctx, "Payments", types.NewNull("payment services")); err != nil {
 		t.Fatalf("upsert namespace: %v", err)
 	}
 
@@ -146,7 +148,7 @@ func TestNamespaceDescriptionCRUD(t *testing.T) {
 
 	// Update preserves CreatedAt.
 	first, _ := reg.GetNamespace(ctx, "payments")
-	updated, err := reg.UpsertNamespace(ctx, "payments", "updated")
+	updated, err := reg.UpsertNamespace(ctx, "payments", types.NewNull("updated"))
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
@@ -176,7 +178,7 @@ func TestNamespaceDescriptionCRUD(t *testing.T) {
 	}
 
 	// The wildcard cannot be created.
-	if _, err := reg.UpsertNamespace(ctx, NamespaceAll, "x"); err == nil {
+	if _, err := reg.UpsertNamespace(ctx, NamespaceAll, types.NewNull("x")); err == nil {
 		t.Fatal("expected error creating reserved namespace")
 	}
 }
@@ -207,5 +209,46 @@ func TestSetNamespace(t *testing.T) {
 	// The wildcard cannot be assigned.
 	if _, err := reg.SetNamespace(ctx, "acme/a", NamespaceAll); err == nil {
 		t.Fatal("expected error assigning reserved namespace")
+	}
+}
+
+// TestUpsertNamespaceKeepsOmittedDescription is the regression test for an
+// upsert that erased the description whenever the caller did not restate it.
+// The record is written whole, so "not provided" has to be distinguishable from
+// "set to empty".
+func TestUpsertNamespaceKeepsOmittedDescription(t *testing.T) {
+	ctx := context.Background()
+	reg := newTestRegistry(t)
+
+	if _, err := reg.UpsertNamespace(ctx, "payments", types.NewNull("payment services")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Omitted: keep.
+	var absent types.Null[string]
+	rec, err := reg.UpsertNamespace(ctx, "payments", absent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Description != "payment services" {
+		t.Fatalf("omitted description was not kept: %q", rec.Description)
+	}
+
+	// Explicit null: clear.
+	rec, err = reg.UpsertNamespace(ctx, "payments", types.Null[string]{ParsedNull: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Description != "" {
+		t.Fatalf("explicit null did not clear: %q", rec.Description)
+	}
+
+	// Value: replace.
+	rec, err = reg.UpsertNamespace(ctx, "payments", types.NewNull(" cards "))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Description != "cards" {
+		t.Fatalf("value was not stored (and trimmed): %q", rec.Description)
 	}
 }

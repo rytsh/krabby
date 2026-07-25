@@ -21,7 +21,10 @@ func TestNormalizeDocsSearchMode(t *testing.T) {
 		in, want string
 		wantErr  bool
 	}{
-		{want: DocsSearchHybrid},
+		// An unset mode stays unset here; the default is resolved per request
+		// against what the installation has configured.
+		{want: ""},
+		{in: "  ", want: ""},
 		{in: "HYBRID", want: DocsSearchHybrid},
 		{in: DocsSearchSemantic, want: DocsSearchSemantic},
 		{in: DocsSearchLexical, want: DocsSearchLexical},
@@ -186,6 +189,38 @@ func TestSearchDocsLexicalWithoutSemanticIndex(t *testing.T) {
 	_, err = m.SearchDocs(ctx, ScopeRepos, repo.ID, "", DocsSearchHybrid, "PAY-1842", 5)
 	if err == nil || !strings.Contains(err.Error(), "semantic docs search is not enabled") {
 		t.Fatalf("hybrid without semantic index error = %v", err)
+	}
+
+	// With no embedder configured the default must resolve to lexical: it is
+	// the only mode this installation can serve.
+	docs, err = m.SearchDocs(ctx, ScopeRepos, repo.ID, "", "", "PAY-1842", 5)
+	if err != nil {
+		t.Fatalf("default mode without an embedder: %v", err)
+	}
+	if len(docs) != 1 || docs[0].Path != "incident.md" {
+		t.Fatalf("default mode docs = %#v", docs)
+	}
+}
+
+// TestResolveDocsSearchModeDefaults pins the default: semantic when the
+// installation can serve it, lexical otherwise, and an explicit mode always
+// wins.
+func TestResolveDocsSearchModeDefaults(t *testing.T) {
+	t.Parallel()
+
+	withEmbedder := &Manager{docs: &docsBundle{rag: &rag.Service{}}}
+	if got := withEmbedder.resolveDocsSearchMode(""); got != DocsSearchSemantic {
+		t.Fatalf("default with a semantic index = %q, want semantic", got)
+	}
+	for _, mode := range []string{DocsSearchHybrid, DocsSearchLexical, DocsSearchSemantic} {
+		if got := withEmbedder.resolveDocsSearchMode(mode); got != mode {
+			t.Fatalf("explicit %q was overridden with %q", mode, got)
+		}
+	}
+
+	withoutEmbedder := &Manager{docs: &docsBundle{}}
+	if got := withoutEmbedder.resolveDocsSearchMode(""); got != DocsSearchLexical {
+		t.Fatalf("default without a semantic index = %q, want lexical", got)
 	}
 }
 

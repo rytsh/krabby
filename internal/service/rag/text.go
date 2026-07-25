@@ -244,9 +244,11 @@ func (s *TextStore) Search(ctx context.Context, filter vectorstore.Filter, searc
 	return docs, nil
 }
 
+// HasRepo reports whether the key has any indexed chunk. It stops at the first
+// one: the answer is a yes/no, and counting a large collection's chunks to
+// produce it costs a scan of the whole partition.
 func (s *TextStore) HasRepo(ctx context.Context, repo string) (bool, error) {
-	n, err := s.bucket.Count(ctx, docsTextRepoQuery(repo))
-	return n > 0, err
+	return s.bucket.Exists(ctx, docsTextRepoQuery(repo))
 }
 
 func (s *TextStore) IndexedPaths(ctx context.Context, repo string) (map[string]struct{}, error) {

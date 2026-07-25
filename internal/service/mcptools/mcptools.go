@@ -230,8 +230,15 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 	addTool(server, &mcp.Tool{
 		Name:        "set_namespace_description",
 		Description: "Create or update a namespace's description (an arbitrary grouping label plus a summary of what it holds). The description is surfaced by list_namespaces to help pick the right search scope. This does not tag any repo; use add_repo or set_repo_namespace for that.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args upsertNamespaceArgs) (*mcp.CallToolResult, any, error) {
-		rec, err := mgr.UpsertNamespace(ctx, args.Name, args.Description)
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args upsertNamespaceArgs) (*mcp.CallToolResult, any, error) {
+		// Presence comes from the raw arguments: a nullable typed field would
+		// reflect into the tool schema as a {V,Valid} object.
+		description, err := nullFromArgs(req.Params.Arguments, "description", args.Description)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		rec, err := mgr.UpsertNamespace(ctx, args.Name, description)
 		if err != nil {
 			return nil, nil, err
 		}

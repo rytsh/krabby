@@ -90,3 +90,16 @@ func BenchmarkTextStoreSearch(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkTextStoreHasRepo measures the existence probe the docs search runs
+// for every key in scope before it can answer.
+func BenchmarkTextStoreHasRepo(b *testing.B) {
+	store := benchCorpus(b, 10000)
+	ctx := context.Background()
+
+	for b.Loop() {
+		if _, err := store.HasRepo(ctx, "acme/payments"); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

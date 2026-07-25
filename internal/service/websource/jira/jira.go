@@ -172,16 +172,6 @@ func decodeRawConfig(raw json.RawMessage) (Config, error) {
 	return cfg, nil
 }
 
-// mergeNull returns the update value when the field was present in the update
-// JSON (a value OR explicit null), otherwise the stored value.
-func mergeNull[T any](update, stored types.Null[T]) types.Null[T] {
-	if update.Valid || update.ParsedNull {
-		return update
-	}
-
-	return stored
-}
-
 func (f *Fetcher) Validate(raw json.RawMessage) error {
 	cfg, err := decodeConfig(raw)
 	if err != nil {
@@ -213,15 +203,15 @@ func (f *Fetcher) MergeConfig(current, update json.RawMessage) (json.RawMessage,
 			return nil, err
 		}
 
-		next.BaseURL = mergeNull(next.BaseURL, prev.BaseURL)
-		next.User = mergeNull(next.User, prev.User)
-		next.Project = mergeNull(next.Project, prev.Project)
-		next.JQL = mergeNull(next.JQL, prev.JQL)
-		next.IncludeLabels = mergeNull(next.IncludeLabels, prev.IncludeLabels)
-		next.ExcludeLabels = mergeNull(next.ExcludeLabels, prev.ExcludeLabels)
-		next.TeamFields = mergeNull(next.TeamFields, prev.TeamFields)
-		next.MaxIssues = mergeNull(next.MaxIssues, prev.MaxIssues)
-		next.FullResyncEvery = mergeNull(next.FullResyncEvery, prev.FullResyncEvery)
+		next.BaseURL = websource.MergeNull(next.BaseURL, prev.BaseURL)
+		next.User = websource.MergeNull(next.User, prev.User)
+		next.Project = websource.MergeNull(next.Project, prev.Project)
+		next.JQL = websource.MergeNull(next.JQL, prev.JQL)
+		next.IncludeLabels = websource.MergeNull(next.IncludeLabels, prev.IncludeLabels)
+		next.ExcludeLabels = websource.MergeNull(next.ExcludeLabels, prev.ExcludeLabels)
+		next.TeamFields = websource.MergeNull(next.TeamFields, prev.TeamFields)
+		next.MaxIssues = websource.MergeNull(next.MaxIssues, prev.MaxIssues)
+		next.FullResyncEvery = websource.MergeNull(next.FullResyncEvery, prev.FullResyncEvery)
 
 		if next.APIToken.ValueOrZero() == "" {
 			next.APIToken = prev.APIToken
