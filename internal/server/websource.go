@@ -10,6 +10,7 @@ import (
 	"github.com/rakunlabs/ada"
 
 	"github.com/rytsh/krabby/internal/service/manager"
+	"github.com/rytsh/krabby/internal/service/repofs"
 	"github.com/rytsh/krabby/internal/service/websource"
 )
 
@@ -328,6 +329,23 @@ func getSourceDoc(mgr *manager.Manager) ada.HandlerFunc {
 			return c.SetStatus(http.StatusNotFound).SendJSON(map[string]string{"error": err.Error()})
 		}
 
-		return c.SendJSON(doc)
+		page, err := mgr.WebPage(
+			c.Request.Context(),
+			c.Request.PathValue("name"),
+			strings.TrimSuffix(path, ".md"),
+		)
+		if err != nil {
+			return c.Err(err)
+		}
+
+		view := struct {
+			*repofs.FileContent
+			URL string `json:"url,omitempty"`
+		}{FileContent: doc}
+		if page != nil {
+			view.URL = page.URL
+		}
+
+		return c.SendJSON(view)
 	}
 }

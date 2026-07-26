@@ -309,6 +309,15 @@ func (m *Manager) WebPages(ctx context.Context, name string) ([]*websource.Page,
 	return m.webStore.Pages(ctx, name)
 }
 
+// WebPage returns one persisted page record, or nil when it does not exist.
+func (m *Manager) WebPage(ctx context.Context, name, slug string) (*websource.Page, error) {
+	if m.webStore == nil {
+		return nil, ErrNoWebSources
+	}
+
+	return m.webStore.GetPage(ctx, websource.PageID(name, slug))
+}
+
 // WebPageCount returns the number of page records in one collection without
 // loading them, for listings that only need the size.
 func (m *Manager) WebPageCount(ctx context.Context, name string) (int, error) {

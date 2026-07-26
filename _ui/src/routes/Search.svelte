@@ -3,7 +3,6 @@
   // hybrid mode that fuses BM25 and semantic document ranks.
   import { onDestroy, onMount } from "svelte";
   import { api } from "../lib/api.js";
-  import { navigate } from "../lib/router.js";
   import { fmtDate } from "../lib/format.js";
   import Icon from "../lib/Icon.svelte";
 
@@ -128,17 +127,15 @@
     loading = false;
   }
 
-  function open(r) {
+  function resultHref(r) {
     if (scope === "docs") {
       // Web-source hits open the synced markdown on the Sources page.
       if (r.repo.startsWith("web:")) {
-        navigate(`/sources/${r.repo.slice(4)}?doc=${encodeURIComponent(r.path)}`);
-        return;
+        return `#/sources/${r.repo.slice(4)}?doc=${encodeURIComponent(r.path)}`;
       }
-      navigate(`/repos/${r.repo}?doc=${encodeURIComponent(r.path)}`);
-      return;
+      return `#/repos/${r.repo}?doc=${encodeURIComponent(r.path)}`;
     }
-    navigate(`/repos/${r.repo}?file=${encodeURIComponent(r.path)}&line=${r.line || r.start_line || 1}`);
+    return `#/repos/${r.repo}?file=${encodeURIComponent(r.path)}&line=${r.line || r.start_line || 1}`;
   }
 
   function pct(score) {
@@ -339,7 +336,7 @@
     <div class="flex flex-col gap-3">
       {#each results as r, i (i)}
         {#if scope === "docs"}
-          <button class="card block w-full cursor-pointer overflow-hidden text-left transition-colors hover:border-accent" onclick={() => open(r)}>
+          <a class="card block w-full cursor-pointer overflow-hidden text-left transition-colors hover:border-accent" href={resultHref(r)}>
             <div class="flex items-center gap-2 border-b border-line bg-surface-2/50 px-3.5 py-2">
               <span class="truncate text-[13px] font-medium text-fg">{r.title || r.path}</span>
               <span class="font-mono text-[11px] text-faint">{r.repo} / {r.path}</span>
@@ -353,10 +350,10 @@
               </span>
             </div>
             <pre class="m-0 max-h-56 overflow-hidden whitespace-pre-wrap px-3.5 py-2.5 font-mono text-[12px] leading-relaxed text-dim">{docExcerpt(r.excerpt)}</pre>
-          </button>
+          </a>
         {:else}
           {@const snip = codeSnippet(r)}
-          <button class="card block w-full cursor-pointer overflow-hidden text-left transition-colors hover:border-accent" onclick={() => open(r)}>
+          <a class="card block w-full cursor-pointer overflow-hidden text-left transition-colors hover:border-accent" href={resultHref(r)}>
             <div class="flex items-center gap-2 border-b border-line bg-surface-2/50 px-3.5 py-2">
               <span class="font-mono text-[12.5px] text-fg">{r.repo}</span>
               <span class="text-faint">/</span>
@@ -376,7 +373,7 @@
               style={`counter-reset: line ${snip.first - 1}`}
             ><code>{#if snip.clippedAbove}<span class="line-elided">⋯</span>{"\n"}{/if}{#each snip.lines as l, li}<span
                   class="line {snip.match === snip.first + li ? 'line-target' : ''}">{l}</span>{"\n"}{/each}{#if snip.clippedBelow}<span class="line-elided">⋯</span>{/if}</code></pre>
-          </button>
+          </a>
         {/if}
       {/each}
     </div>

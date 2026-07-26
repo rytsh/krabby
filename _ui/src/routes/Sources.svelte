@@ -2,7 +2,7 @@
   // Web content sources: named collections (wikis, Confluence spaces) whose
   // pages are synced to markdown and indexed into the docs RAG. Each
   // collection is searchable on the Search page as "web:<name>".
-  import { onMount, untrack } from "svelte";
+  import { onMount } from "svelte";
   import { api } from "../lib/api.js";
   import { path as routePath, navigate, link } from "../lib/router.js";
   import { fmtDate, fmtEta } from "../lib/format.js";
@@ -39,6 +39,7 @@
 
   // Doc viewer state.
   let docContent = $state("");
+  let docURL = $state("");
   let docError = $state("");
 
   // Add form.
@@ -334,48 +335,20 @@
     const doc = docParam;
     if (!name || !doc) {
       docContent = "";
+      docURL = "";
       docError = "";
       return;
     }
     docContent = "";
+    docURL = "";
     docError = "";
     api
       .sourceDoc(name, doc)
-      .then((res) => (docContent = res?.content || ""))
+      .then((res) => {
+        docContent = res?.content || "";
+        docURL = res?.url || "";
+      })
       .catch((e) => (docError = e.message));
-  });
-
-  function sourceOfDoc() {
-    return sources.find((s) => s.name === sourceName);
-  }
-
-  function docPageURL() {
-    const list = pages[sourceName] || [];
-    const slug = docParam.replace(/\.md$/, "");
-    return list.find((p) => p.slug === slug)?.url || "";
-  }
-
-  // A search result opens this page with the doc routed but the collection's
-  // page list never fetched, and docPageURL() needs that list to link back to
-  // the original Jira/Confluence page. Fetching it from an effect needs two
-  // guards, because neither is sufficient alone:
-  //
-  //   - untrack, because loadPages() writes pageLoading (and reads pageNum and
-  //     teamFilter) synchronously, before its first await. Those reads would
-  //     otherwise become dependencies of this effect and the write would
-  //     re-dirty it on the spot.
-  //   - the sentinel, because pages[name] — the condition that is supposed to
-  //     end the loop — is only assigned after the request resolves, which
-  //     cannot happen within the same flush. It is a plain let, not $state, so
-  //     that setting it is not itself a reactive write. It also stops the
-  //     effect from retrying forever when the request fails.
-  let pagesRequestedFor = "";
-  $effect(() => {
-    const name = sourceName;
-    if (!name || !docParam || pages[name] || pagesRequestedFor === name) return;
-
-    pagesRequestedFor = name;
-    untrack(() => loadPages(name));
   });
 
   onMount(load);
@@ -389,8 +362,8 @@
     <span class="font-mono">{sourceName}</span>
     <span class="text-faint">/</span>
     <span class="truncate font-mono text-dim">{docParam}</span>
-    {#if docPageURL()}
-      <a class="btn btn-sm ml-auto" href={docPageURL()} target="_blank" rel="noreferrer noopener">
+    {#if docURL}
+      <a class="btn btn-sm ml-auto" href={docURL} target="_blank" rel="noreferrer noopener">
         Open original
       </a>
     {/if}
