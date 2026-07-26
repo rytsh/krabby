@@ -182,7 +182,27 @@ func (f *Fetcher) Validate(raw json.RawMessage) error {
 	if cfg.Space == "" && cfg.RootPage == "" {
 		return fmt.Errorf("confluence requires a space key or a root_page id")
 	}
+	// The root page id is interpolated into a CQL clause and a request path,
+	// so it has to look like the numeric id the UI asks for.
+	if cfg.RootPage != "" && !isDigits(cfg.RootPage) {
+		return fmt.Errorf("confluence root_page must be a numeric page id, got %q", cfg.RootPage)
+	}
+
 	return nil
+}
+
+// isDigits reports whether s is a non-empty run of ASCII digits.
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+
+	return true
 }
 
 // MergeConfig merges an update onto the stored config so partial updates (e.g.
@@ -321,7 +341,24 @@ const confluenceTimeLayout = "2006-01-02 15:04"
 type syncState struct {
 	Watermark string    `json:"watermark,omitempty"`
 	FullAt    time.Time `json:"full_at,omitzero"`
+	// V is the slug generation of the records this state describes. A stored
+	// state older than slugGeneration was written when slugs still embedded the
+	// page title, so the next sweep must be a full one (see Fetch).
+	V int `json:"v,omitempty"`
 }
+
+// slugGeneration is bumped whenever the slug format changes, which invalidates
+// every stored record of the collection.
+//
+// Generation 2 dropped the title from the slug. A slug is the identity of a
+// page across syncs and the name of its markdown file, so deriving it from a
+// mutable field meant that renaming a Confluence page produced a second copy of
+// it: the incremental run saw the bumped last-modified date, emitted the page
+// under a new slug, and the old record, file and vectors stayed behind — a
+// pruning pass would have removed them, but pruning needs a complete sweep, and
+// incremental runs are never that. Search then returned the same document
+// twice, one copy with a stale title, accumulating with every rename.
+const slugGeneration = 2
 
 // Fetch lists the current pages of the configured space (or, when root_page is
 // set, that page and all its descendants), applies the label filters and
@@ -355,8 +392,11 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 	}
 
 	// Periodically force a full pass so pages deleted remotely (which an
-	// incremental "lastmodified >=" query never returns) are reconciled.
-	full := websource.FullResyncDue(state.FullAt, cfg.fullResyncEvery())
+	// incremental "lastmodified >=" query never returns) are reconciled. A slug
+	// format change forces one too: the stored records are keyed by the old
+	// format, so only a complete sweep can re-emit every page under the new one
+	// and prune the old-format leftovers in the same run.
+	full := state.V < slugGeneration || websource.FullResyncDue(state.FullAt, cfg.fullResyncEvery())
 	watermark := state.Watermark
 	if full {
 		watermark = ""
@@ -404,6 +444,16 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 		// indeterminate phase with a live counter.
 		progress.Report(ctx, count, 0)
 
+		// The cursor is the only thing that ends this walk, and it comes from
+		// the server. An instance that keeps returning a next link past the
+		// last result — or one that returns the same cursor twice — would spin
+		// here forever while holding the collection's sync lock and a queue
+		// slot. An empty page means there is nothing left regardless of what
+		// the cursor claims, and a repeated cursor is not progress.
+		if len(list.Results) == 0 || list.Links.Next == next {
+			break
+		}
+
 		next = list.Links.Next
 	}
 
@@ -412,12 +462,12 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 	// modified since the watermark.
 	if cfg.RootPage != "" && cfg.IncludeRoot {
 		if root, err := f.fetchOne(ctx, cfg, base, cfg.RootPage); err != nil {
-			if eerr := emit(websource.RemotePage{
-				Slug: cfg.RootPage + "-root",
-				Err:  fmt.Errorf("fetch root page %s; %w", cfg.RootPage, err),
-			}); eerr != nil {
-				return nil, eerr
-			}
+			// Reporting this as a page would invent a slug ("<id>-root") that
+			// the success path never produces, so the record could never be
+			// updated by a later run — only pruned by a full sweep. The root's
+			// previously synced copy stays as it is; the failure is logged.
+			slog.Warn("confluence root page fetch failed; keeping its previous copy",
+				"source", col.Name, "root_page", cfg.RootPage, "error", err)
 		} else {
 			w := parseConfluenceTime(root.Version.When)
 			if w.After(maxSeen) {
@@ -451,7 +501,7 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 		fullAt = time.Now()
 	}
 
-	nextState, err := json.Marshal(syncState{Watermark: nextWatermark, FullAt: fullAt})
+	nextState, err := json.Marshal(syncState{Watermark: nextWatermark, FullAt: fullAt, V: slugGeneration})
 	if err != nil {
 		return nil, fmt.Errorf("encode confluence sync state; %w", err)
 	}
@@ -471,7 +521,13 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 // per-page conversion error rather than failing the whole sync.
 func pageToRemote(base string, page contentPage) websource.RemotePage {
 	remote := websource.RemotePage{
-		Slug:      page.ID + "-" + websource.Slugify(page.Title),
+		// The page id alone: it is the only part of a Confluence page that
+		// does not change under the user's hands. The title used to be
+		// appended for a readable filename, but a slug is an identity, and
+		// tying an identity to a mutable field duplicated the page on every
+		// rename (see slugGeneration). The title still reaches search through
+		// the page record and the markdown heading.
+		Slug:      page.ID,
 		Title:     page.Title,
 		URL:       base + page.Links.WebUI,
 		UpdatedAt: parseConfluenceTime(page.Version.When),

@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -519,3 +520,35 @@ func (s *Store) DeletePage(ctx context.Context, id string) error {
 
 // PageID builds the primary key of a page record.
 func PageID(collection, slug string) string { return collection + "/" + slug }
+
+// slugRe is what a slug may contain. It is deliberately narrower than what
+// Slugify produces so that a slug is always a single, self-contained path
+// element: no separator, no dot segment, no leading dash.
+var slugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
+
+// ValidSlug reports whether a slug is safe to use as a page identity and as a
+// filename.
+//
+// A slug reaches the filesystem as "<slug>.md" under the collection's directory
+// and reaches the store as "<collection>/<slug>", and it arrives from two
+// untrusted directions: a remote provider's response (a JIRA issue key, a
+// Confluence page id) and a REST query parameter. filepath.Join resolves ".."
+// instead of rejecting it, so an unchecked slug turns a page delete into a
+// delete of any *.md file the process can reach, and a "/" in a slug makes the
+// store key ambiguous. Slugify is safe by construction, but not every provider
+// runs its identifiers through it — so the guard lives here, at the point where
+// the slug is trusted, rather than at each producer.
+func ValidSlug(slug string) bool {
+	return slug != "" && len(slug) <= 200 && slug != "." && slug != ".." && slugRe.MatchString(slug)
+}
+
+// PageFile returns the path of a slug's markdown inside dir, refusing any slug
+// that is not a safe, single path element. Every read, write and delete of a
+// page's markdown must go through it.
+func PageFile(dir, slug string) (string, error) {
+	if !ValidSlug(slug) {
+		return "", fmt.Errorf("unsafe page slug %q", slug)
+	}
+
+	return filepath.Join(dir, slug+".md"), nil
+}

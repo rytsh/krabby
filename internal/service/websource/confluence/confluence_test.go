@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/rytsh/krabby/internal/service/websource"
 )
 
 func TestLabelSelected(t *testing.T) {
@@ -233,5 +236,67 @@ func TestParseConfluenceTime(t *testing.T) {
 	}
 	if !parseConfluenceTime("nonsense").IsZero() {
 		t.Fatal("garbage should be zero time")
+	}
+}
+
+// TestSlugIsStableAcrossRenames pins the identity contract. The slug used to
+// carry the page title, so renaming a page changed its identity: the
+// incremental run (which sees the bumped last-modified date) emitted it as a
+// new page, and the previous record, markdown and vectors stayed behind because
+// pruning requires a complete sweep. Search then returned the document twice.
+func TestSlugIsStableAcrossRenames(t *testing.T) {
+	page := contentPage{ID: "123456", Title: "Deployment Guide"}
+	renamed := contentPage{ID: "123456", Title: "Deployment Guide (2026)"}
+
+	before := pageToRemote("https://x", page)
+	after := pageToRemote("https://x", renamed)
+
+	if before.Slug != after.Slug {
+		t.Fatalf("renaming changed the slug: %q -> %q", before.Slug, after.Slug)
+	}
+
+	if before.Slug != "123456" {
+		t.Fatalf("slug = %q, want the bare page id", before.Slug)
+	}
+
+	// The title is not lost; it travels on the record instead.
+	if after.Title != "Deployment Guide (2026)" {
+		t.Fatalf("title = %q", after.Title)
+	}
+}
+
+// TestSlugGenerationForcesFullSweep covers the migration: collections synced
+// under the old slug format hold records keyed by it, and only a complete sweep
+// can re-emit them under the new one and prune the leftovers in the same run.
+func TestSlugGenerationForcesFullSweep(t *testing.T) {
+	old, err := json.Marshal(syncState{Watermark: "2026-01-01 00:00", FullAt: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var state syncState
+	if err := json.Unmarshal(old, &state); err != nil {
+		t.Fatal(err)
+	}
+
+	// The stored state is recent enough that the periodic full pass is not due,
+	// so the generation check is the only thing that can force one.
+	if websource.FullResyncDue(state.FullAt, 24*time.Hour) {
+		t.Fatal("precondition: the periodic full pass must not be due")
+	}
+	if state.V >= slugGeneration {
+		t.Fatalf("state from the old format reports generation %d", state.V)
+	}
+
+	current, err := json.Marshal(syncState{Watermark: "x", FullAt: time.Now(), V: slugGeneration})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fresh syncState
+	if err := json.Unmarshal(current, &fresh); err != nil {
+		t.Fatal(err)
+	}
+	if fresh.V < slugGeneration {
+		t.Fatal("a state written now must not ask for another migration sweep")
 	}
 }

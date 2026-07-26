@@ -727,6 +727,41 @@ func (m *Manager) ReconcileInterruptedStages(ctx context.Context) error {
 		}
 	}
 
+	errs = append(errs, m.reconcileInterruptedSyncs(ctx))
+
+	return errors.Join(errs...)
+}
+
+// reconcileInterruptedSyncs clears the "fetching" status left by a sync that
+// died with the process. The status is a lock as much as a label: the interval
+// poll skips a collection that claims to be fetching, so a kill (an OOM during
+// a large sweep is the likely one) would otherwise park the source forever,
+// with the UI polling it every two seconds because it looks live.
+func (m *Manager) reconcileInterruptedSyncs(ctx context.Context) error {
+	if m.webStore == nil {
+		return nil
+	}
+
+	cols, err := m.webStore.ListCollections(ctx)
+	if err != nil {
+		return err
+	}
+
+	var errs []error
+	for _, col := range cols {
+		if col.Status != websource.StatusFetching {
+			continue
+		}
+
+		col.Status = websource.StatusError
+		col.LastError = "interrupted by service restart"
+		// Do not stamp LastRefreshAt: nothing was completed, and the next poll
+		// should pick this collection straight back up.
+		if err := m.webStore.UpsertCollection(ctx, col); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
 	return errors.Join(errs...)
 }
 
@@ -2990,6 +3025,19 @@ func fileExists(p string) bool {
 	_, err := os.Stat(p)
 
 	return err == nil
+}
+
+// withinDir reports whether path is root itself or lies under it, comparing
+// whole path elements. It is the containment test to use before a destructive
+// operation: the lexical filepath.HasPrefix would accept "/data/srcs-evil" as
+// living under "/data/srcs".
+func withinDir(root, path string) bool {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
+	if err != nil {
+		return false
+	}
+
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // dirHasMarkdown reports whether dir contains at least one generated markdown

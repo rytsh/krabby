@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/worldline-go/hardloop"
@@ -62,6 +63,50 @@ func (m *Manager) sourcesDir(name string) string {
 	return filepath.Join(m.sourcesRootDir, name)
 }
 
+// collectionLock serialises read-modify-write cycles on one collection record.
+//
+// It is deliberately a different lock from the sync lock. RefreshWebSource
+// holds the sync lock for a whole sweep — minutes on a large project — so a
+// config edit that waited for it would hang the HTTP request for the duration.
+// This lock is only ever held across a store read and its matching write.
+//
+// Lock order, where both are taken: sync lock first, then this one. Nothing
+// takes them in the opposite order.
+func (m *Manager) collectionLock(name string) *sync.Mutex {
+	return m.lock(websource.ScopeKey(name) + "#record")
+}
+
+// mutateCollection applies fn to the current stored record under the record
+// lock and writes the result back.
+//
+// Every writer goes through it because the alternative — read a record, work
+// for a while, write the whole thing back — loses whatever else was written in
+// between. That is not theoretical here: a sync reads the collection at the top
+// of a sweep and writes it back at the end, so a config or schedule edit made
+// during the sweep would be silently reverted, and an update that read the
+// record just before a delete would re-insert it afterwards, leaving a
+// collection with no pages, no directory and no index that nothing can clean up.
+func (m *Manager) mutateCollection(ctx context.Context, name string, fn func(*websource.Collection) error) error {
+	l := m.collectionLock(name)
+	l.Lock()
+	defer l.Unlock()
+
+	col, err := m.webStore.GetCollection(ctx, name)
+	if err != nil {
+		return err
+	}
+
+	if col == nil {
+		return fmt.Errorf("collection %s not found", name)
+	}
+
+	if err := fn(col); err != nil {
+		return err
+	}
+
+	return m.webStore.UpsertCollection(ctx, col)
+}
+
 // AddWebCollection validates and stores a new collection, then triggers its
 // first sync in the background.
 func (m *Manager) AddWebCollection(ctx context.Context, col *websource.Collection) error {
@@ -87,16 +132,29 @@ func (m *Manager) AddWebCollection(ctx context.Context, col *websource.Collectio
 	}
 	col.Config = config
 
+	// The exists-check and the insert are one critical section, or two
+	// concurrent creates of the same name both "succeed" and the second
+	// silently overwrites the first.
+	l := m.collectionLock(col.Name)
+	l.Lock()
+
 	if existing, err := m.webStore.GetCollection(ctx, col.Name); err != nil {
+		l.Unlock()
+
 		return err
 	} else if existing != nil {
+		l.Unlock()
+
 		return fmt.Errorf("collection %s already exists", col.Name)
 	}
 
 	col.Status = websource.StatusPending
 	col.CreatedAt = time.Now()
 
-	if err := m.webStore.UpsertCollection(ctx, col); err != nil {
+	err = m.webStore.UpsertCollection(ctx, col)
+	l.Unlock()
+
+	if err != nil {
 		return err
 	}
 
@@ -120,38 +178,34 @@ func (m *Manager) UpdateWebCollection(ctx context.Context, name string, update w
 
 	name = strings.TrimSpace(strings.ToLower(name))
 
-	existing, err := m.webStore.GetCollection(ctx, name)
-	if err != nil {
-		return err
-	}
-
-	if existing == nil {
-		return fmt.Errorf("collection %s not found", name)
-	}
-
 	// Start from the stored record so every unmentioned field survives by
-	// construction rather than by remembering to copy it back.
-	col := *existing
-	if err := update.Apply(&col); err != nil {
-		return err
-	}
+	// construction rather than by remembering to copy it back — and read it
+	// under the record lock so "stored" means now, not before whatever else
+	// was writing to this collection.
+	return m.mutateCollection(ctx, name, func(col *websource.Collection) error {
+		stored := col.Config
 
-	if err := validateWebSpecs(col.Specs); err != nil {
-		return err
-	}
+		if err := update.Apply(col); err != nil {
+			return err
+		}
 
-	fetcher, ok := m.webFetchers[col.Type] // the type is immutable once created
-	if !ok {
-		return fmt.Errorf("no fetcher for source type %q", col.Type)
-	}
+		if err := validateWebSpecs(col.Specs); err != nil {
+			return err
+		}
 
-	merged, err := fetcher.MergeConfig(existing.Config, config)
-	if err != nil {
-		return err
-	}
-	col.Config = merged
+		fetcher, ok := m.webFetchers[col.Type] // the type is immutable once created
+		if !ok {
+			return fmt.Errorf("no fetcher for source type %q", col.Type)
+		}
 
-	return m.webStore.UpsertCollection(ctx, &col)
+		merged, err := fetcher.MergeConfig(stored, config)
+		if err != nil {
+			return err
+		}
+		col.Config = merged
+
+		return nil
+	})
 }
 
 // WebSourceConfigView returns a provider-owned, redacted config shape for the
@@ -178,6 +232,14 @@ func (m *Manager) DeleteWebCollection(ctx context.Context, name string) error {
 	l := m.lock(scope)
 	l.Lock()
 	defer l.Unlock()
+
+	// Held for the whole teardown, not just the store read: an update that
+	// slipped in between the record delete and here would re-insert the
+	// collection, leaving a record with no pages, no directory and no index
+	// entries — and no path that ever cleans it up.
+	rl := m.collectionLock(name)
+	rl.Lock()
+	defer rl.Unlock()
 
 	col, err := m.webStore.GetCollection(ctx, name)
 	if err != nil {
@@ -206,8 +268,12 @@ func (m *Manager) DeleteWebCollection(ctx context.Context, name string) error {
 		return err
 	}
 
+	// The name is already ValidName-checked on create, but this guards an
+	// os.RemoveAll: use a separator-aware containment test rather than
+	// filepath.HasPrefix, which is deprecated precisely because "…/srcs-evil"
+	// passes a prefix test against "…/srcs".
 	dir := m.sourcesDir(name)
-	if m.sourcesRootDir != "" && filepath.HasPrefix(dir, m.sourcesRootDir) {
+	if m.sourcesRootDir != "" && withinDir(m.sourcesRootDir, dir) {
 		if err := os.RemoveAll(dir); err != nil {
 			return fmt.Errorf("remove source content %s; %w", dir, err)
 		}
@@ -351,13 +417,24 @@ func (m *Manager) DeleteWebPage(ctx context.Context, name, slug string) error {
 	l.Lock()
 	defer l.Unlock()
 
+	// Validate before touching anything: slug arrives from a query parameter,
+	// and it is about to name a file to delete.
+	file, err := websource.PageFile(m.sourcesDir(name), slug)
+	if err != nil {
+		return err
+	}
+
 	if err := m.webStore.DeletePage(ctx, websource.PageID(name, slug)); err != nil {
 		return err
 	}
 
-	_ = os.Remove(filepath.Join(m.sourcesDir(name), slug+".md"))
+	_ = os.Remove(file)
 
-	m.indexWebSource(ctx, name)
+	// Only this page's vectors and text rows go; rebuilding the collection
+	// would re-embed every remaining document to delete one.
+	if err := m.indexWebSourcePaths(ctx, name, nil, []string{slug + ".md"}, nil); err != nil {
+		return fmt.Errorf("drop index entries for %s; %w", slug, err)
+	}
 
 	return nil
 }
@@ -523,14 +600,39 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 	// return between phases must not leave a stale bar on screen.
 	defer m.clearAllProgress(scope)
 
-	col.Status = websource.StatusFetching
-	col.LastError = ""
-	_ = m.webStore.UpsertCollection(ctx, col)
+	// col is this sweep's snapshot: its Config and State drive the fetch, and a
+	// config edit landing mid-sweep applies to the next one. Writes, though, go
+	// through mutateCollection and touch only the fields the sync owns, so the
+	// snapshot can never be written back wholesale over someone else's edit.
+	setSyncState := func(ctx context.Context, apply func(*websource.Collection)) {
+		if err := m.mutateCollection(ctx, name, func(cur *websource.Collection) error {
+			apply(cur)
+
+			return nil
+		}); err != nil {
+			slog.Error("persist web source sync state", "source", name, "error", err)
+		}
+	}
+
+	setSyncState(ctx, func(cur *websource.Collection) {
+		cur.Status = websource.StatusFetching
+		cur.LastError = ""
+	})
 
 	fail := func(ferr error) error {
-		col.Status = websource.StatusError
-		col.LastError = ferr.Error()
-		_ = m.webStore.UpsertCollection(context.WithoutCancel(ctx), col)
+		setSyncState(context.WithoutCancel(ctx), func(cur *websource.Collection) {
+			cur.Status = websource.StatusError
+			cur.LastError = ferr.Error()
+			// Stamp the attempt, not just the outcome. The interval poll fires
+			// every minute and re-triggers anything whose LastRefreshAt is
+			// older than its interval, so leaving it untouched on failure turns
+			// a source with bad credentials or an unreachable host into a
+			// once-a-minute retry loop against the remote API — the fastest way
+			// to get an Atlassian token rate-limited — while holding one of the
+			// few queue slots. A failed attempt waits out the same interval as
+			// a good one.
+			cur.LastRefreshAt = time.Now()
+		})
 
 		return ferr
 	}
@@ -580,6 +682,19 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 	)
 
 	write := func(remote websource.RemotePage) error {
+		// A slug comes from the remote provider (an issue key, a page id) and
+		// becomes both a store key and a filename, so it is checked before it
+		// is trusted. One malformed item is dropped with a warning rather than
+		// failing the sync: the rest of the collection is still worth syncing,
+		// and it must not be recorded as seen either, or a later prune would
+		// try to delete the file it names.
+		if !websource.ValidSlug(remote.Slug) {
+			slog.Warn("web source page skipped: unsafe slug",
+				"source", name, "slug", remote.Slug)
+
+			return nil
+		}
+
 		written++
 		seen[remote.Slug] = true
 
@@ -614,7 +729,13 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 
 		markdown := withTitleHeading(remote.Markdown, rec.Title)
 		hash := websource.Hash(markdown)
-		file := filepath.Join(dir, remote.Slug+".md")
+
+		file, err := websource.PageFile(dir, remote.Slug)
+		if err != nil {
+			writeErr = err
+
+			return writeErr
+		}
 
 		if hash != rec.Hash || !fileExists(file) {
 			if err := os.WriteFile(file, []byte(markdown), 0o644); err != nil {
@@ -676,11 +797,23 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 	}
 
 	for _, rec := range prune {
+		// Records written before slugs were validated can still name a path
+		// outside the collection; drop the record but never act on the name.
+		file, ferr := websource.PageFile(dir, rec.Slug)
+		if ferr != nil {
+			slog.Warn("web source page record has an unsafe slug; removing the record only",
+				"source", name, "slug", rec.Slug)
+		}
+
 		if err := m.webStore.DeletePage(ctx, rec.ID); err != nil {
 			return fail(err)
 		}
 
-		_ = os.Remove(filepath.Join(dir, rec.Slug+".md"))
+		if ferr != nil {
+			continue
+		}
+
+		_ = os.Remove(file)
 		removedPaths = append(removedPaths, rec.Slug+".md")
 	}
 
@@ -735,22 +868,30 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 		}
 	}
 
-	col.LastRefreshAt = time.Now()
-	if indexOK {
-		col.Status = websource.StatusReady
-		col.LastError = ""
-		if result.State != nil {
-			col.State = result.State
-		}
-	} else {
-		col.Status = websource.StatusError
-		col.LastError = "indexing incomplete; will retry on next sync"
-		// Leave col.State unchanged so the watermark does not advance and the
-		// unindexed pages are re-fetched and indexed next time.
-	}
+	if err := m.mutateCollection(context.WithoutCancel(ctx), name, func(cur *websource.Collection) error {
+		cur.LastRefreshAt = time.Now()
 
-	if err := m.webStore.UpsertCollection(context.WithoutCancel(ctx), col); err != nil {
-		return err
+		if indexOK {
+			cur.Status = websource.StatusReady
+			cur.LastError = ""
+			if result.State != nil {
+				cur.State = result.State
+			}
+
+			return nil
+		}
+
+		cur.Status = websource.StatusError
+		cur.LastError = "indexing incomplete; will retry on next sync"
+		// Leave State unchanged so the watermark does not advance and the
+		// unindexed pages are re-fetched and indexed next time.
+
+		return nil
+	}); err != nil {
+		// The sweep itself succeeded, so this is a storage failure, not a sync
+		// failure — but the status is now whatever the opening write left
+		// (fetching), which the interval poll skips. Say so plainly.
+		return fmt.Errorf("persist sync result for %s; %w", name, err)
 	}
 
 	slog.Info("web source synced", "source", name,
