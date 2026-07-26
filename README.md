@@ -42,8 +42,10 @@ keeps those indexes fresh in the background.
 ## Requirements
 
 - Go 1.26+ (build), git, ssh (for private repos)
-- graphify CLI for building graphs: `uv tool install graphifyy`
-  (or `pip install graphifyy`). The MCP extra is **no longer required** — graph
+- graphify CLI for building graphs: `uv tool install graphifyy==0.9.26`
+  (or `pip install graphifyy==0.9.26`). This tested version is pinned in the
+  container image; upgrade it together with the compatibility test. The MCP
+  extra is **no longer required** — graph
   queries are answered in-process by krabby's native Go engine.
 
 ## Quick start
@@ -215,6 +217,10 @@ webhook / poll / refresh_repo
   → code RAG index (when enabled)
   → generated docs + docs RAG index (when enabled)
 ```
+
+Krabby records the Graphify version beside each validated graph. On startup it
+queues a one-time rebuild for graphs produced by another version (or predating
+the marker), so extractor upgrades also refresh repositories with no new commit.
 
 Repos are also polled on cron schedules configured in Settings. Each schedule
 targets a namespace (`*` = all, `default` = untagged) and carries one or more

@@ -97,6 +97,15 @@ type rawEdge struct {
 
 // Load reads and parses a graphify graph.json into an in-memory Graph.
 func Load(path string) (*Graph, error) {
+	raw, err := readRaw(path)
+	if err != nil {
+		return nil, err
+	}
+
+	return fromRaw(raw)
+}
+
+func readRaw(path string) (*rawGraph, error) {
 	if !strings.HasSuffix(path, ".json") {
 		return nil, fmt.Errorf("graph path must be a .json file, got: %q", path)
 	}
@@ -120,7 +129,56 @@ func Load(path string) (*Graph, error) {
 		return nil, fmt.Errorf("graph.json is corrupted (%w); re-run the build to rebuild", err)
 	}
 
-	return fromRaw(&raw)
+	return &raw, nil
+}
+
+// Validate checks that a Graphify output can be consumed by the query engine.
+// Empty graphs are valid for empty repositories; missing schema fields and
+// inconsistent nodes or edges are rejected before artifacts are published.
+func Validate(path string) error {
+	raw, err := readRaw(path)
+	if err != nil {
+		return err
+	}
+	if raw.Nodes == nil {
+		return fmt.Errorf("graph %s is missing the nodes array", path)
+	}
+	if raw.Links == nil && raw.Edges == nil {
+		return fmt.Errorf("graph %s is missing the links or legacy edges array", path)
+	}
+
+	nodeIDs := make(map[string]struct{}, len(raw.Nodes))
+	for i, encoded := range raw.Nodes {
+		var node rawNode
+		if err := json.Unmarshal(encoded, &node); err != nil {
+			return fmt.Errorf("decode node %d; %w", i, err)
+		}
+		if node.ID == "" {
+			return fmt.Errorf("graph %s node %d has an empty id", path, i)
+		}
+		if _, duplicate := nodeIDs[node.ID]; duplicate {
+			return fmt.Errorf("graph %s contains duplicate node id %q", path, node.ID)
+		}
+		nodeIDs[node.ID] = struct{}{}
+	}
+	links := raw.Links
+	if len(links) == 0 {
+		links = raw.Edges
+	}
+	for i, encoded := range links {
+		var edge rawEdge
+		if err := json.Unmarshal(encoded, &edge); err != nil {
+			return fmt.Errorf("decode edge %d; %w", i, err)
+		}
+		if _, ok := nodeIDs[edge.Source]; !ok {
+			return fmt.Errorf("graph %s edge %d references missing source %q", path, i, edge.Source)
+		}
+		if _, ok := nodeIDs[edge.Target]; !ok {
+			return fmt.Errorf("graph %s edge %d references missing target %q", path, i, edge.Target)
+		}
+	}
+
+	return nil
 }
 
 func fromRaw(raw *rawGraph) (*Graph, error) {

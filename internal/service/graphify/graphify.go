@@ -18,9 +18,16 @@ import (
 type Client struct {
 	bin          string
 	python       string
+	version      string
 	buildTimeout time.Duration
 	exclude      []string
 }
+
+// TestedVersion is the Graphify release exercised by Krabby's integration test
+// and installed in the published container image.
+const TestedVersion = "0.9.26"
+
+const versionFileName = ".krabby-graphify-version"
 
 // New creates a graphify CLI client. python may be empty; it is derived from
 // the graphify binary shebang, falling back to python3. exclude carries extra
@@ -39,6 +46,7 @@ func New(bin, python string, buildTimeout time.Duration, exclude []string) (*Cli
 	return &Client{
 		bin:          binPath,
 		python:       python,
+		version:      detectVersion(binPath),
 		buildTimeout: buildTimeout,
 		exclude:      exclude,
 	}, nil
@@ -46,6 +54,48 @@ func New(bin, python string, buildTimeout time.Duration, exclude []string) (*Cli
 
 // Python returns the interpreter able to `import graphify`.
 func (c *Client) Python() string { return c.python }
+
+// Version returns the installed Graphify version, or "unknown" when the CLI
+// does not support version discovery.
+func (c *Client) Version() string { return c.version }
+
+// GraphBuiltWithCurrentVersion reports whether Krabby recorded this CLI version
+// after validating the repository's active graph.
+func (c *Client) GraphBuiltWithCurrentVersion(repoPath string) bool {
+	b, err := os.ReadFile(filepath.Join(repoPath, "graphify-out", versionFileName))
+
+	return err == nil && strings.TrimSpace(string(b)) == c.version
+}
+
+// RecordGraphVersion marks a validated graph with the CLI version that built it.
+func (c *Client) RecordGraphVersion(repoPath string) error {
+	path := filepath.Join(repoPath, "graphify-out", versionFileName)
+	if err := os.WriteFile(path, []byte(c.version+"\n"), 0o644); err != nil {
+		return fmt.Errorf("record graphify version; %w", err)
+	}
+
+	return nil
+}
+
+func detectVersion(binPath string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, binPath, "--version").CombinedOutput()
+	if err != nil {
+		return "unknown"
+	}
+
+	fields := strings.Fields(string(out))
+	if len(fields) >= 2 && strings.EqualFold(fields[0], "graphify") {
+		return fields[1]
+	}
+	if len(fields) == 0 {
+		return "unknown"
+	}
+
+	return truncate(strings.Join(fields, " "), 128)
+}
 
 // GraphNeedsIgnoreRebuild reports whether the built graph for repoPath still
 // contains nodes that the current exclude rules should drop, so the refresh path

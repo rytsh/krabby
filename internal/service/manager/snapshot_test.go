@@ -46,7 +46,7 @@ func TestSnapshotActivationLeavesActiveCloneUntouchedUntilPublish(t *testing.T) 
 	}
 
 	graphifyBin := filepath.Join(dataDir, "graphify-test")
-	snapshotTestWrite(t, graphifyBin, "#!/bin/sh\nmkdir -p \"$2/graphify-out\"\nprintf '%s' '{\"nodes\":[],\"links\":[]}' > \"$2/graphify-out/graph.json\"\n")
+	snapshotTestWrite(t, graphifyBin, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'graphify 0.9.26'; exit 0; fi\nmkdir -p \"$2/graphify-out\"\nprintf '%s' '{\"nodes\":[{\"id\":\"file:test\",\"label\":\"test\"}],\"links\":[]}' > \"$2/graphify-out/graph.json\"\n")
 	if err := os.Chmod(graphifyBin, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -108,6 +108,9 @@ func TestSnapshotActivationLeavesActiveCloneUntouchedUntilPublish(t *testing.T) 
 	}
 	if _, err := os.Stat(graphify.GraphPath(persisted.Path)); err != nil {
 		t.Fatalf("activated graph missing: %v", err)
+	}
+	if !gfy.GraphBuiltWithCurrentVersion(persisted.Path) {
+		t.Fatal("activated graph is missing its Graphify version marker")
 	}
 
 	pinned, err := m.ReadRepoFileAt(context.Background(), repo.ID, "version.txt", oldRead.Snapshot, 0, 0)
@@ -214,6 +217,57 @@ func TestSnapshotBuildFailureKeepsActivePathAndCleansStaging(t *testing.T) {
 	}
 	if _, err := os.Stat(stagingPath); !os.IsNotExist(err) {
 		t.Fatalf("failed staging directory remains: %v", err)
+	}
+}
+
+func TestSnapshotValidationFailureKeepsActivePathAndCleansStaging(t *testing.T) {
+	dataDir := t.TempDir()
+	db, err := storage.Open(filepath.Join(dataDir, "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	reg, err := registry.New(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bin := filepath.Join(dataDir, "graphify-invalid")
+	snapshotTestWrite(t, bin, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'graphify 0.9.26'; exit 0; fi\nmkdir -p \"$2/graphify-out\"\nprintf '%s' '{}' > \"$2/graphify-out/graph.json\"\n")
+	if err := os.Chmod(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gfy, err := graphify.New(bin, "sh", time.Minute, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	activePath := filepath.Join(dataDir, "repos", "owner", "repo")
+	stagingPath := filepath.Join(dataDir, "repos", ".snapshots", "owner", "repo", ".staging-test")
+	if err := os.MkdirAll(stagingPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	repo := &registry.Repo{ID: "owner/repo", Path: activePath, LastCommit: "old", Status: registry.StatusReady}
+	if err := reg.Upsert(context.Background(), repo); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &Manager{reg: reg, gfy: gfy, engine: graphquery.NewEngine(0), reposDir: filepath.Join(dataDir, "repos"), activity: map[string]map[string]struct{}{}}
+	snapshot := &preparedSnapshot{StagingPath: stagingPath, FinalPath: stagingPath + "-final", Commit: "new"}
+	err = m.buildGraphSnapshot(context.Background(), repo, snapshot, registry.StatusReady)
+	if err == nil || !strings.Contains(err.Error(), "missing the nodes array") {
+		t.Fatalf("buildGraphSnapshot error = %v, want graph validation failure", err)
+	}
+
+	persisted, err := reg.Get(context.Background(), repo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Path != activePath || persisted.LastCommit != "old" {
+		t.Fatalf("invalid graph activated snapshot: path=%q commit=%q", persisted.Path, persisted.LastCommit)
+	}
+	if _, err := os.Stat(stagingPath); !os.IsNotExist(err) {
+		t.Fatalf("invalid staging directory remains: %v", err)
 	}
 }
 

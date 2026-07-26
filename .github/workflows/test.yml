@@ -18,11 +18,18 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install tested Graphify
+        run: python -m pip install graphifyy==0.9.26
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
           args: --timeout 10m --new-from-rev=HEAD~1 --issues-exit-code=0
       - name: Run tests
+        env:
+          KRABBY_GRAPHIFY_INTEGRATION: "1"
         run: |
           golangci-lint run --issues-exit-code=0 --output.checkstyle.path=golangci-lint-report.out ./...
           go test -coverprofile=coverage.out -json ./... > test-report.out

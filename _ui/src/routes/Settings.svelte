@@ -289,6 +289,7 @@
       ["MCP profiles", "standard (default), full (X-Krabby-Tool-Profile: full)"],
       ["MCP API key", s.mcp.api_key_set ? "set" : "not set", s.mcp.api_key_set],
       ["Graphify bin", s.graphify.bin],
+      ["Graphify version", s.graphify.version || "unknown"],
       ["Graphify python", s.graphify.python || "auto (shebang)"],
       ["Build timeout", s.graphify.build_timeout],
     ];

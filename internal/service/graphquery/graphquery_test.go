@@ -62,6 +62,30 @@ func TestLoadCounts(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsUnusableGraph(t *testing.T) {
+	for name, body := range map[string]string{
+		"missing root":  `{}`,
+		"missing links": `{"nodes":[{"id":"a"}]}`,
+		"empty node id": `{"nodes":[{"id":""}],"links":[]}`,
+		"duplicate id":  `{"nodes":[{"id":"a"},{"id":"a"}],"links":[]}`,
+		"dangling edge": `{"nodes":[{"id":"a"}],"links":[{"source":"a","target":"b"}]}`,
+		"corrupted":     `{not-json}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := Validate(writeGraph(t, body)); err == nil {
+				t.Fatal("Validate accepted an unusable graph")
+			}
+		})
+	}
+
+	if err := Validate(writeGraph(t, smallGraph)); err != nil {
+		t.Fatalf("Validate rejected a compatible graph: %v", err)
+	}
+	if err := Validate(writeGraph(t, `{"nodes":[],"links":[]}`)); err != nil {
+		t.Fatalf("Validate rejected an empty repository graph: %v", err)
+	}
+}
+
 func TestGraphStats(t *testing.T) {
 	g := loadSmall(t)
 	got := g.GraphStats()

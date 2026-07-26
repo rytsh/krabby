@@ -1,10 +1,12 @@
 # Copies the pre-built binary (built by goreleaser or `make build`) instead of compiling.
 FROM python:3.12-slim
 
+ARG GRAPHIFYY_VERSION=0.9.26
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git openssh-client ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir graphifyy
+    && pip install --no-cache-dir "graphifyy==${GRAPHIFYY_VERSION}"
 
 # goreleaser lays the build context out as <os>/<arch>/krabby, one directory per
 # target platform, so the COPY must be platform-qualified for buildx to pick the

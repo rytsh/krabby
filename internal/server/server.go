@@ -254,6 +254,7 @@ type settingsResponse struct {
 	Graphify struct {
 		Bin          string `json:"bin"`
 		Python       string `json:"python,omitempty"`
+		Version      string `json:"version"`
 		BuildTimeout string `json:"build_timeout"`
 	} `json:"graphify"`
 }
@@ -277,6 +278,7 @@ func getSettings(cfg *config.Config, mgr *manager.Manager) ada.HandlerFunc {
 
 		s.Graphify.Bin = cfg.Graphify.Bin
 		s.Graphify.Python = cfg.Graphify.Python
+		s.Graphify.Version = mgr.GraphifyVersion()
 		s.Graphify.BuildTimeout = cfg.Graphify.BuildTimeout.String()
 
 		return c.SendJSON(s)

@@ -22,7 +22,7 @@ mcp:
   # api_key: change-me            # require X-Api-Key / Bearer on /mcp
 
 graphify:
-  bin: graphify              # graphify CLI (uv tool install graphifyy)
+  bin: graphify              # graphify CLI (uv tool install graphifyy==0.9.26)
   # python: /path/to/python  # interpreter that can `import graphify` (auto-detected)
   build_timeout: 30m         # graph queries are answered in-process (no serve subprocess)
   # exclude:                 # extra gitignore-style patterns kept out of the graph
