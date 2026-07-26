@@ -1,0 +1,275 @@
+---
+import "../styles/global.css";
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>krabby — code search, docs &amp; graph intelligence over MCP</title>
+    <meta
+      name="description"
+      content="Krabby clones and indexes your repositories, builds a graphify knowledge graph per repo, and serves fast code search, docs retrieval and relationship analysis to LLM agents over MCP."
+    />
+    <meta name="theme-color" content="#f6f1df" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="krabby" />
+    <meta
+      property="og:description"
+      content="Code search, documentation retrieval and graph analysis over MCP. Point it at repositories — it clones, indexes and keeps them fresh."
+    />
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap"
+    />
+  </head>
+  <body>
+    <header class="hero wrap" id="top">
+      <div class="cover">
+        <img src="./krabby.webp" alt="krabby" />
+      </div>
+
+      <div class="front-grid">
+        <div class="bubble">
+          <p class="t">
+            Code search, docs &amp; analysis<br />
+            <span class="red">Served to your agent over MCP</span>
+          </p>
+          <p class="s">
+            Point it at repositories. Krabby clones and indexes them, builds a graphify knowledge graph per repo,
+            and keeps those indexes fresh in the background. Graph queries are answered in-process by a native Go
+            engine.
+          </p>
+        </div>
+        <aside class="sidebar">
+          <span class="paperclip" aria-hidden="true"></span>
+          <div class="file-sheet">
+            <span class="case-no">KRABBY INTELLIGENCE BUREAU · FILE 001</span>
+            <span class="label">INDEX REPORT</span>
+            <h3>THE REPO<br />HAS BEEN READ!</h3>
+            <p>A native Go engine, searchable docs and graph intelligence, delivered through one MCP endpoint.</p>
+          </div>
+          <span class="stamp">MCP READY</span>
+        </aside>
+      </div>
+
+      <div class="cta">
+        <a class="btn btn-red" href="#quickstart">Quick start »</a>
+        <a class="btn" href="https://github.com/rytsh/krabby" target="_blank" rel="noopener">Repository</a>
+      </div>
+    </header>
+
+    <main>
+      <section id="features">
+        <div class="wrap">
+          <div class="head reveal">
+            <span class="caption">// what it does</span>
+            <h2>Built for agents that <em>read code</em> all day.</h2>
+            <p>Every capability below is served straight to your LLM or agent over a single streamable-HTTP MCP endpoint.</p>
+          </div>
+
+          <div class="grid">
+            <article class="panel reveal">
+              <div class="ico">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <circle cx="11" cy="11" r="7"></circle><path d="m21 21-4.3-4.3"></path>
+                </svg>
+              </div>
+              <div class="num">01</div>
+              <h3>Queries are fast</h3>
+              <p>Graph query tools are answered <b>in-process by a native Go engine</b> that reads <span class="mono">graph.json</span> directly and hot-reloads on rebuild — no per-graph subprocess is spawned.</p>
+              <span class="tag">query_graph · get_node · shortest_path</span>
+            </article>
+
+            <article class="panel reveal">
+              <div class="ico">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M4 4h6l2 2h8v12a2 2 0 0 1-2 2H4z"></path><path d="M8 13h8M8 17h5"></path>
+                </svg>
+              </div>
+              <div class="num">02</div>
+              <h3>Builds are cheap</h3>
+              <p>Code extraction is <b>AST-based</b> — no LLM key needed. The graphify CLI is only invoked to build graphs incrementally.</p>
+              <span class="tag">graphify update</span>
+            </article>
+
+            <article class="panel reveal">
+              <div class="ico">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
+                </svg>
+              </div>
+              <div class="num">03</div>
+              <h3>Docs &amp; RAG</h3>
+              <p>With an LLM configured, krabby generates per-file Markdown docs plus a repo overview — browsable in the UI. The prompt is configurable.</p>
+              <span class="tag">optional · search_docs</span>
+            </article>
+
+            <article class="panel reveal">
+              <div class="ico">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <circle cx="12" cy="12" r="9"></circle><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"></path>
+                </svg>
+              </div>
+              <div class="num">04</div>
+              <h3>Web sources</h3>
+              <p>Custom web URL collections and Confluence spaces are converted to Markdown and indexed beside repo docs. Search one collection like <span class="mono">web:wine</span> or everything at once.</p>
+              <span class="tag">list_sources · confluence</span>
+            </article>
+
+            <article class="panel reveal">
+              <div class="ico">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"></path>
+                </svg>
+              </div>
+              <div class="num">05</div>
+              <h3>Semantic code search</h3>
+              <p>Source is chunked at graphify symbol boundaries, embedded with a dedicated code model such as Codestral Embed, and returned as ranked path/line snippets.</p>
+              <span class="tag">optional · code/search</span>
+            </article>
+
+            <article class="panel reveal">
+              <div class="ico">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <circle cx="6" cy="6" r="2"></circle><circle cx="18" cy="7" r="2"></circle><circle cx="12" cy="18" r="2"></circle><path d="m7.7 7.1 2.8 8.1M16.3 8.2l-2.8 7.9M8 6.2l8 1.1"></path>
+                </svg>
+              </div>
+              <div class="num">06</div>
+              <h3>Graph-backed code search</h3>
+              <p>Find real code through the repository graph: symbols, definitions, usages and dependencies are resolved to the exact path and line.</p>
+              <span class="tag">search_code · query_graph</span>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section id="architecture">
+        <div class="wrap">
+          <div class="head reveal">
+            <span class="caption">// how it fits together</span>
+            <h2>One Go binary between <em>agents</em> and <em>repos</em>.</h2>
+          </div>
+
+          <div class="arch">
+            <div class="screen reveal">
+              <div class="tbar"><i></i><i></i><i></i><span>krabby · pipeline</span></div>
+              <pre><span class="d">+-----------------------------------------+</span>
+<span class="d">|</span> <span class="b">LLM/Agent</span>   --MCP--> <span class="a">krabby (Go)</span>        <span class="d">|</span>
+<span class="d">|</span> <span class="b">CI/webhook</span>  --HTTP-> <span class="a">krabby (Go)</span>        <span class="d">|</span>
+<span class="d">|</span>                                         <span class="d">|</span>
+<span class="d">|</span>  |- MCP tools (manage + query)          <span class="d">|</span>
+<span class="d">|</span>  |- REST API + provider-neutral hook    <span class="d">|</span>
+<span class="d">|</span>  |- Registry (bw/BadgerDB)              <span class="d">|</span>
+<span class="d">|</span>  |- <span class="g">Native graph query engine (Go)</span>      <span class="d">|</span>
+<span class="d">|</span>  `- Scheduler (poll interval)           <span class="d">|</span>
+<span class="d">+-----------------------------------------+</span></pre>
+            </div>
+
+            <ul class="points reveal">
+              <li><b>Registry</b> in embedded BadgerDB (bw) tracks every repo and credential.</li>
+              <li><b>Plain files on disk</b> under <span class="mono">~/.krabby</span> — clones, <span class="mono">graph.json</span>, reports and vectors are all readable by other tools.</li>
+              <li><b>Provider-neutral webhook</b> at <span class="mono">/webhook/git</span> accepts common server formats with bearer / shared-token auth.</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section id="quickstart">
+        <div class="wrap">
+          <div class="head reveal">
+            <span class="caption">// get running</span>
+            <h2>From clone to first query in a <em>minute</em>.</h2>
+            <p>Requires git, ssh, and the graphify CLI (<span class="mono">uv tool install graphifyy==0.9.26</span>).</p>
+          </div>
+
+          <div class="qs">
+            <div class="code reveal">
+              <div class="clabel"><span>shell — release &amp; run</span><button class="copy" data-copy="build">copy</button></div>
+              <pre id="build"><span class="c"># download the latest release</span>
+<a class="release-link" href="https://github.com/rytsh/krabby/releases/latest" target="_blank" rel="noopener">https://github.com/rytsh/krabby/releases/latest</a>
+
+<span class="c"># configure and start the server</span>
+ cp krabby.example.yaml krabby.yaml   <span class="c"># edit repos, keys</span>
+ ./bin/krabby
+
+<span class="c"># track a repo, then list what you have</span>
+curl -X POST localhost:8080/api/v1/repos \
+  -d <span class="s">'&#123;"url":"git@git.example.com:team/service.git"&#125;'</span>
+curl localhost:8080/api/v1/repos</pre>
+            </div>
+
+            <div class="code reveal">
+              <div class="clabel"><span>LLM — MCP setup prompt</span><button class="copy" data-copy="prompt">copy</button></div>
+              <pre id="prompt">Set up Krabby as an MCP server for this repository.
+
+Download the latest Krabby release, start the server, and connect
+the MCP client to:
+http://localhost:8080/mcp
+Use this header:
+X-Krabby-Tool-Profile: full
+
+After Krabby is running, configure its runtime model settings either
+through the Krabby web UI at http://localhost:8080 or through MCP tools:
+- LLM provider/model and API key for generated code documentation
+- General embedder for document/RAG search
+- Code embedder for code indexing and semantic code search
+Run test_llm, test_embedder, and test_code_embedder before adding or
+refreshing repositories so indexing and docs generation are verified.
+
+Verify that the MCP connection works, then use Krabby for this
+repository. For code questions, use graph-backed search first:
+find symbols, definitions, usages and dependencies through the
+repository graph, and always report exact file paths and lines.</pre>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="wrap">
+        <div class="fbrand"><span class="dot"></span>krabby</div>
+        <div class="flinks">
+          <a href="https://github.com/rytsh/krabby" target="_blank" rel="noopener">GitHub</a>
+          <a href="https://github.com/rytsh/krabby#mcp-tools" target="_blank" rel="noopener">MCP tools</a>
+          <a href="https://github.com/rytsh/krabby#rest-api" target="_blank" rel="noopener">REST API</a>
+          <a href="https://github.com/Graphify-Labs/graphify" target="_blank" rel="noopener">graphify</a>
+        </div>
+        <small>MIT © 2026 Eray Ates</small>
+      </div>
+    </footer>
+
+    <script>
+      document.querySelectorAll<HTMLButtonElement>(".copy").forEach((button) => {
+        button.addEventListener("click", async () => {
+          const target = document.getElementById(button.dataset.copy || "");
+          if (!target) return;
+
+          await navigator.clipboard.writeText(target.innerText.trim());
+          const label = button.textContent;
+          button.textContent = "copied!";
+          button.classList.add("ok");
+          setTimeout(() => {
+            button.textContent = label;
+            button.classList.remove("ok");
+          }, 1400);
+        });
+      });
+
+      const observer = new IntersectionObserver((entries) => {
+        entries.forEach((entry) => {
+          if (!entry.isIntersecting) return;
+          entry.target.classList.add("in");
+          observer.unobserve(entry.target);
+        });
+      }, { threshold: 0.12 });
+
+      document.querySelectorAll(".reveal").forEach((element) => observer.observe(element));
+    </script>
+  </body>
+</html>

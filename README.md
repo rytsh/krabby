@@ -1,4 +1,4 @@
-<img src="./docs/krabby.webp" width="360" />
+<img src="./_docs/public/krabby.webp" width="360" />
 
 [![License](https://img.shields.io/github/license/rytsh/krabby?color=red&style=flat-square)](https://raw.githubusercontent.com/rytsh/krabby/main/LICENSE)
 [![Coverage](https://img.shields.io/sonar/coverage/rytsh_krabby?logo=sonarcloud&server=https%3A%2F%2Fsonarcloud.io&style=flat-square)](https://sonarcloud.io/summary/overall?id=rytsh_krabby)
@@ -38,6 +38,17 @@ keeps those indexes fresh in the background.
 - **Semantic code search (optional)**: source is chunked at graphify symbol
   boundaries (with line-window fallback), embedded with a dedicated code model
   such as Codestral Embed, and returned as ranked path/line snippets.
+
+## Website
+
+The GitHub Pages site lives in `_docs/` and is deployed by GitHub Actions.
+Run it locally with:
+
+```sh
+cd _docs
+pnpm install
+pnpm dev
+```
 
 ## Requirements
 

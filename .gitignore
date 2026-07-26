@@ -12,5 +12,8 @@ krabby.toml
 # embedded at build time; keep a placeholder so the go:embed always has
 # something to embed.
 _ui/node_modules/
+_docs/node_modules/
+_docs/dist/
+_docs/.astro/
 internal/server/dist/*
 !internal/server/dist/.gitkeep
