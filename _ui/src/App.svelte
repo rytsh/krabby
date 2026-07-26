@@ -8,7 +8,13 @@
     loadOwnerRepos,
     ownerOf,
   } from "./lib/repos.js";
-  import { buildOwnerTree, collapseTree, sidebarPathMode } from "./lib/paths.js";
+  import {
+    buildOwnerTree,
+    collapseTree,
+    ancestorKeys,
+    nodeKeys,
+    sidebarPathMode,
+  } from "./lib/paths.js";
   import Icon from "./lib/Icon.svelte";
   import BrandIcon from "./lib/BrandIcon.svelte";
   import ToastHost from "./lib/ToastHost.svelte";
@@ -65,57 +71,91 @@
   // Expanded state per owner group, persisted so it survives reloads. Groups
   // default to collapsed: a group's repos are fetched lazily only when it is
   // expanded, so the sidebar stays cheap with many owners.
-  const EXPANDED_KEY = "krabby-sidebar-expanded";
+  //
+  // Only what the user explicitly toggled lives here. Folders opened just to
+  // reveal the repo being viewed go into `revealed` below and are deliberately
+  // not persisted, so navigating to a repo does not silently turn into a
+  // permanent "everything is open" preference after the next refresh.
+  //
+  // The key is versioned: v1 also stored the reveal chain, including keys for
+  // rows that only exist in one path mode, and never pruned anything. That data
+  // is the reason folders used to appear expanded on their own, so it is dropped
+  // instead of migrated.
+  const EXPANDED_KEY = "krabby-sidebar-expanded-v2";
   let expanded = $state({});
   try {
-    expanded = JSON.parse(localStorage.getItem(EXPANDED_KEY) || "{}") || {};
+    localStorage.removeItem("krabby-sidebar-expanded");
+    const saved = JSON.parse(localStorage.getItem(EXPANDED_KEY) || "{}") || {};
+    expanded = Object.fromEntries(Object.entries(saved).filter(([, v]) => v === true));
   } catch {
     expanded = {};
   }
 
-  function persistExpanded() {
-    localStorage.setItem(EXPANDED_KEY, JSON.stringify(expanded));
+  function persistExpanded(map) {
+    try {
+      localStorage.setItem(EXPANDED_KEY, JSON.stringify(map));
+    } catch {
+      // Private mode / storage full: the state just won't survive a reload.
+    }
   }
 
   // Nested folder tree built from the flat owner list, so that groups like
-  // ".../parser" and ".../parser/poc" nest as parent/child. In "full" mode the
-  // long shared prefix chain (host/org/team/...) is kept as separate levels; in
-  // "smart" mode single-child prefix chains are collapsed into one row.
-  let ownerTree = $derived.by(() => {
-    const tree = buildOwnerTree($owners);
-    return $sidebarPathMode === "full" ? tree : collapseTree(tree);
-  });
+  // ".../parser" and ".../parser/poc" nest as parent/child. `fullTree` keeps the
+  // long shared prefix chain (host/org/team/...) as separate levels; "smart"
+  // mode collapses single-child prefix chains into one row. A collapsed row
+  // always adopts its deepest child's key, so full-tree keys are a superset of
+  // the smart-mode ones and can be used to validate persisted state in either
+  // mode.
+  let fullTree = $derived(buildOwnerTree($owners));
+  let ownerTree = $derived($sidebarPathMode === "full" ? fullTree : collapseTree(fullTree));
+
+  // Folders opened only to reveal the repo currently being viewed. Ephemeral:
+  // recomputed on navigation, never written to localStorage.
+  let revealed = $state({});
+
+  // What the sidebar actually renders as open. A reveal wins over stored state
+  // so the active repo is always visible; toggleNode drops the reveal when the
+  // user closes such a folder, so it stays closable.
+  let openKeys = $derived({ ...expanded, ...revealed });
 
   // A tree node is expandable by its full path key; when the node is also a real
   // owner group (node.owner != null) its repos are loaded lazily on expand.
   function toggleNode(node) {
-    const next = !expanded[node.key];
-    expanded = { ...expanded, [node.key]: next };
-    persistExpanded();
+    const next = !openKeys[node.key];
+
+    const map = { ...expanded };
+    if (next) map[node.key] = true;
+    else delete map[node.key];
+    expanded = map;
+    persistExpanded(map);
+
+    if (!next && revealed[node.key]) {
+      const rest = { ...revealed };
+      delete rest[node.key];
+      revealed = rest;
+    }
+
     if (next && node.owner !== null) loadOwnerRepos(node.owner);
   }
 
-  // Expand every ancestor folder of an owner path (its own key included) so a
-  // deeply nested active repo is revealed in the sidebar. Keys are the running
-  // "/"-joined prefixes of the owner path.
-  function expandAncestors(owner) {
-    const segs = owner === "" ? [""] : owner.split("/");
-    let path = "";
-    const next = { ...expanded };
-    let changed = false;
-    for (const seg of segs) {
-      path = path ? `${path}/${seg}` : seg;
-      if (!next[path]) {
-        next[path] = true;
-        changed = true;
-      }
+  // pruneExpanded drops persisted keys that have no row in the current tree
+  // (removed repos, or keys written by older builds that invented prefixes).
+  // Skipped while the owner list is still empty, otherwise the first render
+  // would wipe everything.
+  function pruneExpanded(tree) {
+    const keys = nodeKeys(tree);
+    if (keys.size === 0) return;
+
+    const map = {};
+    let dropped = false;
+    for (const k of Object.keys(expanded)) {
+      if (keys.has(k)) map[k] = true;
+      else dropped = true;
     }
-    // Only write when something actually changed. Reassigning `expanded` with a
-    // fresh object every time would retrigger the ancestor effect (which reads
-    // `expanded`) forever — Svelte 5 effect_update_depth_exceeded.
-    if (!changed) return;
-    expanded = next;
-    persistExpanded();
+    if (!dropped) return;
+
+    expanded = map;
+    persistExpanded(map);
   }
 
   const SIDEBAR_WIDTH_KEY = "krabby-sidebar-width";
@@ -160,30 +200,56 @@
   // repos are already loaded.
   function loadExpandedOwners(nodes) {
     for (const node of nodes) {
-      if (!expanded[node.key]) continue;
+      if (!openKeys[node.key]) continue;
       if (node.owner !== null) loadOwnerRepos(node.owner);
       if (node.children.length > 0) loadExpandedOwners(node.children);
     }
   }
 
-  // On load (and whenever the tree rebuilds) restore the repos of the groups
-  // that were left expanded from a previous session. Without this the expanded
-  // folders render empty after a page refresh until the user toggles them,
-  // because repos are only fetched on manual expand.
+  // On load (and whenever the tree rebuilds) drop stale expand state and
+  // restore the repos of the groups that were left expanded from a previous
+  // session. Without the restore, expanded folders render empty after a page
+  // refresh until the user toggles them, because repos are only fetched on
+  // manual expand.
   $effect(() => {
+    const full = fullTree;
     const tree = ownerTree;
-    untrack(() => loadExpandedOwners(tree));
+    untrack(() => {
+      pruneExpanded(full);
+      loadExpandedOwners(tree);
+    });
   });
 
-  // When viewing a repo, make sure its owner group is expanded and loaded so
-  // the active repo is visible and highlighted in the sidebar.
+  // When viewing a repo, reveal its owner group (and every folder above it) so
+  // the active repo is visible and highlighted, and load that group's repos.
+  // The reveal is derived from the route, so it disappears again as soon as the
+  // user navigates elsewhere instead of sticking around in localStorage.
   $effect(() => {
-    if (view === "repo" && repoId) {
-      const owner = ownerOf(repoId);
-      // Reveal the repo when navigation changes, but do not make manual
-      // collapse state a dependency that immediately reopens the group.
-      untrack(() => expandAncestors(owner));
-      loadOwnerRepos(owner);
+    const tree = ownerTree;
+    const id = view === "repo" ? repoId : "";
+
+    if (!id) {
+      if (untrack(() => Object.keys(revealed).length) > 0) revealed = {};
+      return;
+    }
+
+    const owner = ownerOf(id);
+    loadOwnerRepos(owner);
+
+    const next = {};
+    for (const key of ancestorKeys(tree, owner)) next[key] = true;
+
+    // Reassigning an equivalent object on every tree rebuild would churn the
+    // whole sidebar, so only write when the revealed chain actually changed.
+    const same = untrack(() => {
+      const keys = Object.keys(revealed);
+      return keys.length === Object.keys(next).length && keys.every((k) => next[k]);
+    });
+    if (!same) {
+      revealed = next;
+      // Newly revealed folders can be owner groups themselves; fetch their
+      // repos too (cached, so this is a no-op for the ones already loaded).
+      untrack(() => loadExpandedOwners(tree));
     }
   });
 </script>
@@ -216,7 +282,7 @@
     {#if $owners.length > 0}
       <div class="mt-5 px-2.5 pb-1.5 text-[11px] font-medium uppercase tracking-wider text-faint">Repositories</div>
       <nav class="flex flex-col gap-0.5">
-        <RepoTree nodes={ownerTree} depth={0} {expanded} onToggle={toggleNode} {view} {repoId} />
+        <RepoTree nodes={ownerTree} depth={0} expanded={openKeys} onToggle={toggleNode} {view} {repoId} />
       </nav>
     {/if}
 

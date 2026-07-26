@@ -153,6 +153,47 @@ export function collapseTree(nodes) {
   });
 }
 
+// nodeKeys collects the key of every node in a tree, at all levels. Used to
+// drop persisted expand state for rows that no longer exist.
+export function nodeKeys(nodes, out = new Set()) {
+  for (const n of nodes || []) {
+    out.add(n.key);
+    nodeKeys(n.children, out);
+  }
+  return out;
+}
+
+// ancestorKeys returns the keys of the nodes that have to be expanded for the
+// group `owner` to become visible, ending with the owner node's own key (empty
+// when the group is not in the tree).
+//
+// The chain is read from the tree instead of from the raw string prefixes of
+// the owner path on purpose: in "smart" mode collapseTree merges chains, so
+// "github.com" and "github.com/org" are usually not rows at all. Marking those
+// invented keys as expanded is invisible at first, but as soon as another group
+// makes the tree branch there, the rows materialise already expanded — which is
+// how sidebar folders used to pop open on their own after a refresh.
+export function ancestorKeys(nodes, owner) {
+  const chain = [];
+
+  const walk = (list) => {
+    for (const n of list) {
+      if (n.key === owner) {
+        chain.push(n.key);
+        return true;
+      }
+      if (owner.startsWith(`${n.key}/`) && walk(n.children)) {
+        chain.push(n.key);
+        return true;
+      }
+    }
+    return false;
+  };
+
+  walk(nodes || []);
+  return chain.reverse();
+}
+
 // sidebarPathMode controls how the sidebar renders repo paths: "smart"
 // (shortened, default) or "full". A pure display preference, persisted per
 // browser in localStorage and configurable from the settings page.
