@@ -1,5 +1,10 @@
 <img src="./docs/krabby.webp" width="360" />
 
+[![License](https://img.shields.io/github/license/rytsh/krabby?color=red&style=flat-square)](https://raw.githubusercontent.com/rytsh/krabby/main/LICENSE)
+[![Coverage](https://img.shields.io/sonar/coverage/rytsh_krabby?logo=sonarcloud&server=https%3A%2F%2Fsonarcloud.io&style=flat-square)](https://sonarcloud.io/summary/overall?id=rytsh_krabby)
+[![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/rytsh/krabby/test.yml?branch=main&logo=github&style=flat-square&label=ci)](https://github.com/rytsh/krabby/actions)
+[![Web](https://img.shields.io/badge/web-document-blueviolet?style=flat-square)](https://rytsh.github.io/krabby/)
+
 Krabby provides code search, documentation retrieval, and relationship analysis
 over MCP. Point it at repositories; it clones and indexes, docs and RAG them with LLM and Embeddings,
 builds a [graphify](https://github.com/Graphify-Labs/graphify) knowledge graph per repo, and

@@ -1,0 +1,63 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # create the GitHub release and upload archives
+  packages: write # push ghcr.io/rytsh/krabby
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # goreleaser derives the version and changelog from git history, so a
+          # shallow clone produces a wrong version and an empty changelog.
+          fetch-depth: 0
+
+      # actions/checkout fetches the tag as a lightweight ref; goreleaser reads
+      # the annotated tag object for the release notes.
+      - run: git fetch --force --tags
+
+      # The .goreleaser.yaml `before` hook runs `make build-ui`, which needs
+      # pnpm on PATH. pnpm/action-setup must run before setup-node for the
+      # `cache: pnpm` store lookup to resolve.
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: _ui/pnpm-lock.yaml
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # dockers_v2 builds a linux/amd64 + linux/arm64 manifest. The Dockerfile
+      # has RUN steps (apt-get, pip), so the arm64 layers need QEMU emulation.
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
