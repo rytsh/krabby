@@ -65,6 +65,7 @@
       // Confluence-only
       root_page: "",
       include_root: true,
+      max_pages: "",
       // JIRA-only
       project: "",
       jql: "",
@@ -117,7 +118,7 @@
   }
   function progressLabel(p) {
     if (!p) return "";
-    const phase = { fetch: "Fetching", write: "Saving", index: "Embedding" }[p.phase] || p.phase;
+    const phase = { fetch: "Fetching", index: "Embedding" }[p.phase] || p.phase;
     // Some providers page a cursor without publishing a result-set size: the
     // running count is still worth showing, just without a percentage.
     if (!p.total) return p.done ? `${phase} ${p.done}…` : `${phase}…`;
@@ -200,6 +201,7 @@
           include_labels: splitLabels(form.include_labels),
           exclude_labels: splitLabels(form.exclude_labels),
           full_resync_every: form.full_resync_every.trim(),
+          max_pages: form.max_pages ? Number(form.max_pages) : 0,
         };
       } else if (form.type === "jira") {
         config = {
@@ -260,6 +262,7 @@
       exclude_labels: (source.config?.exclude_labels || []).join(", "),
       root_page: source.config?.root_page || "",
       include_root: source.config?.include_root !== false,
+      max_pages: source.config?.max_pages || "",
       project: source.config?.project || "",
       jql: source.config?.jql || "",
       team_fields: (source.config?.team_fields || []).join(", "),
@@ -503,6 +506,10 @@
               Full re-sync every (e.g. 24h; reconciles deletions)
               <input class="input" placeholder="24h" bind:value={form.full_resync_every} />
             </label>
+            <label class="flex flex-col gap-1 text-[13px] text-dim">
+              Max pages per sync (0 = no limit)
+              <input class="input" type="number" min="0" placeholder="0" bind:value={form.max_pages} />
+            </label>
           </div>
           <p class="m-0 text-[12px] text-faint">
             Set a <strong>Root page id</strong> (from the page URL) to index just that page and its
@@ -548,14 +555,20 @@
               <input class="input" placeholder="customfield_104705, customfield_110643" bind:value={form.team_fields} />
             </label>
             <label class="flex flex-col gap-1 text-[13px] text-dim">
-              Max issues (0 = default)
-              <input class="input" type="number" min="0" placeholder="5000" bind:value={form.max_issues} />
+              Max issues per sync (0 = no limit)
+              <input class="input" type="number" min="0" placeholder="0" bind:value={form.max_issues} />
             </label>
             <label class="flex flex-col gap-1 text-[13px] text-dim">
               Full re-sync every (e.g. 24h; reconciles deletions)
               <input class="input" placeholder="24h" bind:value={form.full_resync_every} />
             </label>
           </div>
+          <p class="m-0 text-[12px] text-faint">
+            Tickets are streamed as they are fetched, so a project of any size syncs in the same
+            memory — leave <strong>Max issues</strong> at 0 unless you want to bound the time and API
+            spend of a single run. A capped sync cannot tell a deleted ticket from one past the cap,
+            so it stops reconciling deletions until an uncapped full pass runs.
+          </p>
           <p class="m-0 text-[12px] text-faint">
             Team field ids are instance-specific JIRA custom fields that hold team/squad ownership
             (e.g. a "Squad" field). Their values are indexed so tickets are searchable by team name.

@@ -46,11 +46,15 @@ func (f *Fetcher) ConfigView(_ json.RawMessage) any { return nil }
 
 // Fetch re-fetches every registered page. Per-page failures are reported via
 // RemotePage.Err so one broken URL never aborts the whole collection sync.
-// URL-list collections are always a full fetch (no incremental state).
-func (f *Fetcher) Fetch(ctx context.Context, _ *websource.Collection, pages []*websource.Page, _ json.RawMessage) (*websource.FetchResult, error) {
-	out := make([]websource.RemotePage, 0, len(pages))
-
-	for _, p := range pages {
+//
+// The result is never Complete: the inventory of a URL-list collection is the
+// registered page set itself, maintained through the add/remove page endpoints
+// rather than discovered remotely, so there is nothing for the manager to
+// prune. Every registered page is emitted here (a failed one included), so the
+// distinction is academic — but claiming an authority this provider does not
+// have would be one refactor away from deleting the user's page list.
+func (f *Fetcher) Fetch(ctx context.Context, _ *websource.Collection, pages []*websource.Page, _ json.RawMessage, emit websource.Emit) (*websource.FetchResult, error) {
+	for i, p := range pages {
 		remote := websource.RemotePage{Slug: p.Slug, URL: p.URL, Title: p.Title}
 
 		title, md, err := f.fetchOne(ctx, p.URL)
@@ -63,11 +67,14 @@ func (f *Fetcher) Fetch(ctx context.Context, _ *websource.Collection, pages []*w
 			}
 		}
 
-		out = append(out, remote)
-		progress.Report(ctx, len(out), len(pages))
+		if err := emit(remote); err != nil {
+			return nil, err
+		}
+
+		progress.Report(ctx, i+1, len(pages))
 	}
 
-	return &websource.FetchResult{Pages: out}, nil
+	return &websource.FetchResult{}, nil
 }
 
 func (f *Fetcher) fetchOne(ctx context.Context, pageURL string) (title, markdown string, err error) {

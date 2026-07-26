@@ -37,7 +37,7 @@ func (f *gateFetcher) MergeConfig(_, update json.RawMessage) (json.RawMessage, e
 
 func (f *gateFetcher) ConfigView(json.RawMessage) any { return struct{}{} }
 
-func (f *gateFetcher) Fetch(_ context.Context, _ *websource.Collection, _ []*websource.Page, state json.RawMessage) (*websource.FetchResult, error) {
+func (f *gateFetcher) Fetch(_ context.Context, _ *websource.Collection, _ []*websource.Page, state json.RawMessage, emit websource.Emit) (*websource.FetchResult, error) {
 	f.calls++
 	if f.calls > 1 {
 		close(f.started)
@@ -45,10 +45,16 @@ func (f *gateFetcher) Fetch(_ context.Context, _ *websource.Collection, _ []*web
 	}
 
 	if len(state) != 0 {
-		return &websource.FetchResult{Incremental: true, State: state}, nil
+		return &websource.FetchResult{State: state}, nil
 	}
 
-	return &websource.FetchResult{Pages: f.pages, State: json.RawMessage(`{"w":"1"}`)}, nil
+	for _, p := range f.pages {
+		if err := emit(p); err != nil {
+			return nil, err
+		}
+	}
+
+	return &websource.FetchResult{Complete: true, State: json.RawMessage(`{"w":"1"}`)}, nil
 }
 
 // TestSearchDocsDoesNotBlockOnRunningSync is the regression test for searches

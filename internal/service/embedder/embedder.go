@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rytsh/krabby/internal/config"
@@ -28,6 +29,15 @@ var ErrNotConfigured = errors.New("embedder not configured (set embedder.base_ur
 // endpoint regardless of the configured batch, chosen to satisfy the most
 // restrictive common provider limit (Google Gemini caps a batch at 100).
 const maxSafeBatch = 100
+
+// maxRespBytes bounds a single embeddings response body so a misbehaving
+// endpoint cannot exhaust memory. It has to clear the widest legitimate
+// response by a wide margin: a full batch of 100 vectors at 3072 dimensions
+// (Gemini Embedding 2's default width) is several MiB of JSON floats, and a
+// body truncated at the limit fails as an opaque JSON decode error rather than
+// as the size problem it is — so the limit is generous and overruns are
+// reported explicitly.
+const maxRespBytes = 32 << 20
 
 // Retry/backoff tuning for transient embed failures (HTTP 429 rate limits and
 // 5xx). Large indexing runs (tens of thousands of chunks) routinely trip a
@@ -45,16 +55,31 @@ type Client struct {
 	baseURL string
 	apiKey  string
 	model   string
+	outDim  int
 	batch   int
 	conc    int
 	http    *http.Client
 
-	dimMu sync.Mutex
-	dim   int
+	// noDims latches when the endpoint has rejected the "dimensions"
+	// parameter, so the remaining requests of a run stop sending it.
+	noDims atomic.Bool
+
+	dimMu     sync.Mutex
+	dim       int
+	dimWarned bool
 }
 
 // New builds an embeddings client from config. Returns ErrNotConfigured when no
 // base URL is set so RAG can be disabled gracefully.
+//
+// A non-zero cfg.Dim is requested from the provider (the OpenAI "dimensions"
+// parameter) rather than merely asserted locally. Models trained with
+// Matryoshka Representation Learning — Gemini Embedding 2 (128-3072),
+// text-embedding-3 — keep most of their accuracy at a fraction of their default
+// width, and the width decides the one budget GOMEMLIMIT cannot enforce: the
+// decoded vectors bw holds to traverse the HNSW graph. Endpoints that do not
+// understand the parameter are detected on first use and fall back to their
+// native width (see embedBatch).
 func New(cfg config.Embedder) (*Client, error) {
 	if cfg.BaseURL == "" {
 		return nil, ErrNotConfigured
@@ -89,6 +114,7 @@ func New(cfg config.Embedder) (*Client, error) {
 		baseURL: strings.TrimRight(cfg.BaseURL, "/"),
 		apiKey:  cfg.APIKey,
 		model:   cfg.Model,
+		outDim:  cfg.Dim,
 		dim:     cfg.Dim,
 		batch:   batch,
 		conc:    conc,
@@ -99,7 +125,8 @@ func New(cfg config.Embedder) (*Client, error) {
 // Model returns the configured embedding model name.
 func (c *Client) Model() string { return c.model }
 
-// Dim returns the embedding dimension (0 until inferred from a response).
+// Dim returns the embedding dimension: the configured one until the first
+// response, and the width actually returned from then on.
 func (c *Client) Dim() int {
 	c.dimMu.Lock()
 	defer c.dimMu.Unlock()
@@ -110,6 +137,10 @@ func (c *Client) Dim() int {
 type embedRequest struct {
 	Model string   `json:"model"`
 	Input []string `json:"input"`
+	// Dimensions truncates the output vector on providers that support it
+	// (OpenAI text-embedding-3, Gemini via its OpenAI-compatible layer, where
+	// it maps to output_dimensionality). Omitted when zero.
+	Dimensions int `json:"dimensions,omitempty"`
 }
 
 type embedResponse struct {
@@ -225,16 +256,43 @@ func (c *Client) EmbedWithProgress(ctx context.Context, texts []string, onProgre
 // with exponential backoff and jitter so a per-minute provider quota does not
 // abort a large indexing run. A non-retryable error or a cancelled context
 // returns immediately.
+//
+// One non-retryable case is retried anyway, once per client: a configured
+// output dimension rejected by the endpoint. Only some providers accept the
+// "dimensions" parameter, and a local Ollama/TEI/vLLM deployment that does not
+// would otherwise fail every request the moment a dimension is configured.
+// The parameter is dropped for the rest of the client's life and the request
+// is replayed; if it still fails, the real error surfaces.
 func (c *Client) embedBatch(ctx context.Context, batch []string) ([][]float32, error) {
 	var lastErr error
 	for attempt := 0; attempt <= maxEmbedRetries; attempt++ {
-		vecs, retryAfter, err := c.embedBatchOnce(ctx, batch)
+		sentDims := c.requestDim()
+
+		vecs, retryAfter, err := c.embedBatchOnce(ctx, batch, sentDims)
 		if err == nil {
 			return vecs, nil
 		}
 
 		var re retryableErr
 		if !errors.As(err, &re) {
+			// Every in-flight batch that carried the parameter retries, not
+			// just the one that latched the flag: batches run concurrently, so
+			// the others are failing for the same reason at the same moment
+			// and would otherwise abort the run. The replay carries no
+			// dimension, so this cannot loop.
+			if sentDims > 0 {
+				if c.noDims.CompareAndSwap(false, true) {
+					slog.Warn("embeddings endpoint rejected the requested output dimension; retrying at the model's native width",
+						"model", c.model, "dim", sentDims, "error", err)
+				}
+
+				// Keep the error in case this was the last attempt: the
+				// replay would otherwise exit the loop empty-handed.
+				lastErr = err
+
+				continue
+			}
+
 			return nil, err // non-retryable: fail fast
 		}
 		lastErr = err
@@ -283,10 +341,20 @@ func backoffDelay(attempt int, retryAfter time.Duration) time.Duration {
 	return time.Duration(rand.Int63n(int64(backoff)) + int64(backoff)/2) //nolint:gosec // jitter, not security-sensitive
 }
 
+// requestDim is the output dimension to ask for, or 0 when none is configured
+// or the endpoint has already rejected the parameter.
+func (c *Client) requestDim() int {
+	if c.outDim <= 0 || c.noDims.Load() {
+		return 0
+	}
+
+	return c.outDim
+}
+
 // embedBatchOnce performs a single embeddings request. On a retryable failure
 // it returns a retryableErr and, when the server advertised one, a retry delay.
-func (c *Client) embedBatchOnce(ctx context.Context, batch []string) ([][]float32, time.Duration, error) {
-	body, err := json.Marshal(embedRequest{Model: c.model, Input: batch})
+func (c *Client) embedBatchOnce(ctx context.Context, batch []string, dims int) ([][]float32, time.Duration, error) {
+	body, err := json.Marshal(embedRequest{Model: c.model, Input: batch, Dimensions: dims})
 	if err != nil {
 		return nil, 0, fmt.Errorf("marshal embed request; %w", err)
 	}
@@ -314,7 +382,12 @@ func (c *Client) embedBatchOnce(ctx context.Context, batch []string) ([][]float3
 	}
 	defer resp.Body.Close()
 
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	// Read one byte past the limit so an overrun is distinguishable from a
+	// body that merely ends there.
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxRespBytes+1))
+	if len(raw) > maxRespBytes {
+		return nil, 0, fmt.Errorf("embed response exceeds %d bytes for %d inputs; lower the batch size or the embedding dimension", maxRespBytes, len(batch))
+	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		httpErr := fmt.Errorf("embed http %d; %s", resp.StatusCode, apiErrMsg(raw))
@@ -344,14 +417,33 @@ func (c *Client) embedBatchOnce(ctx context.Context, batch []string) ([][]float3
 	}
 
 	if len(vecs) > 0 {
-		c.dimMu.Lock()
-		if c.dim == 0 {
-			c.dim = len(vecs[0])
-		}
-		c.dimMu.Unlock()
+		c.observeDim(len(vecs[0]))
 	}
 
 	return vecs, 0, nil
+}
+
+// observeDim records the width the endpoint actually returned. The response is
+// authoritative over the configured dimension: a provider that ignores the
+// "dimensions" parameter rather than rejecting it (several local servers accept
+// and discard unknown fields) would otherwise leave the client reporting a
+// width the vector store never sees, since the store locks in the dimension of
+// the vectors it is handed. The disagreement is worth one warning: it means the
+// memory saving the configured dimension was meant to buy is not happening.
+func (c *Client) observeDim(got int) {
+	c.dimMu.Lock()
+	defer c.dimMu.Unlock()
+
+	if c.dim != got && !c.dimWarned {
+		c.dimWarned = true
+
+		if c.outDim > 0 && !c.noDims.Load() {
+			slog.Warn("embeddings endpoint ignored the requested output dimension",
+				"model", c.model, "requested", c.outDim, "got", got)
+		}
+	}
+
+	c.dim = got
 }
 
 // isRetryableStatus reports whether an HTTP status warrants a retry: 429 (rate

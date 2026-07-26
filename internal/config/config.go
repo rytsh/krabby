@@ -176,7 +176,13 @@ type Embedder struct {
 	APIKey string `cfg:"api_key" log:"-"`
 	// Model is the embedding model name.
 	Model string `cfg:"model"`
-	// Dim is the expected embedding dimension; 0 = infer from first response.
+	// Dim is the requested output dimension, sent as the OpenAI "dimensions"
+	// parameter; 0 leaves the model at its native width. It is worth setting
+	// on a Matryoshka-trained model (Gemini Embedding 2 accepts 128-3072,
+	// text-embedding-3 likewise): accuracy holds well below the default width
+	// while the vector cache, which is live memory GOMEMLIMIT cannot reclaim,
+	// scales linearly with it. Endpoints that reject the parameter fall back
+	// to their native width automatically.
 	Dim int `cfg:"dim"`
 	// Batch bounds how many inputs are sent per embeddings request.
 	Batch int `cfg:"batch" default:"64"`

@@ -34,9 +34,13 @@ func (f *reportingFetcher) MergeConfig(_, update json.RawMessage) (json.RawMessa
 
 func (f *reportingFetcher) ConfigView(json.RawMessage) any { return struct{}{} }
 
-func (f *reportingFetcher) Fetch(ctx context.Context, _ *websource.Collection, _ []*websource.Page, _ json.RawMessage) (*websource.FetchResult, error) {
-	for i := range f.pages {
+func (f *reportingFetcher) Fetch(ctx context.Context, _ *websource.Collection, _ []*websource.Page, _ json.RawMessage, emit websource.Emit) (*websource.FetchResult, error) {
+	for i, p := range f.pages {
 		progress.Report(ctx, i+1, len(f.pages))
+
+		if err := emit(p); err != nil {
+			return nil, err
+		}
 
 		if f.observe != nil {
 			if p, ok := f.observe(); ok {
@@ -47,7 +51,7 @@ func (f *reportingFetcher) Fetch(ctx context.Context, _ *websource.Collection, _
 		}
 	}
 
-	return &websource.FetchResult{Pages: f.pages}, nil
+	return &websource.FetchResult{Complete: true}, nil
 }
 
 // TestRefreshWebSourcePublishesFetchProgress checks the fetch phase is

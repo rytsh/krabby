@@ -63,7 +63,6 @@
   // the web-source phases are its own vocabulary.
   const phaseLabel = {
     fetch: "fetching",
-    write: "saving",
     index: "embedding",
     docs: "writing docs",
     docs_index: "embedding docs",

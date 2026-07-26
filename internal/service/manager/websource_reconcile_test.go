@@ -41,16 +41,22 @@ func (f *fakeReconcileFetcher) MergeConfig(_, update json.RawMessage) (json.RawM
 
 func (f *fakeReconcileFetcher) ConfigView(json.RawMessage) any { return struct{}{} }
 
-func (f *fakeReconcileFetcher) Fetch(_ context.Context, _ *websource.Collection, _ []*websource.Page, state json.RawMessage) (*websource.FetchResult, error) {
+func (f *fakeReconcileFetcher) Fetch(_ context.Context, _ *websource.Collection, _ []*websource.Page, state json.RawMessage, emit websource.Emit) (*websource.FetchResult, error) {
 	if len(state) != 0 {
 		// Incremental run: nothing changed since the stored watermark.
-		return &websource.FetchResult{Incremental: true, State: state}, nil
+		return &websource.FetchResult{State: state}, nil
 	}
 
 	// First, full discovery run.
+	for _, p := range f.pages {
+		if err := emit(p); err != nil {
+			return nil, err
+		}
+	}
+
 	return &websource.FetchResult{
-		Pages: f.pages,
-		State: json.RawMessage(`{"w":"1"}`),
+		Complete: true,
+		State:    json.RawMessage(`{"w":"1"}`),
 	}, nil
 }
 

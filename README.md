@@ -32,7 +32,9 @@ keeps those indexes fresh in the background.
   overview, browsable in the UI.
 - **Web sources**: named Custom web URL collections and Confluence spaces are
   converted to Markdown and indexed beside repo docs. Search everything, all
-  repos, all web sources, or one collection such as `web:wine`.
+  repos, all web sources, or one collection such as `web:wine`. Providers stream
+  their items as they are fetched, so a 35k-ticket JIRA project or a whole
+  Confluence space syncs in the same memory as a handful of pages.
 - **Semantic code search (optional)**: source is chunked at graphify symbol
   boundaries (with line-window fallback), embedded with a dedicated code model
   such as Codestral Embed, and returned as ranked path/line snippets.
@@ -260,6 +262,16 @@ Three things about the design are worth knowing when tuning it:
   synced JIRA/Confluence collection. The trade-off is that a failure part-way
   through a full rebuild leaves a partial index rather than the previous one;
   the next refresh repairs it.
+- **Fetching is streaming too, and that is a correctness property.** A web
+  source provider hands each page to the sync as it converts it, so the walk
+  costs the same memory at any size. That is what lets a full sweep run to
+  completion, and only a sweep that completes may report itself as the
+  collection's whole inventory — which is the sole licence the sync has to
+  delete a stored page it did not see. A run cut short by `max_issues` /
+  `max_pages` says so, and the sync then prunes nothing beyond what the provider
+  explicitly reported as removed. Both caps default to unlimited; setting one
+  bounds a single run's time and API spend and, as a consequence, suspends
+  deletion reconciliation.
 - **The startup warm passes are sequential.** Backfilling the code and docs
   search indexes runs one after the other in the background, so a restart never
   pays for both at once.
@@ -279,6 +291,15 @@ and ~1.2 GiB at 1536. krabby therefore gives bw a **byte** budget derived from
 the process limit (`bw.WithVectorCacheBytes`, bw v0.3.7+) rather than letting a
 vector count stand in for one. A narrower embedding model buys a larger working
 set for the same memory; a wider one buys better recall for less.
+
+With a Matryoshka-trained model that trade is a setting rather than a change of
+model: the embedding dim in Settings is sent to the provider as the OpenAI
+`dimensions` parameter, so Gemini Embedding 2 (128–3072) or text-embedding-3 can
+be held at a fraction of its default width with little accuracy lost and a
+proportional cut in vector memory. Providers that do not accept the parameter
+are detected on the first request and stay at their native width — `Test
+embedder` reports the width actually returned, not the one asked for. Changing
+the dim changes the index dimension, which wipes and rebuilds it.
 
 `GET <base>/debug/pprof/heap` is mounted for when the numbers still do not add
 up.

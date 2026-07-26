@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -32,13 +33,8 @@ import (
 	"github.com/rytsh/krabby/internal/service/websource"
 )
 
-const (
-	// pageLimit is the REST page size for the issue search.
-	pageLimit = 50
-	// maxIssuesDefault caps a sync so a runaway query cannot grind the system.
-	// It can be lowered per collection via Config.MaxIssues.
-	maxIssuesDefault = 5000
-)
+// pageLimit is the REST page size for the issue search.
+const pageLimit = 50
 
 // Fetcher syncs one JIRA project / JQL query per collection.
 type Fetcher struct {
@@ -78,7 +74,14 @@ type Config struct {
 	// "components" field id is also accepted.
 	TeamFields types.Null[[]string] `json:"team_fields,omitempty"`
 
-	// MaxIssues caps how many tickets a single sync ingests (0 = default).
+	// MaxIssues caps how many tickets a single sync walks; 0 (the default) is
+	// uncapped. Tickets are streamed as they are rendered, so the walk costs
+	// the same memory at any size and the cap exists only to bound the time
+	// and API spend of one run against a runaway query.
+	//
+	// A capped run cannot reconcile deletions: it reports an incomplete sweep,
+	// which stops the manager from reading "not seen" as "deleted remotely".
+	// Set it only if you want that trade.
 	MaxIssues types.Null[int] `json:"max_issues,omitempty"`
 
 	// FullResyncEvery is a Go duration ("24h") controlling how often a full,
@@ -327,7 +330,13 @@ type syncState struct {
 // issues updated since the stored watermark and returns an advanced watermark,
 // so a large project is not re-pulled or re-embedded every cycle. The persisted
 // page records are ignored: JIRA is a discovery source, the query is the truth.
-func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*websource.Page, rawState json.RawMessage) (*websource.FetchResult, error) {
+//
+// Issues are emitted as they are rendered, so a project of any size is walked
+// in constant memory and a full sweep can run to completion. Completion is what
+// is reported back: only a full (non-incremental) walk that reached the end of
+// the result set claims Complete, because only then does "not seen" mean
+// "deleted".
+func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*websource.Page, rawState json.RawMessage, emit websource.Emit) (*websource.FetchResult, error) {
 	cfg, err := decodeConfig(col.Config)
 	if err != nil {
 		return nil, err
@@ -336,10 +345,10 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 		return nil, fmt.Errorf("jira base_url is required")
 	}
 
+	// A zero cap is uncapped: the walk streams, so its memory does not grow
+	// with the project and there is nothing to protect against by stopping
+	// early.
 	maxIssues := cfg.MaxIssues
-	if maxIssues <= 0 {
-		maxIssues = maxIssuesDefault
-	}
 
 	var state syncState
 	if len(rawState) != 0 {
@@ -356,12 +365,18 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 	incremental := watermark != ""
 	jql := buildJQL(cfg, watermark)
 
-	var (
-		out     []websource.RemotePage
-		maxSeen time.Time
-	)
+	var maxSeen time.Time
 
-	for start := 0; start < maxIssues; start += pageLimit {
+	capped := maxIssues > 0
+	truncated := false
+
+	for start := 0; ; start += pageLimit {
+		if capped && start >= maxIssues {
+			truncated = true
+
+			break
+		}
+
 		res, err := f.search(ctx, cfg, jql, start)
 		if err != nil {
 			return nil, err
@@ -383,7 +398,7 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 
 			teams := extractTeams(iss, cfg.TeamFields)
 
-			out = append(out, websource.RemotePage{
+			if err := emit(websource.RemotePage{
 				// Slug is derived from the immutable issue key so ticket
 				// updates map to the same markdown file across syncs.
 				Slug:      strings.ToLower(iss.Key),
@@ -392,13 +407,19 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 				Teams:     teams,
 				UpdatedAt: parseJiraTime(iss.Fields.Updated),
 				Markdown:  renderIssue(iss, teams),
-			})
+			}); err != nil {
+				return nil, err
+			}
 		}
 
 		// Report raw discovery progress (issues scanned, not issues kept), so
 		// the bar tracks the remote paging rather than the label filter.
 		scanned := res.StartAt + len(res.Issues)
-		progress.Report(ctx, min(scanned, maxIssues), min(res.Total, maxIssues))
+		if capped {
+			progress.Report(ctx, min(scanned, maxIssues), min(res.Total, maxIssues))
+		} else {
+			progress.Report(ctx, scanned, res.Total)
+		}
 
 		if len(res.Issues) == 0 || scanned >= res.Total {
 			break
@@ -413,6 +434,12 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 		nextWatermark = maxSeen.Add(-time.Minute).Format(jiraTimeLayout)
 	}
 
+	// A truncated full pass still counts as "attempted" so the watermark is
+	// allowed to advance on the next run. Retrying the full pass instead would
+	// clear the watermark every time and re-walk the same prefix forever,
+	// leaving every ticket past the cap permanently unsynced. The cost of that
+	// choice — deletions are never reconciled on a capped collection — is
+	// carried by Complete below, not hidden.
 	fullAt := state.FullAt
 	if full {
 		fullAt = time.Now()
@@ -423,10 +450,14 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 		return nil, fmt.Errorf("encode jira sync state; %w", err)
 	}
 
+	if truncated {
+		slog.Warn("jira sync hit max_issues; deletions will not be reconciled this run",
+			"source", col.Name, "max_issues", maxIssues)
+	}
+
 	return &websource.FetchResult{
-		Pages:       out,
-		Incremental: incremental,
-		State:       nextState,
+		Complete: !incremental && !truncated,
+		State:    nextState,
 	}, nil
 }
 

@@ -168,19 +168,34 @@ type RemotePage struct {
 	Err error
 }
 
-// FetchResult is the outcome of one fetch. Pages are the items returned this
-// run. Incremental marks a partial fetch (only items changed since the last
-// sync): the manager then upserts only those items and must NOT prune records
-// it did not see, because unseen means unchanged, not deleted. Removed lists
-// slugs the provider positively knows no longer match (so they can be pruned
-// even in incremental mode). State is an opaque provider watermark the manager
-// persists back onto the collection and hands to the next fetch.
+// FetchResult is the outcome of one fetch. The pages themselves are streamed to
+// the emit callback during the fetch rather than returned here, so a collection
+// of any size costs the same memory.
+//
+// Complete is a guarantee about what was emitted, and it is the only thing that
+// licenses deletion: it means every item the collection currently contains was
+// emitted this run, so a stored record that was not seen is genuinely gone
+// remotely. It must be false for an incremental fetch (unseen means unchanged,
+// not deleted) and equally false for a full fetch that did not finish — one cut
+// short by a cap, a provider limit or any other early exit. A truncated sweep
+// that claims completeness makes the manager delete every record beyond the cut
+// and re-embed it on the next sync.
+//
+// Removed lists slugs the provider positively knows no longer match; they are
+// pruned regardless of Complete.
+//
+// State is an opaque provider watermark the manager persists back onto the
+// collection and hands to the next fetch.
 type FetchResult struct {
-	Pages       []RemotePage
-	Incremental bool
-	Removed     []string
-	State       json.RawMessage
+	Complete bool
+	Removed  []string
+	State    json.RawMessage
 }
+
+// Emit receives one fetched page. Returning an error aborts the fetch, which
+// must propagate the error unchanged so the manager can tell a provider failure
+// (retry later, do not advance the watermark) from a sink failure.
+type Emit func(RemotePage) error
 
 // Fetcher lists and converts the current remote pages of one collection.
 // Implementations live in per-type subpackages. pages carries the persisted
@@ -188,6 +203,12 @@ type FetchResult struct {
 // may ignore them. state is the provider watermark returned by the previous
 // fetch (nil on first run); providers that support incremental sync use it to
 // fetch only what changed and return an advanced State.
+//
+// Pages are handed to emit as they are converted instead of being accumulated
+// and returned. A provider must not buffer the whole collection: a space or
+// project of any size then costs the same memory, which is what lets a full
+// sweep run to completion instead of being capped — and only a sweep that
+// completes may report Complete.
 type Fetcher interface {
 	// Validate checks provider config before a collection is persisted.
 	Validate(config json.RawMessage) error
@@ -196,7 +217,7 @@ type Fetcher interface {
 	MergeConfig(current, update json.RawMessage) (json.RawMessage, error)
 	// ConfigView returns a JSON-safe, redacted provider config for REST/UI.
 	ConfigView(config json.RawMessage) any
-	Fetch(ctx context.Context, col *Collection, pages []*Page, state json.RawMessage) (*FetchResult, error)
+	Fetch(ctx context.Context, col *Collection, pages []*Page, state json.RawMessage, emit Emit) (*FetchResult, error)
 }
 
 // nameRe restricts collection names to something safe for directories, URLS

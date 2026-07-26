@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -29,8 +30,6 @@ import (
 const (
 	// pageLimit is the REST page size for content listing.
 	pageLimit = 50
-	// maxPages caps a space sync so a runaway space cannot grind the system.
-	maxPages = 5000
 )
 
 // Fetcher syncs one Confluence space per collection.
@@ -69,6 +68,16 @@ type Config struct {
 	// non-incremental pass runs to reconcile remotely-deleted pages. Empty or
 	// invalid uses the default (24h).
 	FullResyncEvery types.Null[string] `json:"full_resync_every,omitempty"`
+
+	// MaxPages caps how many results a single sync walks; 0 (the default) is
+	// uncapped. Pages are streamed as they are converted, so the walk costs
+	// the same memory at any size and the cap exists only to bound the time
+	// and API spend of one run against a misconfigured query.
+	//
+	// A capped run cannot reconcile deletions: it reports an incomplete sweep,
+	// which stops the manager from reading "not seen" as "deleted remotely".
+	// Set it only if you want that trade.
+	MaxPages types.Null[int] `json:"max_pages,omitempty"`
 }
 
 // resolvedConfig is the plain, validated view of a Config used by the sync
@@ -84,6 +93,7 @@ type resolvedConfig struct {
 	IncludeLabels   []string
 	ExcludeLabels   []string
 	FullResyncEvery string
+	MaxPages        int
 }
 
 // resolve flattens the nullable config into plain values with defaults applied.
@@ -103,6 +113,7 @@ func (c Config) resolve() resolvedConfig {
 		IncludeLabels:   c.IncludeLabels.ValueOrZero(),
 		ExcludeLabels:   c.ExcludeLabels.ValueOrZero(),
 		FullResyncEvery: strings.TrimSpace(c.FullResyncEvery.ValueOrZero()),
+		MaxPages:        c.MaxPages.ValueOrZero(),
 	}
 }
 
@@ -116,6 +127,7 @@ type configView struct {
 	IncludeLabels   []string `json:"include_labels,omitempty"`
 	ExcludeLabels   []string `json:"exclude_labels,omitempty"`
 	FullResyncEvery string   `json:"full_resync_every,omitempty"`
+	MaxPages        int      `json:"max_pages,omitempty"`
 }
 
 // fullResyncEvery parses the configured interval, falling back to the default.
@@ -199,6 +211,7 @@ func (f *Fetcher) MergeConfig(current, update json.RawMessage) (json.RawMessage,
 		next.IncludeLabels = websource.MergeNull(next.IncludeLabels, prev.IncludeLabels)
 		next.ExcludeLabels = websource.MergeNull(next.ExcludeLabels, prev.ExcludeLabels)
 		next.FullResyncEvery = websource.MergeNull(next.FullResyncEvery, prev.FullResyncEvery)
+		next.MaxPages = websource.MergeNull(next.MaxPages, prev.MaxPages)
 
 		// Tokens are write-only: an absent or blank incoming token keeps the
 		// stored one; only a non-empty value replaces it.
@@ -231,6 +244,7 @@ func (f *Fetcher) ConfigView(raw json.RawMessage) any {
 		IncludeRoot:   &includeRoot,
 		IncludeLabels: cfg.IncludeLabels, ExcludeLabels: cfg.ExcludeLabels,
 		FullResyncEvery: cfg.FullResyncEvery,
+		MaxPages:        cfg.MaxPages,
 	}
 }
 
@@ -316,7 +330,12 @@ type syncState struct {
 // lastmodified) and returns an advanced watermark, so a large tree is not
 // re-listed, re-fetched or re-embedded every cycle. The persisted page records
 // are ignored: Confluence is a discovery source, the remote tree is the truth.
-func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*websource.Page, rawState json.RawMessage) (*websource.FetchResult, error) {
+//
+// Pages are emitted as they are converted, so a space of any size is walked in
+// constant memory and a full sweep can run to completion. Completion is what is
+// reported back: only a full (non-incremental) walk that reached the end of the
+// result set claims Complete, because only then does "not seen" mean "deleted".
+func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*websource.Page, rawState json.RawMessage, emit websource.Emit) (*websource.FetchResult, error) {
 	cfg, err := decodeConfig(col.Config)
 	if err != nil {
 		return nil, err
@@ -344,13 +363,21 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 	}
 	incremental := watermark != ""
 
-	var (
-		out     []websource.RemotePage
-		maxSeen time.Time
-	)
+	var maxSeen time.Time
+
+	// A zero cap is uncapped: the walk streams, so its memory does not grow
+	// with the space and there is nothing to protect against by stopping early.
+	capped := cfg.MaxPages > 0
+	truncated := false
 
 	next := firstEndpoint(cfg, watermark)
-	for count := 0; next != "" && count < maxPages; {
+	for count := 0; next != ""; {
+		if capped && count >= cfg.MaxPages {
+			truncated = true
+
+			break
+		}
+
 		list, err := f.listContent(ctx, cfg, base+next)
 		if err != nil {
 			return nil, err
@@ -367,7 +394,9 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 				continue
 			}
 
-			out = append(out, pageToRemote(base, page))
+			if err := emit(pageToRemote(base, page)); err != nil {
+				return nil, err
+			}
 		}
 
 		// Confluence pages a cursor without publishing a result-set size, so
@@ -383,10 +412,12 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 	// modified since the watermark.
 	if cfg.RootPage != "" && cfg.IncludeRoot {
 		if root, err := f.fetchOne(ctx, cfg, base, cfg.RootPage); err != nil {
-			out = append(out, websource.RemotePage{
+			if eerr := emit(websource.RemotePage{
 				Slug: cfg.RootPage + "-root",
 				Err:  fmt.Errorf("fetch root page %s; %w", cfg.RootPage, err),
-			})
+			}); eerr != nil {
+				return nil, eerr
+			}
 		} else {
 			w := parseConfluenceTime(root.Version.When)
 			if w.After(maxSeen) {
@@ -394,7 +425,9 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 			}
 			rootChanged := !incremental || !w.Before(parseConfluenceTime(watermark))
 			if rootChanged && labelSelected(*root, cfg.IncludeLabels, cfg.ExcludeLabels) {
-				out = append(out, pageToRemote(base, *root))
+				if err := emit(pageToRemote(base, *root)); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
@@ -407,6 +440,12 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 		nextWatermark = maxSeen.Add(-time.Minute).Format(confluenceTimeLayout)
 	}
 
+	// A truncated full pass still counts as "attempted" so the watermark is
+	// allowed to advance on the next run. Retrying the full pass instead would
+	// clear the watermark every time and re-walk the same prefix forever,
+	// leaving everything past the cap permanently unsynced. The cost of that
+	// choice — deletions are never reconciled on a capped collection — is
+	// carried by Complete below, not hidden.
 	fullAt := state.FullAt
 	if full {
 		fullAt = time.Now()
@@ -417,10 +456,14 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 		return nil, fmt.Errorf("encode confluence sync state; %w", err)
 	}
 
+	if truncated {
+		slog.Warn("confluence sync hit max_pages; deletions will not be reconciled this run",
+			"source", col.Name, "max_pages", cfg.MaxPages)
+	}
+
 	return &websource.FetchResult{
-		Pages:       out,
-		Incremental: incremental,
-		State:       nextState,
+		Complete: !incremental && !truncated,
+		State:    nextState,
 	}, nil
 }
 

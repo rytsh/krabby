@@ -705,10 +705,16 @@
         <input class="input" type="password" bind:value={embedKey} placeholder="leave blank to keep" />
       </label>
       <label class="flex flex-col gap-1 text-[13px] text-dim">
-        Embedding dim (0 = infer)
+        Embedding dim (0 = model default)
         <input class="input" type="number" bind:value={docsCfg.embed_dim} />
       </label>
     </div>
+    <p class="mt-2 text-[12px] text-faint">
+      The dim is requested from the provider. On a Matryoshka model (Gemini Embedding 2 accepts
+      128–3072, text-embedding-3 likewise) a narrower vector keeps most of its accuracy and cuts
+      vector memory proportionally. Providers that do not support it stay at their native width —
+      test the embedder and check the reported dim. Changing the dim rebuilds the index.
+    </p>
 
     <!-- Source-code embeddings -->
     <div class="mb-2 mt-6 flex items-center justify-between">
@@ -750,7 +756,7 @@
         <input class="input" type="password" bind:value={codeEmbedKey} placeholder="leave blank to keep" />
       </label>
       <label class="flex flex-col gap-1 text-[13px] text-dim">
-        Code embedding dim (0 = infer)
+        Code embedding dim (0 = model default)
         <input class="input" type="number" bind:value={docsCfg.code_embed_dim} />
       </label>
       <label class="flex flex-col gap-1 text-[13px] text-dim">

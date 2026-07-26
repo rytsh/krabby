@@ -1,5 +1,8 @@
 bin/
-dist/
+# Anchored to the repo root on purpose: a bare `dist/` also matches
+# internal/server/dist/, and git never descends into an excluded directory, so
+# the `!internal/server/dist/.gitkeep` negation below would silently do nothing.
+/dist/
 krabby.yaml
 krabby.toml
 .env

@@ -515,8 +515,9 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 	defer m.clearActivity(scope, "sync")
 
 	// Progress is published throughout the sync so the UI can show live state.
-	// The fetch phase count is unknown up front (the provider streams pages), so
-	// it is indeterminate; the index phase below reports embedded/total chunks.
+	// Fetching and persisting are one step — a page is written as it arrives —
+	// so they share the fetch phase, reported by the provider as it walks; the
+	// index phase below then reports embedded/total chunks.
 	m.setProgress(scope, Progress{Phase: "fetch"})
 	// The sync owns the scope's phases end to end, so clear them all: an early
 	// return between phases must not leave a stale bar on screen.
@@ -547,16 +548,6 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 		m.setProgress(scope, Progress{Phase: "fetch", Done: done, Total: total})
 	})
 
-	result, err := fetcher.Fetch(fetchCtx, col, pages, col.State)
-	if err != nil {
-		return fail(fmt.Errorf("fetch %s; %w", name, err))
-	}
-
-	// Fetching is done; hand over to the write phase with the concrete page
-	// count the provider returned this run.
-	m.clearProgress(scope, "fetch")
-	m.setProgress(scope, Progress{Phase: "write", Done: 0, Total: len(result.Pages)})
-
 	dir := m.sourcesDir(name)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fail(fmt.Errorf("mkdir %s; %w", dir, err))
@@ -577,13 +568,19 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 	updatedAt := map[string]time.Time{}
 	now := time.Now()
 
-	total := len(result.Pages)
-	for i, remote := range result.Pages {
-		// Report write-phase progress every so often so a big source shows a
-		// moving bar without thrashing the progress map on every page.
-		if i%25 == 0 {
-			m.setProgress(scope, Progress{Phase: "write", Done: i, Total: total})
-		}
+	// Pages are written as the provider streams them, so a 35k-ticket project
+	// never sits in memory as one slice. Only the small per-page bookkeeping
+	// below (slugs and paths) accumulates.
+	//
+	// writeErr carries a sink failure back out: the fetcher propagates it
+	// verbatim, and the caller must not label it as a fetch failure.
+	var (
+		written  int
+		writeErr error
+	)
+
+	write := func(remote websource.RemotePage) error {
+		written++
 		seen[remote.Slug] = true
 
 		rec := existing[remote.Slug]
@@ -604,7 +601,7 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 			rec.LastError = remote.Err.Error()
 			_ = m.webStore.UpsertPage(ctx, rec)
 
-			continue
+			return nil
 		}
 
 		if remote.Title != "" {
@@ -621,7 +618,9 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 
 		if hash != rec.Hash || !fileExists(file) {
 			if err := os.WriteFile(file, []byte(markdown), 0o644); err != nil {
-				return fail(fmt.Errorf("write %s; %w", file, err))
+				writeErr = fmt.Errorf("write %s; %w", file, err)
+
+				return writeErr
 			}
 
 			rec.Hash = hash
@@ -632,37 +631,57 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 		rec.LastError = ""
 
 		if err := m.webStore.UpsertPage(ctx, rec); err != nil {
-			return fail(err)
+			writeErr = err
+
+			return writeErr
+		}
+
+		// Keep the record available to the reconcile pass below: it is now the
+		// current state of this page, and for a new page it is the only copy.
+		existing[remote.Slug] = rec
+
+		return nil
+	}
+
+	result, err := fetcher.Fetch(fetchCtx, col, pages, col.State, write)
+	if writeErr != nil {
+		return fail(writeErr)
+	}
+	if err != nil {
+		return fail(fmt.Errorf("fetch %s; %w", name, err))
+	}
+
+	m.clearProgress(scope, "fetch")
+
+	// Pruning of vanished records. Deleting a stored page because it was not
+	// seen is only sound when the provider enumerated the whole collection, so
+	// it hangs entirely off the Complete guarantee: an incremental fetch
+	// (unseen means unchanged) and a truncated sweep (unseen means past the
+	// cap) both leave the stored set alone and prune only what the provider
+	// explicitly reported as removed.
+	prune := map[string]*websource.Page{}
+
+	for _, slug := range result.Removed {
+		if rec := existing[slug]; rec != nil && !seen[slug] {
+			prune[slug] = rec
 		}
 	}
 
-	// Pruning of vanished records. In a full discovery fetch, any record not
-	// seen this run is gone. In an incremental fetch, unseen means unchanged,
-	// so only the provider's explicit Removed list is pruned.
-	if col.Type != websource.TypePages {
-		var prune []*websource.Page
-		if result.Incremental {
-			for _, slug := range result.Removed {
-				if rec := existing[slug]; rec != nil {
-					prune = append(prune, rec)
-				}
-			}
-		} else {
-			for slug, rec := range existing {
-				if !seen[slug] {
-					prune = append(prune, rec)
-				}
+	if result.Complete {
+		for slug, rec := range existing {
+			if !seen[slug] {
+				prune[slug] = rec
 			}
 		}
+	}
 
-		for _, rec := range prune {
-			if err := m.webStore.DeletePage(ctx, rec.ID); err != nil {
-				return fail(err)
-			}
-
-			_ = os.Remove(filepath.Join(dir, rec.Slug+".md"))
-			removedPaths = append(removedPaths, rec.Slug+".md")
+	for _, rec := range prune {
+		if err := m.webStore.DeletePage(ctx, rec.ID); err != nil {
+			return fail(err)
 		}
+
+		_ = os.Remove(filepath.Join(dir, rec.Slug+".md"))
+		removedPaths = append(removedPaths, rec.Slug+".md")
 	}
 
 	// Reconcile the index against every page currently on disk, not just the
@@ -735,8 +754,8 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 	}
 
 	slog.Info("web source synced", "source", name,
-		"fetched", len(result.Pages), "changed", len(changedPaths),
-		"removed", len(removedPaths), "incremental", result.Incremental, "indexed", indexOK)
+		"fetched", written, "changed", len(changedPaths),
+		"removed", len(removedPaths), "complete", result.Complete, "indexed", indexOK)
 
 	return nil
 }

@@ -24,13 +24,24 @@ func TestFetchCustomPages(t *testing.T) {
 	fetcher := New(func(context.Context, string) (string, string, error) {
 		return "", "secret", nil
 	})
+	var remotes []websource.RemotePage
 	res, err := fetcher.Fetch(context.Background(), &websource.Collection{Name: "wine"}, []*websource.Page{
 		{Slug: "fermentation", URL: server.URL + "/fermentation"},
-	}, nil)
+	}, nil, func(p websource.RemotePage) error {
+		remotes = append(remotes, p)
+
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	remotes := res.Pages
+
+	// A URL-list collection has no remote inventory to enumerate, so it must
+	// never license the manager to delete registered pages.
+	if res.Complete {
+		t.Fatal("pages fetcher claimed a complete inventory")
+	}
+
 	if len(remotes) != 1 || remotes[0].Err != nil {
 		t.Fatalf("remotes=%+v", remotes)
 	}
