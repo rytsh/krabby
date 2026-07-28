@@ -32,7 +32,7 @@ build-container: ## Build the amd64 container image with a test tag
 	GOOS=linux GOARCH=amd64 goreleaser build --snapshot --clean --single-target
 	mkdir -p dist/docker-context/linux/amd64
 	cp dist/krabby_linux_amd64_v1/krabby dist/docker-context/linux/amd64/krabby
-	docker build --platform=linux/amd64 -t krabby:test -f Dockerfile dist/docker-context/
+	docker build --platform=linux/amd64 --build-arg TARGETPLATFORM=linux/amd64 -t krabby:test -f Dockerfile dist/docker-context/
 
 .PHONY: help
 help: ## Show this help
