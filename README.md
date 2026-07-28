@@ -34,7 +34,7 @@ Open [http://localhost:8080](http://localhost:8080), then add repositories from
 the UI. The `krabby-data` directory keeps repositories, indexes, and settings
 between container restarts.
 
-> For base path use **KRABBY_BASE_PATH** environment variable, e.g. `-e KRABBY_BASE_PATH=/krabby` to run behind a reverse proxy.
+> For base path use **KRABBY_SERVER_BASE_PATH** environment variable, e.g. `-e KRABBY_SERVER_BASE_PATH=/krabby` to run behind a reverse proxy.
 
 ## Add MCP
 
