@@ -105,9 +105,15 @@ func (g *Git) SetRemoteURL(ctx context.Context, dir, url string) error {
 	return err
 }
 
-// Fetch updates remote refs.
+// Fetch updates remote refs, including tags.
+//
+// --tags is explicit rather than left to git's default tag-following: the
+// clones are --single-branch, so the default only picks up tags reachable from
+// that one branch's new history. Release tags are how a caller names "the
+// version before this one", and a tag list that silently lags the remote is
+// worse than none.
 func (g *Git) Fetch(ctx context.Context, dir string, auth *credentials.Auth) error {
-	_, err := g.run(ctx, dir, auth, "fetch", "--prune", "origin")
+	_, err := g.run(ctx, dir, auth, "fetch", "--prune", "--tags", "origin")
 
 	return err
 }

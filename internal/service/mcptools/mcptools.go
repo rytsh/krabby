@@ -11,6 +11,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/rytsh/krabby/internal/service/credentials"
+	"github.com/rytsh/krabby/internal/service/gitops"
 	"github.com/rytsh/krabby/internal/service/manager"
 	"github.com/rytsh/krabby/internal/service/registry"
 )
@@ -25,7 +26,8 @@ Tool selection (roughly what to reach for, in order):
 - Use search_code first for symbols, paths, literals, definitions, usages, and implementation locations. Use normal mode for exact text and semantic mode for conceptual source search.
 - Use read_file to view the actual source behind a result (node 'src' fields give the path); reads are sandboxed to the clone and paginated.
 - Use query_graph for architecture, dependencies, call/data flow, and relationships across files. It is not a keyword or symbol search.
-- Use git_blame to attribute lines to their last commit (who changed a snippet, when, in which commit); pass start_line/end_line to blame just a range.
+- Use git_blame to attribute lines to a commit (start_line/end_line blames a range), then git_diff with that sha to see what it changed.
+- Use git_log with from/to to compare releases or follow one file; list_refs gives tag names.
 - Use search_docs for documentation and knowledge; it covers both generated repo docs and connected web sources (Confluence, Jira, pages). Hybrid mode is the default; use lexical for exact keys/titles/identifiers and semantic for conceptual questions. Pass the user's full question rather than hand-picked keywords: it is rewritten for BM25 into an OR of its words, and keys, error codes and versions stay required. Scope a web source with repo=web:<collection>.
 - Use list_* only when an identifier is unknown or the user explicitly requests an inventory. Do not exhaust pages or request a recursive file tree without a clear need.
 - Use get_* tools only after a search/query identifies the target.
@@ -65,6 +67,7 @@ func New(mgr *manager.Manager, version string, waitTimeout time.Duration, profil
 	addManagementTools(server, mgr, waitTimeout)
 	addQueryTools(server, mgr)
 	addFileTools(server, mgr)
+	addHistoryTools(server, mgr)
 	addDocTools(server, mgr, profile == ToolProfileFull)
 	if profile == ToolProfileFull {
 		addCredentialTools(server, mgr)
@@ -88,13 +91,13 @@ type addRepoArgs struct {
 // selection and documentation prompt, shared by add_repo and
 // set_repo_overrides.
 type repoOverrideArgs struct {
-	Include      []string `json:"include,omitempty" jsonschema:"globs selecting which files of THIS repo are indexed and documented; REPLACES the built-in allowlist for this repo. Use include_extra instead unless you mean 'only these files'"`
-	IncludeExtra []string `json:"include_extra,omitempty" jsonschema:"globs ADDED to the built-in allowlist for this repo, e.g. ['**/*.yaml'] to index every YAML in a deployment repository without losing the default source extensions"`
-	Exclude      []string `json:"exclude,omitempty" jsonschema:"globs skipped in this repo; applied last and wins over the include rules"`
-	GraphExclude []string `json:"graph_exclude,omitempty" jsonschema:"gitignore-style patterns kept out of THIS repo's knowledge graph, unioned with the install-wide ones. Separate from exclude: generated code is often worth searching but only adds noise to the graph. Changing it rebuilds the graph"`
+	Include      []string `json:"include,omitempty" jsonschema:"globs REPLACING the built-in file allowlist for this repo"`
+	IncludeExtra []string `json:"include_extra,omitempty" jsonschema:"globs ADDED to the allowlist, e.g. ['**/*.yaml']; prefer this over include"`
+	Exclude      []string `json:"exclude,omitempty" jsonschema:"globs skipped; applied last and wins"`
+	GraphExclude []string `json:"graph_exclude,omitempty" jsonschema:"patterns kept out of the knowledge graph; rebuilds it"`
 
-	DocsPrompt      string `json:"docs_prompt,omitempty" jsonschema:"system prompt REPLACING the default documentation prompt for this repo; the default carries formatting constraints a replacement drops, so prefer docs_prompt_extra"`
-	DocsPromptExtra string `json:"docs_prompt_extra,omitempty" jsonschema:"extra instructions APPENDED to the documentation prompt for this repo, e.g. 'environments are separate compose files; render a markdown table of service, image and version per environment'"`
+	DocsPrompt      string `json:"docs_prompt,omitempty" jsonschema:"prompt REPLACING the default documentation prompt; prefer docs_prompt_extra"`
+	DocsPromptExtra string `json:"docs_prompt_extra,omitempty" jsonschema:"extra documentation instructions for this repo"`
 }
 
 func (a repoOverrideArgs) overrides() registry.Overrides {
@@ -271,12 +274,10 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 
 	addTool(server, &mcp.Tool{
 		Name: "set_repo_overrides",
-		Description: "Override the install-wide file selection and documentation prompt for ONE repository. " +
-			"Use it when a repo does not fit the defaults: a deployment repo whose content is compose/YAML rather than source " +
-			"(include_extra), or a repo whose documentation needs a specific shape (docs_prompt_extra). " +
-			"The payload replaces the repo's whole override set, so send every field you want to keep; " +
-			"an empty payload clears the overrides and returns the repo to the install-wide settings. " +
-			"A change re-indexes and re-documents that repository in the background.",
+		Description: "Override the install-wide file selection and documentation prompt for ONE repository, for repos that do not fit the defaults: " +
+			"a deployment repo holding compose/YAML rather than source (include_extra), or one whose docs need a specific shape (docs_prompt_extra). " +
+			"The payload replaces the whole override set, so send every field you want to keep; an empty payload clears them. " +
+			"A change rebuilds that repository's index and docs in the background.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args setRepoOverridesArgs) (*mcp.CallToolResult, any, error) {
 		repo, err := mgr.SetRepoOverrides(ctx, args.Repo, args.overrides())
 		if err != nil {
@@ -769,6 +770,86 @@ type gitBlameArgs struct {
 	StartLine int    `json:"start_line,omitempty" jsonschema:"first line to blame (1-based); omit or <=0 to blame the whole file"`
 	EndLine   int    `json:"end_line,omitempty" jsonschema:"last line to blame (inclusive); omit or <=0 to blame from start_line to end of file"`
 	Snapshot  string `json:"snapshot,omitempty" jsonschema:"snapshot token from an earlier read_file/list_files call; pass it to blame the same commit"`
+}
+
+// ---- git history tools ------------------------------------------------------
+
+// The jsonschema strings below are deliberately terse: every tool schema is
+// sent on each session's tools/list, and the package budgets that payload
+// (see server_test.go). Nuance that only matters once a call is being made
+// belongs in the tool Description, not in every field.
+//
+// None of these take a snapshot token, unlike read_file and git_blame. Those
+// address content by position, which shifts between clone versions; history is
+// addressed by revision, which does not.
+type listRefsArgs struct {
+	Repo  string `json:"repo" jsonschema:"repository id (owner/name)"`
+	Kind  string `json:"kind,omitempty" jsonschema:"'tag' or 'branch'; omit for both"`
+	Limit int    `json:"limit,omitempty" jsonschema:"max refs (default/max 200)"`
+}
+
+type gitLogArgs struct {
+	Repo  string `json:"repo" jsonschema:"repository id (owner/name)"`
+	From  string `json:"from,omitempty" jsonschema:"start revision (tag/branch/sha), exclusive"`
+	To    string `json:"to,omitempty" jsonschema:"end revision, inclusive; omit for the branch head"`
+	Path  string `json:"path,omitempty" jsonschema:"repo-relative file or directory to follow"`
+	Skip  int    `json:"skip,omitempty" jsonschema:"commits to skip, for older pages"`
+	Limit int    `json:"limit,omitempty" jsonschema:"max commits (default/max 200)"`
+}
+
+type gitDiffArgs struct {
+	Repo  string `json:"repo" jsonschema:"repository id (owner/name)"`
+	From  string `json:"from,omitempty" jsonschema:"start revision, exclusive; omit to explain the single commit in 'to'"`
+	To    string `json:"to" jsonschema:"end revision, or the commit to explain"`
+	Path  string `json:"path,omitempty" jsonschema:"repo-relative path to narrow a large change set"`
+	Patch bool   `json:"patch,omitempty" jsonschema:"include the change text (off by default; a release-sized patch is large)"`
+}
+
+func addHistoryTools(server *mcp.Server, mgr *manager.Manager) {
+	addTool(server, &mcp.Tool{
+		Name: "list_refs",
+		Description: "List a repository's tags and branches, newest first. Call it for exact version names before git_log or git_diff. " +
+			"Only the tracked branch is fetched, so revisions must be reachable from it.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args listRefsArgs) (*mcp.CallToolResult, any, error) {
+		res, err := mgr.RepoRefs(ctx, args.Repo, args.Kind, args.Limit)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return jsonResult(res), nil, nil
+	})
+
+	addTool(server, &mcp.Tool{
+		Name: "git_log",
+		Description: "Commit history: author, date, full message and touched files. from+to reads what landed between two releases; path follows one file. " +
+			"Metadata only - use git_diff for the changes.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args gitLogArgs) (*mcp.CallToolResult, any, error) {
+		res, err := mgr.RepoLog(ctx, args.Repo, gitops.LogOptions{
+			From:  args.From,
+			To:    args.To,
+			Path:  args.Path,
+			Skip:  args.Skip,
+			Limit: args.Limit,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return jsonResult(res), nil, nil
+	})
+
+	addTool(server, &mcp.Tool{
+		Name: "git_diff",
+		Description: "What changed between two revisions, or what one commit changed when from is omitted - this turns a git_blame sha into an explanation. " +
+			"Returns the changed files and their status; patch=true adds the change text, path narrows a large change set.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args gitDiffArgs) (*mcp.CallToolResult, any, error) {
+		res, err := mgr.RepoDiff(ctx, args.Repo, args.From, args.To, args.Path, args.Patch)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return jsonResult(res), nil, nil
+	})
 }
 
 func addFileTools(server *mcp.Server, mgr *manager.Manager) {

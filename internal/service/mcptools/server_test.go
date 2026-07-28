@@ -12,14 +12,41 @@ import (
 	"github.com/rytsh/krabby/internal/service/coderag"
 )
 
+// toolsPayloadBudget bounds the standard profile's tools/list response. Every
+// MCP session receives it in full before any work starts, and it occupies the
+// model's context whether or not a tool is used — provider-side prompt caching
+// lowers the price but not the occupancy.
+//
+// The budget is expressed in bytes because that is what the test can measure
+// without a tokenizer, but the number that matters is tokens. Measured with
+// tiktoken over the actual payload:
+//
+//	29,392 B  ->  6,049 tokens (cl100k_base) / 6,254 (o200k_base)
+//	 2,399 B  ->    488 tokens  (serverInstructions, on top of this)
+//
+// That is ~4.9 bytes per token, better than plain prose, because the payload is
+// mostly repeated JSON scaffolding and ordinary English — BPE collapses both.
+// So this budget is roughly 6,200 tokens, ~3% of a 200k context and ~20% of a
+// 32k one, paid on every session.
+//
+// Raising it is a decision, not a formality: check first whether a tool
+// description is carrying detail that belongs in the handler's error messages,
+// or whether a jsonschema field is explaining nuance that only matters once a
+// call is being made.
+const (
+	toolsPayloadBudget = 30_000
+	// bytesPerToken is the measured ratio above, for reporting only.
+	bytesPerToken = 5
+)
+
 func TestToolProfiles(t *testing.T) {
 	tests := []struct {
 		profile string
 		count   int
 		admin   bool
 	}{
-		{profile: ToolProfileStandard, count: 30},
-		{profile: ToolProfileFull, count: 44, admin: true},
+		{profile: ToolProfileStandard, count: 33},
+		{profile: ToolProfileFull, count: 47, admin: true},
 	}
 
 	for _, tt := range tests {
@@ -49,8 +76,9 @@ func TestToolProfiles(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if len(raw) > 30_000 {
-					t.Fatalf("standard tools/list payload grew to %d bytes", len(raw))
+				if len(raw) > toolsPayloadBudget {
+					t.Fatalf("standard tools/list payload grew to %d bytes (~%d tokens), budget %d",
+						len(raw), len(raw)/bytesPerToken, toolsPayloadBudget)
 				}
 			}
 
@@ -86,11 +114,15 @@ func TestToolProfiles(t *testing.T) {
 // serverInstructionsBudget bounds the server-level guidance. Every MCP session
 // pays for it in full, so it must stay a tool-selection map and never grow into
 // per-tool documentation, which belongs in each tool's Description.
+//
+// 2,400 bytes is roughly 490 tokens (see toolsPayloadBudget for the measured
+// bytes-per-token ratio), on top of the tools/list payload.
 const serverInstructionsBudget = 2400
 
 func TestModelGuidanceIsSearchFirstAndBounded(t *testing.T) {
 	if len(serverInstructions) > serverInstructionsBudget {
-		t.Fatalf("server instructions grew to %d bytes, budget %d", len(serverInstructions), serverInstructionsBudget)
+		t.Fatalf("server instructions grew to %d bytes (~%d tokens), budget %d",
+			len(serverInstructions), len(serverInstructions)/bytesPerToken, serverInstructionsBudget)
 	}
 	for _, phrase := range []string{"Use search_code first", "Use list_* only", "Always pass repo"} {
 		if !strings.Contains(serverInstructions, phrase) {
