@@ -494,7 +494,8 @@ type Store struct {
 	mcpBucket *bw.Bucket[MCPKey]
 }
 
-// settingsSchemaVersion v9 adds the hybrid docs-search knobs
+// settingsSchemaVersion v10 adds docs_include_extra and
+// code_rag_include_extra. v9 added the hybrid docs-search knobs
 // (rag_hybrid_candidates, rag_hybrid_rrf_k, rag_hybrid_weight_lexical,
 // rag_hybrid_weight_semantic) and rag_lexical_stop_words; zero values there
 // mean "use the built-in default", so migrated records need no backfill. v8
@@ -505,7 +506,7 @@ type Store struct {
 // docs_summary_model; v4 docs_max_groups; v3 embed_concurrency /
 // code_embed_concurrency. Bumping the version lets bw migrate existing settings
 // records in place.
-const settingsSchemaVersion = 9
+const settingsSchemaVersion = 10
 
 // New opens the settings bucket. If no record exists yet, seed is persisted as
 // the initial configuration (seeded from file/env config by the caller).
