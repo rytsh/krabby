@@ -152,7 +152,7 @@ func TestCodeRAGIndexAndRetrieve(t *testing.T) {
 	})
 
 	svc := New(cfg, emb, store, nil, nil)
-	if err := svc.Index(context.Background(), "acme/app", root); err != nil {
+	if err := svc.Index(context.Background(), "acme/app", root, config.Filters{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -234,7 +234,7 @@ func TestIndexChangedIncremental(t *testing.T) {
 
 	svc := New(cfg, emb, store, nil, text)
 	ctx := context.Background()
-	if err := svc.Index(ctx, "acme/app", root); err != nil {
+	if err := svc.Index(ctx, "acme/app", root, config.Filters{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -245,7 +245,7 @@ func TestIndexChangedIncremental(t *testing.T) {
 	}
 	write("greet.go", "package greet\n\nfunc Hello() string { return \"hi\" }\n")
 
-	if err := svc.IndexChanged(ctx, "acme/app", root, []string{"auth.go", "math.go", "greet.go"}); err != nil {
+	if err := svc.IndexChanged(ctx, "acme/app", root, []string{"auth.go", "math.go", "greet.go"}, config.Filters{}); err != nil {
 		t.Fatal(err)
 	}
 

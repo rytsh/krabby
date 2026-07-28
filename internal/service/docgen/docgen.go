@@ -67,6 +67,10 @@ const ManifestName = "docs-index.json"
 // DocName is the single comprehensive documentation file.
 const DocName = "documentation.md"
 
+// docsDirName is the in-clone directory krabby writes generated docs to when
+// no external docs root is configured; it is never itself documented.
+const docsDirName = "krabby-docs"
+
 // summariesDir holds the internal per-file summary cache inside the docs dir.
 // Files use a .sum extension so the RAG doc indexer (which walks *.md) skips them.
 const summariesDir = ".summaries"
@@ -233,7 +237,10 @@ type Generator interface {
 	// manifest into docsDir. It returns the manifest it wrote. When force is
 	// true the incremental caches are ignored: every per-file summary and the
 	// final documentation.md are regenerated even if nothing changed.
-	Generate(ctx context.Context, repo, clonePath, docsDir string, force bool) (*Manifest, error)
+	//
+	// over carries this repository's overrides of the install-wide file
+	// selection and prompt; the zero value inherits everything.
+	Generate(ctx context.Context, repo, clonePath, docsDir string, over config.DocsOverride, force bool) (*Manifest, error)
 }
 
 // llmGenerator is the default LLM-backed generator.
@@ -260,8 +267,10 @@ func New(cfg config.Docs, chat, summary *llm.Client, engine *graphquery.Engine) 
 
 // Generate implements the two-phase pipeline: incremental per-file summaries,
 // then one comprehensive documentation.md synthesized from them.
-func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir string, force bool) (*Manifest, error) {
-	files, err := g.selectFiles(clonePath)
+func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir string, over config.DocsOverride, force bool) (*Manifest, error) {
+	filters := g.cfg.Filters.Merge(over.Filters)
+
+	files, err := g.selectFiles(clonePath, filters)
 	if err != nil {
 		return nil, fmt.Errorf("select source files; %w", err)
 	}
@@ -279,7 +288,9 @@ func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir st
 	}
 
 	graph := g.loadGraph(clonePath)
-	promptHash := hashString(g.synthesisPrompt())
+	// The hash covers the effective prompt, so editing a repository's own
+	// prompt re-synthesizes that repository's documentation and nothing else.
+	promptHash := hashString(g.synthesisPrompt(over))
 
 	if err := os.MkdirAll(docsDir, 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir docs dir; %w", err)
@@ -352,7 +363,7 @@ func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir st
 	sort.Slice(summaries, func(i, j int) bool { return summaries[i].Path < summaries[j].Path })
 
 	// Synthesis: skip the LLM call when nothing changed and the doc exists.
-	docMeta, synthesized, synthErr := g.maybeSynthesize(ctx, repo, docsDir, graph, summaries, priorMan, regen, promptHash)
+	docMeta, synthesized, synthErr := g.maybeSynthesize(ctx, repo, docsDir, graph, summaries, priorMan, regen, promptHash, over)
 
 	var docs []DocMeta
 	if docMeta != nil {
@@ -813,6 +824,7 @@ func (g *llmGenerator) maybeSynthesize(
 	priorMan *Manifest,
 	regen int,
 	promptHash string,
+	over config.DocsOverride,
 ) (*DocMeta, bool, error) {
 	docAbs := filepath.Join(docsDir, DocName)
 
@@ -832,7 +844,7 @@ func (g *llmGenerator) maybeSynthesize(
 		return nil, false, fmt.Errorf("no source files to document")
 	}
 
-	system := g.synthesisPrompt()
+	system := g.synthesisPrompt(over)
 
 	var user strings.Builder
 	fmt.Fprintf(&user, "Repository: %s\n\n", repo)
@@ -866,12 +878,30 @@ func (g *llmGenerator) maybeSynthesize(
 	}, true, nil
 }
 
-func (g *llmGenerator) synthesisPrompt() string {
-	if strings.TrimSpace(g.cfg.Prompt) == "" {
-		return DefaultPrompt
+// synthesisPrompt resolves the system prompt for one repository: the most
+// specific replacement wins as the base, then the additive parts are appended
+// outermost-last so a repository's own instruction is the final word the model
+// reads.
+func (g *llmGenerator) synthesisPrompt(over config.DocsOverride) string {
+	base := strings.TrimSpace(over.Prompt)
+	if base == "" {
+		base = strings.TrimSpace(g.cfg.Prompt)
+	}
+	if base == "" {
+		base = DefaultPrompt
 	}
 
-	return g.cfg.Prompt
+	var b strings.Builder
+	b.WriteString(base)
+
+	for _, extra := range []string{g.cfg.PromptExtra, over.PromptExtra} {
+		if extra = strings.TrimSpace(extra); extra != "" {
+			b.WriteString("\n\nAdditional instructions for this repository (these take precedence over the general guidance above where they conflict):\n")
+			b.WriteString(extra)
+		}
+	}
+
+	return b.String()
 }
 
 // joinSummaries concatenates summary contents within a byte budget. When the
@@ -966,41 +996,48 @@ func cleanupStaleDocs(docsDir string, docs []DocMeta) {
 // the Include globs and none of the Exclude globs. When Include is empty a set of
 // sensible source extensions is documented. graphify-out, .git and vendor are
 // skipped by repofs.ListFiles.
-func (g *llmGenerator) selectFiles(clonePath string) ([]string, error) {
-	entries, err := repofs.ListFiles(clonePath, "", true)
-	if err != nil {
-		return nil, err
-	}
+// selectFiles picks the sources to document. It walks the clone rather than
+// listing it: repofs.ListFiles caps its result at MaxListEntries, which is
+// right for a UI listing and silently wrong here — a repository past the cap
+// would be documented from an arbitrary alphabetical prefix of itself, with
+// nothing in the output saying so.
+func (g *llmGenerator) selectFiles(clonePath string, filters config.Filters) ([]string, error) {
+	// Noise directories are pruned during the walk rather than filtered
+	// afterwards, so a vendored tree costs nothing to skip instead of being
+	// descended in full and discarded file by file.
+	noiseSkipped := len(filters.Include) == 0
 
 	var out []string
-	for _, e := range entries {
-		if e.IsDir {
-			continue
-		}
 
+	err := repofs.WalkFiles(clonePath, func(rel, name string) bool {
 		// Never document our own output.
-		if strings.HasPrefix(e.Path, "krabby-docs/") {
-			continue
+		if name == docsDirName {
+			return true
+		}
+		if noiseSkipped && docNoiseDirs[strings.ToLower(name)] {
+			return true
 		}
 
-		// When the user has not pinned an explicit Include set, skip test
-		// files, fixtures, mocks and dependency/noise directories by
-		// default. Documentation summarises what the system does, not its
-		// tests; including them bloats every per-file summary call and the
-		// final synthesis payload (a common cause of synthesis timeouts).
-		if len(g.cfg.Include) == 0 && isDocNoise(e.Path) {
-			continue
+		return matchAny(filters.Exclude, rel+"/")
+	}, func(rel string, _ int64) error {
+		// Documentation summarises what the system does, not its tests;
+		// including them bloats every per-file summary call and the final
+		// synthesis payload (a common cause of synthesis timeouts). An explicit
+		// Include means the user is in control, so the default is stepped over.
+		if noiseSkipped && isTestFileName(strings.ToLower(path.Base(rel))) {
+			return nil
 		}
 
-		if !g.matchInclude(e.Path) {
-			continue
+		if !matchInclude(rel, filters) || matchAny(filters.Exclude, rel) {
+			return nil
 		}
 
-		if g.matchExclude(e.Path) {
-			continue
-		}
+		out = append(out, rel)
 
-		out = append(out, e.Path)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	sort.Strings(out)
@@ -1008,17 +1045,28 @@ func (g *llmGenerator) selectFiles(clonePath string) ([]string, error) {
 	return out, nil
 }
 
-func (g *llmGenerator) matchInclude(rel string) bool {
-	if len(g.cfg.Include) == 0 {
-		return defaultIncludeExts[strings.ToLower(path.Ext(rel))] ||
-			defaultIncludeNames[strings.ToLower(path.Base(rel))]
+// matchInclude applies the resolved filters to one repo-relative path.
+// IncludeExtra is checked first because it is purely additive: it widens
+// whatever Include resolved to, so a repository can document one more family of
+// files without restating the whole allowlist.
+func matchInclude(rel string, filters config.Filters) bool {
+	if matchAny(filters.IncludeExtra, rel) {
+		return true
 	}
 
-	return matchAny(g.cfg.Include, rel)
-}
+	if len(filters.Include) > 0 {
+		return matchAny(filters.Include, rel)
+	}
 
-func (g *llmGenerator) matchExclude(rel string) bool {
-	return matchAny(g.cfg.Exclude, rel)
+	rel = strings.ToLower(rel)
+
+	// Deploy config is documented as well as indexed: which service runs which
+	// image version per environment is part of understanding a system, and for
+	// a deployment-only repository it is the only thing there — without it such
+	// a repo synthesizes documentation from no files at all.
+	return defaultIncludeExts[path.Ext(rel)] ||
+		defaultIncludeNames[path.Base(rel)] ||
+		repofs.DeployConfigFile(rel)
 }
 
 // matchAny reports whether rel matches any glob. A glob is matched against both
@@ -1092,20 +1140,6 @@ var docNoiseDirs = map[string]bool{
 	".git":         true,
 	"graphify-out": true,
 	"krabby-docs":  true,
-}
-
-// isDocNoise reports whether a repo-relative path should be excluded from
-// documentation by default: any file under a noise directory, or a test file
-// (Go *_test.go, JS/TS *.test.* / *.spec.*, Python test_*.py / *_test.py).
-func isDocNoise(rel string) bool {
-	segs := strings.Split(rel, "/")
-	for _, seg := range segs[:len(segs)-1] {
-		if docNoiseDirs[strings.ToLower(seg)] {
-			return true
-		}
-	}
-
-	return isTestFileName(strings.ToLower(path.Base(rel)))
 }
 
 // isTestFileName recognises common test-file naming conventions across the

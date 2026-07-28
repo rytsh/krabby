@@ -42,6 +42,116 @@
   // Generate on an up-to-date repo is a no-op. Force bypasses those caches.
   const forceable = new Set(["docs", "docs_index"]);
 
+  // Per-repo build settings: what this repo is actually indexed and documented
+  // with, and which level decided each value. The merge rules differ per field
+  // (include replaces, include_extra/exclude add), so the effective result is
+  // computed by the backend rather than re-derived here.
+  let settings = $state(null);
+  let showOverrides = $state(false);
+  let savingOverrides = $state(false);
+  let overridesForm = $state(emptyOverrides());
+
+  function emptyOverrides() {
+    return {
+      include: "",
+      include_extra: "",
+      exclude: "",
+      graph_exclude: "",
+      docs_prompt: "",
+      docs_prompt_extra: "",
+    };
+  }
+
+  function overridesFromRepo(r) {
+    const o = r?.overrides || {};
+    return {
+      include: (o.include || []).join(", "),
+      include_extra: (o.include_extra || []).join(", "),
+      exclude: (o.exclude || []).join(", "),
+      graph_exclude: (o.graph_exclude || []).join(", "),
+      docs_prompt: o.docs_prompt || "",
+      docs_prompt_extra: o.docs_prompt_extra || "",
+    };
+  }
+
+  async function loadSettings() {
+    try {
+      settings = await api.repoSettings(repoId);
+    } catch (e) {
+      error = e.message;
+    }
+  }
+
+  // Rows rendered in the read-only summary: label, effective value, and whether
+  // this repo is the reason it differs from the install-wide setting.
+  function settingsRows(st) {
+    if (!st) return [];
+    const eff = st.effective || {};
+    const over = st.overrides || {};
+    const list = (v) => (v?.length ? v.join(", ") : "");
+
+    return [
+      {
+        label: "Indexed files",
+        value: eff.code_include_is_default ? "built-in allowlist" : list(eff.code_include),
+        overridden: Boolean(over.include?.length),
+      },
+      { label: "Also indexed", value: list(eff.code_include_extra), overridden: Boolean(over.include_extra?.length) },
+      { label: "Skipped", value: list(eff.code_exclude), overridden: Boolean(over.exclude?.length) },
+      { label: "Graph ignores", value: list(eff.graph_exclude), overridden: Boolean(over.graph_exclude?.length) },
+      { label: "Docs prompt", value: eff.docs_prompt_source, overridden: eff.docs_prompt_source === "repo" },
+      {
+        label: "Extra doc rules",
+        value: eff.docs_prompt_extras?.length ? eff.docs_prompt_extras.join(" + ") : "none",
+        overridden: (eff.docs_prompt_extras || []).includes("repo"),
+      },
+    ].filter((r) => r.value);
+  }
+
+  function splitGlobs(s) {
+    return s
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean);
+  }
+
+  function hasOverrides(r) {
+    const o = r?.overrides || {};
+    return Boolean(
+      o.include?.length ||
+        o.include_extra?.length ||
+        o.exclude?.length ||
+        o.docs_prompt ||
+        o.docs_prompt_extra,
+    );
+  }
+
+  function openOverrides() {
+    overridesForm = overridesFromRepo(repo);
+    showOverrides = true;
+  }
+
+  async function saveOverrides() {
+    savingOverrides = true;
+    try {
+      await api.setRepoOverrides(repoId, {
+        include: splitGlobs(overridesForm.include),
+        include_extra: splitGlobs(overridesForm.include_extra),
+        exclude: splitGlobs(overridesForm.exclude),
+        graph_exclude: splitGlobs(overridesForm.graph_exclude),
+        docs_prompt: overridesForm.docs_prompt.trim(),
+        docs_prompt_extra: overridesForm.docs_prompt_extra.trim(),
+      });
+      showOverrides = false;
+      successToast("Settings saved; rebuild queued");
+      await Promise.all([loadRepo(), loadSettings()]);
+    } catch (e) {
+      error = e.message;
+    } finally {
+      savingOverrides = false;
+    }
+  }
+
   function stageEnabled(key) {
     if (!cfg) return true;
     if (key === "graph") return true;
@@ -310,6 +420,7 @@
   onMount(async () => {
     await loadRepo();
     api.docsConfig().then((c) => (cfg = c)).catch(() => {});
+    loadSettings();
     // Poll so stage states and the running indicator update live.
     startPolling();
     await loadDocs();
@@ -723,6 +834,82 @@
           <div class="flex flex-col gap-1">
             <span class="text-dim">Error</span>
             <span class="break-words text-err">{repo.last_error}</span>
+          </div>
+        {/if}
+      </div>
+
+      <div class="card shrink-0 flex flex-col gap-2.5 p-4 text-[13px]">
+        <div class="flex items-center justify-between gap-2">
+          <span class="text-dim">Build settings</span>
+          <button class="btn btn-sm" onclick={() => (showOverrides ? (showOverrides = false) : openOverrides())}>
+            {showOverrides ? "Close" : "Edit"}
+          </button>
+        </div>
+
+        {#if !showOverrides}
+          {#if settings}
+            {#each settingsRows(settings) as row}
+              <div class="flex items-start justify-between gap-2">
+                <span class="text-dim">{row.label}</span>
+                <span class="text-right">
+                  <span class="break-all font-mono text-faint">{row.value}</span>
+                  {#if row.overridden}
+                    <span class="ml-1 text-[11px] text-acc">repo</span>
+                  {/if}
+                </span>
+              </div>
+            {/each}
+            <p class="m-0 text-[12px] text-faint">
+              {hasOverrides(repo)
+                ? "Values marked “repo” override the global settings."
+                : "All values come from the global settings."}
+            </p>
+          {:else}
+            <p class="m-0 text-[12px] text-faint">Loading…</p>
+          {/if}
+        {:else}
+          <label class="flex flex-col gap-1 text-[13px] text-dim">
+            Also index these (added to the defaults)
+            <input class="input" placeholder="**/*.yaml, **/*.yml" bind:value={overridesForm.include_extra} />
+          </label>
+          <label class="flex flex-col gap-1 text-[13px] text-dim">
+            Index only these (replaces the defaults)
+            <input class="input" placeholder="empty = built-in allowlist" bind:value={overridesForm.include} />
+          </label>
+          <label class="flex flex-col gap-1 text-[13px] text-dim">
+            Skip these
+            <input class="input" placeholder="**/generated/**" bind:value={overridesForm.exclude} />
+          </label>
+          <label class="flex flex-col gap-1 text-[13px] text-dim">
+            Keep out of the knowledge graph
+            <input class="input" placeholder="proto/, **/*.gen.go" bind:value={overridesForm.graph_exclude} />
+          </label>
+          <label class="flex flex-col gap-1 text-[13px] text-dim">
+            Extra documentation instructions
+            <textarea
+              class="input min-h-[80px]"
+              placeholder="Environments are separate compose files; render a markdown table of service, image and version per environment."
+              bind:value={overridesForm.docs_prompt_extra}
+            ></textarea>
+          </label>
+          <label class="flex flex-col gap-1 text-[13px] text-dim">
+            Replace the documentation prompt
+            <textarea
+              class="input min-h-[60px]"
+              placeholder="empty = keep the default prompt"
+              bind:value={overridesForm.docs_prompt}
+            ></textarea>
+          </label>
+          <p class="m-0 text-[12px] text-faint">
+            Prefer the two “extra” fields: they add to the defaults. The replacing fields drop the
+            built-in allowlist and the default prompt’s formatting rules for this repo. Saving re-indexes
+            and re-documents this repository; changing the graph ignores rebuilds its graph too.
+          </p>
+          <div class="flex gap-2">
+            <button class="btn btn-primary" onclick={saveOverrides} disabled={savingOverrides}>
+              {savingOverrides ? "Saving…" : "Save settings"}
+            </button>
+            <button class="btn" onclick={() => (showOverrides = false)}>Cancel</button>
           </div>
         {/if}
       </div>

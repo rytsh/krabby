@@ -130,12 +130,16 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 		"file":   readRepoFile(mgr),
 		"docs":   listDocs(mgr),
 		"doc":    getDoc(mgr),
+		// The effective build configuration of this repo: the install-wide
+		// settings, this repo's overrides, and the merge the next build runs.
+		"settings": repoSettings(mgr),
 	})))
 	api.POST("/repos/{ref...}", server.Wrap(dispatchRepo(mgr, map[string]ada.HandlerFunc{
 		"refresh":   refreshRepo(mgr),
 		"generate":  generateRepo(mgr),
 		"cancel":    cancelRepoJob(mgr),
 		"namespace": setRepoNamespace(mgr),
+		"overrides": setRepoOverrides(mgr),
 	})))
 	api.DELETE("/repos/{ref...}", server.Wrap(dispatchRepo(mgr, map[string]ada.HandlerFunc{
 		"": deleteRepo(mgr),
@@ -329,9 +333,10 @@ func clearMCPKey(mgr *manager.Manager) ada.HandlerFunc {
 // ---- REST handlers ----------------------------------------------------------
 
 type addRepoRequest struct {
-	URL       string `json:"url"`
-	Branch    string `json:"branch"`
-	Namespace string `json:"namespace"`
+	URL       string             `json:"url"`
+	Branch    string             `json:"branch"`
+	Namespace string             `json:"namespace"`
+	Overrides registry.Overrides `json:"overrides"`
 }
 
 // repoRef splits the greedy {ref...} path value into the raw repo id and the
@@ -554,6 +559,44 @@ func setRepoNamespace(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
+func repoSettings(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		out, err := mgr.RepoSettings(c.Request.Context(), repoID(c.Request))
+		if err != nil {
+			return c.Err(err)
+		}
+
+		return c.SendJSON(out)
+	}
+}
+
+// setRepoOverridesRequest replaces a repo's indexing/documentation overrides.
+// The payload is the whole override set, not a patch: the UI edits it as one
+// form, and a partial merge would make "clear this list" unexpressible.
+type setRepoOverridesRequest struct {
+	Overrides registry.Overrides `json:"overrides"`
+}
+
+func setRepoOverrides(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		id := repoID(c.Request)
+
+		var req setRepoOverridesRequest
+		if err := c.Bind(&req); err != nil {
+			return c.SetStatus(http.StatusBadRequest).Err(err)
+		}
+
+		// A change queues a rebuild, so the write must survive the client
+		// navigating away mid-save.
+		repo, err := mgr.SetRepoOverrides(context.WithoutCancel(c.Request.Context()), id, req.Overrides)
+		if err != nil {
+			return c.Err(err)
+		}
+
+		return c.SendJSON(repo)
+	}
+}
+
 // activeRepoView is one repo with currently running pipeline steps.
 type activeRepoView struct {
 	ID      string `json:"id"`
@@ -667,7 +710,12 @@ func addRepo(mgr *manager.Manager) ada.HandlerFunc {
 
 		// Registration must finish even if the UI navigates away. The clone/build
 		// itself is queued on the manager lifecycle context by AddRepo.
-		repo, err := mgr.AddRepo(context.WithoutCancel(c.Request.Context()), req.URL, req.Branch, req.Namespace)
+		repo, err := mgr.AddRepo(context.WithoutCancel(c.Request.Context()), manager.RepoSpec{
+			URL:       req.URL,
+			Branch:    req.Branch,
+			Namespace: req.Namespace,
+			Overrides: req.Overrides,
+		})
 		if err != nil {
 			return c.Err(err)
 		}

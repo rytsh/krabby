@@ -97,11 +97,27 @@ func detectVersion(binPath string) string {
 	return truncate(strings.Join(fields, " "), 128)
 }
 
+// Exclude returns the install-wide graph ignore patterns, for surfacing the
+// effective configuration of one repository.
+func (c *Client) Exclude() []string { return c.exclude }
+
 // GraphNeedsIgnoreRebuild reports whether the built graph for repoPath still
 // contains nodes that the current exclude rules should drop, so the refresh path
-// can rebuild a stale graph even when git did not change.
-func (c *Client) GraphNeedsIgnoreRebuild(repoPath string) bool {
-	return GraphHasExcludedNodes(repoPath, c.exclude)
+// can rebuild a stale graph even when git did not change. extra carries the
+// repository's own patterns, which must be considered here too: adding one to a
+// repo has to invalidate its existing graph, or the excluded nodes survive
+// until some unrelated commit happens to trigger a rebuild.
+func (c *Client) GraphNeedsIgnoreRebuild(repoPath string, extra []string) bool {
+	return GraphHasExcludedNodes(repoPath, c.ignorePatterns(extra))
+}
+
+// ignorePatterns is the effective exclude list for one repository: the
+// install-wide patterns plus that repository's own. It is a union, never a
+// replacement — an install-wide rule ("never graph vendored protobufs") is a
+// policy, and a single repository opting out of it is not a case worth
+// supporting.
+func (c *Client) ignorePatterns(extra []string) []string {
+	return MergeExclude(c.exclude, extra)
 }
 
 func pythonFromShebang(binPath string) string {
@@ -153,6 +169,8 @@ func (c *Client) run(ctx context.Context, dir string, args ...string) error {
 // Update runs an incremental (or initial) AST-only build for repoPath.
 // Code-only extraction needs no LLM key. It first refreshes the clone's managed
 // .graphifyignore block so the graph skips test fixtures and configured noise.
+// extra carries the repository's own ignore patterns, unioned with the
+// install-wide ones.
 //
 // The build is forced whenever a krabby-managed ignore block is present. Excluded
 // files (testdata, fixtures, ...) shrink the node count relative to an older
@@ -160,8 +178,8 @@ func (c *Client) run(ctx context.Context, dir string, args ...string) error {
 // refuse to overwrite without --force — leaving stale excluded nodes in the
 // graph forever. Forcing is safe here because krabby only ever runs a
 // deterministic full AST re-extraction (no partial LLM chunks to lose).
-func (c *Client) Update(ctx context.Context, repoPath string) error {
-	if _, err := WriteIgnore(repoPath, c.exclude); err != nil {
+func (c *Client) Update(ctx context.Context, repoPath string, extra []string) error {
+	if _, err := WriteIgnore(repoPath, c.ignorePatterns(extra)); err != nil {
 		// Non-fatal: a graph that includes testdata is still usable.
 		slog.Warn("graphify: could not update .graphifyignore", "path", repoPath, "error", err)
 	}

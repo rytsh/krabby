@@ -80,6 +80,38 @@ type addRepoArgs struct {
 	Branch    string `json:"branch,omitempty" jsonschema:"branch to track (default: repo default branch)"`
 	Namespace string `json:"namespace,omitempty" jsonschema:"namespace to assign this repo to (arbitrary grouping label); omitted means the 'default' namespace. '*' is reserved and rejected. Ignored if the repo is already tracked (use set_repo_namespace to move it)"`
 	Wait      bool   `json:"wait,omitempty" jsonschema:"when true, block until the clone and graph build finish and return the final status (ready or error) instead of returning immediately"`
+
+	repoOverrideArgs
+}
+
+// repoOverrideArgs are the per-repository overrides of the install-wide file
+// selection and documentation prompt, shared by add_repo and
+// set_repo_overrides.
+type repoOverrideArgs struct {
+	Include      []string `json:"include,omitempty" jsonschema:"globs selecting which files of THIS repo are indexed and documented; REPLACES the built-in allowlist for this repo. Use include_extra instead unless you mean 'only these files'"`
+	IncludeExtra []string `json:"include_extra,omitempty" jsonschema:"globs ADDED to the built-in allowlist for this repo, e.g. ['**/*.yaml'] to index every YAML in a deployment repository without losing the default source extensions"`
+	Exclude      []string `json:"exclude,omitempty" jsonschema:"globs skipped in this repo; applied last and wins over the include rules"`
+	GraphExclude []string `json:"graph_exclude,omitempty" jsonschema:"gitignore-style patterns kept out of THIS repo's knowledge graph, unioned with the install-wide ones. Separate from exclude: generated code is often worth searching but only adds noise to the graph. Changing it rebuilds the graph"`
+
+	DocsPrompt      string `json:"docs_prompt,omitempty" jsonschema:"system prompt REPLACING the default documentation prompt for this repo; the default carries formatting constraints a replacement drops, so prefer docs_prompt_extra"`
+	DocsPromptExtra string `json:"docs_prompt_extra,omitempty" jsonschema:"extra instructions APPENDED to the documentation prompt for this repo, e.g. 'environments are separate compose files; render a markdown table of service, image and version per environment'"`
+}
+
+func (a repoOverrideArgs) overrides() registry.Overrides {
+	return registry.Overrides{
+		Include:         a.Include,
+		IncludeExtra:    a.IncludeExtra,
+		Exclude:         a.Exclude,
+		GraphExclude:    a.GraphExclude,
+		DocsPrompt:      a.DocsPrompt,
+		DocsPromptExtra: a.DocsPromptExtra,
+	}
+}
+
+type setRepoOverridesArgs struct {
+	Repo string `json:"repo" jsonschema:"repository id (owner/name) to configure"`
+
+	repoOverrideArgs
 }
 
 type repoIDArgs struct {
@@ -139,7 +171,29 @@ type repoView struct {
 }
 
 func viewRepo(mgr *manager.Manager, repo *registry.Repo) repoView {
-	return repoView{Repo: repo, Running: mgr.Activity(repo.ID)}
+	if repo == nil {
+		return repoView{}
+	}
+
+	return repoView{Repo: trimRepoForView(repo), Running: mgr.Activity(repo.ID)}
+}
+
+// trimRepoForView drops the documentation prompts from a repo record.
+//
+// They are override *inputs*, not repository facts: a model listing
+// repositories has no use for them, and a page of 20 repos each carrying a
+// multi-kilobyte prompt would dominate the response. The glob lists stay — they
+// are short and do tell the model what is searchable in that repo.
+// get_docs_config strips the default prompt for the same reason.
+//
+// It copies first: repo points at the caller's record, so blanking the fields
+// in place would corrupt what the registry handed out.
+func trimRepoForView(repo *registry.Repo) *registry.Repo {
+	trimmed := *repo
+	trimmed.Overrides.DocsPrompt = ""
+	trimmed.Overrides.DocsPromptExtra = ""
+
+	return &trimmed
 }
 
 func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout time.Duration) {
@@ -184,7 +238,7 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 			"times out or is cancelled; poll repo_status until status is 'ready' or 'error'.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args addRepoArgs) (*mcp.CallToolResult, any, error) {
 		if !args.Wait {
-			repo, err := mgr.AddRepo(ctx, args.URL, args.Branch, args.Namespace)
+			repo, err := mgr.AddRepo(ctx, args.spec())
 			if err != nil {
 				return nil, nil, err
 			}
@@ -195,7 +249,7 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 		wctx, cancel := waitContext(ctx, waitTimeout)
 		defer cancel()
 
-		repo, done, err := mgr.AddRepoWait(wctx, args.URL, args.Branch, args.Namespace)
+		repo, done, err := mgr.AddRepoWait(wctx, args.spec())
 		if err != nil {
 			return nil, nil, err
 		}
@@ -213,6 +267,29 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 		}
 
 		return jsonResult(viewRepo(mgr, repo)), nil, nil
+	})
+
+	addTool(server, &mcp.Tool{
+		Name: "set_repo_overrides",
+		Description: "Override the install-wide file selection and documentation prompt for ONE repository. " +
+			"Use it when a repo does not fit the defaults: a deployment repo whose content is compose/YAML rather than source " +
+			"(include_extra), or a repo whose documentation needs a specific shape (docs_prompt_extra). " +
+			"The payload replaces the repo's whole override set, so send every field you want to keep; " +
+			"an empty payload clears the overrides and returns the repo to the install-wide settings. " +
+			"A change re-indexes and re-documents that repository in the background.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args setRepoOverridesArgs) (*mcp.CallToolResult, any, error) {
+		repo, err := mgr.SetRepoOverrides(ctx, args.Repo, args.overrides())
+		if err != nil {
+			return nil, nil, err
+		}
+
+		// The repo view strips the prompts to keep listings small, so echo the
+		// stored override set here: this is the one call whose whole purpose is
+		// to confirm what was written.
+		return jsonResult(map[string]any{
+			"repo":      viewRepo(mgr, repo),
+			"overrides": repo.Overrides,
+		}), nil, nil
 	})
 
 	addTool(server, &mcp.Tool{
@@ -819,4 +896,14 @@ func jsonResult(v any) *mcp.CallToolResult {
 	}
 
 	return textResult(string(b))
+}
+
+// spec converts the add_repo arguments into the manager's registration spec.
+func (a addRepoArgs) spec() manager.RepoSpec {
+	return manager.RepoSpec{
+		URL:       a.URL,
+		Branch:    a.Branch,
+		Namespace: a.Namespace,
+		Overrides: a.overrides(),
+	}
 }

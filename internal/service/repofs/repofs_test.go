@@ -1,8 +1,11 @@
 package repofs
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"testing"
 )
 
@@ -166,5 +169,123 @@ func TestListFilesRecursiveSkipsNoise(t *testing.T) {
 
 	if !sawNested {
 		t.Fatalf("expected nested file in recursive listing, got %+v", entries)
+	}
+}
+
+func TestDeployConfigFile(t *testing.T) {
+	tests := []struct {
+		rel  string
+		want bool
+	}{
+		// Compose, with and without an environment in the middle.
+		{"docker-compose.yml", true},
+		{"docker-compose.yaml", true},
+		{"compose.yaml", true},
+		{"docker-compose.prod.yml", true},
+		{"docker-compose-sandbox.yml", true},
+		{"compose.override.yml", true},
+		{"deploy/stage/docker-compose.yml", true},
+		{"Docker-Compose.PROD.YML", true},
+		{"docker-stack.prod.yml", true},
+
+		// Helm.
+		{"chart.yaml", true},
+		{"values.yaml", true},
+		{"values-prod.yaml", true},
+		{"charts/api/values.stage.yaml", true},
+
+		// CI.
+		{".gitlab-ci.yml", true},
+		{".github/workflows/release.yml", true},
+		{"sub/module/.github/workflows/ci.yaml", true},
+
+		// Not deploy config: arbitrary YAML stays out, which is the whole
+		// point of matching families rather than the extension.
+		{"deployment.yaml", false},
+		{"k8s/service.yaml", false},
+		{"openapi.yaml", false},
+		{"config/app.yml", false},
+		{"docker-compose.md", false},
+		{"values.json", false},
+		{"docs/.github/notes.yml", false},
+	}
+
+	for _, tt := range tests {
+		if got := DeployConfigFile(tt.rel); got != tt.want {
+			t.Errorf("DeployConfigFile(%q) = %v, want %v", tt.rel, got, tt.want)
+		}
+	}
+}
+
+// WalkFiles exists because ListFiles caps at MaxListEntries, which silently
+// truncates any caller that must see the whole repository.
+func TestWalkFilesIsUncapped(t *testing.T) {
+	dir := t.TempDir()
+
+	const files = MaxListEntries + 25
+	for i := range files {
+		mustWrite(t, filepath.Join(dir, fmt.Sprintf("pkg%04d", i), "f.go"), "package p\n")
+	}
+
+	var seen int
+	if err := WalkFiles(dir, nil, func(string, int64) error {
+		seen++
+
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if seen != files {
+		t.Fatalf("walked %d files, want %d", seen, files)
+	}
+
+	if listed, err := ListFiles(dir, "", true); err != nil {
+		t.Fatal(err)
+	} else if len(listed) != MaxListEntries {
+		t.Fatalf("ListFiles should still cap at %d, got %d", MaxListEntries, len(listed))
+	}
+}
+
+// Only .git is pruned unconditionally; everything else is the caller's call, so
+// an explicit "index vendor/" stays expressible.
+func TestWalkFilesPruningIsCallerControlled(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "main.go"), "package main\n")
+	mustWrite(t, filepath.Join(dir, "vendor", "dep", "lib.go"), "package dep\n")
+	mustWrite(t, filepath.Join(dir, "skipme", "x.go"), "package x\n")
+	mustWrite(t, filepath.Join(dir, ".git", "config"), "[core]\n")
+
+	collect := func(skip func(rel, name string) bool) []string {
+		var out []string
+		if err := WalkFiles(dir, skip, func(rel string, _ int64) error {
+			out = append(out, rel)
+
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		sort.Strings(out)
+
+		return out
+	}
+
+	// No filter: vendor/ is walked (ListFiles hides it; WalkFiles must not).
+	got := collect(nil)
+	if len(got) != 3 || got[0] != "main.go" {
+		t.Fatalf("walked %v, want main.go plus vendor and skipme, and never .git", got)
+	}
+	for _, rel := range got {
+		if strings.HasPrefix(rel, ".git/") {
+			t.Fatalf(".git must always be pruned, got %v", got)
+		}
+	}
+
+	// With a filter the caller prunes what it wants.
+	got = collect(func(_, name string) bool { return name == "skipme" })
+	for _, rel := range got {
+		if strings.HasPrefix(rel, "skipme/") {
+			t.Fatalf("skipDir was ignored, got %v", got)
+		}
 	}
 }

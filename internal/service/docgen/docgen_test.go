@@ -17,6 +17,7 @@ import (
 	"github.com/rytsh/krabby/internal/config"
 	"github.com/rytsh/krabby/internal/service/graphquery"
 	"github.com/rytsh/krabby/internal/service/llm"
+	"github.com/rytsh/krabby/internal/service/repofs"
 )
 
 // fakeLLM returns a server that echoes a deterministic markdown body and counts
@@ -79,7 +80,7 @@ func TestSummaryModelUsedForSummariesOnly(t *testing.T) {
 	gen := New(config.Docs{}, synth, summary, nil)
 
 	docsDir := filepath.Join(clone, "krabby-docs")
-	if _, err := gen.Generate(context.Background(), "r", clone, docsDir, false); err != nil {
+	if _, err := gen.Generate(context.Background(), "r", clone, docsDir, config.DocsOverride{}, false); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
 
@@ -112,7 +113,7 @@ func TestNilSummaryFallsBackToChat(t *testing.T) {
 
 	gen := New(config.Docs{}, chat, nil, nil) // nil summary -> use chat for both
 
-	if _, err := gen.Generate(context.Background(), "r", clone, filepath.Join(clone, "krabby-docs"), false); err != nil {
+	if _, err := gen.Generate(context.Background(), "r", clone, filepath.Join(clone, "krabby-docs"), config.DocsOverride{}, false); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
 
@@ -149,7 +150,7 @@ func TestGenerateWritesDocAndManifest(t *testing.T) {
 	gen := New(config.Docs{}, fakeLLM(t, &calls), nil, nil)
 
 	docsDir := filepath.Join(clone, "krabby-docs")
-	man, err := gen.Generate(context.Background(), "owner/repo", clone, docsDir, false)
+	man, err := gen.Generate(context.Background(), "owner/repo", clone, docsDir, config.DocsOverride{}, false)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
@@ -259,7 +260,7 @@ func TestGenerateCommunityGroupingReducesCalls(t *testing.T) {
 	gen := New(config.Docs{}, c, nil, graphquery.NewEngine(0))
 
 	docsDir := filepath.Join(clone, "krabby-docs")
-	man, err := gen.Generate(context.Background(), "owner/repo", clone, docsDir, false)
+	man, err := gen.Generate(context.Background(), "owner/repo", clone, docsDir, config.DocsOverride{}, false)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
@@ -341,7 +342,7 @@ func TestGenerateIncremental(t *testing.T) {
 	gen := New(config.Docs{}, fakeLLM(t, &calls), nil, nil)
 	docsDir := filepath.Join(clone, "krabby-docs")
 
-	if _, err := gen.Generate(context.Background(), "r", clone, docsDir, false); err != nil {
+	if _, err := gen.Generate(context.Background(), "r", clone, docsDir, config.DocsOverride{}, false); err != nil {
 		t.Fatalf("first gen: %v", err)
 	}
 	if calls != 3 {
@@ -350,7 +351,7 @@ func TestGenerateIncremental(t *testing.T) {
 
 	// Change only b.go; a.go summary is reused, b.go + synthesis regenerate.
 	writeSrc(t, clone, "b.go", "package b\nfunc B() {}\n")
-	if _, err := gen.Generate(context.Background(), "r", clone, docsDir, false); err != nil {
+	if _, err := gen.Generate(context.Background(), "r", clone, docsDir, config.DocsOverride{}, false); err != nil {
 		t.Fatalf("second gen: %v", err)
 	}
 	if calls != 5 {
@@ -358,7 +359,7 @@ func TestGenerateIncremental(t *testing.T) {
 	}
 
 	// Nothing changed: no LLM calls at all (summaries cached, doc reused).
-	if _, err := gen.Generate(context.Background(), "r", clone, docsDir, false); err != nil {
+	if _, err := gen.Generate(context.Background(), "r", clone, docsDir, config.DocsOverride{}, false); err != nil {
 		t.Fatalf("third gen: %v", err)
 	}
 	if calls != 5 {
@@ -367,7 +368,7 @@ func TestGenerateIncremental(t *testing.T) {
 
 	// force=true ignores every cache even though nothing changed: both
 	// summaries and the synthesis are regenerated (3 more calls).
-	if _, err := gen.Generate(context.Background(), "r", clone, docsDir, true); err != nil {
+	if _, err := gen.Generate(context.Background(), "r", clone, docsDir, config.DocsOverride{}, true); err != nil {
 		t.Fatalf("forced gen: %v", err)
 	}
 	if calls != 8 {
@@ -384,7 +385,7 @@ func TestGenerateResynthesizesWhenPromptChanges(t *testing.T) {
 	docsDir := filepath.Join(clone, "krabby-docs")
 
 	first, err := New(config.Docs{Prompt: "first prompt"}, client, nil, nil).
-		Generate(context.Background(), "r", clone, docsDir, false)
+		Generate(context.Background(), "r", clone, docsDir, config.DocsOverride{}, false)
 	if err != nil {
 		t.Fatalf("first gen: %v", err)
 	}
@@ -393,7 +394,7 @@ func TestGenerateResynthesizesWhenPromptChanges(t *testing.T) {
 	}
 
 	second, err := New(config.Docs{Prompt: "second prompt"}, client, nil, nil).
-		Generate(context.Background(), "r", clone, docsDir, false)
+		Generate(context.Background(), "r", clone, docsDir, config.DocsOverride{}, false)
 	if err != nil {
 		t.Fatalf("second gen: %v", err)
 	}
@@ -408,7 +409,7 @@ func TestGenerateResynthesizesWhenPromptChanges(t *testing.T) {
 	}
 
 	third, err := New(config.Docs{Prompt: "second prompt"}, client, nil, nil).
-		Generate(context.Background(), "r", clone, docsDir, false)
+		Generate(context.Background(), "r", clone, docsDir, config.DocsOverride{}, false)
 	if err != nil {
 		t.Fatalf("third gen: %v", err)
 	}
@@ -450,7 +451,7 @@ func TestMigratesOldPerFileLayout(t *testing.T) {
 	var calls int32
 	gen := New(config.Docs{}, fakeLLM(t, &calls), nil, nil)
 
-	man, err := gen.Generate(context.Background(), "r", clone, docsDir, false)
+	man, err := gen.Generate(context.Background(), "r", clone, docsDir, config.DocsOverride{}, false)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
@@ -485,13 +486,13 @@ func TestIncludeExcludeGlobs(t *testing.T) {
 	writeSrc(t, clone, "vendor/dep.go", "package v\n")
 
 	var calls int32
-	gen := New(config.Docs{
+	gen := New(config.Docs{Filters: config.Filters{
 		Include: []string{"*.go"},
 		Exclude: []string{"skip.go", "vendor/"},
-	}, fakeLLM(t, &calls), nil, nil)
+	}}, fakeLLM(t, &calls), nil, nil)
 
 	docsDir := filepath.Join(clone, "krabby-docs")
-	man, err := gen.Generate(context.Background(), "r", clone, docsDir, false)
+	man, err := gen.Generate(context.Background(), "r", clone, docsDir, config.DocsOverride{}, false)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
@@ -523,7 +524,7 @@ func TestCustomPromptUsedForSynthesis(t *testing.T) {
 	c, _ := llm.New(config.LLM{BaseURL: srv.URL, Model: "m"})
 	gen := New(config.Docs{Prompt: "CUSTOM PROMPT XYZZY"}, c, nil, nil)
 
-	if _, err := gen.Generate(context.Background(), "r", clone, filepath.Join(clone, "krabby-docs"), false); err != nil {
+	if _, err := gen.Generate(context.Background(), "r", clone, filepath.Join(clone, "krabby-docs"), config.DocsOverride{}, false); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
 
@@ -562,7 +563,7 @@ func TestDefaultPromptFallback(t *testing.T) {
 	c, _ := llm.New(config.LLM{BaseURL: srv.URL, Model: "m"})
 	gen := New(config.Docs{Prompt: "   "}, c, nil, nil) // blank -> default
 
-	if _, err := gen.Generate(context.Background(), "r", clone, filepath.Join(clone, "krabby-docs"), false); err != nil {
+	if _, err := gen.Generate(context.Background(), "r", clone, filepath.Join(clone, "krabby-docs"), config.DocsOverride{}, false); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
 
@@ -619,7 +620,7 @@ func TestSelectFilesSkipsTestAndFixtureNoise(t *testing.T) {
 
 	gen := New(config.Docs{}, nil, nil, nil).(*llmGenerator)
 
-	files, err := gen.selectFiles(clone)
+	files, err := gen.selectFiles(clone, gen.cfg.Filters)
 	if err != nil {
 		t.Fatalf("selectFiles: %v", err)
 	}
@@ -644,6 +645,39 @@ func TestSelectFilesSkipsTestAndFixtureNoise(t *testing.T) {
 	}
 }
 
+// A deployment repository holds nothing but compose/CI config, so excluding
+// those left docgen synthesizing documentation from an empty file set.
+func TestSelectFilesDocumentsDeployConfig(t *testing.T) {
+	clone := t.TempDir()
+	writeSrc(t, clone, "docker-compose.prod.yml", "services:\n  api:\n    image: acme/api:2.14.3\n")
+	writeSrc(t, clone, "docker-compose.sandbox.yml", "services:\n")
+	writeSrc(t, clone, "charts/api/values-stage.yaml", "image:\n  tag: 2.15.0\n")
+	writeSrc(t, clone, "k8s/deployment.yaml", "kind: Deployment\n")
+
+	gen := New(config.Docs{}, nil, nil, nil).(*llmGenerator)
+
+	files, err := gen.selectFiles(clone, gen.cfg.Filters)
+	if err != nil {
+		t.Fatalf("selectFiles: %v", err)
+	}
+
+	got := map[string]bool{}
+	for _, f := range files {
+		got[f] = true
+	}
+
+	for _, want := range []string{
+		"docker-compose.prod.yml", "docker-compose.sandbox.yml", "charts/api/values-stage.yaml",
+	} {
+		if !got[want] {
+			t.Errorf("expected %q to be documented, got %v", want, files)
+		}
+	}
+	if got["k8s/deployment.yaml"] {
+		t.Errorf("arbitrary YAML should stay out of the default allowlist, got %v", files)
+	}
+}
+
 func TestSelectFilesRespectsExplicitInclude(t *testing.T) {
 	// With an explicit Include set, the user is in control: test files match
 	// the glob and are documented (no implicit noise filtering).
@@ -651,8 +685,8 @@ func TestSelectFilesRespectsExplicitInclude(t *testing.T) {
 	writeSrc(t, clone, "svc.go", "package svc\n")
 	writeSrc(t, clone, "svc_test.go", "package svc\n")
 
-	gen := New(config.Docs{Include: []string{"*.go"}}, nil, nil, nil).(*llmGenerator)
-	files, err := gen.selectFiles(clone)
+	gen := New(config.Docs{Filters: config.Filters{Include: []string{"*.go"}}}, nil, nil, nil).(*llmGenerator)
+	files, err := gen.selectFiles(clone, gen.cfg.Filters)
 	if err != nil {
 		t.Fatalf("selectFiles: %v", err)
 	}
@@ -662,5 +696,102 @@ func TestSelectFilesRespectsExplicitInclude(t *testing.T) {
 	}
 	if !got["svc_test.go"] {
 		t.Errorf("explicit Include should document svc_test.go; got %v", files)
+	}
+}
+
+func TestSynthesisPromptResolution(t *testing.T) {
+	base := New(config.Docs{}, nil, nil, nil).(*llmGenerator)
+
+	t.Run("default when nothing set", func(t *testing.T) {
+		if got := base.synthesisPrompt(config.DocsOverride{}); got != DefaultPrompt {
+			t.Fatalf("expected the built-in default, got %q", got)
+		}
+	})
+
+	// The whole point of the extra field: the default's constraints (mermaid
+	// escaping, required sections) survive, the repo instruction is added.
+	t.Run("repo extra is appended to the default", func(t *testing.T) {
+		got := base.synthesisPrompt(config.DocsOverride{PromptExtra: "render an env/image/version table"})
+		if !strings.HasPrefix(got, DefaultPrompt) {
+			t.Fatal("default prompt must remain the base")
+		}
+		if !strings.Contains(got, "render an env/image/version table") {
+			t.Fatalf("repo instruction missing: %q", got)
+		}
+	})
+
+	t.Run("repo prompt replaces the global one", func(t *testing.T) {
+		g := New(config.Docs{Prompt: "GLOBAL"}, nil, nil, nil).(*llmGenerator)
+		got := g.synthesisPrompt(config.DocsOverride{Prompt: "REPO"})
+		if strings.Contains(got, "GLOBAL") || !strings.Contains(got, "REPO") {
+			t.Fatalf("repo prompt should win outright, got %q", got)
+		}
+	})
+
+	// Both extras apply, repo last so it is the final word the model reads.
+	t.Run("global and repo extras both apply, repo last", func(t *testing.T) {
+		g := New(config.Docs{Prompt: "BASE", PromptExtra: "HOUSE RULE"}, nil, nil, nil).(*llmGenerator)
+		got := g.synthesisPrompt(config.DocsOverride{PromptExtra: "REPO RULE"})
+		house, repo := strings.Index(got, "HOUSE RULE"), strings.Index(got, "REPO RULE")
+		if house < 0 || repo < 0 {
+			t.Fatalf("both extras must be present, got %q", got)
+		}
+		if house > repo {
+			t.Fatalf("repo instruction must come last, got %q", got)
+		}
+	})
+
+	// The manifest hash is what makes an edited prompt re-synthesize only the
+	// repository whose prompt changed.
+	t.Run("differing overrides hash differently", func(t *testing.T) {
+		a := hashString(base.synthesisPrompt(config.DocsOverride{PromptExtra: "a"}))
+		b := hashString(base.synthesisPrompt(config.DocsOverride{PromptExtra: "b"}))
+		if a == b {
+			t.Fatal("prompt hash must change with the repo override")
+		}
+	})
+}
+
+// TestSelectFilesBeyondListCap is the regression test for a silent truncation:
+// selectFiles used to go through repofs.ListFiles, whose MaxListEntries cap is
+// meant for UI/MCP listings. A repository with more source files than the cap
+// was documented from an alphabetical prefix of itself, and nothing in the
+// output said so.
+func TestSelectFilesBeyondListCap(t *testing.T) {
+	clone := t.TempDir()
+
+	const files = repofs.MaxListEntries + 50
+	for i := range files {
+		writeSrc(t, clone, fmt.Sprintf("pkg%04d/svc.go", i), "package p\n")
+	}
+
+	gen := New(config.Docs{}, nil, nil, nil).(*llmGenerator)
+
+	got, err := gen.selectFiles(clone, config.Filters{})
+	if err != nil {
+		t.Fatalf("selectFiles: %v", err)
+	}
+	if len(got) != files {
+		t.Fatalf("selected %d files, want all %d (cap leaked back in?)", len(got), files)
+	}
+}
+
+// The walk must still prune what the default selection is meant to hide, and
+// prune it as a directory rather than per file.
+func TestSelectFilesPrunesNoiseDirs(t *testing.T) {
+	clone := t.TempDir()
+	writeSrc(t, clone, "main.go", "package main\n")
+	writeSrc(t, clone, "node_modules/dep/index.js", "module.exports = {}\n")
+	writeSrc(t, clone, "krabby-docs/documentation.md", "# docs\n")
+	writeSrc(t, clone, ".git/hooks/pre-commit.sh", "#!/bin/sh\n")
+
+	gen := New(config.Docs{}, nil, nil, nil).(*llmGenerator)
+
+	got, err := gen.selectFiles(clone, config.Filters{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "main.go" {
+		t.Fatalf("selected %v, want only main.go", got)
 	}
 }

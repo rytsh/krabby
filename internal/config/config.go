@@ -126,6 +126,70 @@ type Graphify struct {
 // are plain parameter carriers for the internal clients (llm, embedder, rag,
 // docgen, coderag), populated from the runtime settings store.
 
+// Filters select which files of a repository are indexed or documented. The
+// same shape is used at two levels: the install-wide settings, and a
+// per-repository override stored on the repo record.
+//
+// The rules are deliberately identical at both levels:
+//
+//   - Include, when non-empty, REPLACES the built-in allowlist. Use it to say
+//     "in this repo, index only these".
+//   - IncludeExtra is always ADDED on top of whatever Include resolved to
+//     (built-in allowlist or explicit Include). Use it to say "also index
+//     these", e.g. every YAML in a deployment repository, without having to
+//     restate the whole allowlist.
+//   - Exclude is applied last and wins over both.
+//
+// A repository override does not silently discard the install-wide settings:
+// see Filters.Merge for how the two combine.
+type Filters struct {
+	Include      []string `cfg:"include"`
+	IncludeExtra []string `cfg:"include_extra"`
+	Exclude      []string `cfg:"exclude"`
+}
+
+// Merge overlays a per-repository override on install-wide filters.
+//
+// Include is a replacement, so the repo's own list wins outright when it sets
+// one — that is the whole point of a per-repo Include, and unioning would make
+// "only these files, in this repo" unexpressible. IncludeExtra and Exclude are
+// additive: both only ever widen or narrow the set further, so combining them
+// keeps an install-wide rule (say, "never index generated protobufs") in force
+// no matter what a single repository asks for.
+func (f Filters) Merge(over Filters) Filters {
+	out := Filters{
+		Include:      f.Include,
+		IncludeExtra: concatGlobs(f.IncludeExtra, over.IncludeExtra),
+		Exclude:      concatGlobs(f.Exclude, over.Exclude),
+	}
+	if len(over.Include) > 0 {
+		out.Include = over.Include
+	}
+
+	return out
+}
+
+// Empty reports whether no filter is set at all.
+func (f Filters) Empty() bool {
+	return len(f.Include) == 0 && len(f.IncludeExtra) == 0 && len(f.Exclude) == 0
+}
+
+// concatGlobs joins two glob lists without aliasing either input, so a merged
+// result can never be appended into one of the sources it was built from.
+func concatGlobs(a, b []string) []string {
+	if len(a) == 0 {
+		return b
+	}
+	if len(b) == 0 {
+		return a
+	}
+
+	out := make([]string, 0, len(a)+len(b))
+	out = append(out, a...)
+
+	return append(out, b...)
+}
+
 // Docs configures the repo -> markdown documentation generator.
 type Docs struct {
 	// Enabled turns on doc generation in the refresh pipeline. When false,
@@ -145,14 +209,35 @@ type Docs struct {
 	// count stays bounded regardless of how fragmented the graph is. 0 uses the
 	// built-in default.
 	MaxGroups int `cfg:"max_groups" default:"40"`
-	// Include globs select source files to document (repo-relative).
-	Include []string `cfg:"include"`
-	// Exclude globs skip files (evaluated after Include).
-	Exclude []string `cfg:"exclude"`
+	// Filters select which repo files are documented. See Filters.
+	Filters
 	// Prompt is the system prompt for the final synthesis of the comprehensive
 	// repository documentation. Empty falls back to docgen.DefaultPrompt. The
 	// per-file summaries and graph overview are appended as the user message.
 	Prompt string `cfg:"prompt"`
+	// PromptExtra is appended to whatever Prompt resolved to, rather than
+	// replacing it. It is how an install-wide house rule ("always list config
+	// keys in a table") is added without restating docgen.DefaultPrompt, which
+	// carries constraints — mermaid escaping, required sections — that a
+	// replacement silently drops.
+	PromptExtra string `cfg:"prompt_extra"`
+}
+
+// DocsOverride is a per-repository override of the documentation settings. It
+// follows the same replace/extend split as Filters: Prompt replaces the
+// effective system prompt for this repository, PromptExtra is appended to it.
+//
+// Prefer PromptExtra. It is what expresses "in this repo, also do X" — the
+// common case — while keeping the default prompt's rules in force.
+type DocsOverride struct {
+	Filters
+	Prompt      string
+	PromptExtra string
+}
+
+// Empty reports whether the override carries nothing at all.
+func (o DocsOverride) Empty() bool {
+	return o.Filters.Empty() && o.Prompt == "" && o.PromptExtra == ""
 }
 
 // LLM configures an OpenAI-compatible chat-completions endpoint.
@@ -239,11 +324,11 @@ type CodeRAG struct {
 	ChunkOverlap int `cfg:"chunk_overlap" default:"1000"`
 	// TopK is how many code snippets to return per search.
 	TopK int `cfg:"top_k" default:"10"`
-	// Include globs select source files to index (repo-relative). Empty uses a
-	// built-in source-extension allowlist.
-	Include []string `cfg:"include"`
-	// Exclude globs skip files (evaluated after Include).
-	Exclude []string `cfg:"exclude"`
+	// Filters select which repo files are indexed. Empty uses the built-in
+	// allowlist (source extensions, build manifests and deploy config). See
+	// Filters: a non-empty Include replaces that allowlist and also disables
+	// the default node_modules/vendor skip, whereas IncludeExtra adds to it.
+	Filters
 }
 
 // Load reads configuration (default -> file -> env) and initializes log level.

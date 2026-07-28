@@ -25,7 +25,7 @@ import (
 type unchangedDocsGenerator struct{}
 
 func (unchangedDocsGenerator) Generate(
-	context.Context, string, string, string, bool,
+	context.Context, string, string, string, config.DocsOverride, bool,
 ) (*docgen.Manifest, error) {
 	return &docgen.Manifest{ChangedDocs: false}, nil
 }

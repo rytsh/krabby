@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -106,6 +107,39 @@ func (s *Stages) Get(name string) *StageState {
 	return nil
 }
 
+// Overrides are one repository's overrides of the install-wide indexing and
+// documentation settings. They exist because those settings are a single global
+// row, which forces every repository to be treated the same: a repo holding
+// nothing but deployment config needs a different file selection than a Go
+// service, and a repo whose shape is unusual ("environments are separate
+// compose files") needs to say so to the doc generator.
+//
+// The empty value means "inherit everything", so an untouched repo behaves
+// exactly as before. See config.Filters and config.DocsOverride for how each
+// field combines with the install-wide value — the short version is that
+// Include and DocsPrompt replace, while IncludeExtra, Exclude and
+// DocsPromptExtra add.
+type Overrides struct {
+	Include      []string `bw:"include"       json:"include,omitempty"`
+	IncludeExtra []string `bw:"include_extra" json:"include_extra,omitempty"`
+	Exclude      []string `bw:"exclude"       json:"exclude,omitempty"`
+
+	// GraphExclude are extra gitignore-style patterns for this repository's
+	// knowledge-graph build, unioned with the install-wide ones. It is separate
+	// from Exclude because the graph and the index answer different questions:
+	// a generated client is worth searching but only adds noise to the graph.
+	GraphExclude []string `bw:"graph_exclude" json:"graph_exclude,omitempty"`
+
+	DocsPrompt      string `bw:"docs_prompt"       json:"docs_prompt,omitempty"`
+	DocsPromptExtra string `bw:"docs_prompt_extra" json:"docs_prompt_extra,omitempty"`
+}
+
+// Empty reports whether nothing is overridden.
+func (o Overrides) Empty() bool {
+	return len(o.Include) == 0 && len(o.IncludeExtra) == 0 && len(o.Exclude) == 0 &&
+		len(o.GraphExclude) == 0 && o.DocsPrompt == "" && o.DocsPromptExtra == ""
+}
+
 // Repo is a tracked repository record.
 type Repo struct {
 	ID          string    `bw:"id,pk"        json:"id"` // full path: host/group/.../name
@@ -119,6 +153,7 @@ type Repo struct {
 	LastError   string    `bw:"last_error"      json:"last_error,omitempty"`
 	Namespace   string    `bw:"namespace,index" json:"namespace,omitempty"` // "" == NamespaceDefault
 	Stages      Stages    `bw:"stages"          json:"stages"`
+	Overrides   Overrides `bw:"overrides"       json:"overrides,omitzero"`
 }
 
 // NamespaceRecord is the persisted metadata for one namespace. The set of
@@ -143,7 +178,8 @@ type Registry struct {
 // bw auto-migrates existing buckets instead of failing with a fingerprint
 // mismatch at startup. v2: added per-stage generation states (Stages).
 // v3: added the Namespace field (empty == default namespace).
-const repoSchemaVersion = 3
+// v4: added per-repository Overrides (file selection, graph ignore, docs prompt).
+const repoSchemaVersion = 4
 
 // namespaceSchemaVersion mirrors repoSchemaVersion for the namespaces bucket.
 const namespaceSchemaVersion = 1
@@ -547,6 +583,83 @@ func (r *Registry) SetNamespace(ctx context.Context, id, ns string) (*Repo, erro
 	}
 
 	return repo, nil
+}
+
+// SetOverrides replaces a repo's overrides wholesale and returns what they were
+// before.
+//
+// The caller needs the previous value, not just "something changed": the
+// artifacts invalidated depend on which field moved. A new include list
+// invalidates the index and the documentation; a new graph exclude invalidates
+// the knowledge graph, which is a different and much more expensive rebuild. A
+// no-op write must trigger neither.
+func (r *Registry) SetOverrides(ctx context.Context, id string, over Overrides) (repo *Repo, prev Overrides, err error) {
+	repo, err = r.Get(ctx, id)
+	if err != nil {
+		return nil, Overrides{}, err
+	}
+	if repo == nil {
+		return nil, Overrides{}, fmt.Errorf("repo %s not found", id)
+	}
+
+	prev = repo.Overrides
+
+	over = over.Normalize()
+	if prev.equal(over) {
+		return repo, prev, nil
+	}
+
+	repo.Overrides = over
+	if err := r.Upsert(ctx, repo); err != nil {
+		return nil, Overrides{}, err
+	}
+
+	return repo, prev, nil
+}
+
+// Changed reports whether two override sets differ at all.
+func (o Overrides) Changed(other Overrides) bool { return !o.equal(other) }
+
+// GraphChanged reports whether the knowledge-graph exclusions differ, which is
+// the only part of an override set that invalidates the graph itself.
+func (o Overrides) GraphChanged(other Overrides) bool {
+	return !slices.Equal(o.GraphExclude, other.GraphExclude)
+}
+
+// Normalize drops blank entries and trims whitespace so a form submitting an
+// empty text box stores nothing rather than a one-element list of "".
+func (o Overrides) Normalize() Overrides {
+	return Overrides{
+		Include:         trimGlobs(o.Include),
+		IncludeExtra:    trimGlobs(o.IncludeExtra),
+		Exclude:         trimGlobs(o.Exclude),
+		GraphExclude:    trimGlobs(o.GraphExclude),
+		DocsPrompt:      strings.TrimSpace(o.DocsPrompt),
+		DocsPromptExtra: strings.TrimSpace(o.DocsPromptExtra),
+	}
+}
+
+func trimGlobs(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, g := range in {
+		if g = strings.TrimSpace(g); g != "" {
+			out = append(out, g)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+
+	return out
+}
+
+func (o Overrides) equal(other Overrides) bool {
+	return slices.Equal(o.Include, other.Include) &&
+		slices.Equal(o.IncludeExtra, other.IncludeExtra) &&
+		slices.Equal(o.Exclude, other.Exclude) &&
+		slices.Equal(o.GraphExclude, other.GraphExclude) &&
+		o.DocsPrompt == other.DocsPrompt &&
+		o.DocsPromptExtra == other.DocsPromptExtra
 }
 
 // Resolve returns the repo identified by ref. An exact id match wins; when

@@ -558,9 +558,12 @@ func docsConfig(s settings.Settings) config.Docs {
 		Concurrency:  s.DocsConcurrency,
 		SummaryModel: s.DocsSummaryModel,
 		MaxGroups:    s.DocsMaxGroups,
-		Include:      s.DocsInclude,
-		Exclude:      s.DocsExclude,
-		Prompt:       s.DocsPrompt,
+		Filters: config.Filters{
+			Include:      s.DocsInclude,
+			IncludeExtra: s.DocsIncludeExtra,
+			Exclude:      s.DocsExclude,
+		},
+		Prompt: s.DocsPrompt,
 	}
 }
 
@@ -639,8 +642,11 @@ func codeRagConfig(s settings.Settings) config.CodeRAG {
 		ChunkSize:    s.CodeRAGChunkSize,
 		ChunkOverlap: s.CodeRAGChunkOverlap,
 		TopK:         s.CodeRAGTopK,
-		Include:      s.CodeRAGInclude,
-		Exclude:      s.CodeRAGExclude,
+		Filters: config.Filters{
+			Include:      s.CodeRAGInclude,
+			IncludeExtra: s.CodeRAGIncludeExtra,
+			Exclude:      s.CodeRAGExclude,
+		},
 	}
 }
 

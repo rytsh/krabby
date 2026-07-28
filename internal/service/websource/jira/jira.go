@@ -1,5 +1,6 @@
 // Package jira implements the JIRA web-source fetcher: it lists issues of a
 // project (or any JQL query) through the JIRA REST API, filters by labels and
+// issue type (sub-tasks are dropped unless include_subtasks is set) and
 // renders each ticket to markdown so the shared docs RAG index can retrieve
 // tickets and return them as top items with their original data and a browse
 // link back to JIRA.
@@ -17,6 +18,8 @@ package jira
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -66,6 +69,14 @@ type Config struct {
 	IncludeLabels types.Null[[]string] `json:"include_labels,omitempty"`
 	ExcludeLabels types.Null[[]string] `json:"exclude_labels,omitempty"`
 
+	// IncludeSubtasks keeps sub-task issue types in the sync. It defaults to
+	// false: a sub-task carries a fragment of its parent's story ("add the
+	// index", "review the PR") with none of the context that makes the parent
+	// answerable, so indexing them inflates the corpus with near-duplicate,
+	// low-signal chunks that compete with the parent ticket for the same query.
+	// Turn it on for projects that do the actual work in sub-tasks.
+	IncludeSubtasks types.Null[bool] `json:"include_subtasks,omitempty"`
+
 	// TeamFields are the JIRA field ids that hold team/squad ownership. These
 	// are instance-specific custom fields (e.g. "customfield_104705" for a
 	// "Squad" field). Their values are extracted per ticket, written into the
@@ -100,6 +111,7 @@ type resolvedConfig struct {
 	JQL             string
 	IncludeLabels   []string
 	ExcludeLabels   []string
+	IncludeSubtasks bool
 	TeamFields      []string
 	MaxIssues       int
 	FullResyncEvery string
@@ -115,12 +127,16 @@ func (c Config) resolve() resolvedConfig {
 		JQL:             strings.TrimSpace(c.JQL.ValueOrZero()),
 		IncludeLabels:   c.IncludeLabels.ValueOrZero(),
 		ExcludeLabels:   c.ExcludeLabels.ValueOrZero(),
+		IncludeSubtasks: c.IncludeSubtasks.ValueOrZero(),
 		TeamFields:      c.TeamFields.ValueOrZero(),
 		MaxIssues:       c.MaxIssues.ValueOrZero(),
 		FullResyncEvery: strings.TrimSpace(c.FullResyncEvery.ValueOrZero()),
 	}
 }
 
+// configView is the redacted config the REST API and UI see. IncludeSubtasks
+// is the one field emitted unconditionally: a checkbox has to be able to tell
+// "off" from "not configured", and both mean off.
 type configView struct {
 	BaseURL         string   `json:"base_url"`
 	User            string   `json:"user,omitempty"`
@@ -129,6 +145,7 @@ type configView struct {
 	JQL             string   `json:"jql,omitempty"`
 	IncludeLabels   []string `json:"include_labels,omitempty"`
 	ExcludeLabels   []string `json:"exclude_labels,omitempty"`
+	IncludeSubtasks bool     `json:"include_subtasks"`
 	TeamFields      []string `json:"team_fields,omitempty"`
 	MaxIssues       int      `json:"max_issues,omitempty"`
 	FullResyncEvery string   `json:"full_resync_every,omitempty"`
@@ -212,6 +229,7 @@ func (f *Fetcher) MergeConfig(current, update json.RawMessage) (json.RawMessage,
 		next.JQL = websource.MergeNull(next.JQL, prev.JQL)
 		next.IncludeLabels = websource.MergeNull(next.IncludeLabels, prev.IncludeLabels)
 		next.ExcludeLabels = websource.MergeNull(next.ExcludeLabels, prev.ExcludeLabels)
+		next.IncludeSubtasks = websource.MergeNull(next.IncludeSubtasks, prev.IncludeSubtasks)
 		next.TeamFields = websource.MergeNull(next.TeamFields, prev.TeamFields)
 		next.MaxIssues = websource.MergeNull(next.MaxIssues, prev.MaxIssues)
 		next.FullResyncEvery = websource.MergeNull(next.FullResyncEvery, prev.FullResyncEvery)
@@ -242,6 +260,7 @@ func (f *Fetcher) ConfigView(raw json.RawMessage) any {
 		BaseURL: cfg.BaseURL, User: cfg.User, APITokenSet: cfg.APIToken != "",
 		Project: cfg.Project, JQL: cfg.JQL,
 		IncludeLabels: cfg.IncludeLabels, ExcludeLabels: cfg.ExcludeLabels,
+		IncludeSubtasks: cfg.IncludeSubtasks,
 		TeamFields:      cfg.TeamFields,
 		MaxIssues:       cfg.MaxIssues,
 		FullResyncEvery: cfg.FullResyncEvery,
@@ -262,6 +281,10 @@ type issue struct {
 		} `json:"status"`
 		IssueType struct {
 			Name string `json:"name"`
+			// Subtask is JIRA's own answer to "is this a sub-task type", which
+			// is the only reliable one: the type names are per-instance
+			// ("Sub-task", "Alt görev", "Sub-Bug"), the flag is not.
+			Subtask bool `json:"subtask"`
 		} `json:"issuetype"`
 		Priority struct {
 			Name string `json:"name"`
@@ -319,10 +342,40 @@ const jiraTimestampLayout = "2006-01-02T15:04:05.000-0700"
 // is the highest issue "updated" time ingested so far, in JIRA JQL format; the
 // next incremental fetch asks only for issues updated at or after it. FullAt is
 // the time of the last full (non-incremental) pass, used to schedule periodic
-// full sweeps that reconcile remotely-deleted tickets.
+// full sweeps that reconcile remotely-deleted tickets. Filter fingerprints the
+// config that decided the selection, so a changed filter is noticed.
 type syncState struct {
 	Watermark string    `json:"watermark,omitempty"`
 	FullAt    time.Time `json:"full_at,omitzero"`
+	Filter    string    `json:"filter,omitempty"`
+}
+
+// filterSignature fingerprints the config fields that decide which issues are
+// selected — not how they are rendered. It exists because an incremental run
+// only ever asks for tickets updated since the watermark, so narrowing the
+// selection (excluding sub-tasks, adding a skip label, tightening the JQL)
+// would otherwise leave the tickets that just dropped out sitting in the index
+// until the next scheduled full pass, up to full_resync_every away.
+//
+// A mismatch forces one full pass, and a full pass is the only kind that
+// reports Complete — which is what lets the manager read "not seen" as "deleted
+// remotely" and prune them. Collections synced before a filter existed carry an
+// empty signature, so they self-heal on their next sync.
+func filterSignature(cfg resolvedConfig) string {
+	h := sha256.New()
+	for _, part := range []string{
+		cfg.Project,
+		cfg.JQL,
+		strings.Join(cfg.IncludeLabels, ","),
+		strings.Join(cfg.ExcludeLabels, ","),
+		strconv.FormatBool(cfg.IncludeSubtasks),
+	} {
+		h.Write([]byte(part))
+		// Separate the parts so ("a","b") and ("ab","") cannot collide.
+		h.Write([]byte{0})
+	}
+
+	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
 // Fetch runs the configured JQL, applies label filters and renders each ticket
@@ -356,8 +409,11 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 	}
 
 	// Periodically force a full pass so tickets deleted remotely (which an
-	// incremental "updated >=" query never returns) are reconciled.
-	full := websource.FullResyncDue(state.FullAt, cfg.fullResyncEvery())
+	// incremental "updated >=" query never returns) are reconciled — and force
+	// one immediately when the selection filter changed, so tickets that no
+	// longer qualify are pruned now rather than at the next scheduled sweep.
+	filter := filterSignature(cfg)
+	full := filter != state.Filter || websource.FullResyncDue(state.FullAt, cfg.fullResyncEvery())
 	watermark := state.Watermark
 	if full {
 		watermark = ""
@@ -385,6 +441,13 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 		for _, iss := range res.Issues {
 			if u := parseJiraTime(iss.Fields.Updated); u.After(maxSeen) {
 				maxSeen = u
+			}
+
+			// Sub-tasks are dropped after the watermark is taken, exactly like
+			// the label filter: what was scanned still moves the cursor, only
+			// what is kept gets indexed.
+			if iss.Fields.IssueType.Subtask && !cfg.IncludeSubtasks {
+				continue
 			}
 
 			if !labelSelected(iss.Fields.Labels, cfg.IncludeLabels, cfg.ExcludeLabels) {
@@ -445,7 +508,10 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 		fullAt = time.Now()
 	}
 
-	nextState, err := json.Marshal(syncState{Watermark: nextWatermark, FullAt: fullAt})
+	// The signature is stored even for a truncated pass, for the same reason
+	// fullAt is: retrying instead would clear the watermark on every run of a
+	// capped collection and re-walk the same prefix forever.
+	nextState, err := json.Marshal(syncState{Watermark: nextWatermark, FullAt: fullAt, Filter: filter})
 	if err != nil {
 		return nil, fmt.Errorf("encode jira sync state; %w", err)
 	}

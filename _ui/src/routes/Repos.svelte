@@ -12,6 +12,50 @@
   let addUrl = $state("");
   let addBranch = $state("");
   let addNamespace = $state("");
+  // Per-repo overrides of the install-wide indexing/documentation settings,
+  // offered at add time so a repo that does not fit the defaults is built
+  // correctly on its first pass instead of being reindexed afterwards. Behind a
+  // toggle: the common case is adding a plain source repository.
+  let showAddAdvanced = $state(false);
+  let addOverrides = $state(emptyOverrides());
+
+  function emptyOverrides() {
+    return {
+      include: "",
+      include_extra: "",
+      exclude: "",
+      graph_exclude: "",
+      docs_prompt: "",
+      docs_prompt_extra: "",
+    };
+  }
+
+  function splitGlobs(v) {
+    return v
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean);
+  }
+
+  function overridesPayload(o) {
+    const payload = {
+      include: splitGlobs(o.include),
+      include_extra: splitGlobs(o.include_extra),
+      exclude: splitGlobs(o.exclude),
+      graph_exclude: splitGlobs(o.graph_exclude),
+      docs_prompt: o.docs_prompt.trim(),
+      docs_prompt_extra: o.docs_prompt_extra.trim(),
+    };
+    const empty =
+      !payload.include.length &&
+      !payload.include_extra.length &&
+      !payload.exclude.length &&
+      !payload.graph_exclude.length &&
+      !payload.docs_prompt &&
+      !payload.docs_prompt_extra;
+
+    return empty ? null : payload;
+  }
   let adding = $state(false);
 
   // Server-side pagination + search + status filter. The API returns one page
@@ -83,10 +127,17 @@
     if (!addUrl.trim()) return;
     adding = true;
     try {
-      await api.addRepo(addUrl.trim(), addBranch.trim(), addNamespace.trim());
+      await api.addRepo(
+        addUrl.trim(),
+        addBranch.trim(),
+        addNamespace.trim(),
+        overridesPayload(addOverrides),
+      );
       addUrl = "";
       addBranch = "";
       addNamespace = "";
+      addOverrides = emptyOverrides();
+      showAddAdvanced = false;
       error = "";
       page = 1;
       await reload();
@@ -140,18 +191,60 @@
 
 <p class="text-dim">Tracked repositories and their knowledge-graph build status.</p>
 
-<div class="card my-4 flex gap-2 p-3">
-  <input
-    class="input flex-1"
-    placeholder="git URL (ssh or https)"
-    bind:value={addUrl}
-    onkeydown={(e) => e.key === "Enter" && add()}
-  />
-  <input class="input basis-[180px]" placeholder="branch (optional)" bind:value={addBranch} />
-  <input class="input basis-[180px]" placeholder="namespace (optional)" bind:value={addNamespace} />
-  <button class="btn btn-primary" onclick={add} disabled={adding || !addUrl.trim()}>
-    {adding ? "Adding…" : "Add repo"}
-  </button>
+<div class="card my-4 flex flex-col gap-2 p-3">
+  <div class="flex gap-2">
+    <input
+      class="input flex-1"
+      placeholder="git URL (ssh or https)"
+      bind:value={addUrl}
+      onkeydown={(e) => e.key === "Enter" && add()}
+    />
+    <input class="input basis-[180px]" placeholder="branch (optional)" bind:value={addBranch} />
+    <input class="input basis-[180px]" placeholder="namespace (optional)" bind:value={addNamespace} />
+    <button class="btn" onclick={() => (showAddAdvanced = !showAddAdvanced)}>
+      {showAddAdvanced ? "Hide overrides" : "Overrides"}
+    </button>
+    <button class="btn btn-primary" onclick={add} disabled={adding || !addUrl.trim()}>
+      {adding ? "Adding…" : "Add repo"}
+    </button>
+  </div>
+
+  {#if showAddAdvanced}
+    <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Also index these (added to the defaults)
+        <input class="input" placeholder="**/*.yaml, **/*.yml" bind:value={addOverrides.include_extra} />
+      </label>
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Index only these (replaces the defaults)
+        <input class="input" placeholder="empty = built-in allowlist" bind:value={addOverrides.include} />
+      </label>
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Skip these
+        <input class="input" placeholder="**/generated/**" bind:value={addOverrides.exclude} />
+      </label>
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Keep out of the knowledge graph
+        <input class="input" placeholder="proto/, **/*.gen.go" bind:value={addOverrides.graph_exclude} />
+      </label>
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Replace the documentation prompt
+        <input class="input" placeholder="empty = default prompt" bind:value={addOverrides.docs_prompt} />
+      </label>
+      <label class="flex flex-col gap-1 text-[13px] text-dim sm:col-span-2">
+        Extra documentation instructions
+        <textarea
+          class="input min-h-[70px]"
+          placeholder="Environments are separate compose files; render a markdown table of service, image and version per environment."
+          bind:value={addOverrides.docs_prompt_extra}
+        ></textarea>
+      </label>
+      <p class="m-0 text-[12px] text-faint sm:col-span-2">
+        These apply to a newly tracked repo only; an already tracked URL keeps its settings. Editable
+        later from the repository page.
+      </p>
+    </div>
+  {/if}
 </div>
 
 <div class="mb-3 flex items-center gap-2">

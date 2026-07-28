@@ -32,6 +32,8 @@ type Settings struct {
 	DocsSummaryModel string   `bw:"docs_summary_model" json:"docs_summary_model"`
 	DocsMaxGroups    int      `bw:"docs_max_groups"   json:"docs_max_groups"`
 	DocsInclude      []string `bw:"docs_include"      json:"docs_include"`
+	// DocsIncludeExtra adds to the built-in allowlist instead of replacing it.
+	DocsIncludeExtra []string `bw:"docs_include_extra" json:"docs_include_extra"`
 	DocsExclude      []string `bw:"docs_exclude"      json:"docs_exclude"`
 	DocsPrompt       string   `bw:"docs_prompt"       json:"docs_prompt"`
 
@@ -88,6 +90,10 @@ type Settings struct {
 	CodeRAGChunkOverlap int      `bw:"code_rag_chunk_overlap" json:"code_rag_chunk_overlap"`
 	CodeRAGTopK         int      `bw:"code_rag_top_k"         json:"code_rag_top_k"`
 	CodeRAGInclude      []string `bw:"code_rag_include"       json:"code_rag_include"`
+	// CodeRAGIncludeExtra adds to the built-in allowlist instead of replacing
+	// it, so "also index every YAML" does not cost the default source
+	// extensions.
+	CodeRAGIncludeExtra []string `bw:"code_rag_include_extra" json:"code_rag_include_extra"`
 	CodeRAGExclude      []string `bw:"code_rag_exclude"       json:"code_rag_exclude"`
 
 	// TaskConcurrency caps how many background tasks (repo refresh/generate,
@@ -251,6 +257,7 @@ type Patch struct {
 	DocsSummaryModel *string   `json:"docs_summary_model"`
 	DocsMaxGroups    *int      `json:"docs_max_groups"`
 	DocsInclude      *[]string `json:"docs_include"`
+	DocsIncludeExtra *[]string `json:"docs_include_extra"`
 	DocsExclude      *[]string `json:"docs_exclude"`
 	DocsPrompt       *string   `json:"docs_prompt"`
 
@@ -292,6 +299,7 @@ type Patch struct {
 	CodeRAGChunkOverlap *int      `json:"code_rag_chunk_overlap"`
 	CodeRAGTopK         *int      `json:"code_rag_top_k"`
 	CodeRAGInclude      *[]string `json:"code_rag_include"`
+	CodeRAGIncludeExtra *[]string `json:"code_rag_include_extra"`
 	CodeRAGExclude      *[]string `json:"code_rag_exclude"`
 
 	TaskConcurrency *int            `json:"task_concurrency"`
@@ -308,7 +316,7 @@ func (p Patch) RuntimeOnly() bool {
 	return (p.GitPollInterval != nil || p.WebhookSecret != nil || p.TaskConcurrency != nil || p.RepoSchedules != nil) &&
 		p.DocsEnabled == nil && p.DocsConcurrency == nil &&
 		p.DocsSummaryModel == nil && p.DocsMaxGroups == nil &&
-		p.DocsInclude == nil && p.DocsExclude == nil && p.DocsPrompt == nil &&
+		p.DocsInclude == nil && p.DocsIncludeExtra == nil && p.DocsExclude == nil && p.DocsPrompt == nil &&
 		p.LLMBaseURL == nil && p.LLMAPIKey == nil && p.LLMModel == nil && p.LLMTimeout == nil &&
 		p.EmbedBaseURL == nil && p.EmbedAPIKey == nil && p.EmbedModel == nil &&
 		p.EmbedDim == nil && p.EmbedBatch == nil && p.EmbedConcurrency == nil && p.EmbedTimeout == nil &&
@@ -321,7 +329,7 @@ func (p Patch) RuntimeOnly() bool {
 		p.CodeEmbedDim == nil && p.CodeEmbedBatch == nil && p.CodeEmbedConcurrency == nil &&
 		p.CodeEmbedTimeout == nil && p.CodeRAGEnabled == nil && p.CodeRAGChunkSize == nil &&
 		p.CodeRAGChunkOverlap == nil && p.CodeRAGTopK == nil &&
-		p.CodeRAGInclude == nil && p.CodeRAGExclude == nil
+		p.CodeRAGInclude == nil && p.CodeRAGIncludeExtra == nil && p.CodeRAGExclude == nil
 }
 
 // Apply overlays fields present in p onto base. Pointer fields distinguish an
@@ -341,6 +349,9 @@ func (p Patch) Apply(base Settings) Settings {
 	}
 	if p.DocsInclude != nil {
 		base.DocsInclude = *p.DocsInclude
+	}
+	if p.DocsIncludeExtra != nil {
+		base.DocsIncludeExtra = *p.DocsIncludeExtra
 	}
 	if p.DocsExclude != nil {
 		base.DocsExclude = *p.DocsExclude
@@ -446,6 +457,9 @@ func (p Patch) Apply(base Settings) Settings {
 	}
 	if p.CodeRAGInclude != nil {
 		base.CodeRAGInclude = *p.CodeRAGInclude
+	}
+	if p.CodeRAGIncludeExtra != nil {
+		base.CodeRAGIncludeExtra = *p.CodeRAGIncludeExtra
 	}
 	if p.CodeRAGExclude != nil {
 		base.CodeRAGExclude = *p.CodeRAGExclude

@@ -68,7 +68,7 @@ func TestInstalledCLICompatibility(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(repo, name+".py"), []byte(source), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := client.Update(ctx, repo); err != nil {
+		if err := client.Update(ctx, repo, nil); err != nil {
 			t.Fatalf("graphify update %s: %v", name, err)
 		}
 		graphPath := graphify.GraphPath(repo)

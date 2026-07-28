@@ -174,3 +174,71 @@ func TestOwners(t *testing.T) {
 		t.Fatalf("owners not sorted: %+v", owners)
 	}
 }
+
+func TestSetOverridesReportsChange(t *testing.T) {
+	reg := newTestRegistry(t)
+	ctx := context.Background()
+
+	if err := reg.Upsert(ctx, &Repo{ID: "acme/app", URL: "https://git/acme/app"}); err != nil {
+		t.Fatal(err)
+	}
+
+	over := Overrides{IncludeExtra: []string{"**/*.yaml"}, DocsPromptExtra: "table per env"}
+
+	repo, prev, err := reg.SetOverrides(ctx, "acme/app", over)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !prev.Changed(repo.Overrides) {
+		t.Fatal("first write must report a change so the repo is rebuilt")
+	}
+	if len(repo.Overrides.IncludeExtra) != 1 {
+		t.Fatalf("overrides not stored: %+v", repo.Overrides)
+	}
+
+	// Re-saving the same form must not cost a rebuild.
+	repo, prev, err = reg.SetOverrides(ctx, "acme/app", over)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prev.Changed(repo.Overrides) {
+		t.Fatal("identical write must be a no-op")
+	}
+
+	// Blank entries from an empty text box normalize away rather than being
+	// stored as a one-element list of "".
+	repo, prev, err = reg.SetOverrides(ctx, "acme/app", Overrides{
+		IncludeExtra: []string{"  **/*.yaml  "}, DocsPromptExtra: " table per env ",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prev.Changed(repo.Overrides) {
+		t.Fatal("whitespace-only differences must not trigger a rebuild")
+	}
+
+	repo, prev, err = reg.SetOverrides(ctx, "acme/app", Overrides{Include: []string{"", "   "}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !prev.Changed(repo.Overrides) || !repo.Overrides.Empty() {
+		t.Fatalf("blank globs should clear the overrides, got %+v", repo.Overrides)
+	}
+}
+
+// Only a graph-exclude change invalidates the knowledge graph; the rest of the
+// override set does not, and rebuilding it for them would be the most expensive
+// stage of the pipeline run for nothing.
+func TestOverridesGraphChanged(t *testing.T) {
+	base := Overrides{GraphExclude: []string{"gen/"}, IncludeExtra: []string{"**/*.yaml"}}
+
+	if base.GraphChanged(Overrides{GraphExclude: []string{"gen/"}, DocsPromptExtra: "x"}) {
+		t.Fatal("a docs-only change must not invalidate the graph")
+	}
+	if !base.GraphChanged(Overrides{GraphExclude: []string{"gen/", "proto/"}}) {
+		t.Fatal("a new graph exclude must invalidate the graph")
+	}
+	if !base.GraphChanged(Overrides{}) {
+		t.Fatal("clearing the graph excludes must invalidate the graph")
+	}
+}

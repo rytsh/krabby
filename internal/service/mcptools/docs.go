@@ -78,7 +78,7 @@ type addSourceArgs struct {
 	Description     string `json:"description,omitempty" jsonschema:"short human summary of what this source holds (e.g. 'Delivery Support runbooks and TERs'); shown to models by list_sources so they can pick the right source to search"`
 	RefreshInterval string `json:"refresh_interval,omitempty" jsonschema:"legacy fixed interval as a Go duration, e.g. '1h' or '24h'; used only when schedule is empty. Empty or 'manual' means manual only. Prefer schedule for cron-style timing"`
 	Schedule        string `json:"schedule,omitempty" jsonschema:"comma-separated cron schedules (hardloop syntax, e.g. '0 2 * * *' for daily 02:00, or '@every 6h'); mirrors repository schedules and is authoritative over refresh_interval when set"`
-	Config          string `json:"config,omitempty" jsonschema:"provider-owned config as a JSON object encoded in a string, e.g. '{\"base_url\":\"https://...\",\"root_page\":\"123\",\"api_token\":\"...\"}'. jira: base_url, user, api_token, project or jql, include_labels, exclude_labels, team_fields, max_issues. confluence: base_url, and either space (whole space) or root_page (a page id to index that page and all its descendants as one keyed source), optional include_root, user, api_token, include_labels, exclude_labels. API tokens are write-only; blank on update keeps the stored secret"`
+	Config          string `json:"config,omitempty" jsonschema:"provider-owned config as a JSON object encoded in a string, e.g. '{\"base_url\":\"https://...\",\"root_page\":\"123\",\"api_token\":\"...\"}'. jira: base_url, user, api_token, project or jql, include_labels, exclude_labels, include_subtasks (default false: sub-task issue types are skipped), team_fields, max_issues. confluence: base_url, and either space (whole space) or root_page (a page id to index that page and all its descendants as one keyed source), optional include_root, user, api_token, include_labels, exclude_labels. API tokens are write-only; blank on update keeps the stored secret"`
 }
 
 type updateSourceArgs struct {
@@ -453,7 +453,8 @@ type setDocsConfigArgs struct {
 	DocsConcurrency  int      `json:"docs_concurrency,omitempty" jsonschema:"parallel per-file LLM summary calls"`
 	DocsSummaryModel string   `json:"docs_summary_model,omitempty" jsonschema:"chat model for the per-file summary phase (the bulk of calls); use a fast model like gemini-2.5-flash. Reuses the main LLM base URL/key/timeout. Empty uses the main model"`
 	DocsMaxGroups    int      `json:"docs_max_groups,omitempty" jsonschema:"max grouped summary LLM calls per run; small graph communities are packed together to stay under this (default 40)"`
-	DocsInclude      []string `json:"docs_include,omitempty" jsonschema:"source globs to document (repo-relative)"`
+	DocsInclude      []string `json:"docs_include,omitempty" jsonschema:"source globs to document (repo-relative); replaces the built-in allowlist"`
+	DocsIncludeExtra []string `json:"docs_include_extra,omitempty" jsonschema:"source globs added to the built-in allowlist instead of replacing it"`
 	DocsExclude      []string `json:"docs_exclude,omitempty" jsonschema:"source globs to skip"`
 	DocsPrompt       string   `json:"docs_prompt,omitempty" jsonschema:"system prompt for the final documentation synthesis (empty uses the built-in default)"`
 
@@ -494,7 +495,8 @@ type setDocsConfigArgs struct {
 	CodeRAGChunkSize    int      `json:"code_rag_chunk_size,omitempty" jsonschema:"target code chunk length in characters"`
 	CodeRAGChunkOverlap int      `json:"code_rag_chunk_overlap,omitempty" jsonschema:"character overlap for fallback code chunks"`
 	CodeRAGTopK         int      `json:"code_rag_top_k,omitempty" jsonschema:"source snippets returned by default"`
-	CodeRAGInclude      []string `json:"code_rag_include,omitempty" jsonschema:"source globs to index (empty uses built-in source extensions)"`
+	CodeRAGInclude      []string `json:"code_rag_include,omitempty" jsonschema:"source globs to index; replaces the built-in allowlist (empty uses it)"`
+	CodeRAGIncludeExtra []string `json:"code_rag_include_extra,omitempty" jsonschema:"source globs added to the built-in allowlist instead of replacing it, e.g. ['**/*.yaml']"`
 	CodeRAGExclude      []string `json:"code_rag_exclude,omitempty" jsonschema:"source globs to skip"`
 }
 

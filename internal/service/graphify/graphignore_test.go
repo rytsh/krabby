@@ -189,3 +189,29 @@ func TestWriteIgnoreUpdatesWhenExtraChanges(t *testing.T) {
 		t.Errorf("new pattern two/ missing:\n%s", content)
 	}
 }
+
+// A repository's own patterns are unioned with the install-wide ones rather
+// than replacing them: an install-wide rule is a policy, and a repo opting out
+// of it is not a case worth supporting.
+func TestPerRepoIgnorePatternsUnion(t *testing.T) {
+	c := &Client{exclude: []string{"global/"}}
+
+	got := c.ignorePatterns([]string{"repo/"})
+	if len(got) != 2 || got[0] != "global/" || got[1] != "repo/" {
+		t.Fatalf("ignorePatterns = %v, want both lists", got)
+	}
+
+	// No repo patterns: the install-wide list is returned as-is.
+	if got := c.ignorePatterns(nil); len(got) != 1 || got[0] != "global/" {
+		t.Fatalf("ignorePatterns(nil) = %v", got)
+	}
+
+	// The install-wide slice is shared by every repo built in this process, so
+	// unioning must not append into it.
+	base := &Client{exclude: make([]string, 1, 8)}
+	base.exclude[0] = "global/"
+	_ = base.ignorePatterns([]string{"repo/"})
+	if len(base.exclude) != 1 || base.exclude[0] != "global/" {
+		t.Fatalf("install-wide excludes mutated: %v", base.exclude)
+	}
+}

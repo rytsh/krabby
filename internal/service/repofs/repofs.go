@@ -14,6 +14,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -36,6 +37,112 @@ var skipDirs = map[string]bool{
 	".git":         true,
 	"graphify-out": true,
 	"vendor":       true,
+}
+
+// WalkFiles walks every regular file under rootDir, calling fn with the
+// repo-relative slash path and its size. skipDir, when non-nil, is consulted
+// for each directory (repo-relative path and base name); returning true prunes
+// the whole subtree.
+//
+// It exists because ListFiles caps its result at MaxListEntries. That cap is
+// right for a listing sent to a UI or an MCP client, and wrong for anything
+// that has to see the whole repository: a caller that selects files to index or
+// document would silently stop at the cap and quietly ignore everything past
+// it, which is the kind of failure nobody notices until a large repository is
+// half-documented.
+//
+// Symlinks and other non-regular entries are skipped rather than followed, so a
+// link pointing outside the clone cannot pull foreign files into a walk.
+func WalkFiles(rootDir string, skipDir func(rel, name string) bool, fn func(rel string, size int64) error) error {
+	return filepath.WalkDir(rootDir, func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if p == rootDir {
+			return nil
+		}
+
+		rel, err := filepath.Rel(rootDir, p)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+
+		if d.IsDir() {
+			// Only .git is pruned unconditionally: walking a repository's own
+			// object store is never useful. Every other exclusion belongs to
+			// the caller, whose rules are configurable — pruning here what
+			// ListFiles happens to hide would make an explicit "index vendor/"
+			// silently impossible.
+			if d.Name() == ".git" || (skipDir != nil && skipDir(rel, d.Name())) {
+				return fs.SkipDir
+			}
+
+			return nil
+		}
+
+		if d.Type()&os.ModeSymlink != 0 || !d.Type().IsRegular() {
+			return nil
+		}
+
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+
+		return fn(rel, info.Size())
+	})
+}
+
+// DeployConfigFile reports whether a repo-relative path is a deployment or CI
+// config file whose name follows a family convention rather than being fixed,
+// so a plain name lookup cannot catch it: compose files carry the environment
+// in the middle ("docker-compose.prod.yml"), Helm values likewise
+// ("values-stage.yaml"), and GitHub workflows are named freely inside one
+// well-known directory.
+//
+// It exists because these files are where image tags, service versions and
+// deploy topology live — the same reason Dockerfile and go.mod are indexed —
+// while indexing every .yaml instead would pull in the far larger body of
+// generated manifests and vendored chart output.
+//
+// It lives here, in the package both the code indexer and the doc generator
+// already depend on, so the two cannot drift on what counts as deploy config.
+func DeployConfigFile(rel string) bool {
+	rel = strings.ToLower(rel)
+
+	if ext := path.Ext(rel); ext != ".yml" && ext != ".yaml" {
+		return false
+	}
+
+	if strings.HasPrefix(rel, ".github/workflows/") || strings.Contains(rel, "/.github/workflows/") {
+		return true
+	}
+
+	stem := strings.TrimSuffix(path.Base(rel), path.Ext(rel))
+	for _, family := range deployConfigStems {
+		// An exact stem, or the family followed by a separator: the variant
+		// suffix is what names the environment, which is the whole point of
+		// indexing these ("docker-compose.prod.yml" vs ".stage.yml").
+		if stem == family ||
+			strings.HasPrefix(stem, family+".") ||
+			strings.HasPrefix(stem, family+"-") {
+			return true
+		}
+	}
+
+	return false
+}
+
+// deployConfigStems are the YAML config families DeployConfigFile recognises,
+// with or without an environment suffix.
+var deployConfigStems = []string{
+	"compose",
+	"docker-compose",
+	"docker-stack",
+	"values",
+	"chart",
+	".gitlab-ci",
 }
 
 // FileContent is the result of reading a file, with pagination metadata.

@@ -183,31 +183,30 @@ import "../styles/global.css";
         <div class="wrap">
           <div class="head reveal">
             <span class="caption">// get running</span>
-            <h2>From clone to first query in a <em>minute</em>.</h2>
-            <p>Requires git, ssh, and the graphify CLI (<span class="mono">uv tool install graphifyy==0.9.26</span>).</p>
+            <h2>From container to first query in a <em>minute</em>.</h2>
+            <p>The image includes Krabby, Graphify, git, and SSH. You only need Docker.</p>
           </div>
 
           <div class="qs">
             <div class="code reveal">
-              <div class="clabel"><span>shell — release &amp; run</span><button class="copy" data-copy="build">copy</button></div>
-              <pre id="build"><span class="c"># download the latest release</span>
-<a class="release-link" href="https://github.com/rytsh/krabby/releases/latest" target="_blank" rel="noopener">https://github.com/rytsh/krabby/releases/latest</a>
+              <div class="clabel"><span>shell — Docker</span><button class="copy" data-copy="build">copy</button></div>
+              <pre id="build">mkdir -p krabby-data
 
-<span class="c"># configure and start the server</span>
- cp krabby.example.yaml krabby.yaml   <span class="c"># edit repos, keys</span>
- ./bin/krabby
+docker run -d \
+  --name krabby \
+  -p 8080:8080 \
+  -v <span class="s">"$(pwd)/krabby-data:/data"</span> \
+  ghcr.io/rytsh/krabby:latest
 
-<span class="c"># track a repo, then list what you have</span>
-curl -X POST localhost:8080/api/v1/repos \
-  -d <span class="s">'&#123;"url":"git@git.example.com:team/service.git"&#125;'</span>
-curl localhost:8080/api/v1/repos</pre>
+<span class="c"># open the UI and add your repositories</span>
+http://localhost:8080</pre>
             </div>
 
             <div class="code reveal">
               <div class="clabel"><span>LLM — MCP setup prompt</span><button class="copy" data-copy="prompt">copy</button></div>
               <pre id="prompt">Set up Krabby as an MCP server for this repository.
 
-Download the latest Krabby release, start the server, and connect
+Start the latest Krabby Docker image, then connect
 the MCP client to:
 http://localhost:8080/mcp
 Use this header:
@@ -236,8 +235,8 @@ repository graph, and always report exact file paths and lines.</pre>
         <div class="fbrand"><span class="dot"></span>krabby</div>
         <div class="flinks">
           <a href="https://github.com/rytsh/krabby" target="_blank" rel="noopener">GitHub</a>
-          <a href="https://github.com/rytsh/krabby#mcp-tools" target="_blank" rel="noopener">MCP tools</a>
-          <a href="https://github.com/rytsh/krabby#rest-api" target="_blank" rel="noopener">REST API</a>
+          <a href="https://github.com/rytsh/krabby/blob/main/DETAILS.md#mcp-tools" target="_blank" rel="noopener">MCP tools</a>
+          <a href="https://github.com/rytsh/krabby/blob/main/DETAILS.md#rest-api" target="_blank" rel="noopener">REST API</a>
           <a href="https://github.com/Graphify-Labs/graphify" target="_blank" rel="noopener">graphify</a>
         </div>
         <small>MIT © 2026 Eray Ates</small>

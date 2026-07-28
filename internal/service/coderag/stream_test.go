@@ -130,7 +130,7 @@ func TestIndexStreamsInBoundedBatches(t *testing.T) {
 	svc := newStreamService(t, counter, nil)
 	root := manySourceFiles(t, 120)
 
-	if err := svc.Index(t.Context(), "acme/app", root); err != nil {
+	if err := svc.Index(t.Context(), "acme/app", root, config.Filters{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -155,7 +155,7 @@ func TestIndexTextStreams(t *testing.T) {
 	svc := newStreamService(t, counter, text)
 	root := manySourceFiles(t, 120)
 
-	if err := svc.IndexText(t.Context(), "acme/app", root); err != nil {
+	if err := svc.IndexText(t.Context(), "acme/app", root, config.Filters{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -193,7 +193,7 @@ func TestIndexTextReplacesPriorChunks(t *testing.T) {
 	svc := newStreamService(t, counter, text)
 	root := manySourceFiles(t, 4)
 
-	if err := svc.IndexText(t.Context(), "acme/app", root); err != nil {
+	if err := svc.IndexText(t.Context(), "acme/app", root, config.Filters{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -201,7 +201,7 @@ func TestIndexTextReplacesPriorChunks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := svc.IndexText(t.Context(), "acme/app", root); err != nil {
+	if err := svc.IndexText(t.Context(), "acme/app", root, config.Filters{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -230,7 +230,7 @@ func TestIndexProgressReportsDeterminateProgress(t *testing.T) {
 		last   int
 	)
 
-	err := svc.IndexProgress(t.Context(), "acme/app", root, func(done, total int) {
+	err := svc.IndexProgress(t.Context(), "acme/app", root, config.Filters{}, func(done, total int) {
 		totals = append(totals, total)
 		if done < last {
 			t.Errorf("progress went backwards: %d after %d", done, last)

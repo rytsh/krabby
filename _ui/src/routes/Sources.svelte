@@ -70,6 +70,7 @@
       // JIRA-only
       project: "",
       jql: "",
+      include_subtasks: false,
       team_fields: "",
       max_issues: "",
       // Confluence + JIRA
@@ -213,6 +214,7 @@
           jql: form.jql.trim(),
           include_labels: splitLabels(form.include_labels),
           exclude_labels: splitLabels(form.exclude_labels),
+          include_subtasks: form.include_subtasks,
           team_fields: splitLabels(form.team_fields),
           max_issues: form.max_issues ? Number(form.max_issues) : 0,
           full_resync_every: form.full_resync_every.trim(),
@@ -266,6 +268,7 @@
       max_pages: source.config?.max_pages || "",
       project: source.config?.project || "",
       jql: source.config?.jql || "",
+      include_subtasks: source.config?.include_subtasks === true,
       team_fields: (source.config?.team_fields || []).join(", "),
       max_issues: source.config?.max_issues || "",
       full_resync_every: source.config?.full_resync_every || "",
@@ -535,7 +538,17 @@
               Full re-sync every (e.g. 24h; reconciles deletions)
               <input class="input" placeholder="24h" bind:value={form.full_resync_every} />
             </label>
+            <label class="flex items-center gap-2 text-[13px] text-dim sm:col-span-2">
+              <input type="checkbox" bind:checked={form.include_subtasks} />
+              Also index sub-tasks
+            </label>
           </div>
+          <p class="m-0 text-[12px] text-faint">
+            Sub-tasks are skipped by default: they carry a fragment of their parent's story with
+            none of the context that makes the parent answerable, so indexing them adds
+            near-duplicate chunks that compete with the parent ticket. Turning this off on an
+            existing source drops the already-synced sub-tasks on the next sync.
+          </p>
           <p class="m-0 text-[12px] text-faint">
             Tickets are streamed as they are fetched, so a project of any size syncs in the same
             memory — leave <strong>Max issues</strong> at 0 unless you want to bound the time and API
@@ -631,6 +644,7 @@
                   {#if s.config?.exclude_labels?.length}
                     <span>skip: {s.config.exclude_labels.join(", ")}</span>
                   {/if}
+                  <span>{s.config?.include_subtasks ? "with sub-tasks" : "no sub-tasks"}</span>
                 {/if}
                 {#if s.last_error}
                   <span class="text-err" title={s.last_error}>error: {s.last_error.slice(0, 120)}</span>

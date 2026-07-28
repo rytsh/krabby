@@ -896,12 +896,23 @@ func (m *Manager) lock(id string) *sync.Mutex {
 	return l
 }
 
+// RepoSpec describes a repository to track. Only URL is required.
+//
+// Namespace and Overrides apply to a newly registered repo only: adding a repo
+// that is already tracked stays the idempotent "just refresh it" operation it
+// has always been, rather than silently rewriting the configuration someone
+// tuned earlier. Use SetRepoNamespace / SetRepoOverrides to change those.
+type RepoSpec struct {
+	URL       string
+	Branch    string
+	Namespace string
+	Overrides registry.Overrides
+}
+
 // AddRepo registers a repository and starts a background clone+build.
-// If the repo already exists, it just triggers a refresh. namespace assigns the
-// new repo to a namespace ("" == default); it is ignored for an existing repo
-// (use SetRepoNamespace to move one).
-func (m *Manager) AddRepo(ctx context.Context, url, branch, namespace string) (*registry.Repo, error) {
-	id, repo, _, err := m.registerRepo(ctx, url, branch, namespace)
+// If the repo already exists, it just triggers a refresh.
+func (m *Manager) AddRepo(ctx context.Context, spec RepoSpec) (*registry.Repo, error) {
+	id, repo, _, err := m.registerRepo(ctx, spec)
 	if err != nil {
 		return nil, err
 	}
@@ -919,8 +930,8 @@ func (m *Manager) AddRepo(ctx context.Context, url, branch, namespace string) (*
 //
 // A build failure is reported through the returned record's Status ("error") and
 // LastError, not as a Go error, so callers always get the final state back.
-func (m *Manager) AddRepoWait(ctx context.Context, url, branch, namespace string) (*registry.Repo, bool, error) {
-	id, _, _, err := m.registerRepo(ctx, url, branch, namespace)
+func (m *Manager) AddRepoWait(ctx context.Context, spec RepoSpec) (*registry.Repo, bool, error) {
+	id, _, _, err := m.registerRepo(ctx, spec)
 	if err != nil {
 		return nil, false, err
 	}
@@ -999,13 +1010,13 @@ func (m *Manager) refreshAsync(id string) <-chan struct{} {
 
 // registerRepo parses the url, upserts a pending record if the repo is new, and
 // reports whether it already existed. It performs no clone/build itself.
-func (m *Manager) registerRepo(ctx context.Context, url, branch, namespace string) (id string, repo *registry.Repo, existed bool, err error) {
-	id, err = gitops.ParseRepoID(url)
+func (m *Manager) registerRepo(ctx context.Context, spec RepoSpec) (id string, repo *registry.Repo, existed bool, err error) {
+	id, err = gitops.ParseRepoID(spec.URL)
 	if err != nil {
 		return "", nil, false, err
 	}
 
-	if strings.TrimSpace(namespace) == registry.NamespaceAll {
+	if strings.TrimSpace(spec.Namespace) == registry.NamespaceAll {
 		return "", nil, false, fmt.Errorf("namespace %q is reserved", registry.NamespaceAll)
 	}
 
@@ -1017,11 +1028,12 @@ func (m *Manager) registerRepo(ctx context.Context, url, branch, namespace strin
 
 	repo = &registry.Repo{
 		ID:        id,
-		URL:       url,
-		Branch:    branch,
+		URL:       spec.URL,
+		Branch:    spec.Branch,
 		Path:      filepath.Join(m.reposDir, filepath.FromSlash(id)),
 		Status:    registry.StatusPending,
-		Namespace: registry.NormalizeNamespace(namespace),
+		Namespace: registry.NormalizeNamespace(spec.Namespace),
+		Overrides: spec.Overrides.Normalize(),
 	}
 	if err := m.reg.Upsert(ctx, repo); err != nil {
 		return "", nil, false, err
@@ -1048,6 +1060,73 @@ func (m *Manager) SetRepoNamespace(ctx context.Context, ref, namespace string) (
 	defer l.Unlock()
 
 	return m.reg.SetNamespace(ctx, repo.ID, namespace)
+}
+
+// SetRepoOverrides replaces one repository's indexing/documentation overrides.
+//
+// A change invalidates what was already built from the old rules — the code
+// index holds files the new selection excludes, and documentation.md was
+// written against the old prompt — so it queues a rebuild of exactly the
+// artifacts affected: a graph-exclude change needs a full refresh, anything
+// else only the docs/index pass. An identical write rebuilds nothing, so a UI
+// that saves the whole form on every edit is free.
+func (m *Manager) SetRepoOverrides(ctx context.Context, ref string, over registry.Overrides) (*registry.Repo, error) {
+	repo, err := m.reg.Resolve(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	if repo == nil {
+		return nil, fmt.Errorf("repo %s not found", ref)
+	}
+
+	l := m.lock(repo.ID)
+	updated, prev, err := m.reg.SetOverrides(ctx, repo.ID, over)
+	l.Unlock()
+
+	if err != nil {
+		return nil, err
+	}
+
+	switch {
+	case prev.GraphChanged(updated.Overrides):
+		// The graph itself is now wrong, and every artifact derived from it
+		// with it. A full refresh is the only path that rebuilds the graph;
+		// it detects the stale ignore block and forces the rebuild.
+		m.TriggerRefresh(updated.ID)
+	case prev.Changed(updated.Overrides):
+		// Selection or prompt only: the graph still stands, so rebuild just the
+		// docs and indexes derived from it.
+		m.scheduleReindex(updated.ID)
+	}
+
+	return updated, nil
+}
+
+// repoFilters resolves the file-selection overrides of one repository. A nil
+// repo (or one that overrides nothing) inherits the install-wide filters.
+func repoFilters(repo *registry.Repo) config.Filters {
+	if repo == nil {
+		return config.Filters{}
+	}
+
+	return config.Filters{
+		Include:      repo.Overrides.Include,
+		IncludeExtra: repo.Overrides.IncludeExtra,
+		Exclude:      repo.Overrides.Exclude,
+	}
+}
+
+// repoDocsOverride resolves the documentation overrides of one repository.
+func repoDocsOverride(repo *registry.Repo) config.DocsOverride {
+	if repo == nil {
+		return config.DocsOverride{}
+	}
+
+	return config.DocsOverride{
+		Filters:     repoFilters(repo),
+		Prompt:      repo.Overrides.DocsPrompt,
+		PromptExtra: repo.Overrides.DocsPromptExtra,
+	}
 }
 
 // UpsertNamespace creates or updates the description metadata for a namespace.
@@ -1256,7 +1335,16 @@ func (m *Manager) ensureCodeIndex(ctx context.Context, repoID, clonePath string)
 		return nil
 	}
 
-	if err := d.codeRag.IndexText(ctx, repoID, clonePath); err != nil {
+	// The warm pass runs outside a build, so the record is fetched here rather
+	// than threaded through: its overrides decide which files are indexed, and
+	// warming with the install-wide selection would produce an index that
+	// disagrees with every later refresh of the same repo.
+	repo, err := m.reg.Get(ctx, repoID)
+	if err != nil {
+		return err
+	}
+
+	if err := d.codeRag.IndexText(ctx, repoID, clonePath, repoFilters(repo)); err != nil {
 		return err
 	}
 
@@ -1441,7 +1529,7 @@ func (m *Manager) Generate(ctx context.Context, id string, targets []string, for
 					return fmt.Errorf("code index is not configured")
 				}
 
-				return d.codeRag.Index(ctx, repo.ID, repo.Path)
+				return d.codeRag.Index(ctx, repo.ID, repo.Path, repoFilters(repo))
 			})
 		case registry.StageDocs:
 			serr = m.runStage(ctx, repo, name, func() error {
@@ -1453,7 +1541,7 @@ func (m *Manager) Generate(ctx context.Context, id string, targets []string, for
 					return docsDirErr
 				}
 
-				_, err := d.gen.Generate(ctx, repo.ID, repo.Path, docsDir, force)
+				_, err := d.gen.Generate(ctx, repo.ID, repo.Path, docsDir, repoDocsOverride(repo), force)
 
 				return err
 			})
@@ -1741,7 +1829,7 @@ func (m *Manager) refresh(ctx context.Context, repo *registry.Repo) error {
 	defer m.clearRepoActivity(repo.ID)
 
 	hadGraph := fileExists(graphify.GraphPath(repo.Path))
-	staleIgnore := hadGraph && m.gfy.GraphNeedsIgnoreRebuild(repo.Path)
+	staleIgnore := hadGraph && m.gfy.GraphNeedsIgnoreRebuild(repo.Path, repo.Overrides.GraphExclude)
 	staleVersion := hadGraph && !m.gfy.GraphBuiltWithCurrentVersion(repo.Path)
 
 	m.setActivity(repo.ID, "sync")
@@ -1852,10 +1940,10 @@ func (m *Manager) buildDocsAndIndex(ctx context.Context, repo *registry.Repo, de
 			//nolint:errcheck // recorded on the stage state; never fails the build
 			_ = m.runStage(ctx, repo, registry.StageCodeIndex, func() error {
 				if incremental {
-					return d.codeRag.IndexChangedProgress(ctx, repo.ID, repo.Path, changed, onProgress)
+					return d.codeRag.IndexChangedProgress(ctx, repo.ID, repo.Path, changed, repoFilters(repo), onProgress)
 				}
 
-				return d.codeRag.IndexProgress(ctx, repo.ID, repo.Path, onProgress)
+				return d.codeRag.IndexProgress(ctx, repo.ID, repo.Path, repoFilters(repo), onProgress)
 			})
 		}()
 	}
@@ -1884,7 +1972,7 @@ func (m *Manager) buildDocsAndIndex(ctx context.Context, repo *registry.Repo, de
 			var gerr error
 			// A normal refresh stays incremental; force is exposed only via the
 			// explicit Generate path (refresh_repo force flag / API).
-			man, gerr = d.gen.Generate(genCtx, repo.ID, repo.Path, docsDir, false)
+			man, gerr = d.gen.Generate(genCtx, repo.ID, repo.Path, docsDir, repoDocsOverride(repo), false)
 
 			return gerr
 		}); err != nil {
@@ -2469,7 +2557,7 @@ func (m *Manager) buildGraphSnapshot(
 	m.setActivity(repo.ID, registry.StageGraph)
 	defer m.clearActivity(repo.ID, registry.StageGraph)
 	start := time.Now()
-	err := m.gfy.Update(ctx, snapshot.StagingPath)
+	err := m.gfy.Update(ctx, snapshot.StagingPath, repo.Overrides.GraphExclude)
 	if err != nil {
 		return fail(err, snapshot.StagingPath)
 	}

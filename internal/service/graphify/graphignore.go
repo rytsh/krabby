@@ -258,3 +258,20 @@ func stripManagedBlock(content string) string {
 
 	return preserved
 }
+
+// MergeExclude unions install-wide ignore patterns with one repository's, in
+// that order, without aliasing either input. It mirrors what a build applies,
+// so callers surfacing the effective configuration cannot drift from it.
+func MergeExclude(global, repo []string) []string {
+	if len(repo) == 0 {
+		return global
+	}
+	if len(global) == 0 {
+		return repo
+	}
+
+	out := make([]string, 0, len(global)+len(repo))
+	out = append(out, global...)
+
+	return append(out, repo...)
+}

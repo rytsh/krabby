@@ -80,11 +80,28 @@ export const api = {
   // segments, so repo actions use a GitLab-style "/-/" separator between the
   // id and the action.
   repo: (id) => req(`/repos/${id}`),
-  addRepo: (url, branch, namespace = "") =>
+  addRepo: (url, branch, namespace = "", overrides = null) =>
     req("/repos", {
       method: "POST",
       keepalive: true,
-      body: JSON.stringify({ url, branch: branch || "", namespace: namespace || "" }),
+      body: JSON.stringify({
+        url,
+        branch: branch || "",
+        namespace: namespace || "",
+        ...(overrides ? { overrides } : {}),
+      }),
+    }),
+  // Effective build configuration of one repo: install-wide settings, this
+  // repo's overrides, and the merge the next build will run.
+  repoSettings: (id) => req(`/repos/${id}/-/settings`),
+  // Per-repo overrides of the install-wide file selection and docs prompt. The
+  // payload replaces the whole set, so send every field you want to keep; a
+  // change re-indexes and re-documents that repo in the background.
+  setRepoOverrides: (id, overrides) =>
+    req(`/repos/${id}/-/overrides`, {
+      method: "POST",
+      keepalive: true,
+      body: JSON.stringify({ overrides }),
     }),
   deleteRepo: (id) => req(`/repos/${id}`, { method: "DELETE", keepalive: true }),
   refreshRepo: (id) => req(`/repos/${id}/-/refresh`, { method: "POST", keepalive: true }),

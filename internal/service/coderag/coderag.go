@@ -14,7 +14,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"os"
 	"path"
@@ -69,8 +68,8 @@ func New(
 // Index (re)builds the code vector index for a repo clone. It selects source
 // files, chunks them (symbol-aware via the repo's graph when available), embeds
 // the chunks and upserts them, replacing any prior vectors for the repo.
-func (s *Service) Index(ctx context.Context, repo, clonePath string) error {
-	return s.IndexProgress(ctx, repo, clonePath, nil)
+func (s *Service) Index(ctx context.Context, repo, clonePath string, over config.Filters) error {
+	return s.IndexProgress(ctx, repo, clonePath, over, nil)
 }
 
 // IndexProgress is Index with an optional progress callback, invoked as chunks
@@ -82,15 +81,17 @@ func (s *Service) Index(ctx context.Context, repo, clonePath string) error {
 // embedding round trip, and in exchange neither the chunk text nor the vectors
 // of a whole repository are ever resident at once — peak memory becomes a
 // constant instead of scaling with the largest tracked repository.
-func (s *Service) IndexProgress(ctx context.Context, repo, clonePath string, onProgress func(done, total int)) error {
+func (s *Service) IndexProgress(ctx context.Context, repo, clonePath string, over config.Filters, onProgress func(done, total int)) error {
 	if s.text != nil {
 		if err := s.text.DeleteRepo(ctx, repo); err != nil {
 			return fmt.Errorf("clear prior code search chunks; %w", err)
 		}
 	}
 
+	filters := s.cfg.Filters.Merge(over)
+
 	total := 0
-	fileCount, err := s.streamItems(ctx, clonePath, repo, func(batch []vectorstore.Item) error {
+	fileCount, err := s.streamItems(ctx, clonePath, repo, filters, func(batch []vectorstore.Item) error {
 		total += len(batch)
 		if s.text == nil {
 			return nil
@@ -121,7 +122,7 @@ func (s *Service) IndexProgress(ctx context.Context, repo, clonePath string, onP
 	}
 
 	done := 0
-	if _, err := s.streamItems(ctx, clonePath, repo, func(batch []vectorstore.Item) error {
+	if _, err := s.streamItems(ctx, clonePath, repo, filters, func(batch []vectorstore.Item) error {
 		if err := s.embedInto(ctx, batch); err != nil {
 			return err
 		}
@@ -178,16 +179,18 @@ func (s *Service) embedInto(ctx context.Context, items []vectorstore.Item) error
 // prior rows; paths that no longer exist (or fall outside the selection rules)
 // just have their rows dropped. Unchanged files keep their existing FTS rows
 // and vectors, so refreshes touching few files cost a fraction of a full Index.
-func (s *Service) IndexChanged(ctx context.Context, repo, clonePath string, changed []string) error {
-	return s.IndexChangedProgress(ctx, repo, clonePath, changed, nil)
+func (s *Service) IndexChanged(ctx context.Context, repo, clonePath string, changed []string, over config.Filters) error {
+	return s.IndexChangedProgress(ctx, repo, clonePath, changed, over, nil)
 }
 
 // IndexChangedProgress is IndexChanged with an optional progress callback; see
 // IndexProgress.
-func (s *Service) IndexChangedProgress(ctx context.Context, repo, clonePath string, changed []string, onProgress func(done, total int)) error {
+func (s *Service) IndexChangedProgress(ctx context.Context, repo, clonePath string, changed []string, over config.Filters, onProgress func(done, total int)) error {
 	if len(changed) == 0 {
 		return nil
 	}
+
+	filters := s.cfg.Filters.Merge(over)
 
 	// Normalize to the repo-relative slash form used as DocPath in both stores.
 	paths := make([]string, 0, len(changed))
@@ -203,7 +206,7 @@ func (s *Service) IndexChangedProgress(ctx context.Context, repo, clonePath stri
 	)
 
 	for _, rel := range paths {
-		if !s.selectedFile(clonePath, rel) {
+		if !s.selectedFile(clonePath, rel, filters) {
 			continue // deleted/excluded: rows are dropped below, nothing to add
 		}
 
@@ -295,7 +298,7 @@ func (s *Service) IndexChangedProgress(ctx context.Context, repo, clonePath stri
 // selectedFile reports whether rel would be picked by selectFiles: every parent
 // directory passes the skip rules and the file itself is a regular, size-capped,
 // included and not excluded source file.
-func (s *Service) selectedFile(clonePath, rel string) bool {
+func (s *Service) selectedFile(clonePath, rel string, filters config.Filters) bool {
 	prefix := ""
 	for seg := range strings.SplitSeq(path.Dir(rel), "/") {
 		if seg == "." || seg == "" {
@@ -303,7 +306,7 @@ func (s *Service) selectedFile(clonePath, rel string) bool {
 		}
 
 		prefix = path.Join(prefix, seg)
-		if hardSkipDirs[seg] || (len(s.cfg.Include) == 0 && defaultNoiseDirs[seg]) || matchAny(s.cfg.Exclude, prefix+"/") {
+		if hardSkipDirs[seg] || (len(filters.Include) == 0 && defaultNoiseDirs[seg]) || matchAny(filters.Exclude, prefix+"/") {
 			return false
 		}
 	}
@@ -313,14 +316,14 @@ func (s *Service) selectedFile(clonePath, rel string) bool {
 		return false
 	}
 
-	return info.Size() <= repofs.MaxFileBytes && s.matchInclude(rel) && !matchAny(s.cfg.Exclude, rel)
+	return info.Size() <= repofs.MaxFileBytes && matchInclude(rel, filters) && !matchAny(filters.Exclude, rel)
 }
 
 // IndexText builds only the local bw FTS index. It is used to bootstrap the
 // normal search index for repositories tracked before this index was added,
 // which is exactly what the background warm pass does for every repo at
 // startup — so it streams rather than materialising the whole repository.
-func (s *Service) IndexText(ctx context.Context, repo, clonePath string) error {
+func (s *Service) IndexText(ctx context.Context, repo, clonePath string, over config.Filters) error {
 	if s.text == nil {
 		return nil
 	}
@@ -330,7 +333,7 @@ func (s *Service) IndexText(ctx context.Context, repo, clonePath string) error {
 	}
 
 	chunks := 0
-	fileCount, err := s.streamItems(ctx, clonePath, repo, func(batch []vectorstore.Item) error {
+	fileCount, err := s.streamItems(ctx, clonePath, repo, s.cfg.Filters.Merge(over), func(batch []vectorstore.Item) error {
 		chunks += len(batch)
 
 		return s.text.InsertItems(ctx, batch)
@@ -358,9 +361,10 @@ const indexFlushChunks = 512
 func (s *Service) streamItems(
 	ctx context.Context,
 	clonePath, repo string,
+	filters config.Filters,
 	flush func([]vectorstore.Item) error,
 ) (int, error) {
-	files, err := s.selectFiles(clonePath)
+	files, err := s.selectFiles(clonePath, filters)
 	if err != nil {
 		return 0, fmt.Errorf("select source files; %w", err)
 	}
@@ -567,45 +571,18 @@ func (s *Service) fileSymbols(clonePath string) map[string][]symbol {
 }
 
 // selectFiles walks the entire clone and returns repo-relative slash paths
-// matching the Include globs and none of the Exclude globs. It intentionally
-// does not use repofs.ListFiles because that API's 2,000-entry response cap is
-// appropriate for UI/MCP listings but would silently truncate large indexes.
-func (s *Service) selectFiles(clonePath string) ([]string, error) {
+// matching the filters. It walks rather than listing because repofs.ListFiles
+// caps its result: that cap is right for a UI listing and silently wrong for an
+// index, which must see every file or quietly miss the rest of the repository.
+func (s *Service) selectFiles(clonePath string, filters config.Filters) ([]string, error) {
 	var out []string
-	err := filepath.WalkDir(clonePath, func(filePath string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
 
-		if filePath == clonePath {
-			return nil
-		}
-
-		rel, err := filepath.Rel(clonePath, filePath)
-		if err != nil {
-			return err
-		}
-		rel = filepath.ToSlash(rel)
-
-		if d.IsDir() {
-			if hardSkipDirs[d.Name()] || (len(s.cfg.Include) == 0 && defaultNoiseDirs[d.Name()]) || matchAny(s.cfg.Exclude, rel+"/") {
-				return fs.SkipDir
-			}
-
-			return nil
-		}
-
-		// Do not follow or read symlinks and non-regular filesystem entries.
-		if d.Type()&os.ModeSymlink != 0 || !d.Type().IsRegular() {
-			return nil
-		}
-
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-
-		if info.Size() > repofs.MaxFileBytes || !s.matchInclude(rel) || matchAny(s.cfg.Exclude, rel) {
+	err := repofs.WalkFiles(clonePath, func(rel, name string) bool {
+		return hardSkipDirs[name] ||
+			(len(filters.Include) == 0 && defaultNoiseDirs[name]) ||
+			matchAny(filters.Exclude, rel+"/")
+	}, func(rel string, size int64) error {
+		if size > repofs.MaxFileBytes || !matchInclude(rel, filters) || matchAny(filters.Exclude, rel) {
 			return nil
 		}
 
@@ -622,13 +599,30 @@ func (s *Service) selectFiles(clonePath string) ([]string, error) {
 	return out, nil
 }
 
-func (s *Service) matchInclude(rel string) bool {
-	if len(s.cfg.Include) == 0 {
-		return defaultIncludeExts[strings.ToLower(path.Ext(rel))] ||
-			defaultIncludeNames[strings.ToLower(path.Base(rel))]
+// matchInclude applies the resolved filters to one repo-relative path.
+// IncludeExtra is checked first because it is purely additive: it widens
+// whatever Include resolved to, so a repository can opt one more family of
+// files in without restating the allowlist it was happy with.
+func matchInclude(rel string, filters config.Filters) bool {
+	if matchAny(filters.IncludeExtra, rel) {
+		return true
 	}
 
-	return matchAny(s.cfg.Include, rel)
+	if len(filters.Include) == 0 {
+		return defaultIncluded(rel)
+	}
+
+	return matchAny(filters.Include, rel)
+}
+
+// defaultIncluded applies the built-in allowlist: a source extension, a known
+// build-config file name, or a deployment/CI config file.
+func defaultIncluded(rel string) bool {
+	rel = strings.ToLower(rel)
+
+	return defaultIncludeExts[path.Ext(rel)] ||
+		defaultIncludeNames[path.Base(rel)] ||
+		repofs.DeployConfigFile(rel)
 }
 
 // matchAny reports whether rel matches any glob. "**" spans path segments; a

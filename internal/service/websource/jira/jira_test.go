@@ -1,9 +1,16 @@
 package jira
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/rytsh/krabby/internal/service/websource"
 )
 
 func TestLabelSelected(t *testing.T) {
@@ -61,6 +68,46 @@ func TestConfigMergeAndRedaction(t *testing.T) {
 	}
 	if strings.Contains(string(raw), "secret") {
 		t.Fatalf("secret leaked in view: %s", raw)
+	}
+}
+
+func TestIncludeSubtasksMerge(t *testing.T) {
+	f := New()
+	base := json.RawMessage(`{"base_url":"https://j.example.com","project":"PROJ"}`)
+
+	// Default: off. A config written before the option existed reads as off.
+	cfg, err := decodeConfig(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.IncludeSubtasks {
+		t.Fatal("sub-tasks must be excluded by default")
+	}
+
+	on, err := f.MergeConfig(base, json.RawMessage(`{"include_subtasks":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err = decodeConfig(on); err != nil || !cfg.IncludeSubtasks {
+		t.Fatalf("include_subtasks not set: %#v (%v)", cfg, err)
+	}
+
+	// An update that does not mention it keeps the stored value...
+	kept, err := f.MergeConfig(on, json.RawMessage(`{"project":"OTHER"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err = decodeConfig(kept); err != nil || !cfg.IncludeSubtasks {
+		t.Fatalf("include_subtasks not preserved: %#v (%v)", cfg, err)
+	}
+
+	// ...and an explicit false turns it back off.
+	off, err := f.MergeConfig(on, json.RawMessage(`{"include_subtasks":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err = decodeConfig(off); err != nil || cfg.IncludeSubtasks {
+		t.Fatalf("include_subtasks not cleared: %#v (%v)", cfg, err)
 	}
 }
 
@@ -186,6 +233,108 @@ func TestExtractTeamsNoConfig(t *testing.T) {
 	}
 	if got := extractTeams(iss, nil); got != nil {
 		t.Fatalf("extractTeams(nil fields) = %v, want nil", got)
+	}
+}
+
+// jiraServer serves one page of search results and records the JQL it was
+// asked for.
+func jiraServer(t *testing.T, issues string) (*httptest.Server, *[]string) {
+	t.Helper()
+
+	var queries []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		queries = append(queries, r.URL.Query().Get("jql"))
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"startAt":0,"maxResults":50,"total":2,"issues":[%s]}`, issues)
+	}))
+	t.Cleanup(srv.Close)
+
+	return srv, &queries
+}
+
+// twoIssues is a story plus one sub-task of it, in the shape the search API
+// returns (issuetype.subtask is JIRA's own classification).
+const twoIssues = `
+	{"key":"PROJ-1","fields":{"summary":"Story","updated":"2024-01-02T15:04:05.000+0000",
+		"issuetype":{"name":"Story","subtask":false}}},
+	{"key":"PROJ-2","fields":{"summary":"Sub-task","updated":"2024-01-02T15:04:05.000+0000",
+		"issuetype":{"name":"Sub-task","subtask":true}}}`
+
+func fetchSlugs(t *testing.T, baseURL, config string, state json.RawMessage) ([]string, *websource.FetchResult) {
+	t.Helper()
+
+	f := New()
+	col := &websource.Collection{
+		Name:   "tickets",
+		Type:   websource.TypeJira,
+		Config: json.RawMessage(fmt.Sprintf(config, baseURL)),
+	}
+
+	var slugs []string
+	res, err := f.Fetch(context.Background(), col, nil, state, func(p websource.RemotePage) error {
+		slugs = append(slugs, p.Slug)
+
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return slugs, res
+}
+
+func TestFetchSkipsSubtasksByDefault(t *testing.T) {
+	srv, _ := jiraServer(t, twoIssues)
+
+	slugs, _ := fetchSlugs(t, srv.URL, `{"base_url":%q,"project":"PROJ"}`, nil)
+	if len(slugs) != 1 || slugs[0] != "proj-1" {
+		t.Fatalf("emitted %v, want only the parent story", slugs)
+	}
+}
+
+func TestFetchIncludeSubtasks(t *testing.T) {
+	srv, _ := jiraServer(t, twoIssues)
+
+	slugs, _ := fetchSlugs(t, srv.URL, `{"base_url":%q,"project":"PROJ","include_subtasks":true}`, nil)
+	if len(slugs) != 2 {
+		t.Fatalf("emitted %v, want both issues", slugs)
+	}
+}
+
+// A collection synced before the sub-task filter existed carries a watermark
+// but no filter signature. Its next run must be a full pass so it reports
+// Complete and the manager prunes the sub-tasks already in the index; an
+// incremental run would leave them there until the next scheduled sweep.
+func TestFetchForcesFullPassWhenFilterChanged(t *testing.T) {
+	srv, queries := jiraServer(t, twoIssues)
+
+	cfg := `{"base_url":%q,"project":"PROJ"}`
+	stale, err := json.Marshal(syncState{Watermark: "2024-01-01 00:00", FullAt: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, res := fetchSlugs(t, srv.URL, cfg, stale)
+	if !res.Complete {
+		t.Fatal("changed filter must force a full, prunable pass")
+	}
+	if strings.Contains((*queries)[0], "updated >=") {
+		t.Fatalf("full pass must not carry the watermark clause: %q", (*queries)[0])
+	}
+
+	// Same filter next time: back to incremental, no re-walk of the project.
+	_, res2 := fetchSlugs(t, srv.URL, cfg, res.State)
+	if res2.Complete {
+		t.Fatal("unchanged filter should resume incremental syncing")
+	}
+	if !strings.Contains((*queries)[1], "updated >=") {
+		t.Fatalf("incremental pass missing watermark clause: %q", (*queries)[1])
+	}
+
+	// Flipping include_subtasks is itself a filter change.
+	_, res3 := fetchSlugs(t, srv.URL, `{"base_url":%q,"project":"PROJ","include_subtasks":true}`, res.State)
+	if !res3.Complete {
+		t.Fatal("toggling include_subtasks must force a full pass")
 	}
 }
 

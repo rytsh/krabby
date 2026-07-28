@@ -496,12 +496,6 @@ h2 em {
   line-height: 1.7;
 }
 
-.release-link {
-  color: var(--accent);
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
-
 footer {
   padding: 30px 0 42px;
   border-top: 3px double var(--ink);
