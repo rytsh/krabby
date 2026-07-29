@@ -93,7 +93,22 @@ func Current() Budget {
 // means auto-detect from the cgroup (container) limit, falling back to total
 // system memory. ratio is the fraction of the total handed to the Go heap;
 // non-positive values use DefaultRatio.
+//
+// Use NewWithOverrides to set a cache explicitly.
 func New(limit int64, ratio float64) Budget {
+	return NewWithOverrides(limit, ratio, Overrides{})
+}
+
+// Overrides are operator-set cache sizes that replace the derived ones. A zero
+// field keeps the derived value.
+type Overrides struct {
+	// VectorCache replaces the derived per-vector-index cache budget.
+	VectorCache int64
+}
+
+// NewWithOverrides is New with operator-set cache sizes applied on top of the
+// derived ones.
+func NewWithOverrides(limit int64, ratio float64, over Overrides) Budget {
 	b := Budget{Total: limit, Source: "config"}
 	if b.Total <= 0 {
 		b.Total, b.Source = detect()
@@ -113,10 +128,36 @@ func New(limit int64, ratio float64) Budget {
 	b.BlockCache = clamp(b.Total/64, 16<<20, 64<<20)
 	b.IndexCache = clamp(b.Total/128, 8<<20, 32<<20)
 	b.MemTable = clamp(b.Total/256, 8<<20, 32<<20)
-	b.VectorCache = clamp(b.Total/64, 16<<20, 96<<20)
 	b.GraphCache = clamp(b.Total/16, 64<<20, 512<<20)
 
+	// The vector cache is derived from the same total but with a higher
+	// ceiling than the other caches, because its useful size is set by the
+	// embedding model rather than by the machine. An entry costs
+	// dimensions*4 bytes: the old 96 MiB ceiling held ~8k vectors at 3072
+	// dimensions, which on any real corpus means a Badger read and a decode
+	// on nearly every node a search visits. Eviction is random, so a working
+	// set slightly over budget degrades sharply rather than gracefully.
+	b.VectorCache = clamp(b.Total/16, 16<<20, 512<<20)
+
+	if over.VectorCache > 0 {
+		b.VectorCache = over.VectorCache
+	}
+
 	return b
+}
+
+// VectorCacheFit reports how many embeddings of the given width the vector
+// cache budget holds, for the startup log. dim <= 0 reports 0.
+func (b Budget) VectorCacheFit(dim int) int64 {
+	if dim <= 0 {
+		return 0
+	}
+
+	// Mirrors bw's own accounting: the decoded vector plus a fixed per-entry
+	// overhead for the map slot and the key.
+	const entryOverhead = 64
+
+	return b.VectorCache / (int64(dim)*4 + entryOverhead)
 }
 
 // Apply installs the Go soft heap limit. An explicit GOMEMLIMIT in the

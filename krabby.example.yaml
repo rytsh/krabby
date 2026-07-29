@@ -55,6 +55,20 @@ memory:
                        # rest covers the graphify subprocess, git, mmap'd database
                        # tables and runtime overhead outside the heap. An explicit
                        # GOMEMLIMIT environment variable overrides this.
+  # vector_cache_bytes: 0  # per-vector-index cache of decoded embeddings.
+                       # 0 (default) derives it from limit_bytes.
+                       #
+                       # This is the one cache sized by the embedding model
+                       # rather than by the machine: an entry costs dim*4 bytes,
+                       # so the same budget holds three times fewer vectors at
+                       # 3072 dimensions than at 1024. Past the point where the
+                       # working set stops fitting, a search pays a database read
+                       # and a decode on nearly every node it visits, and because
+                       # eviction is random the fall-off is abrupt. krabby logs
+                       # "vector cache" at startup with how many vectors the
+                       # budget holds at the configured width — compare that with
+                       # the number of indexed chunks and raise this if the gap
+                       # is large and the memory is available.
 
 # Docs, LLM/embedder, RAG/code-RAG, repository polling, git credentials and
 # webhook security are persisted runtime settings. Configure them from the UI

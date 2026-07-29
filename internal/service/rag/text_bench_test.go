@@ -74,7 +74,7 @@ func BenchmarkTextStoreSearch(b *testing.B) {
 			// The pathological case: the filter selects the small partition
 			// while the ranking is dominated by the large one.
 			{name: "small_repo", filter: vectorstore.FilterKey("acme/payments")},
-			{name: "repos_only", filter: vectorstore.Filter{ExcludePrefix: "web:"}},
+			{name: "repos_only", filter: vectorstore.Filter{Kind: vectorstore.KindRepo}},
 		} {
 			b.Run(fmt.Sprintf("tickets=%d/%s", tickets, tc.name), func(b *testing.B) {
 				for b.Loop() {

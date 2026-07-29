@@ -341,7 +341,7 @@ func TestConfigureDisabledKeepsVectorsAsInactiveCache(t *testing.T) {
 	if _, err := m.SearchCode(ctx, "owner/repo", "", "query", 1); !errors.Is(err, ErrCodeRAGDisabled) {
 		t.Fatalf("SearchCode error = %v, want ErrCodeRAGDisabled", err)
 	}
-	if _, err := m.retrieveSemanticCandidates(ctx, vectorstore.FilterKey("owner/repo"), "query", 1); err == nil {
+	if _, _, err := m.retrieveSemanticCandidates(ctx, vectorstore.FilterKey("owner/repo"), "query", 1); err == nil {
 		t.Fatal("semantic docs search remained active after RAG was disabled")
 	}
 

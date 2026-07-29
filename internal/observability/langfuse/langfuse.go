@@ -22,10 +22,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
@@ -38,10 +41,18 @@ import (
 	"github.com/rytsh/krabby/internal/config"
 )
 
-// otlpPath is appended to the configured host. Langfuse also accepts
-// "/api/public/otel/v1/traces"; otlptracehttp appends "/v1/traces" itself, so
-// the base form is what we configure.
-const otlpPath = "/api/public/otel"
+// TracesPath is the full path traces are posted to, appended to the configured
+// host. Exported so the settings connectivity test probes the same URL the
+// exporter uses rather than a second guess at it.
+//
+// It has to be the signal-specific form. otlptracehttp.WithURLPath sets the
+// request path outright — it does not append "/v1/traces" the way the
+// OTEL_EXPORTER_OTLP_ENDPOINT environment variable and the OTel Collector's
+// otlphttp exporter do. Langfuse documents the base endpoint
+// ("/api/public/otel") for those, and the signal-specific endpoint
+// ("/api/public/otel/v1/traces") for clients that configure a path directly.
+// Posting to the base form returns 404.
+const TracesPath = "/api/public/otel/v1/traces"
 
 // tracerName identifies krabby's instrumentation scope in exported spans.
 const tracerName = "github.com/rytsh/krabby"
@@ -131,7 +142,7 @@ func New(cfg config.Langfuse) (*Tracer, error) {
 
 	opts := []otlptracehttp.Option{
 		otlptracehttp.WithEndpoint(u.Host),
-		otlptracehttp.WithURLPath(strings.TrimSuffix(u.Path, "/") + otlpPath),
+		otlptracehttp.WithURLPath(strings.TrimSuffix(u.Path, "/") + TracesPath),
 		otlptracehttp.WithTimeout(timeout),
 		otlptracehttp.WithHeaders(map[string]string{
 			"Authorization": "Basic " + base64.StdEncoding.EncodeToString(
@@ -154,6 +165,8 @@ func New(cfg config.Langfuse) (*Tracer, error) {
 	if err != nil {
 		return Disabled(), fmt.Errorf("create langfuse exporter; %w", err)
 	}
+
+	installErrorHandler()
 
 	res, err := resource.Merge(resource.Default(), resource.NewWithAttributes(
 		semconv.SchemaURL,
@@ -190,6 +203,28 @@ func New(cfg config.Langfuse) (*Tracer, error) {
 		release:     config.Version,
 		fingerprint: Fingerprint(cfg),
 	}, nil
+}
+
+// errorHandlerOnce guards the one-time installation of the global handler.
+var errorHandlerOnce sync.Once
+
+// installErrorHandler routes OpenTelemetry's internal errors into krabby's
+// logger.
+//
+// Export failures are reported through otel.Handle, whose default handler
+// writes to the standard library logger — outside krabby's structured output
+// and easy to miss entirely. A misconfigured endpoint or a rejected key then
+// looks exactly like a working exporter that simply has nothing to say, which
+// is the worst possible failure mode for telemetry: silence.
+//
+// The handler is global and therefore shared with the telemetry collector's
+// exporter, so the message names neither.
+func installErrorHandler() {
+	errorHandlerOnce.Do(func() {
+		otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
+			slog.Error("opentelemetry export failed", "error", err)
+		}))
+	})
 }
 
 func spanLimits(cfg config.Langfuse) sdktrace.SpanLimits {

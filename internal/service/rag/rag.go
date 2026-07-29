@@ -472,7 +472,22 @@ func (s *Service) Retrieve(ctx context.Context, filter vectorstore.Filter, quest
 		topK = 40
 	}
 
-	return s.retrieve(ctx, filter, question, topDocs, topK)
+	docs, _, err := s.retrieve(ctx, filter, question, topDocs, topK)
+
+	return docs, err
+}
+
+// RetrieveTiming splits retrieval latency into the two costs that have
+// nothing to do with each other: one network round trip to the embedder, and
+// the local vector search.
+//
+// They are reported separately because they fail and degrade for unrelated
+// reasons — a rate-limited embedder and a corpus the index has outgrown look
+// identical in a single total, and the fix for one is not the fix for the
+// other.
+type RetrieveTiming struct {
+	Embed  time.Duration
+	Vector time.Duration
 }
 
 // RetrieveCandidates returns up to candidates ranked documents for rank
@@ -499,28 +514,69 @@ func (s *Service) RetrieveCandidates(ctx context.Context, filter vectorstore.Fil
 		topK = maxCandidateChunks
 	}
 
+	docs, _, err := s.retrieve(ctx, filter, question, candidates, topK)
+
+	return docs, err
+}
+
+// RetrieveCandidatesTimed is RetrieveCandidates with the latency split
+// reported, for callers that log where a slow search spent its time.
+func (s *Service) RetrieveCandidatesTimed(
+	ctx context.Context,
+	filter vectorstore.Filter,
+	question string,
+	candidates int,
+) ([]Doc, RetrieveTiming, error) {
+	if candidates <= 0 {
+		candidates = DefaultTopDocs
+	}
+	if candidates > MaxCandidates {
+		candidates = MaxCandidates
+	}
+
+	topK := s.cfg.TopK
+	if topK < candidates*3 {
+		topK = candidates * 3
+	}
+	if topK > maxCandidateChunks {
+		topK = maxCandidateChunks
+	}
+
 	return s.retrieve(ctx, filter, question, candidates, topK)
 }
 
 // retrieve embeds the question, searches the vector store for topK chunks and
 // groups them into at most topDocs documents ranked by recency-adjusted score.
-func (s *Service) retrieve(ctx context.Context, filter vectorstore.Filter, question string, topDocs, topK int) ([]Doc, error) {
+func (s *Service) retrieve(
+	ctx context.Context,
+	filter vectorstore.Filter,
+	question string,
+	topDocs, topK int,
+) ([]Doc, RetrieveTiming, error) {
+	var timing RetrieveTiming
+
 	if strings.TrimSpace(question) == "" {
-		return nil, errors.New("question is empty")
+		return nil, timing, errors.New("question is empty")
 	}
 
+	embedStarted := time.Now()
 	vecs, err := s.emb.Embed(ctx, []string{question})
+	timing.Embed = time.Since(embedStarted)
+
 	if err != nil {
-		return nil, fmt.Errorf("embed question; %w", err)
+		return nil, timing, fmt.Errorf("embed question; %w", err)
 	}
 
 	if len(vecs) != 1 {
-		return nil, fmt.Errorf("embedder returned %d vectors for the question", len(vecs))
+		return nil, timing, fmt.Errorf("embedder returned %d vectors for the question", len(vecs))
 	}
 
+	searchStarted := time.Now()
 	matches, err := s.store.Search(ctx, filter, vecs[0], topK)
+	timing.Vector = time.Since(searchStarted)
+
 	if err != nil {
-		return nil, fmt.Errorf("vector search; %w", err)
+		return nil, timing, fmt.Errorf("vector search; %w", err)
 	}
 
 	// Group chunk matches into documents; doc score = best chunk score.
@@ -575,7 +631,7 @@ func (s *Service) retrieve(ctx context.Context, filter vectorstore.Filter, quest
 		})
 	}
 
-	return docs, nil
+	return docs, timing, nil
 }
 
 // recencyFloor caps how much an old document is penalised: its adjusted score

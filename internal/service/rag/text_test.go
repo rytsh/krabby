@@ -60,7 +60,7 @@ func TestTextStoreSearchExactTermsAndFilters(t *testing.T) {
 		t.Fatalf("jira key search = %#v", docs)
 	}
 
-	docs, err = store.Search(ctx, vectorstore.Filter{Prefix: "web:"}, "ERR_CONNECTION_RESET", 5)
+	docs, err = store.Search(ctx, vectorstore.Filter{Kind: vectorstore.KindWeb}, "ERR_CONNECTION_RESET", 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestTextStoreSearchExactTermsAndFilters(t *testing.T) {
 		t.Fatalf("web-source filter search = %#v", docs)
 	}
 
-	docs, err = store.Search(ctx, vectorstore.Filter{ExcludePrefix: "web:"}, "checkout", 5)
+	docs, err = store.Search(ctx, vectorstore.Filter{Kind: vectorstore.KindRepo}, "checkout", 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,5 +260,67 @@ func TestTextStoreIndexPathsUpdatesAndRemoves(t *testing.T) {
 	}
 	if len(current) != 1 || !current[0].UpdatedAt.Equal(updated) {
 		t.Fatalf("updated path = %#v", current)
+	}
+}
+
+// TestDocsTextMigrateV1ToV2 guards the lexical index's half of the scope-filter
+// change.
+//
+// The vector and lexical arms answer the same scope question, so both had to
+// gain the Kind discriminator. A missed backfill here would be quiet in the
+// worst way: hybrid search would still return results from the semantic arm,
+// just fewer and worse, with nothing in the logs to say why.
+func TestDocsTextMigrateV1ToV2(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	db, err := bw.Open("", bw.WithInMemory(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	// Seed in the pre-Kind shape.
+	old, err := bw.RegisterBucket[textRecordV1](db, docsTextBucketName, bw.WithVersion[textRecordV1](1))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seeded := []*textRecordV1{
+		{ID: "acme/payments/runbook.md#0", Repo: "acme/payments", Path: "runbook.md", Title: "Checkout runbook", Excerpt: "restart the payment worker after a timeout"},
+		{ID: "web:jira/pay-1842.md#0", Repo: "web:jira", Path: "pay-1842.md", Title: "PAY-1842", Excerpt: "the payment gateway returns a connection reset"},
+	}
+	for _, rec := range seeded {
+		if err := old.Insert(ctx, rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Registering the current shape runs the migration.
+	store, err := NewTextStore(db)
+	if err != nil {
+		t.Fatalf("migrating the docs text bucket: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		filter   vectorstore.Filter
+		wantPath string
+	}{
+		{"repo scope", vectorstore.Filter{Kind: vectorstore.KindRepo}, "runbook.md"},
+		{"web scope", vectorstore.Filter{Kind: vectorstore.KindWeb}, "pay-1842.md"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			docs, err := store.Search(ctx, tc.filter, "payment", 5)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(docs) != 1 {
+				t.Fatalf("got %d docs, want 1 — Kind was not backfilled: %#v", len(docs), docs)
+			}
+			if docs[0].Path != tc.wantPath {
+				t.Fatalf("got %q, want %q", docs[0].Path, tc.wantPath)
+			}
+		})
 	}
 }

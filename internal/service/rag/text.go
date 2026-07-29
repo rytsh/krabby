@@ -23,13 +23,52 @@ const (
 	maxTextCandidates  = 40
 )
 
+// textRecord is one indexed excerpt.
+//
+// Kind mirrors the vector store's discriminator so both arms of a hybrid
+// search answer a scope filter the same way, through an index seek rather
+// than an unindexable prefix match on Repo. See vectorstore.Filter.
 type textRecord struct {
+	ID        string    `bw:"id,pk"`
+	Repo      string    `bw:"repo,index"`
+	Kind      string    `bw:"kind,index"`
+	Path      string    `bw:"path,fts"`
+	Title     string    `bw:"title,fts"`
+	Excerpt   string    `bw:"excerpt,fts"`
+	UpdatedAt time.Time `bw:"updated_at"`
+}
+
+// textRecordV1 is the shape stored before bucket version 2: no Kind.
+type textRecordV1 struct {
 	ID        string    `bw:"id,pk"`
 	Repo      string    `bw:"repo,index"`
 	Path      string    `bw:"path,fts"`
 	Title     string    `bw:"title,fts"`
 	Excerpt   string    `bw:"excerpt,fts"`
 	UpdatedAt time.Time `bw:"updated_at"`
+}
+
+// docsTextBucketVersion is bumped whenever textRecord changes shape.
+//   - v2: added the indexed Kind discriminator.
+const docsTextBucketVersion = 2
+
+// migrateDocsTextV1ToV2 backfills Kind on records indexed before it existed.
+//
+// Without it the new index would be built over records that have no Kind, so
+// a scope search would quietly match nothing until every document happened to
+// be re-indexed. The excerpts are already stored, so this only rewrites them.
+func migrateDocsTextV1ToV2() bw.BucketOption[textRecord] {
+	return bw.WithTypedMigration(1, 2, func(_ context.Context, old *textRecordV1) (*textRecord, error) {
+		return &textRecord{
+			ID:        old.ID,
+			Repo:      old.Repo,
+			Kind:      vectorstore.KindOf(old.Repo),
+			Path:      old.Path,
+			Title:     old.Title,
+			Excerpt:   old.Excerpt,
+			UpdatedAt: old.UpdatedAt,
+		}, nil
+	})
 }
 
 // TextStore keeps the BM25 documentation index in Krabby's state database.
@@ -50,7 +89,10 @@ type TextStore struct {
 }
 
 func NewTextStore(db *bw.DB) (*TextStore, error) {
-	bucket, err := bw.RegisterBucket[textRecord](db, docsTextBucketName, bw.WithVersion[textRecord](1))
+	bucket, err := bw.RegisterBucket[textRecord](db, docsTextBucketName,
+		bw.WithVersion[textRecord](docsTextBucketVersion),
+		migrateDocsTextV1ToV2(),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("register docs search bucket; %w", err)
 	}
@@ -160,6 +202,7 @@ func streamTextRecords(
 			batch = append(batch, &textRecord{
 				ID:        fmt.Sprintf("%s/%s#%d", repo, docPath, i),
 				Repo:      repo,
+				Kind:      vectorstore.KindOf(repo),
 				Path:      docPath,
 				Title:     title,
 				Excerpt:   excerpt,

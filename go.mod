@@ -16,7 +16,7 @@ require (
 	github.com/rakunlabs/ada/middleware/requestid v0.4.7
 	github.com/rakunlabs/ada/middleware/server v0.4.7
 	github.com/rakunlabs/ada/middleware/telemetry v0.4.7
-	github.com/rakunlabs/bw v0.3.8
+	github.com/rakunlabs/bw v0.3.10
 	github.com/rakunlabs/chu v0.4.7
 	github.com/rakunlabs/chu/loader/external/loaderconsul v0.0.0-20260529215824-15c48ce668ec
 	github.com/rakunlabs/chu/loader/external/loadervault v0.0.0-20260529215824-15c48ce668ec
@@ -26,6 +26,10 @@ require (
 	github.com/rakunlabs/tell v0.1.5
 	github.com/worldline-go/hardloop v0.3.2
 	github.com/worldline-go/types v0.6.0
+	go.opentelemetry.io/otel v1.44.0
+	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.44.0
+	go.opentelemetry.io/otel/sdk v1.44.0
+	go.opentelemetry.io/otel/trace v1.44.0
 	golang.org/x/sync v0.22.0
 	golang.org/x/text v0.40.0
 )
@@ -93,15 +97,11 @@ require (
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.68.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/runtime v0.69.0 // indirect
-	go.opentelemetry.io/otel v1.44.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v1.44.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.44.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.44.0 // indirect
-	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.44.0 // indirect
 	go.opentelemetry.io/otel/metric v1.44.0 // indirect
-	go.opentelemetry.io/otel/sdk v1.44.0 // indirect
 	go.opentelemetry.io/otel/sdk/metric v1.44.0 // indirect
-	go.opentelemetry.io/otel/trace v1.44.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.10.0 // indirect
 	golang.org/x/exp v0.0.0-20250808145144-a408d31f581a // indirect
 	golang.org/x/net v0.55.0 // indirect

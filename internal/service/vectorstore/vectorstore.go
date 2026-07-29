@@ -3,6 +3,7 @@ package vectorstore
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/rakunlabs/query"
@@ -43,17 +44,44 @@ type Match struct {
 	Score   float32 `json:"score"`
 }
 
+// ScopePrefix namespaces web-source keys in the shared docs index. Repo ids
+// can never contain ':' so the two key spaces cannot collide.
+//
+// The convention belongs to the store because the store is what has to answer
+// questions about it; websource re-exports this constant.
+const ScopePrefix = "web:"
+
+// The two classes of key a stored chunk can belong to. They are persisted in
+// an indexed field rather than derived from the key at query time, so asking
+// for one class is an index seek instead of a scan.
+const (
+	KindRepo = "repo"
+	KindWeb  = "web"
+)
+
+// KindOf classifies a store key.
+func KindOf(key string) string {
+	if strings.HasPrefix(key, ScopePrefix) {
+		return KindWeb
+	}
+
+	return KindRepo
+}
+
 // Filter restricts a search to a subset of the indexed keys (repo ids or
 // web-source scope keys). The zero value matches everything. All set fields
 // are combined with AND.
 type Filter struct {
 	// Keys restricts matches to these exact keys.
 	Keys []string
-	// Prefix restricts matches to keys starting with this prefix (e.g. the
-	// web-source namespace "web:").
-	Prefix string
-	// ExcludePrefix drops keys starting with this prefix.
-	ExcludePrefix string
+	// Kind restricts matches to one class of key: KindRepo or KindWeb.
+	//
+	// This used to be a pair of prefix predicates on the key itself, which
+	// read naturally but could not be served by an index: bw's planner has no
+	// plan for LIKE / NOT LIKE, so a scope search degraded into a scan that
+	// decoded every chunk of every repo and every source. Matching a stored
+	// discriminator instead keeps it an index seek.
+	Kind string
 }
 
 // FilterKey builds a single-key filter; an empty key matches everything.
@@ -67,7 +95,7 @@ func FilterKey(key string) Filter {
 
 // IsZero reports whether the filter matches everything.
 func (f Filter) IsZero() bool {
-	return len(f.Keys) == 0 && f.Prefix == "" && f.ExcludePrefix == ""
+	return len(f.Keys) == 0 && f.Kind == ""
 }
 
 // Query translates the filter into a bw where clause over the indexed "repo"
@@ -91,14 +119,9 @@ func (f Filter) Query() *query.Query {
 			query.NewExpressionCmp(query.OperatorIn, "repo", f.Keys).Expression())
 	}
 
-	if f.Prefix != "" {
+	if f.Kind != "" {
 		q.Where = append(q.Where,
-			query.NewExpressionCmp(query.OperatorLike, "repo", f.Prefix+"%").Expression())
-	}
-
-	if f.ExcludePrefix != "" {
-		q.Where = append(q.Where,
-			query.NewExpressionCmp(query.OperatorNLike, "repo", f.ExcludePrefix+"%").Expression())
+			query.NewExpressionCmp(query.OperatorEq, "kind", f.Kind).Expression())
 	}
 
 	return q

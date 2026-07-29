@@ -148,22 +148,22 @@ func TestEmbeddedSearchScopeFilters(t *testing.T) {
 		t.Fatalf("Upsert: %v", err)
 	}
 
-	// Prefix keeps only web-source keys.
-	matches, err := s.Search(ctx, Filter{Prefix: "web:"}, []float32{1, 0, 0}, 10)
+	// KindWeb keeps only web-source keys.
+	matches, err := s.Search(ctx, Filter{Kind: KindWeb}, []float32{1, 0, 0}, 10)
 	if err != nil {
-		t.Fatalf("Search prefix: %v", err)
+		t.Fatalf("Search web scope: %v", err)
 	}
 	if len(matches) != 1 || matches[0].Payload.Repo != "web:wiki" {
-		t.Fatalf("prefix matches = %+v", matches)
+		t.Fatalf("web-scope matches = %+v", matches)
 	}
 
-	// ExcludePrefix drops web-source keys.
-	matches, err = s.Search(ctx, Filter{ExcludePrefix: "web:"}, []float32{1, 0, 0}, 10)
+	// KindRepo drops web-source keys.
+	matches, err = s.Search(ctx, Filter{Kind: KindRepo}, []float32{1, 0, 0}, 10)
 	if err != nil {
-		t.Fatalf("Search exclude prefix: %v", err)
+		t.Fatalf("Search repo scope: %v", err)
 	}
 	if len(matches) != 3 {
-		t.Fatalf("exclude-prefix matches = %+v", matches)
+		t.Fatalf("repo-scope matches = %+v", matches)
 	}
 	for _, m := range matches {
 		if m.Payload.Repo == "web:wiki" {

@@ -63,7 +63,9 @@ func run(ctx context.Context) error {
 	// graph cache and the indexing batches; without it the defaults of three
 	// Badger stores plus an unbounded GC target exceed a typical container
 	// limit on their own.
-	budget := memlimit.New(cfg.Memory.LimitBytes, cfg.Memory.Ratio)
+	budget := memlimit.NewWithOverrides(cfg.Memory.LimitBytes, cfg.Memory.Ratio, memlimit.Overrides{
+		VectorCache: cfg.Memory.VectorCacheBytes,
+	})
 	budget.Apply()
 	memlimit.Set(budget)
 

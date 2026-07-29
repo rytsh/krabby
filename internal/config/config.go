@@ -64,6 +64,17 @@ type Memory struct {
 	// git, mmap'd database tables and runtime overhead outside the heap. An
 	// explicit GOMEMLIMIT environment variable overrides this.
 	Ratio float64 `cfg:"ratio" default:"0.75"`
+	// VectorCacheBytes overrides the per-vector-index cache of decoded
+	// embeddings. 0 derives it from LimitBytes.
+	//
+	// This is the one cache whose useful size is set by the embedding model
+	// rather than by the machine: an entry costs dimensions*4 bytes, so the
+	// derived default holds roughly 25k vectors at 1024 dimensions but only
+	// 8k at 3072. A corpus much larger than that mostly misses, and the miss
+	// is a Badger read plus a decode on every visited node. Raise it when the
+	// working set justifies the resident memory; the store logs the fit at
+	// startup.
+	VectorCacheBytes int64 `cfg:"vector_cache_bytes"`
 }
 
 // Server is the HTTP listen configuration.

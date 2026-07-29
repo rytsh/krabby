@@ -22,6 +22,8 @@ import (
 
 	"github.com/rakunlabs/bw"
 	"github.com/rakunlabs/query"
+
+	"github.com/rytsh/krabby/internal/service/vectorstore"
 )
 
 // Collection types. Each type has a fetcher implementation in its own
@@ -40,9 +42,12 @@ const (
 	StatusError    = "error"
 )
 
-// ScopePrefix namespaces web-source keys in the shared docs vector store.
-// Repo ids can never contain ':' so the two key spaces cannot collide.
-const ScopePrefix = "web:"
+// ScopePrefix namespaces web-source keys in the shared docs index.
+//
+// The convention is owned by the store, which has to answer questions about
+// it; this is a re-export so callers reading web-source code do not have to
+// reach across packages for the spelling.
+const ScopePrefix = vectorstore.ScopePrefix
 
 // ScopeKey returns the vector-store key of a collection ("web:<name>").
 func ScopeKey(name string) string { return ScopePrefix + name }

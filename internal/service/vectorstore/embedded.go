@@ -32,9 +32,23 @@ type embedded struct {
 }
 
 // chunkRecord is one embedded chunk in the bw bucket.
+//
+// Kind exists so a scope search is an indexed equality. Repo holds either a
+// repository id or a "web:<name>" source key, and asking for one class or the
+// other used to mean a LIKE / NOT LIKE on that string — which bw's planner
+// cannot serve from an index, so the query degraded to a scan of every chunk
+// of every repo and every source. Storing the discriminator separately keeps
+// the same question answerable by an index seek.
+//
+// The embedding is declared inline=false: bw already stores it in the vector
+// index, and msgpack spends five bytes per float32, so an inline copy is both
+// redundant and the larger part of the record. Nothing reads it back — Search
+// builds its payload from the other fields — so dropping it costs nothing and
+// removes most of the store's size.
 type chunkRecord struct {
 	ID        string    `bw:"id,pk"`
 	Repo      string    `bw:"repo,index"`
+	Kind      string    `bw:"kind,index"`
 	DocPath   string    `bw:"doc_path"`
 	Title     string    `bw:"title"`
 	Chunk     string    `bw:"chunk"`
@@ -42,7 +56,7 @@ type chunkRecord struct {
 	Symbol    string    `bw:"symbol"`
 	StartLine int       `bw:"start_line"`
 	EndLine   int       `bw:"end_line"`
-	Vector    []float32 `bw:"vector,vector(metric=cosine)"`
+	Vector    []float32 `bw:"vector,vector(metric=cosine,inline=false)"`
 }
 
 // bucketName is the bw bucket holding all chunks (all repos).
@@ -54,7 +68,9 @@ const bucketName = "chunks"
 // bump that drops incompatible rows is acceptable; sources re-embed on their
 // next sync.
 //   - v2: added UpdatedAt for recency-aware retrieval.
-const bucketVersion = 2
+//   - v3: added the indexed Kind discriminator, and stopped storing the
+//     embedding inside the record.
+const bucketVersion = 3
 
 // deleteBatch and upsertBatch are the starting points for the adaptive
 // batchers below, not hard limits. Each vector record carries a full embedding
@@ -108,7 +124,10 @@ func newEmbedded(dir string) (*embedded, error) {
 		return nil, fmt.Errorf("open vector db %s; %w", dir, err)
 	}
 
-	bucket, err := bw.RegisterBucket[chunkRecord](db, bucketName, bw.WithVersion[chunkRecord](bucketVersion))
+	bucket, err := bw.RegisterBucket[chunkRecord](db, bucketName,
+		bw.WithVersion[chunkRecord](bucketVersion),
+		migrateChunksV2ToV3(),
+	)
 	if err != nil {
 		_ = db.Close()
 
@@ -135,6 +154,7 @@ func (s *embedded) Upsert(ctx context.Context, items []Item) error {
 		records = append(records, &chunkRecord{
 			ID:        it.ID,
 			Repo:      it.Payload.Repo,
+			Kind:      KindOf(it.Payload.Repo),
 			DocPath:   it.Payload.DocPath,
 			Title:     it.Payload.Title,
 			Chunk:     it.Payload.Chunk,
@@ -370,3 +390,53 @@ func repoQuery(repo string) *query.Query {
 // filterQuery translates a search Filter into a bw where clause, or nil when
 // the filter matches everything.
 func filterQuery(f Filter) *query.Query { return f.Query() }
+
+// chunkRecordV2 is the record shape stored before bucket version 3: no Kind,
+// and the embedding inline in the record body.
+type chunkRecordV2 struct {
+	ID        string    `bw:"id,pk"`
+	Repo      string    `bw:"repo,index"`
+	DocPath   string    `bw:"doc_path"`
+	Title     string    `bw:"title"`
+	Chunk     string    `bw:"chunk"`
+	UpdatedAt time.Time `bw:"updated_at"`
+	Symbol    string    `bw:"symbol"`
+	StartLine int       `bw:"start_line"`
+	EndLine   int       `bw:"end_line"`
+	Vector    []float32 `bw:"vector,vector(metric=cosine)"`
+}
+
+// migrateChunksV2ToV3 backfills Kind and moves the embedding out of the
+// record body.
+//
+// A migration rather than a wipe because the embeddings are the expensive
+// part: recomputing them means paying an embedding provider for the whole
+// corpus again. They are already stored, so the migration carries each one
+// forward from the old inline copy and lets the normal insert path re-record
+// it — which rebuilds the graph locally but re-embeds nothing.
+//
+// Without it the upgrade would be silently wrong rather than merely slow: the
+// new Kind index would be built over records that have no Kind, so a scope
+// search would match nothing until every document happened to be re-indexed.
+//
+// Note for a future version bump: bw resets vector storage before a typed
+// migration and rebuilds it from what the migration returns. From v3 on the
+// embedding is no longer in the record body, so a later migration must read
+// it from the vector index rather than expecting it in the decoded old shape.
+func migrateChunksV2ToV3() bw.BucketOption[chunkRecord] {
+	return bw.WithTypedMigration(2, 3, func(_ context.Context, old *chunkRecordV2) (*chunkRecord, error) {
+		return &chunkRecord{
+			ID:        old.ID,
+			Repo:      old.Repo,
+			Kind:      KindOf(old.Repo),
+			DocPath:   old.DocPath,
+			Title:     old.Title,
+			Chunk:     old.Chunk,
+			UpdatedAt: old.UpdatedAt,
+			Symbol:    old.Symbol,
+			StartLine: old.StartLine,
+			EndLine:   old.EndLine,
+			Vector:    old.Vector,
+		}, nil
+	})
+}

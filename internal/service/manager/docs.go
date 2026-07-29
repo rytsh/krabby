@@ -16,6 +16,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/rytsh/krabby/internal/config"
+	"github.com/rytsh/krabby/internal/memlimit"
 	"github.com/rytsh/krabby/internal/observability/langfuse"
 	"github.com/rytsh/krabby/internal/service/coderag"
 	"github.com/rytsh/krabby/internal/service/docgen"
@@ -473,6 +474,8 @@ func (m *Manager) buildBundle(s settings.Settings) (*docsBundle, error) {
 
 			b.store = store
 			b.rag = rag.New(ragConfig(s), emb, store)
+
+			logVectorCacheFit("docs", s.EmbedDim)
 		}
 	}
 
@@ -498,6 +501,8 @@ func (m *Manager) buildBundle(s settings.Settings) (*docsBundle, error) {
 
 			codeEmb = emb
 			codeStore = store
+
+			logVectorCacheFit("code", s.CodeEmbedDim)
 		}
 	}
 
@@ -505,6 +510,33 @@ func (m *Manager) buildBundle(s settings.Settings) (*docsBundle, error) {
 	b.codeRag = coderag.New(codeRagConfig(s), codeEmb, codeStore, m.engine, m.codeText)
 
 	return b, nil
+}
+
+// logVectorCacheFit reports how much of a vector index the decoded-embedding
+// cache can hold at the configured width.
+//
+// The number is worth stating out loud because it is the one cache whose
+// useful size is decided by the embedding model, not the machine: an entry
+// costs dim*4 bytes, so tripling the model's width cuts the cache to a third
+// of the vectors without any config having changed. Past that point a search
+// pays a read and a decode on nearly every node it visits, and because
+// eviction is random the degradation is abrupt rather than gradual.
+//
+// A width of zero means the provider's native dimension, which is not known
+// until the first embedding call, so there is nothing useful to report.
+func logVectorCacheFit(index string, dim int) {
+	if dim <= 0 {
+		return
+	}
+
+	budget := memlimit.Current()
+
+	slog.Info("vector cache",
+		"index", index,
+		"dim", dim,
+		"budget", memlimit.Bytes(budget.VectorCache),
+		"holds_vectors", budget.VectorCacheFit(dim),
+	)
 }
 
 // TestResult reports the outcome of a connectivity/credentials test.
@@ -603,19 +635,79 @@ func (m *Manager) TestLangfuse(ctx context.Context, patch settings.Settings) Tes
 
 	// Report which project the keys resolve to: the most common misconfiguration
 	// is a valid key pair pointed at the wrong project.
+	//
+	// A decode failure is fatal rather than cosmetic. Anything with a catch-all
+	// route answers 200 to this path — krabby's own SPA fallback does — so
+	// without checking the shape the test would pass against any web server
+	// that happens to be running at the configured address.
 	var projects struct {
 		Data []struct {
 			Name string `json:"name"`
 		} `json:"data"`
 	}
 
-	if jerr := json.Unmarshal(body, &projects); jerr == nil && len(projects.Data) > 0 {
+	if jerr := json.Unmarshal(body, &projects); jerr != nil {
+		res.Error = fmt.Sprintf("%s did not answer with a Langfuse project list; check the host", host)
+
+		return res
+	}
+
+	if len(projects.Data) > 0 {
 		res.Model = projects.Data[0].Name
+	}
+
+	// Valid keys do not imply a reachable OTLP endpoint. The two live on
+	// different paths, and a Langfuse older than v3.22.0 serves the API while
+	// answering 404 for OTLP — which would leave the test green while every
+	// export was silently discarded.
+	if err := probeOTLP(ctx, host, cfg, timeout); err != nil {
+		res.Error = err.Error()
+
+		return res
 	}
 
 	res.OK = true
 
 	return res
+}
+
+// probeOTLP verifies that the traces endpoint exists and accepts the
+// credentials.
+//
+// The body is empty on purpose: zero bytes is a valid, empty
+// ExportTraceServiceRequest in protobuf, so the probe writes no trace and
+// leaves no residue. Only the endpoint's existence is being asked about.
+func probeOTLP(ctx context.Context, host string, cfg config.Langfuse, timeout time.Duration) error {
+	endpoint := host + langfuse.TracesPath
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, http.NoBody)
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Content-Type", "application/x-protobuf")
+	req.SetBasicAuth(cfg.PublicKey, cfg.SecretKey)
+
+	resp, err := (&http.Client{Timeout: timeout}).Do(req)
+	if err != nil {
+		return fmt.Errorf("otlp endpoint %s unreachable; %w", endpoint, err)
+	}
+	defer resp.Body.Close()
+
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+
+	switch {
+	case resp.StatusCode == http.StatusNotFound:
+		return fmt.Errorf("otlp endpoint %s returned 404; the Langfuse instance is older than v3.22.0 or the host is wrong", endpoint)
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		return fmt.Errorf("otlp endpoint %s rejected the project keys (http %d)", endpoint, resp.StatusCode)
+	case resp.StatusCode >= 500:
+		return fmt.Errorf("otlp endpoint %s returned http %d", endpoint, resp.StatusCode)
+	}
+
+	// A 2xx or a 4xx about the payload both prove the endpoint is there and
+	// the credentials pass, which is all this probe can establish.
+	return nil
 }
 
 // TestLLM validates the chat LLM using the given (un-saved) settings. Blank
@@ -903,9 +995,9 @@ func docsFilter(scope, key string) (vectorstore.Filter, error) {
 	case "", ScopeAll:
 		return vectorstore.Filter{}, nil
 	case ScopeRepos:
-		return vectorstore.Filter{ExcludePrefix: websource.ScopePrefix}, nil
+		return vectorstore.Filter{Kind: vectorstore.KindRepo}, nil
 	case ScopeSources:
-		return vectorstore.Filter{Prefix: websource.ScopePrefix}, nil
+		return vectorstore.Filter{Kind: vectorstore.KindWeb}, nil
 	default:
 		return vectorstore.Filter{}, fmt.Errorf("unknown scope %q (want all, repos or sources)", scope)
 	}
@@ -1115,14 +1207,15 @@ func (m *Manager) SearchDocs(ctx context.Context, scope, key, namespace, mode, q
 	var (
 		semanticDocs, lexicalDocs []rag.Doc
 		semanticTook, lexicalTook time.Duration
+		semanticSplit             rag.RetrieveTiming
 	)
 
 	group, groupCtx := errgroup.WithContext(ctx)
 	if mode != DocsSearchLexical {
 		group.Go(func() error {
 			started := time.Now()
-			docs, err := m.retrieveSemanticCandidates(groupCtx, filter, question, fetch)
-			semanticDocs, semanticTook = docs, time.Since(started)
+			docs, split, err := m.retrieveSemanticCandidates(groupCtx, filter, question, fetch)
+			semanticDocs, semanticTook, semanticSplit = docs, time.Since(started), split
 
 			return err
 		})
@@ -1165,7 +1258,7 @@ func (m *Manager) SearchDocs(ctx context.Context, scope, key, namespace, mode, q
 
 	m.enrichWebDocs(ctx, docs)
 
-	logDocsSearch(mode, scope, key, time.Since(searchStarted), semanticTook, lexicalTook, len(docs))
+	logDocsSearch(mode, scope, key, time.Since(searchStarted), semanticTook, lexicalTook, semanticSplit, len(docs))
 
 	return docs, nil
 }
@@ -1180,7 +1273,17 @@ const docsSearchSlowThreshold = 500 * time.Millisecond
 // logDocsSearch records what a search cost, per ranker. Debug for the normal
 // case, a warning past the threshold, so a corpus that has outgrown the lexical
 // index announces itself instead of being felt as "search is sluggish".
-func logDocsSearch(mode, scope, key string, total, semantic, lexical time.Duration, results int) {
+//
+// The semantic arm is broken down further into the embedder round trip and the
+// vector search. Those two degrade for unrelated reasons and are fixed in
+// different places, so a bare semantic_ms leaves the first diagnostic question
+// unanswered.
+func logDocsSearch(
+	mode, scope, key string,
+	total, semantic, lexical time.Duration,
+	split rag.RetrieveTiming,
+	results int,
+) {
 	attrs := []any{
 		"mode", mode,
 		"total_ms", total.Milliseconds(),
@@ -1194,6 +1297,12 @@ func logDocsSearch(mode, scope, key string, total, semantic, lexical time.Durati
 	if semantic > 0 {
 		attrs = append(attrs, "semantic_ms", semantic.Milliseconds())
 	}
+	if split.Embed > 0 {
+		attrs = append(attrs, "embed_ms", split.Embed.Milliseconds())
+	}
+	if split.Vector > 0 {
+		attrs = append(attrs, "vector_ms", split.Vector.Milliseconds())
+	}
 	if lexical > 0 {
 		attrs = append(attrs, "lexical_ms", lexical.Milliseconds())
 	}
@@ -1205,6 +1314,38 @@ func logDocsSearch(mode, scope, key string, total, semantic, lexical time.Durati
 	}
 
 	slog.Debug("docs search", attrs...)
+}
+
+// logCodeSearch is logDocsSearch for the semantic code arm.
+//
+// Code search had no timing of its own, so the only way to find out whether a
+// slow code query was the embedder or the index was to attach a profiler to a
+// running server. Same threshold and same split as the docs arm, so the two
+// are comparable in one log stream.
+func logCodeSearch(repo, namespace string, total time.Duration, split coderag.RetrieveTiming, results int) {
+	attrs := []any{
+		"total_ms", total.Milliseconds(),
+		"results", results,
+	}
+	if repo != "" {
+		attrs = append(attrs, "repo", repo)
+	} else if namespace != "" {
+		attrs = append(attrs, "namespace", namespace)
+	}
+	if split.Embed > 0 {
+		attrs = append(attrs, "embed_ms", split.Embed.Milliseconds())
+	}
+	if split.Vector > 0 {
+		attrs = append(attrs, "vector_ms", split.Vector.Milliseconds())
+	}
+
+	if total >= docsSearchSlowThreshold {
+		slog.Warn("slow code search", attrs...)
+
+		return
+	}
+
+	slog.Debug("code search", attrs...)
 }
 
 // searchLexical runs the BM25 arm.
@@ -1243,16 +1384,23 @@ func (m *Manager) ragConfigSnapshot() config.RAG {
 	return d.ragCfg
 }
 
-// retrieveSemanticCandidates runs the embedding arm under the bundle lease.
-func (m *Manager) retrieveSemanticCandidates(ctx context.Context, filter vectorstore.Filter, question string, candidates int) ([]rag.Doc, error) {
+// retrieveSemanticCandidates runs the embedding arm under the bundle lease,
+// reporting how the arm's time split between the embedder and the vector
+// index so a slow search says which of the two was responsible.
+func (m *Manager) retrieveSemanticCandidates(
+	ctx context.Context,
+	filter vectorstore.Filter,
+	question string,
+	candidates int,
+) ([]rag.Doc, rag.RetrieveTiming, error) {
 	d, release := m.acquireDocs()
 	defer release()
 
 	if d.rag == nil {
-		return nil, fmt.Errorf("semantic docs search is not enabled; use mode %q", DocsSearchLexical)
+		return nil, rag.RetrieveTiming{}, fmt.Errorf("semantic docs search is not enabled; use mode %q", DocsSearchLexical)
 	}
 
-	return d.rag.RetrieveCandidates(ctx, filter, question, candidates)
+	return d.rag.RetrieveCandidatesTimed(ctx, filter, question, candidates)
 }
 
 func trimDocs(docs []rag.Doc, topDocs int) []rag.Doc {
@@ -1540,26 +1688,33 @@ func (m *Manager) SearchCode(ctx context.Context, repoID, namespace, query strin
 	if err != nil {
 		return nil, err
 	}
+
+	searchStarted := time.Now()
+
+	searchRepo := repoID
+	fetch := scope.fetch(topK)
 	if scope.single != "" {
-		return d.codeRag.Retrieve(ctx, scope.single, query, topK)
+		searchRepo, fetch = scope.single, topK
 	}
 
-	snippets, err := d.codeRag.Retrieve(ctx, repoID, query, scope.fetch(topK))
+	snippets, split, err := d.codeRag.RetrieveTimed(ctx, searchRepo, query, fetch)
 	if err != nil {
 		return nil, err
 	}
-	if scope.all {
-		return snippets, nil
-	}
 
-	out := snippets[:0]
-	for _, s := range snippets {
-		if scope.contains(s.Repo) {
-			out = append(out, s)
+	if scope.single == "" && !scope.all {
+		out := snippets[:0]
+		for _, s := range snippets {
+			if scope.contains(s.Repo) {
+				out = append(out, s)
+			}
 		}
+		snippets = trimSnippets(out, topK)
 	}
 
-	return trimSnippets(out, topK), nil
+	logCodeSearch(repoID, namespace, time.Since(searchStarted), split, len(snippets))
+
+	return snippets, nil
 }
 
 // SearchCodeText performs normal BM25 full-text search over the local bw index,

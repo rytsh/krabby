@@ -15,6 +15,7 @@ import (
 	"github.com/rakunlabs/bw"
 
 	"github.com/rytsh/krabby/internal/config"
+	"github.com/rytsh/krabby/internal/service/coderag"
 	"github.com/rytsh/krabby/internal/service/embedder"
 	"github.com/rytsh/krabby/internal/service/rag"
 	"github.com/rytsh/krabby/internal/service/registry"
@@ -254,12 +255,39 @@ func TestLogDocsSearchAttributes(t *testing.T) {
 
 	for _, tc := range []struct {
 		total, semantic, lexical time.Duration
+		split                    rag.RetrieveTiming
 	}{
 		{total: time.Millisecond},
-		{total: docsSearchSlowThreshold, semantic: 400 * time.Millisecond, lexical: 100 * time.Millisecond},
+		{
+			total:    docsSearchSlowThreshold,
+			semantic: 400 * time.Millisecond,
+			lexical:  100 * time.Millisecond,
+			split:    rag.RetrieveTiming{Embed: 150 * time.Millisecond, Vector: 250 * time.Millisecond},
+		},
 		{total: 2 * docsSearchSlowThreshold, lexical: 2 * docsSearchSlowThreshold},
 	} {
-		logDocsSearch(DocsSearchHybrid, ScopeAll, "web:jira", tc.total, tc.semantic, tc.lexical, 3)
-		logDocsSearch(DocsSearchLexical, ScopeAll, "", tc.total, 0, tc.lexical, 0)
+		logDocsSearch(DocsSearchHybrid, ScopeAll, "web:jira", tc.total, tc.semantic, tc.lexical, tc.split, 3)
+		logDocsSearch(DocsSearchLexical, ScopeAll, "", tc.total, 0, tc.lexical, rag.RetrieveTiming{}, 0)
+	}
+}
+
+// TestLogCodeSearchAttributes is TestLogDocsSearchAttributes for the code arm.
+func TestLogCodeSearchAttributes(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		repo, namespace string
+		total           time.Duration
+		split           coderag.RetrieveTiming
+	}{
+		{total: time.Millisecond},
+		{
+			repo:  "github.com/a/b",
+			total: docsSearchSlowThreshold,
+			split: coderag.RetrieveTiming{Embed: 70 * time.Millisecond, Vector: 430 * time.Millisecond},
+		},
+		{namespace: "payments", total: 2 * docsSearchSlowThreshold},
+	} {
+		logCodeSearch(tc.repo, tc.namespace, tc.total, tc.split, 3)
 	}
 }

@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/rytsh/krabby/internal/config"
 	"github.com/rytsh/krabby/internal/service/embedder"
@@ -452,8 +453,35 @@ func (s *Service) DeleteRepo(ctx context.Context, repo string) error {
 // Retrieve returns up to topK code snippets most relevant to the query.
 // repo == "" searches across all repos. topK <= 0 uses the configured default.
 func (s *Service) Retrieve(ctx context.Context, repo, query string, topK int) ([]Snippet, error) {
+	snippets, _, err := s.RetrieveTimed(ctx, repo, query, topK)
+
+	return snippets, err
+}
+
+// RetrieveTiming splits retrieval latency into the two costs that have
+// nothing to do with each other: one network round trip to the embedder, and
+// the local vector search.
+//
+// They are reported separately because they fail and degrade for unrelated
+// reasons — a rate-limited embedder and a corpus the index has outgrown look
+// identical in a single total, and the fix for one is not the fix for the
+// other.
+type RetrieveTiming struct {
+	Embed  time.Duration
+	Vector time.Duration
+}
+
+// RetrieveTimed is Retrieve with the latency split reported, for callers that
+// log where a slow search spent its time.
+func (s *Service) RetrieveTimed(
+	ctx context.Context,
+	repo, query string,
+	topK int,
+) ([]Snippet, RetrieveTiming, error) {
+	var timing RetrieveTiming
+
 	if strings.TrimSpace(query) == "" {
-		return nil, errors.New("query is empty")
+		return nil, timing, errors.New("query is empty")
 	}
 
 	if topK <= 0 {
@@ -467,21 +495,27 @@ func (s *Service) Retrieve(ctx context.Context, repo, query string, topK int) ([
 		topK = maxSearchResults
 	}
 
+	embedStarted := time.Now()
 	vecs, err := s.emb.Embed(ctx, []string{query})
+	timing.Embed = time.Since(embedStarted)
+
 	if err != nil {
-		return nil, fmt.Errorf("embed query; %w", err)
+		return nil, timing, fmt.Errorf("embed query; %w", err)
 	}
 
 	if len(vecs) != 1 {
-		return nil, fmt.Errorf("embedder returned %d vectors for the query", len(vecs))
+		return nil, timing, fmt.Errorf("embedder returned %d vectors for the query", len(vecs))
 	}
 
 	// Fetch extra candidates because fallback chunks overlap and are deduplicated
 	// below; this keeps the final result useful without returning near-identical
 	// snippets from the same file region.
+	searchStarted := time.Now()
 	matches, err := s.store.Search(ctx, vectorstore.FilterKey(repo), vecs[0], topK*3)
+	timing.Vector = time.Since(searchStarted)
+
 	if err != nil {
-		return nil, fmt.Errorf("vector search; %w", err)
+		return nil, timing, fmt.Errorf("vector search; %w", err)
 	}
 
 	out := make([]Snippet, 0, len(matches))
@@ -505,7 +539,7 @@ func (s *Service) Retrieve(ctx context.Context, repo, query string, topK int) ([
 		}
 	}
 
-	return out, nil
+	return out, timing, nil
 }
 
 // overlapsExisting reports whether candidate overlaps at least half of the

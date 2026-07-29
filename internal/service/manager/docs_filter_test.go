@@ -15,8 +15,8 @@ func TestDocsFilter(t *testing.T) {
 	}{
 		{name: "all default", want: vectorstore.Filter{}},
 		{name: "all explicit", scope: ScopeAll, want: vectorstore.Filter{}},
-		{name: "repos", scope: ScopeRepos, want: vectorstore.Filter{ExcludePrefix: "web:"}},
-		{name: "sources", scope: ScopeSources, want: vectorstore.Filter{Prefix: "web:"}},
+		{name: "repos", scope: ScopeRepos, want: vectorstore.Filter{Kind: vectorstore.KindRepo}},
+		{name: "sources", scope: ScopeSources, want: vectorstore.Filter{Kind: vectorstore.KindWeb}},
 		{name: "single source wins", scope: ScopeRepos, key: "web:wine", want: vectorstore.Filter{Keys: []string{"web:wine"}}},
 		{name: "single repo", key: "git.example.com/a/repo", want: vectorstore.Filter{Keys: []string{"git.example.com/a/repo"}}},
 		{name: "invalid", scope: "other", wantErr: true},

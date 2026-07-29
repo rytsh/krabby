@@ -295,6 +295,14 @@ Configure it under **Settings → LLM observability**, or through
 `set_docs_config` / `PUT /api/v1/docs/config`. Nothing is exported until a host
 and a project key pair are supplied.
 
+Traces are posted to `<host>/api/public/otel/v1/traces` — the signal-specific
+path, not the `/api/public/otel` base endpoint. The base form is what
+`OTEL_EXPORTER_OTLP_ENDPOINT` and the OTel Collector take, because they append
+`/v1/traces` themselves; a client that configures the path directly must spell
+it out, and posting to the base form returns `404`. **Test connection** probes
+that exact URL, so a Langfuse older than v3.22.0 — which serves the REST API but
+has no OTLP endpoint — is reported rather than silently dropping every export.
+
 The export deliberately does **not** go through the `telemetry` collector. Two
 reasons:
 
