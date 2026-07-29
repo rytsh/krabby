@@ -1,0 +1,12 @@
+services:
+  krabby:
+    image: ghcr.io/rytsh/krabby:latest
+    container_name: krabby
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - krabby-data:/data
+
+volumes:
+  krabby-data:

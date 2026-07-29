@@ -20,6 +20,23 @@ and understand relationships through MCP.
 
 ## Run with Docker
 
+With Docker Compose:
+
+```sh
+docker compose --project-name krabby up -d --pull always
+```
+
+To stop and remove Krabby while keeping its data:
+
+```sh
+docker compose --project-name krabby down
+
+# Also permanently delete all Krabby data:
+# docker compose --project-name krabby down --volumes
+```
+
+Or with Docker directly:
+
 ```sh
 mkdir -p krabby-data
 
@@ -31,8 +48,8 @@ docker run -d \
 ```
 
 Open [http://localhost:8080](http://localhost:8080), then add repositories from
-the UI. The `krabby-data` directory keeps repositories, indexes, and settings
-between container restarts.
+the UI. The `krabby-data` volume (or directory when using `docker run`) keeps
+repositories, indexes, and settings between container restarts.
 
 > For base path use **KRABBY_SERVER_BASE_PATH** environment variable, e.g. `-e KRABBY_SERVER_BASE_PATH=/krabby` to run behind a reverse proxy.
 
