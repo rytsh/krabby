@@ -77,7 +77,7 @@ func TestSummaryModelUsedForSummariesOnly(t *testing.T) {
 	synth := modelRecordingLLM(t, "pro-model", &synthSeen, &mu)
 	summary := modelRecordingLLM(t, "flash-model", &summarySeen, &mu)
 
-	gen := New(config.Docs{}, synth, summary, nil)
+	gen := New(config.Docs{}, synth, summary, nil, nil)
 
 	docsDir := filepath.Join(clone, "krabby-docs")
 	if _, err := gen.Generate(context.Background(), "r", clone, docsDir, config.DocsOverride{}, false); err != nil {
@@ -111,7 +111,7 @@ func TestNilSummaryFallsBackToChat(t *testing.T) {
 	var seen []string
 	chat := modelRecordingLLM(t, "only-model", &seen, &mu)
 
-	gen := New(config.Docs{}, chat, nil, nil) // nil summary -> use chat for both
+	gen := New(config.Docs{}, chat, nil, nil, nil) // nil summary -> use chat for both
 
 	if _, err := gen.Generate(context.Background(), "r", clone, filepath.Join(clone, "krabby-docs"), config.DocsOverride{}, false); err != nil {
 		t.Fatalf("Generate: %v", err)
@@ -147,7 +147,7 @@ func TestGenerateWritesDocAndManifest(t *testing.T) {
 	writeSrc(t, clone, "README.md", "# not code\n") // excluded by default ext allowlist
 
 	var calls int32
-	gen := New(config.Docs{}, fakeLLM(t, &calls), nil, nil)
+	gen := New(config.Docs{}, fakeLLM(t, &calls), nil, nil, nil)
 
 	docsDir := filepath.Join(clone, "krabby-docs")
 	man, err := gen.Generate(context.Background(), "owner/repo", clone, docsDir, config.DocsOverride{}, false)
@@ -257,7 +257,7 @@ func TestGenerateCommunityGroupingReducesCalls(t *testing.T) {
 		t.Fatalf("llm.New: %v", err)
 	}
 
-	gen := New(config.Docs{}, c, nil, graphquery.NewEngine(0))
+	gen := New(config.Docs{}, c, nil, graphquery.NewEngine(0), nil)
 
 	docsDir := filepath.Join(clone, "krabby-docs")
 	man, err := gen.Generate(context.Background(), "owner/repo", clone, docsDir, config.DocsOverride{}, false)
@@ -300,7 +300,7 @@ func TestBuildGroupsCapsGroupCount(t *testing.T) {
 	sort.Strings(files)
 	writeGraph(t, clone, community)
 
-	gen := New(config.Docs{MaxGroups: 40}, nil, nil, graphquery.NewEngine(0)).(*llmGenerator)
+	gen := New(config.Docs{MaxGroups: 40}, nil, nil, graphquery.NewEngine(0), nil).(*llmGenerator)
 
 	graph := gen.loadGraph(clone)
 	if graph == nil {
@@ -339,7 +339,7 @@ func TestGenerateIncremental(t *testing.T) {
 	writeSrc(t, clone, "b.go", "package b\n")
 
 	var calls int32
-	gen := New(config.Docs{}, fakeLLM(t, &calls), nil, nil)
+	gen := New(config.Docs{}, fakeLLM(t, &calls), nil, nil, nil)
 	docsDir := filepath.Join(clone, "krabby-docs")
 
 	if _, err := gen.Generate(context.Background(), "r", clone, docsDir, config.DocsOverride{}, false); err != nil {
@@ -384,7 +384,7 @@ func TestGenerateResynthesizesWhenPromptChanges(t *testing.T) {
 	client := fakeLLM(t, &calls)
 	docsDir := filepath.Join(clone, "krabby-docs")
 
-	first, err := New(config.Docs{Prompt: "first prompt"}, client, nil, nil).
+	first, err := New(config.Docs{Prompt: "first prompt"}, client, nil, nil, nil).
 		Generate(context.Background(), "r", clone, docsDir, config.DocsOverride{}, false)
 	if err != nil {
 		t.Fatalf("first gen: %v", err)
@@ -393,7 +393,7 @@ func TestGenerateResynthesizesWhenPromptChanges(t *testing.T) {
 		t.Fatalf("first run calls = %d, want 2 (summary + synthesis)", calls)
 	}
 
-	second, err := New(config.Docs{Prompt: "second prompt"}, client, nil, nil).
+	second, err := New(config.Docs{Prompt: "second prompt"}, client, nil, nil, nil).
 		Generate(context.Background(), "r", clone, docsDir, config.DocsOverride{}, false)
 	if err != nil {
 		t.Fatalf("second gen: %v", err)
@@ -408,7 +408,7 @@ func TestGenerateResynthesizesWhenPromptChanges(t *testing.T) {
 		t.Fatalf("prompt hashes = %q and %q, want different non-empty hashes", first.PromptHash, second.PromptHash)
 	}
 
-	third, err := New(config.Docs{Prompt: "second prompt"}, client, nil, nil).
+	third, err := New(config.Docs{Prompt: "second prompt"}, client, nil, nil, nil).
 		Generate(context.Background(), "r", clone, docsDir, config.DocsOverride{}, false)
 	if err != nil {
 		t.Fatalf("third gen: %v", err)
@@ -449,7 +449,7 @@ func TestMigratesOldPerFileLayout(t *testing.T) {
 	}
 
 	var calls int32
-	gen := New(config.Docs{}, fakeLLM(t, &calls), nil, nil)
+	gen := New(config.Docs{}, fakeLLM(t, &calls), nil, nil, nil)
 
 	man, err := gen.Generate(context.Background(), "r", clone, docsDir, config.DocsOverride{}, false)
 	if err != nil {
@@ -489,7 +489,7 @@ func TestIncludeExcludeGlobs(t *testing.T) {
 	gen := New(config.Docs{Filters: config.Filters{
 		Include: []string{"*.go"},
 		Exclude: []string{"skip.go", "vendor/"},
-	}}, fakeLLM(t, &calls), nil, nil)
+	}}, fakeLLM(t, &calls), nil, nil, nil)
 
 	docsDir := filepath.Join(clone, "krabby-docs")
 	man, err := gen.Generate(context.Background(), "r", clone, docsDir, config.DocsOverride{}, false)
@@ -522,7 +522,7 @@ func TestCustomPromptUsedForSynthesis(t *testing.T) {
 	defer srv.Close()
 
 	c, _ := llm.New(config.LLM{BaseURL: srv.URL, Model: "m"})
-	gen := New(config.Docs{Prompt: "CUSTOM PROMPT XYZZY"}, c, nil, nil)
+	gen := New(config.Docs{Prompt: "CUSTOM PROMPT XYZZY"}, c, nil, nil, nil)
 
 	if _, err := gen.Generate(context.Background(), "r", clone, filepath.Join(clone, "krabby-docs"), config.DocsOverride{}, false); err != nil {
 		t.Fatalf("Generate: %v", err)
@@ -561,7 +561,7 @@ func TestDefaultPromptFallback(t *testing.T) {
 	defer srv.Close()
 
 	c, _ := llm.New(config.LLM{BaseURL: srv.URL, Model: "m"})
-	gen := New(config.Docs{Prompt: "   "}, c, nil, nil) // blank -> default
+	gen := New(config.Docs{Prompt: "   "}, c, nil, nil, nil) // blank -> default
 
 	if _, err := gen.Generate(context.Background(), "r", clone, filepath.Join(clone, "krabby-docs"), config.DocsOverride{}, false); err != nil {
 		t.Fatalf("Generate: %v", err)
@@ -618,7 +618,7 @@ func TestSelectFilesSkipsTestAndFixtureNoise(t *testing.T) {
 	writeSrc(t, clone, "web/app.test.ts", "export {}\n")
 	writeSrc(t, clone, "vendor/dep/dep.go", "package dep\n")
 
-	gen := New(config.Docs{}, nil, nil, nil).(*llmGenerator)
+	gen := New(config.Docs{}, nil, nil, nil, nil).(*llmGenerator)
 
 	files, err := gen.selectFiles(clone, gen.cfg.Filters)
 	if err != nil {
@@ -654,7 +654,7 @@ func TestSelectFilesDocumentsDeployConfig(t *testing.T) {
 	writeSrc(t, clone, "charts/api/values-stage.yaml", "image:\n  tag: 2.15.0\n")
 	writeSrc(t, clone, "k8s/deployment.yaml", "kind: Deployment\n")
 
-	gen := New(config.Docs{}, nil, nil, nil).(*llmGenerator)
+	gen := New(config.Docs{}, nil, nil, nil, nil).(*llmGenerator)
 
 	files, err := gen.selectFiles(clone, gen.cfg.Filters)
 	if err != nil {
@@ -685,7 +685,7 @@ func TestSelectFilesRespectsExplicitInclude(t *testing.T) {
 	writeSrc(t, clone, "svc.go", "package svc\n")
 	writeSrc(t, clone, "svc_test.go", "package svc\n")
 
-	gen := New(config.Docs{Filters: config.Filters{Include: []string{"*.go"}}}, nil, nil, nil).(*llmGenerator)
+	gen := New(config.Docs{Filters: config.Filters{Include: []string{"*.go"}}}, nil, nil, nil, nil).(*llmGenerator)
 	files, err := gen.selectFiles(clone, gen.cfg.Filters)
 	if err != nil {
 		t.Fatalf("selectFiles: %v", err)
@@ -700,7 +700,7 @@ func TestSelectFilesRespectsExplicitInclude(t *testing.T) {
 }
 
 func TestSynthesisPromptResolution(t *testing.T) {
-	base := New(config.Docs{}, nil, nil, nil).(*llmGenerator)
+	base := New(config.Docs{}, nil, nil, nil, nil).(*llmGenerator)
 
 	t.Run("default when nothing set", func(t *testing.T) {
 		if got := base.synthesisPrompt(config.DocsOverride{}); got != DefaultPrompt {
@@ -721,7 +721,7 @@ func TestSynthesisPromptResolution(t *testing.T) {
 	})
 
 	t.Run("repo prompt replaces the global one", func(t *testing.T) {
-		g := New(config.Docs{Prompt: "GLOBAL"}, nil, nil, nil).(*llmGenerator)
+		g := New(config.Docs{Prompt: "GLOBAL"}, nil, nil, nil, nil).(*llmGenerator)
 		got := g.synthesisPrompt(config.DocsOverride{Prompt: "REPO"})
 		if strings.Contains(got, "GLOBAL") || !strings.Contains(got, "REPO") {
 			t.Fatalf("repo prompt should win outright, got %q", got)
@@ -730,7 +730,7 @@ func TestSynthesisPromptResolution(t *testing.T) {
 
 	// Both extras apply, repo last so it is the final word the model reads.
 	t.Run("global and repo extras both apply, repo last", func(t *testing.T) {
-		g := New(config.Docs{Prompt: "BASE", PromptExtra: "HOUSE RULE"}, nil, nil, nil).(*llmGenerator)
+		g := New(config.Docs{Prompt: "BASE", PromptExtra: "HOUSE RULE"}, nil, nil, nil, nil).(*llmGenerator)
 		got := g.synthesisPrompt(config.DocsOverride{PromptExtra: "REPO RULE"})
 		house, repo := strings.Index(got, "HOUSE RULE"), strings.Index(got, "REPO RULE")
 		if house < 0 || repo < 0 {
@@ -765,7 +765,7 @@ func TestSelectFilesBeyondListCap(t *testing.T) {
 		writeSrc(t, clone, fmt.Sprintf("pkg%04d/svc.go", i), "package p\n")
 	}
 
-	gen := New(config.Docs{}, nil, nil, nil).(*llmGenerator)
+	gen := New(config.Docs{}, nil, nil, nil, nil).(*llmGenerator)
 
 	got, err := gen.selectFiles(clone, config.Filters{})
 	if err != nil {
@@ -785,7 +785,7 @@ func TestSelectFilesPrunesNoiseDirs(t *testing.T) {
 	writeSrc(t, clone, "krabby-docs/documentation.md", "# docs\n")
 	writeSrc(t, clone, ".git/hooks/pre-commit.sh", "#!/bin/sh\n")
 
-	gen := New(config.Docs{}, nil, nil, nil).(*llmGenerator)
+	gen := New(config.Docs{}, nil, nil, nil, nil).(*llmGenerator)
 
 	got, err := gen.selectFiles(clone, config.Filters{})
 	if err != nil {

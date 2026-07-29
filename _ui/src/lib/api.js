@@ -132,6 +132,7 @@ export const api = {
   testLLM: (cfg) => req("/docs/config/test/llm", { method: "POST", body: JSON.stringify(cfg) }),
   testEmbedder: (cfg) => req("/docs/config/test/embedder", { method: "POST", body: JSON.stringify(cfg) }),
   testCodeEmbedder: (cfg) => req("/docs/config/test/code-embedder", { method: "POST", body: JSON.stringify(cfg) }),
+  testLangfuse: (cfg) => req("/docs/config/test/langfuse", { method: "POST", body: JSON.stringify(cfg) }),
   // searchDocs scoping: repo may be a repository id or a web-source key
   // ("web:<name>") and wins over scope; scope is all|repos|sources.
   // namespace scopes results to a single namespace; "" (or "*") searches all.

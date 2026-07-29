@@ -17,6 +17,8 @@ import (
 
 	"github.com/rakunlabs/bw"
 	"github.com/worldline-go/hardloop"
+
+	"github.com/rytsh/krabby/internal/config"
 )
 
 // recordID is the single-row key for the settings bucket.
@@ -96,6 +98,31 @@ type Settings struct {
 	CodeRAGIncludeExtra []string `bw:"code_rag_include_extra" json:"code_rag_include_extra"`
 	CodeRAGExclude      []string `bw:"code_rag_exclude"       json:"code_rag_exclude"`
 
+	// Langfuse (LLM observability). Traces are exported over OTLP/HTTP to a
+	// Langfuse instance, on a tracer provider separate from the telemetry
+	// collector: Langfuse does not accept gRPC, and its per-observation
+	// billing makes HTTP server spans unwelcome there.
+	LangfuseEnabled     bool          `bw:"langfuse_enabled"     json:"langfuse_enabled"`
+	LangfuseHost        string        `bw:"langfuse_host"        json:"langfuse_host"`
+	LangfusePublicKey   string        `bw:"langfuse_public_key"  json:"langfuse_public_key"`
+	LangfuseSecretKey   string        `bw:"langfuse_secret_key"  json:"-"` // write-only
+	LangfuseEnvironment string        `bw:"langfuse_environment" json:"langfuse_environment"`
+	LangfuseTimeout     time.Duration `bw:"langfuse_timeout"     json:"langfuse_timeout"`
+
+	// LangfuseCapture is "off", "truncated" or "full" and selects how much
+	// prompt/completion text is exported. LangfuseMaxContentBytes caps a
+	// single captured value in every mode; 0 removes the cap.
+	LangfuseCapture         string `bw:"langfuse_capture"           json:"langfuse_capture"`
+	LangfuseMaxContentBytes int    `bw:"langfuse_max_content_bytes" json:"langfuse_max_content_bytes"`
+
+	// Per-scope switches, so an install pays for exactly the visibility it
+	// wants. HTTP is off by default: REST spans carry no LLM information and
+	// would dominate the observation count.
+	LangfuseTraceDocs  bool `bw:"langfuse_trace_docs"  json:"langfuse_trace_docs"`
+	LangfuseTraceEmbed bool `bw:"langfuse_trace_embed" json:"langfuse_trace_embed"`
+	LangfuseTraceMCP   bool `bw:"langfuse_trace_mcp"   json:"langfuse_trace_mcp"`
+	LangfuseTraceHTTP  bool `bw:"langfuse_trace_http"  json:"langfuse_trace_http"`
+
 	// TaskConcurrency caps how many background tasks (repo refresh/generate,
 	// web-source sync, reindex) run at once through the central work queue.
 	// <= 0 means the built-in default. Raising it processes more repositories
@@ -166,6 +193,19 @@ func Defaults() Settings {
 		CodeRAGChunkOverlap: 1000,
 		CodeRAGTopK:         10,
 
+		// Langfuse is off until a host and keys are supplied; the scope
+		// switches are pre-armed so enabling it produces useful traces
+		// immediately. HTTP stays off: it adds observations without adding LLM
+		// insight.
+		LangfuseHost:            "https://cloud.langfuse.com",
+		LangfuseEnvironment:     "production",
+		LangfuseTimeout:         10 * time.Second,
+		LangfuseCapture:         string(config.CaptureFull),
+		LangfuseMaxContentBytes: 1 << 20,
+		LangfuseTraceDocs:       true,
+		LangfuseTraceEmbed:      true,
+		LangfuseTraceMCP:        true,
+
 		// Keep the queue.DefaultConcurrency default in sync with this value.
 		TaskConcurrency: 3,
 
@@ -222,21 +262,23 @@ func (s Settings) ValidateSchedules() error {
 // booleans indicating whether each is set.
 type Redacted struct {
 	Settings
-	DocsDefaultPrompt  string `json:"docs_default_prompt,omitempty"`
-	LLMAPIKeySet       bool   `json:"llm_api_key_set"`
-	EmbedAPIKeySet     bool   `json:"embed_api_key_set"`
-	CodeEmbedAPIKeySet bool   `json:"code_embed_api_key_set"`
-	WebhookSecretSet   bool   `json:"webhook_secret_set"`
+	DocsDefaultPrompt    string `json:"docs_default_prompt,omitempty"`
+	LLMAPIKeySet         bool   `json:"llm_api_key_set"`
+	EmbedAPIKeySet       bool   `json:"embed_api_key_set"`
+	CodeEmbedAPIKeySet   bool   `json:"code_embed_api_key_set"`
+	WebhookSecretSet     bool   `json:"webhook_secret_set"`
+	LangfuseSecretKeySet bool   `json:"langfuse_secret_key_set"`
 }
 
 // Redact returns a view with secrets removed and "*_set" booleans populated.
 func (s Settings) Redact() Redacted {
 	r := Redacted{
-		Settings:           s,
-		LLMAPIKeySet:       s.LLMAPIKey != "",
-		EmbedAPIKeySet:     s.EmbedAPIKey != "",
-		CodeEmbedAPIKeySet: s.CodeEmbedAPIKey != "",
-		WebhookSecretSet:   s.WebhookSecret != "",
+		Settings:             s,
+		LLMAPIKeySet:         s.LLMAPIKey != "",
+		EmbedAPIKeySet:       s.EmbedAPIKey != "",
+		CodeEmbedAPIKeySet:   s.CodeEmbedAPIKey != "",
+		WebhookSecretSet:     s.WebhookSecret != "",
+		LangfuseSecretKeySet: s.LangfuseSecretKey != "",
 	}
 	// Defensive: ensure the embedded copy carries no secrets (they have json:"-"
 	// so they never marshal, but zero them to avoid accidental in-process leaks).
@@ -244,6 +286,7 @@ func (s Settings) Redact() Redacted {
 	r.Settings.EmbedAPIKey = ""
 	r.Settings.CodeEmbedAPIKey = ""
 	r.Settings.WebhookSecret = ""
+	r.Settings.LangfuseSecretKey = ""
 
 	return r
 }
@@ -302,10 +345,33 @@ type Patch struct {
 	CodeRAGIncludeExtra *[]string `json:"code_rag_include_extra"`
 	CodeRAGExclude      *[]string `json:"code_rag_exclude"`
 
+	LangfuseEnabled         *bool          `json:"langfuse_enabled"`
+	LangfuseHost            *string        `json:"langfuse_host"`
+	LangfusePublicKey       *string        `json:"langfuse_public_key"`
+	LangfuseSecretKey       *string        `json:"langfuse_secret_key"`
+	LangfuseEnvironment     *string        `json:"langfuse_environment"`
+	LangfuseTimeout         *time.Duration `json:"langfuse_timeout"`
+	LangfuseCapture         *string        `json:"langfuse_capture"`
+	LangfuseMaxContentBytes *int           `json:"langfuse_max_content_bytes"`
+	LangfuseTraceDocs       *bool          `json:"langfuse_trace_docs"`
+	LangfuseTraceEmbed      *bool          `json:"langfuse_trace_embed"`
+	LangfuseTraceMCP        *bool          `json:"langfuse_trace_mcp"`
+	LangfuseTraceHTTP       *bool          `json:"langfuse_trace_http"`
+
 	TaskConcurrency *int            `json:"task_concurrency"`
 	GitPollInterval *time.Duration  `json:"git_poll_interval"`
 	RepoSchedules   *[]RepoSchedule `json:"repo_schedules"`
 	WebhookSecret   *string         `json:"webhook_secret"`
+}
+
+// langfuseTouched reports whether the patch changes any observability field.
+func (p Patch) langfuseTouched() bool {
+	return p.LangfuseEnabled != nil || p.LangfuseHost != nil ||
+		p.LangfusePublicKey != nil || p.LangfuseSecretKey != nil ||
+		p.LangfuseEnvironment != nil || p.LangfuseTimeout != nil ||
+		p.LangfuseCapture != nil || p.LangfuseMaxContentBytes != nil ||
+		p.LangfuseTraceDocs != nil || p.LangfuseTraceEmbed != nil ||
+		p.LangfuseTraceMCP != nil || p.LangfuseTraceHTTP != nil
 }
 
 // RuntimeOnly reports whether a patch changes only scheduler/webhook/queue
@@ -329,7 +395,36 @@ func (p Patch) RuntimeOnly() bool {
 		p.CodeEmbedDim == nil && p.CodeEmbedBatch == nil && p.CodeEmbedConcurrency == nil &&
 		p.CodeEmbedTimeout == nil && p.CodeRAGEnabled == nil && p.CodeRAGChunkSize == nil &&
 		p.CodeRAGChunkOverlap == nil && p.CodeRAGTopK == nil &&
-		p.CodeRAGInclude == nil && p.CodeRAGIncludeExtra == nil && p.CodeRAGExclude == nil
+		p.CodeRAGInclude == nil && p.CodeRAGIncludeExtra == nil && p.CodeRAGExclude == nil &&
+		!p.langfuseTouched()
+}
+
+// ObservabilityOnly reports whether a patch changes nothing but the Langfuse
+// export. Such a patch still needs a client rebuild, because the tracer is
+// attached to the LLM and embedder clients, but it changes no embedding input,
+// so the caller can skip the reindex that follows an ordinary settings change.
+func (p Patch) ObservabilityOnly() bool {
+	if !p.langfuseTouched() {
+		return false
+	}
+
+	// Reuse RuntimeOnly's exhaustive field list by asking the inverse
+	// question of a copy with the observability fields cleared: if what
+	// remains changes nothing at all, the patch was purely observability.
+	rest := p
+	rest.LangfuseEnabled, rest.LangfuseHost = nil, nil
+	rest.LangfusePublicKey, rest.LangfuseSecretKey = nil, nil
+	rest.LangfuseEnvironment, rest.LangfuseTimeout = nil, nil
+	rest.LangfuseCapture, rest.LangfuseMaxContentBytes = nil, nil
+	rest.LangfuseTraceDocs, rest.LangfuseTraceEmbed = nil, nil
+	rest.LangfuseTraceMCP, rest.LangfuseTraceHTTP = nil, nil
+
+	return rest.empty()
+}
+
+// empty reports whether the patch sets no field at all.
+func (p Patch) empty() bool {
+	return p == Patch{}
 }
 
 // Apply overlays fields present in p onto base. Pointer fields distinguish an
@@ -476,6 +571,43 @@ func (p Patch) Apply(base Settings) Settings {
 	if p.WebhookSecret != nil {
 		base.WebhookSecret = *p.WebhookSecret
 	}
+	if p.LangfuseEnabled != nil {
+		base.LangfuseEnabled = *p.LangfuseEnabled
+	}
+	if p.LangfuseHost != nil {
+		base.LangfuseHost = *p.LangfuseHost
+	}
+	if p.LangfusePublicKey != nil {
+		base.LangfusePublicKey = *p.LangfusePublicKey
+	}
+	if p.LangfuseSecretKey != nil {
+		base.LangfuseSecretKey = *p.LangfuseSecretKey
+	}
+	if p.LangfuseEnvironment != nil {
+		base.LangfuseEnvironment = *p.LangfuseEnvironment
+	}
+	if p.LangfuseTimeout != nil {
+		base.LangfuseTimeout = *p.LangfuseTimeout
+	}
+	if p.LangfuseCapture != nil {
+		base.LangfuseCapture = *p.LangfuseCapture
+	}
+	if p.LangfuseMaxContentBytes != nil {
+		base.LangfuseMaxContentBytes = *p.LangfuseMaxContentBytes
+	}
+	if p.LangfuseTraceDocs != nil {
+		base.LangfuseTraceDocs = *p.LangfuseTraceDocs
+	}
+	if p.LangfuseTraceEmbed != nil {
+		base.LangfuseTraceEmbed = *p.LangfuseTraceEmbed
+	}
+	if p.LangfuseTraceMCP != nil {
+		base.LangfuseTraceMCP = *p.LangfuseTraceMCP
+	}
+	if p.LangfuseTraceHTTP != nil {
+		base.LangfuseTraceHTTP = *p.LangfuseTraceHTTP
+	}
+
 	return base
 }
 
@@ -494,7 +626,9 @@ type Store struct {
 	mcpBucket *bw.Bucket[MCPKey]
 }
 
-// settingsSchemaVersion v10 adds docs_include_extra and
+// settingsSchemaVersion v11 adds the langfuse_* fields (LLM-observability
+// export). Existing records migrate with langfuse_enabled false, so the
+// exporter stays off until it is configured. v10 added docs_include_extra and
 // code_rag_include_extra. v9 added the hybrid docs-search knobs
 // (rag_hybrid_candidates, rag_hybrid_rrf_k, rag_hybrid_weight_lexical,
 // rag_hybrid_weight_semantic) and rag_lexical_stop_words; zero values there
@@ -506,7 +640,7 @@ type Store struct {
 // docs_summary_model; v4 docs_max_groups; v3 embed_concurrency /
 // code_embed_concurrency. Bumping the version lets bw migrate existing settings
 // records in place.
-const settingsSchemaVersion = 10
+const settingsSchemaVersion = 11
 
 // New opens the settings bucket. If no record exists yet, seed is persisted as
 // the initial configuration (seeded from file/env config by the caller).
@@ -595,6 +729,10 @@ func (s *Store) Set(ctx context.Context, patch Settings) (Settings, error) {
 
 	if next.CodeEmbedAPIKey == "" {
 		next.CodeEmbedAPIKey = cur.CodeEmbedAPIKey
+	}
+
+	if next.LangfuseSecretKey == "" {
+		next.LangfuseSecretKey = cur.LangfuseSecretKey
 	}
 
 	next.UpdatedAt = time.Now()

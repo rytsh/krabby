@@ -141,7 +141,7 @@ administer them.
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /healthz` | Liveness |
+| `GET /healthz` | Liveness — unauthenticated, this is what a health check should target |
 | `GET /api/v1/repos` | List repos |
 | `POST /api/v1/repos` `{"url","branch"}` | Track a repo |
 | `GET /api/v1/repos/{full-path...}` | Repo status |
@@ -163,6 +163,34 @@ administer them.
 | `PUT /api/v1/credentials` `{"pattern","secret","kind","username"}` | Store a credential |
 | `DELETE /api/v1/credentials?pattern=...` | Remove a credential |
 | `POST /webhook/git` | Provider-neutral git push webhook; generic bearer/shared-token auth plus common server formats |
+
+### Health checks and the MCP endpoint
+
+Point liveness and readiness probes at **`/healthz`** (or `<base_path>/healthz`).
+It is unauthenticated, cheap and answers `200 OK`.
+
+The MCP endpoint is not a health check endpoint, but it tolerates being used as
+one. The Streamable HTTP transport speaks JSON-RPC over `POST` and reserves
+`GET` for opening the SSE stream of an established session, so every ordinary
+probe violates its preconditions and used to be answered `400`:
+
+| Probe | Before | Now |
+| --- | --- | --- |
+| `GET`, no `Accept` (Kubernetes `httpGet`, Go's `http.Get`) | `400 Accept must contain 'text/event-stream'` | `200` |
+| `GET`, `Accept: */*` (`curl`, `wget`) | `400 GET requires an Mcp-Session-Id header` | `200` |
+| `HEAD` | `400` | `200` |
+| Browser navigation | `400` | `200` |
+
+Those `400`s were correct per the transport spec and useless as a signal: a
+prober cannot distinguish "your request was malformed" from "this server is
+broken". `GET` and `HEAD` that carry no `Mcp-Session-Id` header are now answered
+with a small JSON descriptor instead. Nothing that a client uses is affected —
+`POST`, `DELETE`, and any `GET` carrying a session id go straight to the
+transport — because a request without that header could only ever have received
+an error.
+
+When an MCP API key is configured, an unauthenticated probe still gets `401`,
+which is both correct and already a usable liveness signal.
 
 ## Data layout & external tools
 
@@ -257,6 +285,70 @@ dimensions are safe.
 Generated markdown is stored outside clones under
 `data_dir/docs/<owner>/<repo>/`; older in-clone `krabby-docs/` trees are moved
 there at startup without regenerating documentation.
+
+### LLM observability (Langfuse)
+
+Every model call krabby makes can be exported to
+[Langfuse](https://langfuse.com) as a trace: model, latency, time to first
+token, prompt and completion tokens, and the cost Langfuse derives from them.
+Configure it under **Settings → LLM observability**, or through
+`set_docs_config` / `PUT /api/v1/docs/config`. Nothing is exported until a host
+and a project key pair are supplied.
+
+The export deliberately does **not** go through the `telemetry` collector. Two
+reasons:
+
+- Langfuse ingests OTLP over HTTP only — it does not accept gRPC — while
+  [tell](https://github.com/rakunlabs/tell) builds its exporter on
+  `otlptracegrpc`. krabby therefore runs a second, dedicated tracer provider
+  for Langfuse.
+- Langfuse bills per observation. The global provider carries an HTTP server
+  span for every REST call and UI poll; none of that belongs in an
+  LLM-observability backend.
+
+The two providers are independent and can run at the same time.
+
+**Trace shape.** One documentation build is one trace, sessioned by repository
+id so every build of a repository lines up in the Langfuse UI. Under it sits one
+generation per summary group plus the final synthesis. MCP tool calls are their
+own traces, which is what shows an agent's actual behaviour. Retries are folded
+into the observation they belong to rather than emitted as siblings, so a
+rate-limited build does not triple its observation count.
+
+**Scopes** are switched independently — documentation LLM calls, embedding
+calls, MCP tool calls, REST requests. Embeddings emit one observation per
+`Embed` call rather than per batch; indexing a large repository issues thousands
+of batches. REST is off by default: those spans carry no model, tokens or cost.
+
+**Content capture** is the setting that deserves thought, and the UI states this
+next to the control:
+
+- `full` (the default) sends prompts and replies whole. Summary prompts embed
+  the files being documented, so a private repository's source is transmitted to
+  the configured instance verbatim — on Langfuse Cloud, to a third party.
+- The payload is not small. A synthesis prompt reaches 256 KiB and a summary
+  prompt 96 KiB, so a forty-group build exports a few megabytes. The exporter is
+  therefore configured with an export batch of 8 spans and a queue of 256, far
+  below the OpenTelemetry defaults (512/2048), which would either produce a
+  request Langfuse rejects or hold more pending spans than the memory budget
+  allows. A build busy enough to fill that queue drops spans rather than growing.
+- `max_content_bytes` caps a single captured value in every mode, `full`
+  included, and defaults to 1 MiB. Setting it to `0` removes the cap and is only
+  safe against a self-hosted instance with a matching body limit.
+- `truncated` clips to 8 KiB and keeps prompts debuggable; `off` exports only
+  model, latency, tokens and cost.
+
+Observability changes rebuild the LLM/embedder clients (the tracer is attached
+to them) but touch nothing that went into a vector, so — unlike an ordinary
+settings save — they do not reindex. The exporter itself is reused across
+unrelated settings changes: tearing it down mid-build would drop whatever it had
+not yet shipped.
+
+Token accounting is captured independently of Langfuse: krabby requests
+`stream_options.include_usage` and reads the usage chunk. Gateways that reject
+the parameter are detected on the first 400 that names it, and the request is
+replayed without it — usage reporting is best-effort and never costs a
+completion.
 
 ### Memory
 

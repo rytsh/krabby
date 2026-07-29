@@ -64,6 +64,10 @@ func New(mgr *manager.Manager, version string, waitTimeout time.Duration, profil
 		Instructions: instructions,
 	})
 
+	// One receiving middleware covers every tool, so instrumentation cannot
+	// drift out of sync as tools are added.
+	server.AddReceivingMiddleware(traceMiddleware(mgr))
+
 	addManagementTools(server, mgr, waitTimeout)
 	addQueryTools(server, mgr)
 	addFileTools(server, mgr)

@@ -150,3 +150,88 @@ func TestPatchApplyExplicitFalse(t *testing.T) {
 		t.Error("explicit false was not applied")
 	}
 }
+
+func TestObservabilityOnly(t *testing.T) {
+	on := true
+	host := "https://cloud.langfuse.com"
+	model := "gpt-4o"
+
+	t.Run("langfuse fields alone", func(t *testing.T) {
+		p := Patch{LangfuseEnabled: &on, LangfuseHost: &host}
+		if !p.ObservabilityOnly() {
+			t.Fatal("a langfuse-only patch must be recognised as observability-only")
+		}
+		// It must NOT take the runtime-only shortcut: the tracer is attached to
+		// the LLM/embedder clients, so the bundle has to be rebuilt.
+		if p.RuntimeOnly() {
+			t.Fatal("a langfuse patch must not skip the client rebuild")
+		}
+	})
+
+	t.Run("mixed with a model change", func(t *testing.T) {
+		p := Patch{LangfuseEnabled: &on, LLMModel: &model}
+		if p.ObservabilityOnly() {
+			t.Fatal("a patch that also changes the model must trigger a reindex")
+		}
+	})
+
+	t.Run("no langfuse field", func(t *testing.T) {
+		p := Patch{LLMModel: &model}
+		if p.ObservabilityOnly() {
+			t.Fatal("a patch with no langfuse field is not observability-only")
+		}
+	})
+
+	t.Run("empty patch", func(t *testing.T) {
+		if (Patch{}).ObservabilityOnly() {
+			t.Fatal("an empty patch is not observability-only")
+		}
+	})
+}
+
+func TestLangfuseSecretIsWriteOnly(t *testing.T) {
+	s := Settings{LangfuseSecretKey: "sk-lf-secret", LangfusePublicKey: "pk-lf-public"}
+
+	r := s.Redact()
+
+	if r.Settings.LangfuseSecretKey != "" {
+		t.Fatal("redacted view still carries the secret")
+	}
+	if !r.LangfuseSecretKeySet {
+		t.Fatal("langfuse_secret_key_set should report the secret is present")
+	}
+	// The public key is not a secret and must survive, or the UI cannot show it.
+	if r.Settings.LangfusePublicKey != "pk-lf-public" {
+		t.Fatal("public key must not be redacted")
+	}
+}
+
+func TestLangfusePatchApply(t *testing.T) {
+	base := Settings{
+		LangfuseHost:      "https://old.example",
+		LangfuseCapture:   "full",
+		LangfuseTraceDocs: true,
+	}
+
+	host := "https://new.example"
+	off := false
+	capture := "truncated"
+
+	got := Patch{
+		LangfuseHost:      &host,
+		LangfuseCapture:   &capture,
+		LangfuseTraceDocs: &off,
+	}.Apply(base)
+
+	if got.LangfuseHost != host {
+		t.Errorf("host = %q want %q", got.LangfuseHost, host)
+	}
+	if got.LangfuseCapture != capture {
+		t.Errorf("capture = %q want %q", got.LangfuseCapture, capture)
+	}
+	// An explicit false must land, which is the whole reason Patch uses
+	// pointers rather than zero values.
+	if got.LangfuseTraceDocs {
+		t.Error("explicit false did not clear trace_docs")
+	}
+}

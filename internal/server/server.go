@@ -50,6 +50,9 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 		mrequestid.Middleware(),
 		mlog.Middleware(),
 		mtelemetry.Middleware(),
+		// Langfuse export of REST traffic. Inert unless the http scope is
+		// switched on in settings; see internal/server/trace.go.
+		langfuseMiddleware(mgr),
 	)
 
 	// base mounts every route (UI, REST, MCP, webhook, healthz) under the
@@ -90,7 +93,11 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	// The MCP key can be overridden at runtime from the UI; resolve it per
 	// request through the manager's cached value.
 	mgr.InitMCPKey(ctx, cfg.MCP.APIKey)
-	base.Handle(cfg.MCP.Path, mcpHandler, apiKeyMiddleware(mgr.MCPAPIKey))
+	// mcpProbe wraps the handler rather than joining the middleware list so the
+	// order is unambiguous: the API key is checked first (an unauthenticated
+	// probe must still get 401), then non-MCP probes are answered, then real
+	// protocol traffic reaches the SDK.
+	base.Handle(cfg.MCP.Path, mcpProbe(mcpHandler), apiKeyMiddleware(mgr.MCPAPIKey))
 
 	api := base.Group("/api/v1")
 	api.GET("/settings", server.Wrap(getSettings(cfg, mgr)))
@@ -166,6 +173,7 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	api.POST("/docs/config/test/llm", server.Wrap(testLLM(mgr)))
 	api.POST("/docs/config/test/embedder", server.Wrap(testEmbedder(mgr)))
 	api.POST("/docs/config/test/code-embedder", server.Wrap(testCodeEmbedder(mgr)))
+	api.POST("/docs/config/test/langfuse", server.Wrap(testLangfuse(mgr)))
 	api.GET("/graph", mergedGraph(mgr))
 	api.GET("/credentials", server.Wrap(listCredentials(mgr)))
 	api.PUT("/credentials", server.Wrap(setCredential(mgr)))
@@ -1091,6 +1099,24 @@ func testEmbedder(mgr *manager.Manager) ada.HandlerFunc {
 		}
 
 		return c.SendJSON(mgr.TestEmbedder(c.Request.Context(), merged))
+	}
+}
+
+func testLangfuse(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		var patch settings.Patch
+		if c.Request.ContentLength != 0 {
+			if err := c.Bind(&patch); err != nil {
+				return c.SetStatus(http.StatusBadRequest).Err(err)
+			}
+		}
+
+		merged, err := applySettingsPatch(c.Request.Context(), mgr, patch)
+		if err != nil {
+			return c.Err(err)
+		}
+
+		return c.SendJSON(mgr.TestLangfuse(c.Request.Context(), merged))
 	}
 }
 

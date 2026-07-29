@@ -253,6 +253,74 @@ type LLM struct {
 	Timeout time.Duration `cfg:"timeout" default:"300s"`
 }
 
+// Capture selects how much prompt/completion content is attached to exported
+// LLM traces.
+type Capture string
+
+const (
+	// CaptureOff exports only metadata: model, latency, tokens, errors. No
+	// prompt or completion text leaves the process.
+	CaptureOff Capture = "off"
+	// CaptureTruncated exports content clipped to a byte budget. Enough to
+	// debug a prompt without shipping whole source files.
+	CaptureTruncated Capture = "truncated"
+	// CaptureFull exports content whole, subject only to the absolute ceiling.
+	CaptureFull Capture = "full"
+)
+
+// ParseCapture normalizes a capture mode, defaulting to CaptureFull for an
+// unrecognized or empty value so an existing record keeps behaving.
+func ParseCapture(s string) Capture {
+	switch Capture(strings.ToLower(strings.TrimSpace(s))) {
+	case CaptureOff:
+		return CaptureOff
+	case CaptureTruncated:
+		return CaptureTruncated
+	default:
+		return CaptureFull
+	}
+}
+
+// Langfuse configures LLM-observability export to a Langfuse instance.
+//
+// Langfuse ingests OTLP over HTTP only (it does not accept gRPC), so this is
+// deliberately separate from the telemetry collector configured in Config:
+// krabby runs a second, dedicated tracer provider for it. That also keeps HTTP
+// server spans out of Langfuse, which bills per observation.
+type Langfuse struct {
+	// Enabled turns the exporter on. When false everything below is ignored
+	// and every trace call is a no-op.
+	Enabled bool `cfg:"enabled"`
+	// Host is the Langfuse root URL, e.g. "https://cloud.langfuse.com" or a
+	// self-hosted "http://localhost:3000". The OTLP path is appended.
+	Host string `cfg:"host"`
+	// PublicKey and SecretKey are the project keys ("pk-lf-..." / "sk-lf-..."),
+	// sent together as HTTP Basic credentials.
+	PublicKey string `cfg:"public_key"`
+	SecretKey string `cfg:"secret_key" log:"-"`
+	// Environment tags every trace, so staging and production traffic stay
+	// separable in one project.
+	Environment string `cfg:"environment" default:"production"`
+	// Timeout bounds a single OTLP export request.
+	Timeout time.Duration `cfg:"timeout" default:"10s"`
+
+	// Capture selects how much prompt/completion text is exported.
+	Capture Capture `cfg:"capture"`
+	// MaxContentBytes caps a single captured input or output. It applies in
+	// every capture mode, including "full", because krabby's synthesis prompt
+	// alone reaches 256 KiB and the export queue holds many spans at once.
+	// 0 removes the cap entirely, which is only safe on a self-hosted
+	// instance with a matching body limit.
+	MaxContentBytes int `cfg:"max_content_bytes" default:"1048576"`
+
+	// Per-scope switches. Each one is checked at the span creation site, so a
+	// disabled scope costs nothing beyond an atomic load.
+	TraceDocs  bool `cfg:"trace_docs"`
+	TraceEmbed bool `cfg:"trace_embed"`
+	TraceMCP   bool `cfg:"trace_mcp"`
+	TraceHTTP  bool `cfg:"trace_http"`
+}
+
 // Embedder configures an OpenAI-compatible embeddings endpoint.
 type Embedder struct {
 	// BaseURL is the API root, e.g. "http://localhost:11434/v1" (Ollama).

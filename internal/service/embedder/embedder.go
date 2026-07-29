@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/rytsh/krabby/internal/config"
+	"github.com/rytsh/krabby/internal/observability/langfuse"
 )
 
 // ErrNotConfigured is returned when no embeddings base URL is configured.
@@ -67,6 +68,24 @@ type Client struct {
 	dimMu     sync.Mutex
 	dim       int
 	dimWarned bool
+
+	// tracer exports each Embed call as a Langfuse generation. Never nil.
+	tracer *langfuse.Tracer
+	// system is the gen_ai.system value derived once from the base URL.
+	system string
+}
+
+// Option customizes a client at construction.
+type Option func(*Client)
+
+// WithTracer attaches an LLM-observability tracer. Passing nil is allowed and
+// leaves the client untraced.
+func WithTracer(t *langfuse.Tracer) Option {
+	return func(c *Client) {
+		if t != nil {
+			c.tracer = t
+		}
+	}
 }
 
 // New builds an embeddings client from config. Returns ErrNotConfigured when no
@@ -80,7 +99,7 @@ type Client struct {
 // decoded vectors bw holds to traverse the HNSW graph. Endpoints that do not
 // understand the parameter are detected on first use and fall back to their
 // native width (see embedBatch).
-func New(cfg config.Embedder) (*Client, error) {
+func New(cfg config.Embedder, opts ...Option) (*Client, error) {
 	if cfg.BaseURL == "" {
 		return nil, ErrNotConfigured
 	}
@@ -110,7 +129,7 @@ func New(cfg config.Embedder) (*Client, error) {
 		conc = 4
 	}
 
-	return &Client{
+	c := &Client{
 		baseURL: strings.TrimRight(cfg.BaseURL, "/"),
 		apiKey:  cfg.APIKey,
 		model:   cfg.Model,
@@ -119,7 +138,15 @@ func New(cfg config.Embedder) (*Client, error) {
 		batch:   batch,
 		conc:    conc,
 		http:    &http.Client{Timeout: timeout},
-	}, nil
+		tracer:  langfuse.Disabled(),
+		system:  langfuse.SystemFromBaseURL(cfg.BaseURL),
+	}
+
+	for _, opt := range opts {
+		opt(c)
+	}
+
+	return c, nil
 }
 
 // Model returns the configured embedding model name.
@@ -144,10 +171,53 @@ type embedRequest struct {
 }
 
 type embedResponse struct {
-	Data []struct {
+	Model string `json:"model"`
+	Data  []struct {
 		Embedding []float32 `json:"embedding"`
 	} `json:"data"`
+	Usage *Usage    `json:"usage,omitempty"`
 	Error *apiError `json:"error,omitempty"`
+}
+
+// Usage carries the token accounting a provider reports for one embeddings
+// request. Embeddings have no completion, so only the prompt side is
+// meaningful; fields are zero when the provider reports nothing.
+type Usage struct {
+	PromptTokens int `json:"prompt_tokens"`
+	TotalTokens  int `json:"total_tokens"`
+}
+
+// Meta summarises one Embed call: the model that answered, the tokens it
+// charged for across every batch, and how many requests it took.
+type Meta struct {
+	Model        string
+	Usage        Usage
+	Inputs       int
+	Batches      int
+	Dim          int
+	usagePrompt  atomic.Int64
+	usageTotal   atomic.Int64
+	batchCounter atomic.Int64
+}
+
+// add accumulates one batch's reported usage. Safe for concurrent use because
+// batches are dispatched in parallel.
+func (m *Meta) add(u Usage) {
+	if m == nil {
+		return
+	}
+
+	m.usagePrompt.Add(int64(u.PromptTokens))
+	m.usageTotal.Add(int64(u.TotalTokens))
+	m.batchCounter.Add(1)
+}
+
+// seal folds the atomic counters into the plain fields once every batch has
+// finished, so callers read a stable value.
+func (m *Meta) seal() {
+	m.Usage.PromptTokens = int(m.usagePrompt.Load())
+	m.Usage.TotalTokens = int(m.usageTotal.Load())
+	m.Batches = int(m.batchCounter.Load())
 }
 
 type apiError struct {
@@ -164,12 +234,68 @@ func (c *Client) Embed(ctx context.Context, texts []string) ([][]float32, error)
 	return c.EmbedWithProgress(ctx, texts, nil)
 }
 
+// EmbedWithMeta is EmbedWithProgress plus the token accounting summed over
+// every batch the call issued. Callers that do not report usage should use
+// Embed or EmbedWithProgress.
+func (c *Client) EmbedWithMeta(ctx context.Context, texts []string, onProgress func(done, total int)) ([][]float32, *Meta, error) {
+	meta := &Meta{Model: c.model, Inputs: len(texts)}
+
+	// One span per Embed call, never per batch: indexing a large repository
+	// issues thousands of batches, and a span each would bury the LLM traces
+	// they are meant to sit beside.
+	ctx, end := c.tracer.StartGeneration(ctx, langfuse.ScopeEmbed, langfuse.GenerationInfo{
+		Name:      "embeddings",
+		System:    c.system,
+		Operation: "embeddings",
+		Model:     c.model,
+		Input:     traceInput(texts),
+	})
+
+	vecs, err := c.embed(ctx, texts, onProgress, meta)
+
+	meta.seal()
+	meta.Dim = c.Dim()
+
+	end(langfuse.GenerationResult{
+		// Vectors are not an output worth exporting; the shape is.
+		Output:      map[string]int{"vectors": len(vecs), "dim": meta.Dim},
+		InputTokens: meta.Usage.PromptTokens,
+		Attempts:    meta.Batches,
+		Err:         err,
+	})
+
+	return vecs, meta, err
+}
+
 // EmbedWithProgress is Embed with an optional callback invoked after each batch
 // completes, reporting how many inputs have been embedded so far out of the
 // total. The callback runs from multiple goroutines, so it must be safe for
 // concurrent use; pass nil to disable progress reporting. It exists so callers
 // (e.g. indexing a large web source) can drive a determinate progress bar.
 func (c *Client) EmbedWithProgress(ctx context.Context, texts []string, onProgress func(done, total int)) ([][]float32, error) {
+	vecs, _, err := c.EmbedWithMeta(ctx, texts, onProgress)
+
+	return vecs, err
+}
+
+// traceInput decides what to attach to an embedding span.
+//
+// A single input is a query: showing it is exactly what makes the trace
+// useful. Many inputs are an indexing batch of hundreds of chunks, where the
+// text is noise that would dominate the export payload, so only the shape is
+// recorded. This holds regardless of the capture mode, which governs how much
+// of a *useful* value is kept, not whether bulk corpora get shipped.
+func traceInput(texts []string) any {
+	if len(texts) == 1 {
+		return texts[0]
+	}
+
+	return map[string]int{"inputs": len(texts)}
+}
+
+// embed is the shared implementation. meta may be nil when the caller does not
+// collect usage.
+func (c *Client) embed(ctx context.Context, texts []string, onProgress func(done, total int), meta *Meta) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
 	}
@@ -177,7 +303,7 @@ func (c *Client) EmbedWithProgress(ctx context.Context, texts []string, onProgre
 	total := len(texts)
 
 	if total <= c.batch {
-		vecs, err := c.embedBatch(ctx, texts)
+		vecs, err := c.embedBatch(ctx, texts, meta)
 		if err == nil && onProgress != nil {
 			onProgress(total, total)
 		}
@@ -214,7 +340,7 @@ func (c *Client) EmbedWithProgress(ctx context.Context, texts []string, onProgre
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			vecs, err := c.embedBatch(ctx, texts[start:end])
+			vecs, err := c.embedBatch(ctx, texts[start:end], meta)
 			if err != nil {
 				errMu.Lock()
 				if firstErr == nil {
@@ -263,13 +389,15 @@ func (c *Client) EmbedWithProgress(ctx context.Context, texts []string, onProgre
 // would otherwise fail every request the moment a dimension is configured.
 // The parameter is dropped for the rest of the client's life and the request
 // is replayed; if it still fails, the real error surfaces.
-func (c *Client) embedBatch(ctx context.Context, batch []string) ([][]float32, error) {
+func (c *Client) embedBatch(ctx context.Context, batch []string, meta *Meta) ([][]float32, error) {
 	var lastErr error
 	for attempt := 0; attempt <= maxEmbedRetries; attempt++ {
 		sentDims := c.requestDim()
 
-		vecs, retryAfter, err := c.embedBatchOnce(ctx, batch, sentDims)
+		vecs, usage, retryAfter, err := c.embedBatchOnce(ctx, batch, sentDims)
 		if err == nil {
+			meta.add(usage)
+
 			return vecs, nil
 		}
 
@@ -353,15 +481,17 @@ func (c *Client) requestDim() int {
 
 // embedBatchOnce performs a single embeddings request. On a retryable failure
 // it returns a retryableErr and, when the server advertised one, a retry delay.
-func (c *Client) embedBatchOnce(ctx context.Context, batch []string, dims int) ([][]float32, time.Duration, error) {
+func (c *Client) embedBatchOnce(ctx context.Context, batch []string, dims int) ([][]float32, Usage, time.Duration, error) {
+	var usage Usage
+
 	body, err := json.Marshal(embedRequest{Model: c.model, Input: batch, Dimensions: dims})
 	if err != nil {
-		return nil, 0, fmt.Errorf("marshal embed request; %w", err)
+		return nil, usage, 0, fmt.Errorf("marshal embed request; %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/embeddings", bytes.NewReader(body))
 	if err != nil {
-		return nil, 0, fmt.Errorf("new embed request; %w", err)
+		return nil, usage, 0, fmt.Errorf("new embed request; %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
@@ -375,10 +505,10 @@ func (c *Client) embedBatchOnce(ctx context.Context, batch []string, dims int) (
 		// Network/transport errors are transient (unless the context was
 		// cancelled): retry them.
 		if ctx.Err() != nil {
-			return nil, 0, ctx.Err()
+			return nil, usage, 0, ctx.Err()
 		}
 
-		return nil, 0, retryableErr{fmt.Errorf("embed request; %w", err)}
+		return nil, usage, 0, retryableErr{fmt.Errorf("embed request; %w", err)}
 	}
 	defer resp.Body.Close()
 
@@ -386,29 +516,33 @@ func (c *Client) embedBatchOnce(ctx context.Context, batch []string, dims int) (
 	// body that merely ends there.
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxRespBytes+1))
 	if len(raw) > maxRespBytes {
-		return nil, 0, fmt.Errorf("embed response exceeds %d bytes for %d inputs; lower the batch size or the embedding dimension", maxRespBytes, len(batch))
+		return nil, usage, 0, fmt.Errorf("embed response exceeds %d bytes for %d inputs; lower the batch size or the embedding dimension", maxRespBytes, len(batch))
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		httpErr := fmt.Errorf("embed http %d; %s", resp.StatusCode, apiErrMsg(raw))
 		if isRetryableStatus(resp.StatusCode) {
-			return nil, retryAfterHint(resp, raw), retryableErr{httpErr}
+			return nil, usage, retryAfterHint(resp, raw), retryableErr{httpErr}
 		}
 
-		return nil, 0, httpErr
+		return nil, usage, 0, httpErr
 	}
 
 	var out embedResponse
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, 0, fmt.Errorf("decode embed response; %w", err)
+		return nil, usage, 0, fmt.Errorf("decode embed response; %w", err)
 	}
 
 	if out.Error != nil {
-		return nil, 0, fmt.Errorf("embed api error; %s", out.Error.Message)
+		return nil, usage, 0, fmt.Errorf("embed api error; %s", out.Error.Message)
 	}
 
 	if len(out.Data) != len(batch) {
-		return nil, 0, fmt.Errorf("embed response count mismatch: got %d for %d inputs", len(out.Data), len(batch))
+		return nil, usage, 0, fmt.Errorf("embed response count mismatch: got %d for %d inputs", len(out.Data), len(batch))
+	}
+
+	if out.Usage != nil {
+		usage = *out.Usage
 	}
 
 	vecs := make([][]float32, len(out.Data))
@@ -420,7 +554,7 @@ func (c *Client) embedBatchOnce(ctx context.Context, batch []string, dims int) (
 		c.observeDim(len(vecs[0]))
 	}
 
-	return vecs, 0, nil
+	return vecs, usage, 0, nil
 }
 
 // observeDim records the width the endpoint actually returned. The response is
@@ -497,7 +631,7 @@ func parseRetryPhrase(body string) time.Duration {
 // Ping embeds a single short string to validate the endpoint, credentials and
 // model. On success the client's dimension is populated.
 func (c *Client) Ping(ctx context.Context) error {
-	vecs, err := c.embedBatch(ctx, []string{"ping"})
+	vecs, err := c.embedBatch(ctx, []string{"ping"}, nil)
 	if err != nil {
 		return err
 	}

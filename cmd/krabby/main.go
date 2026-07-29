@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/rakunlabs/into"
 	"github.com/rakunlabs/logi"
@@ -234,6 +235,18 @@ func run(ctx context.Context) error {
 	// persisted runtime settings, so changes apply without a restart.
 	go scheduler.Run(ctx, mgr)
 
+	// The Langfuse tracer is owned by the docs bundle and rebuilt on settings
+	// changes; flush whichever one is live when the process stops, so the last
+	// build's spans are not lost.
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), langfuseShutdownTimeout)
+		defer cancel()
+
+		if err := mgr.Tracer().Shutdown(shutdownCtx); err != nil {
+			slog.Warn("shutdown langfuse tracer", "error", err)
+		}
+	}()
+
 	mcpServer := mcptools.New(mgr, version, cfg.MCP.WaitTimeout, mcptools.ToolProfileStandard)
 	mcpFullServer := mcptools.New(mgr, version, cfg.MCP.WaitTimeout, mcptools.ToolProfileFull)
 
@@ -244,6 +257,11 @@ func run(ctx context.Context) error {
 
 	return nil
 }
+
+// langfuseShutdownTimeout bounds the final flush of exported LLM traces on
+// shutdown. Spans that cannot be shipped in that window are dropped rather
+// than holding the process open.
+const langfuseShutdownTimeout = 5 * time.Second
 
 // graphCacheBytes resolves the parsed-graph cache cap. Zero (unset) follows the
 // process memory budget so the cache stays proportional to the container limit;

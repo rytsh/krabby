@@ -2,9 +2,12 @@ package manager
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -13,6 +16,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/rytsh/krabby/internal/config"
+	"github.com/rytsh/krabby/internal/observability/langfuse"
 	"github.com/rytsh/krabby/internal/service/coderag"
 	"github.com/rytsh/krabby/internal/service/docgen"
 	"github.com/rytsh/krabby/internal/service/embedder"
@@ -211,7 +215,8 @@ func (m *Manager) SetDocsConfig(ctx context.Context, patch settings.Settings) (s
 	m.settingsMu.Lock()
 	defer m.settingsMu.Unlock()
 
-	return m.setDocsConfig(ctx, patch)
+	// A whole-record write cannot tell what changed, so it always reindexes.
+	return m.setDocsConfig(ctx, patch, true)
 }
 
 // PatchDocsConfig atomically merges a presence-aware patch with persisted
@@ -244,10 +249,15 @@ func (m *Manager) PatchDocsConfig(ctx context.Context, patch settings.Patch) (se
 		return redactSettings(saved), nil
 	}
 
-	return m.setDocsConfig(ctx, next)
+	// Observability changes rebuild the clients (the tracer is attached to
+	// them) but touch nothing that went into a vector, so they must not drag
+	// every repository through a reindex.
+	return m.setDocsConfig(ctx, next, !patch.ObservabilityOnly())
 }
 
-func (m *Manager) setDocsConfig(ctx context.Context, next settings.Settings) (settings.Redacted, error) {
+// setDocsConfig persists next, rebuilds the clients, and optionally rebuilds
+// the derived search indexes.
+func (m *Manager) setDocsConfig(ctx context.Context, next settings.Settings, reindex bool) (settings.Redacted, error) {
 	if m.settings == nil {
 		return settings.Redacted{}, ErrNoSettingsStore
 	}
@@ -266,7 +276,9 @@ func (m *Manager) setDocsConfig(ctx context.Context, next settings.Settings) (se
 	// Existing repositories may be unchanged, so a normal refresh would return
 	// before indexing. Rebuild derived docs/code indexes explicitly after live
 	// settings changes (model, chunking, filters, or enablement).
-	m.TriggerReindexAll()
+	if reindex {
+		m.TriggerReindexAll()
+	}
 
 	return redactSettings(saved), nil
 }
@@ -291,6 +303,11 @@ func redactSettings(s settings.Settings) settings.Redacted {
 //
 // This is called once at startup with the persisted/seeded settings, and again
 // on every settings update, giving live reconfiguration without a restart.
+// tracerShutdownTimeout bounds the final flush of a replaced tracer. Spans
+// that cannot be shipped in that window are dropped rather than delaying the
+// reconfiguration.
+const tracerShutdownTimeout = 5 * time.Second
+
 func (m *Manager) Configure(_ context.Context, s settings.Settings) error {
 	m.configureMu.Lock()
 	defer m.configureMu.Unlock()
@@ -325,6 +342,21 @@ func (m *Manager) Configure(_ context.Context, s settings.Settings) error {
 		}
 	}
 
+	// The tracer is shut down only when the swap actually replaced it
+	// (tracerFor hands the live one forward whenever the configuration is
+	// unchanged). Shutdown flushes, so it is given its own bounded context
+	// rather than the caller's, which may already be cancelled.
+	if prev != nil && prev.tracer != nil && prev.tracer != bundle.tracer {
+		go func(t *langfuse.Tracer) {
+			ctx, cancel := context.WithTimeout(context.Background(), tracerShutdownTimeout)
+			defer cancel()
+
+			if cerr := t.Shutdown(ctx); cerr != nil {
+				slog.Warn("shutdown previous langfuse tracer", "error", cerr)
+			}
+		}(prev.tracer)
+	}
+
 	slog.Info("docs/rag reconfigured",
 		"docgen", bundle.gen != nil,
 		"rag", bundle.rag != nil,
@@ -334,12 +366,72 @@ func (m *Manager) Configure(_ context.Context, s settings.Settings) error {
 	return nil
 }
 
+// tracerFor returns the Langfuse tracer the next bundle should use.
+//
+// When the live bundle already holds a tracer built from an equivalent
+// configuration it is handed over unchanged. That matters because the exporter
+// owns a batch queue: tearing it down while a docs build is mid-flight drops
+// whatever it had not yet shipped, and most settings changes (a model name, a
+// chunk size) have nothing to do with observability. Only a genuine
+// observability change pays for a rebuild.
+//
+// A tracer that fails to build is logged and replaced by an inert one:
+// telemetry must never be the reason a settings save fails.
+func (m *Manager) tracerFor(s settings.Settings) *langfuse.Tracer {
+	cfg := langfuseConfig(s)
+
+	m.docsMu.RLock()
+	prev := m.docs
+	m.docsMu.RUnlock()
+
+	if prev != nil && prev.tracer.Same(cfg) {
+		return prev.tracer
+	}
+
+	tracer, err := langfuse.New(cfg)
+	if err != nil {
+		slog.Error("langfuse export disabled", "error", err)
+
+		return tracer // langfuse.New returns an inert tracer alongside its error
+	}
+
+	if tracer.Enabled() {
+		slog.Info("langfuse export enabled",
+			"host", cfg.Host, "environment", cfg.Environment, "capture", cfg.Capture)
+	}
+
+	return tracer
+}
+
+// Tracer returns the live Langfuse tracer. It is never nil, so callers outside
+// the docs bundle (the MCP server, HTTP middleware) can instrument
+// unconditionally.
+//
+// The nil-receiver case is real: the MCP server can be constructed without a
+// manager (tool-catalog inspection), and its tracing middleware runs on every
+// request regardless.
+func (m *Manager) Tracer() *langfuse.Tracer {
+	if m == nil {
+		return langfuse.Disabled()
+	}
+
+	m.docsMu.RLock()
+	defer m.docsMu.RUnlock()
+
+	if m.docs == nil || m.docs.tracer == nil {
+		return langfuse.Disabled()
+	}
+
+	return m.docs.tracer
+}
+
 // buildBundle constructs docgen/rag clients from settings. A disabled or
 // unconfigured capability yields a nil field rather than an error, so partial
 // configuration (e.g. docs on, rag off) is valid. Store construction failures
 // leave the previous live bundle active.
 func (m *Manager) buildBundle(s settings.Settings) (*docsBundle, error) {
-	b := &docsBundle{ragCfg: ragConfig(s)}
+	b := &docsBundle{ragCfg: ragConfig(s), tracer: m.tracerFor(s)}
+
 	var (
 		codeEmb   *embedder.Client
 		codeStore vectorstore.Store
@@ -347,7 +439,7 @@ func (m *Manager) buildBundle(s settings.Settings) (*docsBundle, error) {
 
 	// Doc generation needs a chat LLM.
 	if s.DocsEnabled {
-		chat, err := llm.New(llmConfig(s))
+		chat, err := llm.New(llmConfig(s), llm.WithTracer(b.tracer))
 		switch {
 		case errors.Is(err, llm.ErrNotConfigured):
 			slog.Warn("docs enabled but llm not configured; doc generation disabled")
@@ -357,17 +449,17 @@ func (m *Manager) buildBundle(s settings.Settings) (*docsBundle, error) {
 			// A dedicated (usually faster) model for the per-file summary phase;
 			// falls back to the synthesis client when unset or misconfigured.
 			summary := chat
-			if sc, serr := llm.New(summaryLLMConfig(s)); serr == nil {
+			if sc, serr := llm.New(summaryLLMConfig(s), llm.WithTracer(b.tracer)); serr == nil {
 				summary = sc
 			}
 
-			b.gen = docgen.New(docsConfig(s), chat, summary, m.engine)
+			b.gen = docgen.New(docsConfig(s), chat, summary, m.engine, b.tracer)
 		}
 	}
 
 	// RAG needs an embedder and a vector store.
 	if s.RAGEnabled {
-		emb, err := embedder.New(embedderConfig(s))
+		emb, err := embedder.New(embedderConfig(s), embedder.WithTracer(b.tracer))
 		switch {
 		case errors.Is(err, embedder.ErrNotConfigured):
 			slog.Warn("rag enabled but embedder not configured; rag disabled")
@@ -388,7 +480,7 @@ func (m *Manager) buildBundle(s settings.Settings) (*docsBundle, error) {
 	// indexes into a separate store namespace so docs/code dimensions never
 	// collide.
 	if s.CodeRAGEnabled {
-		emb, err := embedder.New(codeEmbedderConfig(s))
+		emb, err := embedder.New(codeEmbedderConfig(s), embedder.WithTracer(b.tracer))
 		switch {
 		case errors.Is(err, embedder.ErrNotConfigured):
 			slog.Warn("code rag enabled but no embedder configured; code rag disabled")
@@ -449,7 +541,81 @@ func (m *Manager) mergeSecrets(ctx context.Context, patch settings.Settings) (se
 		patch.CodeEmbedAPIKey = cur.CodeEmbedAPIKey
 	}
 
+	if patch.LangfuseSecretKey == "" {
+		patch.LangfuseSecretKey = cur.LangfuseSecretKey
+	}
+
 	return patch, nil
+}
+
+// TestLangfuse validates the Langfuse host and project keys using the given
+// (un-saved) settings. Blank secrets fall back to the stored value; nothing is
+// persisted.
+//
+// It calls the public projects endpoint rather than the OTLP one: OTLP accepts
+// a batch and answers 207 regardless of whether the credentials resolve to a
+// project, so it cannot distinguish a working key from a typo. The projects
+// endpoint authenticates with the same Basic credentials and answers 401 on a
+// bad key, which is the question being asked.
+func (m *Manager) TestLangfuse(ctx context.Context, patch settings.Settings) TestResult {
+	s, err := m.mergeSecrets(ctx, patch)
+	if err != nil {
+		return TestResult{Error: err.Error()}
+	}
+
+	cfg := langfuseConfig(s)
+
+	host := strings.TrimRight(strings.TrimSpace(cfg.Host), "/")
+	if host == "" || cfg.PublicKey == "" || cfg.SecretKey == "" {
+		return TestResult{Error: "langfuse host, public key and secret key are required"}
+	}
+
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, host+"/api/public/projects", nil)
+	if err != nil {
+		return TestResult{Error: err.Error()}
+	}
+
+	req.SetBasicAuth(cfg.PublicKey, cfg.SecretKey)
+
+	start := time.Now()
+	resp, err := (&http.Client{Timeout: timeout}).Do(req)
+	res := TestResult{LatencyMS: time.Since(start).Milliseconds()}
+
+	if err != nil {
+		res.Error = err.Error()
+
+		return res
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		res.Error = fmt.Sprintf("langfuse http %d; %s", resp.StatusCode, strings.TrimSpace(string(body)))
+
+		return res
+	}
+
+	// Report which project the keys resolve to: the most common misconfiguration
+	// is a valid key pair pointed at the wrong project.
+	var projects struct {
+		Data []struct {
+			Name string `json:"name"`
+		} `json:"data"`
+	}
+
+	if jerr := json.Unmarshal(body, &projects); jerr == nil && len(projects.Data) > 0 {
+		res.Model = projects.Data[0].Name
+	}
+
+	res.OK = true
+
+	return res
 }
 
 // TestLLM validates the chat LLM using the given (un-saved) settings. Blank
@@ -617,6 +783,25 @@ func codeEmbedderConfig(s settings.Settings) config.Embedder {
 		Batch:       s.CodeEmbedBatch,
 		Concurrency: s.CodeEmbedConcurrency,
 		Timeout:     s.CodeEmbedTimeout,
+	}
+}
+
+// langfuseConfig maps the persisted observability settings onto the exporter's
+// configuration carrier.
+func langfuseConfig(s settings.Settings) config.Langfuse {
+	return config.Langfuse{
+		Enabled:         s.LangfuseEnabled,
+		Host:            s.LangfuseHost,
+		PublicKey:       s.LangfusePublicKey,
+		SecretKey:       s.LangfuseSecretKey,
+		Environment:     s.LangfuseEnvironment,
+		Timeout:         s.LangfuseTimeout,
+		Capture:         config.ParseCapture(s.LangfuseCapture),
+		MaxContentBytes: s.LangfuseMaxContentBytes,
+		TraceDocs:       s.LangfuseTraceDocs,
+		TraceEmbed:      s.LangfuseTraceEmbed,
+		TraceMCP:        s.LangfuseTraceMCP,
+		TraceHTTP:       s.LangfuseTraceHTTP,
 	}
 }
 

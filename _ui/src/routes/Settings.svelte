@@ -37,6 +37,15 @@
   let testingEmbed = $state(false);
   let testingCodeEmbed = $state(false);
 
+  // Langfuse (LLM observability). Saved on its own so changing an export
+  // setting does not push the whole Docs & RAG form, and never reindexes.
+  let langfuseKey = $state(""); // write-only; blank means "keep existing"
+  let langfuseTest = $state(null); // { ok, latency_ms, model (project), error }
+  let testingLangfuse = $state(false);
+  let langfuseBusy = $state(false);
+  let langfuseMsg = $state("");
+  let langfuseErr = $state("");
+
   function logTestFailure(name, result) {
     if (result && !result.ok) {
       console.error(`[krabby] ${name} test failed`, result);
@@ -141,6 +150,7 @@
     delete patch.llm_api_key_set;
     delete patch.embed_api_key_set;
     delete patch.code_embed_api_key_set;
+    delete patch.langfuse_secret_key_set;
     delete patch.docs_default_prompt;
     delete patch.updated_at;
     // Never submit half-edited (empty-spec) schedules the backend would reject.
@@ -236,6 +246,57 @@
       console.error("[krabby] Code embedder test request failed", e);
     } finally {
       testingCodeEmbed = false;
+    }
+  }
+
+  // buildLangfusePatch sends only the observability fields. Keeping it narrow
+  // is what lets the server recognise the change as observability-only and skip
+  // the reindex an ordinary settings save triggers.
+  function buildLangfusePatch() {
+    return {
+      langfuse_enabled: !!docsCfg.langfuse_enabled,
+      langfuse_host: docsCfg.langfuse_host || "",
+      langfuse_public_key: docsCfg.langfuse_public_key || "",
+      langfuse_secret_key: langfuseKey,
+      langfuse_environment: docsCfg.langfuse_environment || "",
+      langfuse_capture: docsCfg.langfuse_capture || "full",
+      langfuse_max_content_bytes: Number(docsCfg.langfuse_max_content_bytes) || 0,
+      langfuse_trace_docs: !!docsCfg.langfuse_trace_docs,
+      langfuse_trace_embed: !!docsCfg.langfuse_trace_embed,
+      langfuse_trace_mcp: !!docsCfg.langfuse_trace_mcp,
+      langfuse_trace_http: !!docsCfg.langfuse_trace_http,
+    };
+  }
+
+  async function saveLangfuse() {
+    langfuseBusy = true;
+    langfuseErr = "";
+    langfuseMsg = "";
+    try {
+      docsCfg = await api.setDocsConfig(buildLangfusePatch());
+      langfuseKey = "";
+      langfuseMsg = docsCfg.langfuse_enabled
+        ? "Saved. Traces export from the next model call."
+        : "Saved. Langfuse export is off.";
+      successToast("Saved");
+    } catch (e) {
+      langfuseErr = e.message;
+    } finally {
+      langfuseBusy = false;
+    }
+  }
+
+  async function testLangfuse() {
+    testingLangfuse = true;
+    langfuseTest = null;
+    try {
+      langfuseTest = await api.testLangfuse(buildLangfusePatch());
+      logTestFailure("Langfuse", langfuseTest);
+    } catch (e) {
+      langfuseTest = { ok: false, error: e.message };
+      console.error("[krabby] Langfuse test request failed", e);
+    } finally {
+      testingLangfuse = false;
     }
   }
 
@@ -839,6 +900,159 @@
     <div class="mt-6">
       <button class="btn btn-primary" onclick={saveDocs} disabled={saving}>
         {saving ? "Saving…" : "Save & rebuild"}
+      </button>
+    </div>
+  </div>
+
+  <!-- LLM observability (Langfuse) -->
+  <h2 class="mb-1 mt-10 text-[15px] font-semibold">LLM observability</h2>
+  <p class="mb-3 text-[13px] text-dim">
+    Export every model call to Langfuse as a trace: model, latency, time to first token, token
+    usage and cost. Traces are sent over OTLP/HTTP on a tracer provider separate from the
+    <code>telemetry</code> collector, because Langfuse does not accept gRPC. Saving here rebuilds
+    the clients but does not reindex anything.
+  </p>
+
+  <div class="card p-4">
+    <div class="mb-3 flex items-center justify-between">
+      <label class="flex items-center gap-2 text-[13px]">
+        <input type="checkbox" bind:checked={docsCfg.langfuse_enabled} />
+        Enable Langfuse export
+      </label>
+      <span class="flex items-center gap-2">
+        {#if langfuseTest}
+          {#if langfuseTest.ok}
+            <span class="text-[12px] text-ok">
+              ✓ ok{langfuseTest.model ? ` · project ${langfuseTest.model}` : ""} · {langfuseTest.latency_ms}ms
+            </span>
+          {:else}
+            <span class="max-w-[24rem] truncate text-[12px] text-err" title={langfuseTest.error}>✗ {langfuseTest.error}</span>
+          {/if}
+        {/if}
+        <button class="btn btn-sm" onclick={testLangfuse} disabled={testingLangfuse}>
+          {testingLangfuse ? "Testing…" : "Test connection"}
+        </button>
+      </span>
+    </div>
+
+    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Host
+        <input class="input" bind:value={docsCfg.langfuse_host} placeholder="https://cloud.langfuse.com" />
+      </label>
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Environment
+        <input class="input" bind:value={docsCfg.langfuse_environment} placeholder="production" />
+      </label>
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Public key
+        <input class="input" bind:value={docsCfg.langfuse_public_key} placeholder="pk-lf-…" />
+      </label>
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Secret key {docsCfg.langfuse_secret_key_set ? "(set)" : "(not set)"}
+        <input class="input" type="password" bind:value={langfuseKey} placeholder="leave blank to keep" />
+      </label>
+    </div>
+    <p class="mt-2 text-[12px] text-faint">
+      For the EU region use <code>https://cloud.langfuse.com</code>; US, Japan and HIPAA have their
+      own hosts. A self-hosted instance needs v3.22.0 or newer for the OTLP endpoint.
+    </p>
+
+    <!-- What gets traced -->
+    <div class="mb-2 mt-6 text-[13px] font-semibold text-dim">What gets traced</div>
+    <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+      <label class="flex items-start gap-2 text-[13px]">
+        <input type="checkbox" class="mt-1" bind:checked={docsCfg.langfuse_trace_docs} />
+        <span>
+          Documentation LLM calls
+          <span class="block text-[12px] text-faint">
+            One trace per docs build, one generation per summary group plus the synthesis.
+          </span>
+        </span>
+      </label>
+      <label class="flex items-start gap-2 text-[13px]">
+        <input type="checkbox" class="mt-1" bind:checked={docsCfg.langfuse_trace_embed} />
+        <span>
+          Embedding calls
+          <span class="block text-[12px] text-faint">
+            One observation per Embed call, not per batch — a large index would otherwise emit
+            thousands.
+          </span>
+        </span>
+      </label>
+      <label class="flex items-start gap-2 text-[13px]">
+        <input type="checkbox" class="mt-1" bind:checked={docsCfg.langfuse_trace_mcp} />
+        <span>
+          MCP tool calls
+          <span class="block text-[12px] text-faint">
+            Shows what a connected agent actually asked for. No model or token data.
+          </span>
+        </span>
+      </label>
+      <label class="flex items-start gap-2 text-[13px]">
+        <input type="checkbox" class="mt-1" bind:checked={docsCfg.langfuse_trace_http} />
+        <span>
+          REST API requests
+          <span class="block text-[12px] text-faint">
+            Off by default. These carry no model, tokens or cost, and the UI polls — expect the
+            observation count to be dominated by them.
+          </span>
+        </span>
+      </label>
+    </div>
+
+    <!-- Content capture -->
+    <div class="mb-2 mt-6 text-[13px] font-semibold text-dim">Prompt &amp; completion capture</div>
+    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Capture mode
+        <select class="input" bind:value={docsCfg.langfuse_capture}>
+          <option value="full">full — send prompts and replies whole</option>
+          <option value="truncated">truncated — clip to 8 KiB</option>
+          <option value="off">off — metadata only</option>
+        </select>
+      </label>
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Max bytes per value (0 = no limit)
+        <input class="input" type="number" min="0" bind:value={docsCfg.langfuse_max_content_bytes} />
+      </label>
+    </div>
+
+    {#if docsCfg.langfuse_enabled && docsCfg.langfuse_capture === "full"}
+      <div class="mt-3 rounded border border-warn/40 bg-warn/10 p-3 text-[12px]">
+        <div class="mb-1 font-semibold text-warn">What "full" capture means</div>
+        <ul class="list-disc space-y-1 pl-4 text-dim">
+          <li>
+            <b>Your source code leaves this process.</b> Summary prompts embed the files being
+            documented, so private repository contents are sent to
+            {docsCfg.langfuse_host || "the configured Langfuse instance"} verbatim. On Langfuse Cloud
+            that is a third party.
+          </li>
+          <li>
+            <b>The payload is large.</b> A synthesis prompt reaches 256 KiB and a summary prompt
+            96 KiB; a forty-group build exports a few megabytes. Krabby caps the export batch at 8
+            spans and the queue at 256 to keep that off the memory budget, so a very busy build can
+            drop spans rather than grow.
+          </li>
+          <li>
+            <b>Removing the byte cap is not free.</b> Setting max bytes to 0 lets a single
+            attribute exceed what a hosted Langfuse will accept, and the whole batch is rejected.
+            Only do it against a self-hosted instance with a matching body limit.
+          </li>
+        </ul>
+        <div class="mt-2 text-dim">
+          Use <b>truncated</b> to keep prompts debuggable at 8 KiB, or <b>off</b> to export only
+          model, latency, tokens and cost.
+        </div>
+      </div>
+    {/if}
+
+    {#if langfuseErr}<div class="mt-3 text-[13px] text-err">{langfuseErr}</div>{/if}
+    {#if langfuseMsg}<div class="mt-3 text-[13px] text-ok">{langfuseMsg}</div>{/if}
+
+    <div class="mt-6">
+      <button class="btn btn-primary" onclick={saveLangfuse} disabled={langfuseBusy}>
+        {langfuseBusy ? "Saving…" : "Save observability settings"}
       </button>
     </div>
   </div>

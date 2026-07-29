@@ -22,6 +22,7 @@ import (
 	"github.com/worldline-go/types"
 
 	"github.com/rytsh/krabby/internal/config"
+	"github.com/rytsh/krabby/internal/observability/langfuse"
 	"github.com/rytsh/krabby/internal/service/coderag"
 	"github.com/rytsh/krabby/internal/service/credentials"
 	"github.com/rytsh/krabby/internal/service/docgen"
@@ -149,6 +150,12 @@ type docsBundle struct {
 
 	codeRag   *coderag.Service
 	codeStore vectorstore.Store // owned; closed on swap
+
+	// tracer exports LLM activity to Langfuse. Never nil: a disabled export
+	// is an inert tracer, so call sites need no guard. It is owned by the
+	// bundle and shut down on swap, but only when the replacement was built
+	// from a different configuration - see buildBundle.
+	tracer *langfuse.Tracer
 
 	// ragCfg carries the docs retrieval tuning (hybrid fusion, lexical query
 	// building). It is kept on the bundle rather than read from rag because

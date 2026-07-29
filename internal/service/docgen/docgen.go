@@ -22,11 +22,13 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/rytsh/krabby/internal/config"
+	"github.com/rytsh/krabby/internal/observability/langfuse"
 	"github.com/rytsh/krabby/internal/service/graphify"
 	"github.com/rytsh/krabby/internal/service/graphquery"
 	"github.com/rytsh/krabby/internal/service/llm"
@@ -249,6 +251,7 @@ type llmGenerator struct {
 	llm    *llm.Client // synthesis (final documentation.md)
 	sum    *llm.Client // per-file summary phase (the bulk of the calls)
 	engine *graphquery.Engine
+	tracer *langfuse.Tracer
 }
 
 // New builds the default generator. chat is required and produces the final
@@ -257,17 +260,36 @@ type llmGenerator struct {
 // summary is nil the chat client is used for both phases. engine may be nil, in
 // which case summaries are generated from source content alone (without graph
 // neighborhood context).
-func New(cfg config.Docs, chat, summary *llm.Client, engine *graphquery.Engine) Generator {
+// tracer may be nil, in which case nothing is exported.
+func New(cfg config.Docs, chat, summary *llm.Client, engine *graphquery.Engine, tracer *langfuse.Tracer) Generator {
 	if summary == nil {
 		summary = chat
 	}
 
-	return &llmGenerator{cfg: cfg, llm: chat, sum: summary, engine: engine}
+	if tracer == nil {
+		tracer = langfuse.Disabled()
+	}
+
+	return &llmGenerator{cfg: cfg, llm: chat, sum: summary, engine: engine, tracer: tracer}
 }
 
 // Generate implements the two-phase pipeline: incremental per-file summaries,
 // then one comprehensive documentation.md synthesized from them.
-func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir string, over config.DocsOverride, force bool) (*Manifest, error) {
+func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir string, over config.DocsOverride, force bool) (man *Manifest, err error) {
+	// One docs build is one Langfuse trace, with every summary and the final
+	// synthesis hanging off it. Sessioning by repository id lines up the whole
+	// history of a repository's builds in the UI.
+	ctx, endTrace := g.tracer.StartTrace(ctx, langfuse.ScopeDocs, langfuse.TraceInfo{
+		Name:      "docs.generate",
+		SessionID: repo,
+		Tags:      []string{"krabby", "docs"},
+		Metadata: map[string]string{
+			"repo":  repo,
+			"force": strconv.FormatBool(force),
+		},
+	})
+	defer func() { endTrace(traceSummary(man), err) }()
+
 	filters := g.cfg.Filters.Merge(over.Filters)
 
 	files, err := g.selectFiles(clonePath, filters)
@@ -370,7 +392,7 @@ func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir st
 		docs = append(docs, *docMeta)
 	}
 
-	man := &Manifest{
+	man = &Manifest{
 		Repo:        repo,
 		Model:       g.llm.Model(),
 		PromptHash:  promptHash,
@@ -396,6 +418,22 @@ func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir st
 	}
 
 	return man, nil
+}
+
+// traceSummary renders the outcome of a build for the exported trace. The
+// manifest itself is not attached: it lists every summarized file and would
+// dwarf the useful part.
+func traceSummary(man *Manifest) any {
+	if man == nil {
+		return nil
+	}
+
+	return map[string]any{
+		"model":        man.Model,
+		"summaries":    len(man.Summaries),
+		"docs":         len(man.Docs),
+		"changed_docs": man.ChangedDocs,
+	}
 }
 
 // summaryPath returns the docs-dir-relative cache path for a source file.
@@ -654,7 +692,7 @@ func (g *llmGenerator) summaryForGroup(
 		fmt.Fprintf(&user, "===== FILE: %s =====\n```\n%s\n```\n\n", p.rel, content)
 	}
 
-	out, err := g.sum.Complete(ctx, []llm.Message{
+	out, _, err := g.sum.CompleteOp(ctx, "chat.summary", []llm.Message{
 		{Role: "system", Content: groupSummaryPrompt},
 		{Role: "user", Content: user.String()},
 	})
@@ -858,7 +896,7 @@ func (g *llmGenerator) maybeSynthesize(
 	user.WriteString("Per-file summaries:\n\n")
 	user.WriteString(joinSummaries(docsDir, summaries, maxSynthesisBytes))
 
-	out, err := g.llm.Complete(ctx, []llm.Message{
+	out, _, err := g.llm.CompleteOp(ctx, "chat.synthesis", []llm.Message{
 		{Role: "system", Content: system},
 		{Role: "user", Content: user.String()},
 	})

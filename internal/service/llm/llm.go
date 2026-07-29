@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/rytsh/krabby/internal/config"
+	"github.com/rytsh/krabby/internal/observability/langfuse"
 )
 
 // ErrNotConfigured is returned when the LLM has no base URL configured.
@@ -40,6 +41,30 @@ type Client struct {
 	// total call duration, so a long-but-progressing generation is never
 	// killed while it is still producing tokens.
 	idleTimeout time.Duration
+
+	// noStreamOpts latches when the endpoint has rejected the
+	// stream_options parameter, so subsequent calls omit it instead of
+	// paying a failed round trip each time. Same pattern as the embedder's
+	// dimensions probe.
+	noStreamOpts atomic.Bool
+
+	// tracer exports each call as a Langfuse generation. Never nil.
+	tracer *langfuse.Tracer
+	// system is the gen_ai.system value derived once from the base URL.
+	system string
+}
+
+// Option customizes a client at construction.
+type Option func(*Client)
+
+// WithTracer attaches an LLM-observability tracer. Passing nil is allowed and
+// leaves the client untraced.
+func WithTracer(t *langfuse.Tracer) Option {
+	return func(c *Client) {
+		if t != nil {
+			c.tracer = t
+		}
+	}
 }
 
 // defaultIdleTimeout is the maximum time to wait for the next streamed chunk
@@ -49,7 +74,7 @@ const defaultIdleTimeout = 120 * time.Second
 
 // New builds a chat client from config. Returns ErrNotConfigured when no base
 // URL is set so callers can disable doc generation gracefully.
-func New(cfg config.LLM) (*Client, error) {
+func New(cfg config.LLM, opts ...Option) (*Client, error) {
 	if cfg.BaseURL == "" {
 		return nil, ErrNotConfigured
 	}
@@ -67,7 +92,7 @@ func New(cfg config.LLM) (*Client, error) {
 		idle = defaultIdleTimeout
 	}
 
-	return &Client{
+	c := &Client{
 		baseURL: strings.TrimRight(cfg.BaseURL, "/"),
 		apiKey:  cfg.APIKey,
 		model:   cfg.Model,
@@ -75,7 +100,15 @@ func New(cfg config.LLM) (*Client, error) {
 		// long-lived. Liveness is enforced by the per-chunk idle timer.
 		http:        &http.Client{},
 		idleTimeout: idle,
-	}, nil
+		tracer:      langfuse.Disabled(),
+		system:      langfuse.SystemFromBaseURL(cfg.BaseURL),
+	}
+
+	for _, opt := range opts {
+		opt(c)
+	}
+
+	return c, nil
 }
 
 // Model returns the configured chat model name.
@@ -86,23 +119,57 @@ type chatRequest struct {
 	Messages  []Message `json:"messages"`
 	MaxTokens int       `json:"max_tokens,omitempty"`
 	Stream    bool      `json:"stream,omitempty"`
+	// StreamOptions asks the provider to emit a final usage chunk. Omitted
+	// entirely once noStreamOpts latches, because a few OpenAI-compatible
+	// gateways reject the unknown field with a 400.
+	StreamOptions *streamOptions `json:"stream_options,omitempty"`
+}
+
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
+}
+
+// Usage carries the token accounting a provider reports for one call. Fields
+// are zero when the provider does not report them.
+type Usage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
+// Meta describes one completed chat call beyond its text: what the provider
+// charged for it and how quickly it started producing output.
+type Meta struct {
+	Model string
+	Usage Usage
+	// FirstTokenAt is when the first content delta arrived. Zero when the
+	// response was not streamed (gateway fallback path).
+	FirstTokenAt time.Time
+	// Attempts counts how many HTTP requests were made, including retries.
+	Attempts int
 }
 
 type chatResponse struct {
+	Model   string `json:"model"`
 	Choices []struct {
 		Message Message `json:"message"`
 	} `json:"choices"`
+	Usage *Usage    `json:"usage,omitempty"`
 	Error *apiError `json:"error,omitempty"`
 }
 
 // streamChunk is one server-sent event payload from a streaming chat call.
 type streamChunk struct {
+	Model   string `json:"model"`
 	Choices []struct {
 		Delta struct {
 			Content string `json:"content"`
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
+	// Usage is present only on the final chunk, and only when the provider
+	// honoured stream_options.include_usage.
+	Usage *Usage    `json:"usage,omitempty"`
 	Error *apiError `json:"error,omitempty"`
 }
 
@@ -113,28 +180,89 @@ type apiError struct {
 
 // Complete sends messages and returns the assistant's reply text.
 func (c *Client) Complete(ctx context.Context, messages []Message) (string, error) {
-	return c.complete(ctx, messages, 0)
+	text, _, err := c.CompleteOp(ctx, "chat", messages)
+
+	return text, err
+}
+
+// CompleteOp is Complete with an operation name for the exported trace (e.g.
+// "chat.summary"), and it returns the provider's token accounting alongside
+// the text.
+func (c *Client) CompleteOp(ctx context.Context, op string, messages []Message) (string, Meta, error) {
+	if op == "" {
+		op = "chat"
+	}
+
+	ctx, end := c.tracer.StartGeneration(ctx, langfuse.ScopeDocs, langfuse.GenerationInfo{
+		Name:      op,
+		System:    c.system,
+		Operation: "chat",
+		Model:     c.model,
+		Input:     messages,
+	})
+
+	text, meta, err := c.complete(ctx, messages, 0)
+
+	end(langfuse.GenerationResult{
+		Output:        text,
+		InputTokens:   meta.Usage.PromptTokens,
+		OutputTokens:  meta.Usage.CompletionTokens,
+		ResponseModel: meta.Model,
+		FirstTokenAt:  meta.FirstTokenAt,
+		Attempts:      meta.Attempts,
+		Err:           err,
+	})
+
+	return text, meta, err
 }
 
 // maxAttempts bounds retries for transient failures (429, 5xx, network).
 const maxAttempts = 3
 
-func (c *Client) complete(ctx context.Context, messages []Message, maxTokens int) (string, error) {
-	body, err := json.Marshal(chatRequest{Model: c.model, Messages: messages, MaxTokens: maxTokens, Stream: true})
+func (c *Client) complete(ctx context.Context, messages []Message, maxTokens int) (string, Meta, error) {
+	meta := Meta{Model: c.model}
+
+	body, err := c.marshalRequest(messages, maxTokens)
 	if err != nil {
-		return "", fmt.Errorf("marshal chat request; %w", err)
+		return "", meta, err
 	}
 
 	var lastErr error
 	for attempt := 1; ; attempt++ {
-		text, retryAfter, retryable, err := c.completeOnce(ctx, body)
+		meta.Attempts = attempt
+
+		res, retryAfter, retryable, err := c.completeOnce(ctx, body)
 		if err == nil {
-			return text, nil
+			meta.Usage = res.usage
+			meta.FirstTokenAt = res.firstTokenAt
+			if res.model != "" {
+				meta.Model = res.model
+			}
+
+			return res.text, meta, nil
 		}
 
 		lastErr = err
+
+		// A gateway that does not understand stream_options answers 400 on
+		// every attempt, so retrying the same body is pointless. Drop the
+		// field once and replay immediately rather than burning a backoff.
+		if errors.Is(err, errStreamOptsRejected) && c.noStreamOpts.CompareAndSwap(false, true) {
+			slog.Warn("endpoint rejected stream_options; retrying without token usage reporting",
+				"model", c.model)
+
+			retry, merr := c.marshalRequest(messages, maxTokens)
+			if merr != nil {
+				return "", meta, merr
+			}
+
+			body = retry
+
+			continue
+		}
+
 		if !retryable || attempt >= maxAttempts || ctx.Err() != nil {
-			return "", lastErr
+			return "", meta, lastErr
 		}
 
 		delay := time.Duration(attempt) * 2 * time.Second
@@ -148,9 +276,35 @@ func (c *Client) complete(ctx context.Context, messages []Message, maxTokens int
 		select {
 		case <-time.After(delay):
 		case <-ctx.Done():
-			return "", lastErr
+			return "", meta, lastErr
 		}
 	}
+}
+
+// marshalRequest builds the request body, including stream_options unless the
+// endpoint has already rejected it.
+func (c *Client) marshalRequest(messages []Message, maxTokens int) ([]byte, error) {
+	req := chatRequest{Model: c.model, Messages: messages, MaxTokens: maxTokens, Stream: true}
+	if !c.noStreamOpts.Load() {
+		req.StreamOptions = &streamOptions{IncludeUsage: true}
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshal chat request; %w", err)
+	}
+
+	return body, nil
+}
+
+// completion is the outcome of one successful streaming chat call.
+type completion struct {
+	text  string
+	model string
+	usage Usage
+	// firstTokenAt is when the first content delta arrived; zero when the
+	// gateway returned a non-streamed body.
+	firstTokenAt time.Time
 }
 
 // completeOnce performs a single streaming chat call. retryable reports whether
@@ -161,7 +315,7 @@ func (c *Client) complete(ctx context.Context, messages []Message, maxTokens int
 // The response is consumed as OpenAI-style server-sent events. A per-chunk idle
 // timer bounds liveness: as long as chunks keep arriving the call may run for
 // minutes, but a stalled endpoint is aborted after idleTimeout.
-func (c *Client) completeOnce(ctx context.Context, body []byte) (text string, retryAfter time.Duration, retryable bool, err error) {
+func (c *Client) completeOnce(ctx context.Context, body []byte) (res completion, retryAfter time.Duration, retryable bool, err error) {
 	// Derive a cancellable context and arm an idle timer that cancels it if
 	// no progress is made for idleTimeout. Each received chunk resets it.
 	streamCtx, cancel := context.WithCancel(ctx)
@@ -177,7 +331,7 @@ func (c *Client) completeOnce(ctx context.Context, body []byte) (text string, re
 
 	req, err := http.NewRequestWithContext(streamCtx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return "", 0, false, fmt.Errorf("new chat request; %w", err)
+		return completion{}, 0, false, fmt.Errorf("new chat request; %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
@@ -190,59 +344,84 @@ func (c *Client) completeOnce(ctx context.Context, body []byte) (text string, re
 	resp, err := c.http.Do(req)
 	if err != nil {
 		if idledOut.Load() {
-			return "", 0, false, fmt.Errorf("chat request stalled: no response within %s", c.idleTimeout)
+			return completion{}, 0, false, fmt.Errorf("chat request stalled: no response within %s", c.idleTimeout)
 		}
 		var netErr interface{ Timeout() bool }
 		timedOut := errors.As(err, &netErr) && netErr.Timeout()
 
-		return "", 0, !timedOut && ctx.Err() == nil, fmt.Errorf("chat request; %w", err)
+		return completion{}, 0, !timedOut && ctx.Err() == nil, fmt.Errorf("chat request; %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		retryable := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
+		httpErr := fmt.Errorf("chat http %d; %s", resp.StatusCode, apiErrMsg(raw))
 
-		return "", parseRetryAfter(resp.Header.Get("Retry-After")), retryable,
-			fmt.Errorf("chat http %d; %s", resp.StatusCode, apiErrMsg(raw))
+		// Some OpenAI-compatible gateways reject the unknown stream_options
+		// field outright. Flag it so the caller can replay without it instead
+		// of disabling the whole call path.
+		if rejectsStreamOptions(resp.StatusCode, raw) {
+			httpErr = fmt.Errorf("%w; %w", errStreamOptsRejected, httpErr)
+		}
+
+		return completion{}, parseRetryAfter(resp.Header.Get("Retry-After")), retryable, httpErr
 	}
 
-	text, err = c.readStream(resp.Body, resetIdle)
+	res, err = c.readStream(resp.Body, resetIdle)
 	if err != nil {
 		if idledOut.Load() {
-			return "", 0, false, fmt.Errorf("chat stream stalled: no data within %s", c.idleTimeout)
+			return completion{}, 0, false, fmt.Errorf("chat stream stalled: no data within %s", c.idleTimeout)
 		}
 		if ctx.Err() != nil {
-			return "", 0, false, ctx.Err()
+			return completion{}, 0, false, ctx.Err()
 		}
 		// An error explicitly reported by the API in the stream is not
 		// transient; only genuine transport read failures are retried.
 		if errors.Is(err, errAPIStream) {
-			return "", 0, false, err
+			return completion{}, 0, false, err
 		}
 
-		return "", 0, true, err // mid-stream read failure: transient, retry
+		return completion{}, 0, true, err // mid-stream read failure: transient, retry
 	}
 
-	return text, 0, false, nil
+	return res, 0, false, nil
 }
 
 // errAPIStream marks an error the model/gateway reported inside the SSE stream,
 // so the retry logic can treat it as terminal rather than transient.
 var errAPIStream = errors.New("chat api stream error")
 
+// errStreamOptsRejected marks a 400 that names stream_options, so the caller
+// can replay the request without it. Usage reporting is best-effort: losing it
+// must never lose the completion itself.
+var errStreamOptsRejected = errors.New("endpoint rejected stream_options")
+
+// rejectsStreamOptions reports whether a non-2xx response is the gateway
+// complaining specifically about stream_options. Matching on the body keeps a
+// generic 400 (bad model, oversized prompt) from silently disabling usage
+// reporting for the process lifetime.
+func rejectsStreamOptions(status int, raw []byte) bool {
+	if status != http.StatusBadRequest && status != http.StatusUnprocessableEntity {
+		return false
+	}
+
+	return strings.Contains(strings.ToLower(string(raw)), "stream_options")
+}
+
 // readStream parses an OpenAI SSE chat stream into the concatenated assistant
 // text, calling onProgress after each line so the caller can reset its idle
 // timer. If the stream yields no SSE data events (some gateways ignore
 // stream:true and return a normal JSON body), it falls back to decoding the
 // whole buffered body as a single chat response.
-func (c *Client) readStream(body io.Reader, onProgress func()) (string, error) {
+func (c *Client) readStream(body io.Reader, onProgress func()) (completion, error) {
 	sc := bufio.NewScanner(body)
 	// Allow long single-line data payloads (big deltas / fallback whole body).
 	sc.Buffer(make([]byte, 0, 64*1024), 8<<20)
 
 	var (
 		out     strings.Builder
+		res     completion
 		sawData bool
 		allRaw  strings.Builder // captured for the non-streaming fallback
 	)
@@ -268,34 +447,63 @@ func (c *Client) readStream(body io.Reader, onProgress func()) (string, error) {
 			continue // ignore keep-alives / comments
 		}
 		if chunk.Error != nil {
-			return "", fmt.Errorf("%w; %s", errAPIStream, chunk.Error.Message)
+			return completion{}, fmt.Errorf("%w; %s", errAPIStream, chunk.Error.Message)
 		}
+
+		if chunk.Model != "" && res.model == "" {
+			res.model = chunk.Model
+		}
+		// The usage chunk arrives last and carries no choices; keep the last
+		// non-nil one so a provider that repeats it does not lose the totals.
+		if chunk.Usage != nil {
+			res.usage = *chunk.Usage
+		}
+
 		for _, ch := range chunk.Choices {
+			if ch.Delta.Content == "" {
+				continue
+			}
+			// Time to first token: measured at the first chunk that actually
+			// carries content, not at the role-only preamble chunk.
+			if res.firstTokenAt.IsZero() {
+				res.firstTokenAt = time.Now()
+			}
+
 			out.WriteString(ch.Delta.Content)
 		}
+
 		sawData = true
 	}
 
 	if err := sc.Err(); err != nil {
-		return "", fmt.Errorf("read chat stream; %w", err)
+		return completion{}, fmt.Errorf("read chat stream; %w", err)
 	}
 
 	if sawData {
-		return out.String(), nil
+		res.text = out.String()
+
+		return res, nil
 	}
 
 	// Fallback: decode the whole body as a non-streamed chat response.
 	var whole chatResponse
 	if err := json.Unmarshal([]byte(strings.TrimSpace(allRaw.String())), &whole); err == nil {
 		if whole.Error != nil {
-			return "", fmt.Errorf("%w; %s", errAPIStream, whole.Error.Message)
+			return completion{}, fmt.Errorf("%w; %s", errAPIStream, whole.Error.Message)
 		}
 		if len(whole.Choices) > 0 {
-			return whole.Choices[0].Message.Content, nil
+			if whole.Usage != nil {
+				res.usage = *whole.Usage
+			}
+
+			res.model = whole.Model
+			res.text = whole.Choices[0].Message.Content
+
+			return res, nil
 		}
 	}
 
-	return "", errors.New("chat response had no choices")
+	return completion{}, errors.New("chat response had no choices")
 }
 
 // parseRetryAfter reads a Retry-After header in seconds form; 0 when absent or
@@ -321,7 +529,7 @@ func parseRetryAfter(v string) time.Duration {
 // Ping performs a minimal completion to validate the endpoint, credentials and
 // model. It returns the model that answered (echoed from config) and any error.
 func (c *Client) Ping(ctx context.Context) error {
-	_, err := c.complete(ctx, []Message{{Role: "user", Content: "ping"}}, 1)
+	_, _, err := c.complete(ctx, []Message{{Role: "user", Content: "ping"}}, 1)
 
 	return err
 }

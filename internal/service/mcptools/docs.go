@@ -498,6 +498,19 @@ type setDocsConfigArgs struct {
 	CodeRAGInclude      []string `json:"code_rag_include,omitempty" jsonschema:"source globs to index; replaces the built-in allowlist (empty uses it)"`
 	CodeRAGIncludeExtra []string `json:"code_rag_include_extra,omitempty" jsonschema:"source globs added to the built-in allowlist instead of replacing it, e.g. ['**/*.yaml']"`
 	CodeRAGExclude      []string `json:"code_rag_exclude,omitempty" jsonschema:"source globs to skip"`
+
+	LangfuseEnabled         bool   `json:"langfuse_enabled,omitempty" jsonschema:"export LLM traces to Langfuse over OTLP/HTTP"`
+	LangfuseHost            string `json:"langfuse_host,omitempty" jsonschema:"Langfuse root URL, e.g. https://cloud.langfuse.com or a self-hosted http://localhost:3000"`
+	LangfusePublicKey       string `json:"langfuse_public_key,omitempty" jsonschema:"Langfuse project public key (pk-lf-...)"`
+	LangfuseSecretKey       string `json:"langfuse_secret_key,omitempty" jsonschema:"Langfuse project secret key (write-only; leave empty to keep existing)"`
+	LangfuseEnvironment     string `json:"langfuse_environment,omitempty" jsonschema:"environment tag on every trace, e.g. production or staging"`
+	LangfuseTimeout         string `json:"langfuse_timeout,omitempty" jsonschema:"OTLP export request timeout as a Go duration, e.g. 10s"`
+	LangfuseCapture         string `json:"langfuse_capture,omitempty" jsonschema:"how much prompt/completion text to export: off (metadata only), truncated (8 KiB), or full. full sends repository source code to the Langfuse instance"`
+	LangfuseMaxContentBytes int    `json:"langfuse_max_content_bytes,omitempty" jsonschema:"cap on a single captured input or output in bytes, applied in every capture mode (default 1048576); 0 removes the cap, which is only safe on a self-hosted instance"`
+	LangfuseTraceDocs       bool   `json:"langfuse_trace_docs,omitempty" jsonschema:"trace documentation-generation chat calls"`
+	LangfuseTraceEmbed      bool   `json:"langfuse_trace_embed,omitempty" jsonschema:"trace embedding calls (one observation per Embed call, not per batch)"`
+	LangfuseTraceMCP        bool   `json:"langfuse_trace_mcp,omitempty" jsonschema:"trace MCP tool invocations"`
+	LangfuseTraceHTTP       bool   `json:"langfuse_trace_http,omitempty" jsonschema:"trace REST API requests; off by default because these carry no model or token data and Langfuse bills per observation"`
 }
 
 type testLLMArgs struct {
@@ -563,7 +576,7 @@ func (a setDocsConfigArgs) patch(raw json.RawMessage) (settings.Patch, error) {
 	// settings.Patch handles presence for all fields except duration strings,
 	// which MCP exposes in human-readable Go syntax (e.g. "30s").
 	durationPresent := map[string]bool{}
-	for _, key := range []string{"llm_timeout", "embed_timeout", "code_embed_timeout"} {
+	for _, key := range []string{"llm_timeout", "embed_timeout", "code_embed_timeout", "langfuse_timeout"} {
 		_, durationPresent[key] = fields[key]
 		delete(fields, key)
 	}
@@ -585,6 +598,7 @@ func (a setDocsConfigArgs) patch(raw json.RawMessage) (settings.Patch, error) {
 		"llm_timeout":        {a.LLMTimeout, func(d time.Duration) { patch.LLMTimeout = &d }},
 		"embed_timeout":      {a.EmbedTimeout, func(d time.Duration) { patch.EmbedTimeout = &d }},
 		"code_embed_timeout": {a.CodeEmbedTimeout, func(d time.Duration) { patch.CodeEmbedTimeout = &d }},
+		"langfuse_timeout":   {a.LangfuseTimeout, func(d time.Duration) { patch.LangfuseTimeout = &d }},
 	} {
 		if !durationPresent[key] {
 			continue
