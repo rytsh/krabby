@@ -68,6 +68,37 @@ type GenerationResult struct {
 // EndTrace closes a trace started by StartTrace. output may be nil.
 type EndTrace func(output any, err error)
 
+// ctxKey marks a context as already carrying a span from this provider.
+type ctxKey struct{}
+
+// marked reports whether ctx already holds a Langfuse span.
+//
+// This cannot be answered from the OpenTelemetry context alone. krabby runs two
+// tracer providers — tell's gRPC one for the collector, and this one — and the
+// HTTP middleware puts a span from the *other* provider on the context of every
+// request. Parenting to it would produce a span whose parent id Langfuse never
+// receives, and Langfuse does not materialise a trace without its root: the
+// observation would silently vanish. A marker of our own is the only reliable
+// way to tell "there is a parent Langfuse span here" from "there is a foreign
+// span here".
+func marked(ctx context.Context) bool {
+	return ctx.Value(ctxKey{}) != nil
+}
+
+func mark(ctx context.Context) context.Context {
+	return context.WithValue(ctx, ctxKey{}, struct{}{})
+}
+
+// rootUnlessNested returns the span options for a span that should attach to a
+// Langfuse parent when there is one, and start its own trace when there is not.
+func rootUnlessNested(ctx context.Context, opts ...trace.SpanStartOption) []trace.SpanStartOption {
+	if marked(ctx) {
+		return opts
+	}
+
+	return append(opts, trace.WithNewRoot())
+}
+
 // EndGeneration closes a generation started by StartGeneration.
 type EndGeneration func(GenerationResult)
 
@@ -110,7 +141,7 @@ func (t *Tracer) StartTrace(ctx context.Context, scope Scope, info TraceInfo) (c
 		attrs = append(attrs, attribute.String(attrObsInput, in))
 	}
 
-	ctx, span := t.tracer.Start(ctx, info.Name,
+	ctx, span := t.tracer.Start(mark(ctx), info.Name,
 		trace.WithNewRoot(),
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithAttributes(attrs...),
@@ -160,9 +191,15 @@ func (t *Tracer) StartGeneration(ctx context.Context, scope Scope, info Generati
 		}
 	}
 
-	ctx, span := t.tracer.Start(ctx, info.Name,
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(attrs...),
+	// A generation is normally nested under the unit of work that issued it,
+	// but it must stand on its own when nothing above it created a Langfuse
+	// span — a search served over REST, or an indexing run on the background
+	// queue, reaches the embedder with no krabby root in scope.
+	ctx, span := t.tracer.Start(mark(ctx), info.Name,
+		rootUnlessNested(ctx,
+			trace.WithSpanKind(trace.SpanKindClient),
+			trace.WithAttributes(attrs...),
+		)...,
 	)
 
 	start := time.Now()
@@ -229,9 +266,11 @@ func (t *Tracer) StartSpan(ctx context.Context, scope Scope, name string, input 
 		}
 	}
 
-	ctx, span := t.tracer.Start(ctx, name,
-		trace.WithSpanKind(trace.SpanKindInternal),
-		trace.WithAttributes(attrs...),
+	ctx, span := t.tracer.Start(mark(ctx), name,
+		rootUnlessNested(ctx,
+			trace.WithSpanKind(trace.SpanKindInternal),
+			trace.WithAttributes(attrs...),
+		)...,
 	)
 
 	return ctx, func(output any, err error) {

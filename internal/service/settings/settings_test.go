@@ -235,3 +235,75 @@ func TestLangfusePatchApply(t *testing.T) {
 		t.Error("explicit false did not clear trace_docs")
 	}
 }
+
+// A Go nil slice marshals to null. Clients index these lists directly, so the
+// redacted view - the single funnel for every GET and PUT response - must
+// always present them as arrays.
+func TestRedactNeverReturnsNullLists(t *testing.T) {
+	// The zero value is what a fresh install looks like: every list nil.
+	body, err := json.Marshal(Settings{}.Redact())
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	lists := []string{
+		"repo_schedules",
+		"docs_include",
+		"docs_include_extra",
+		"docs_exclude",
+		"rag_lexical_stop_words",
+		"code_rag_include",
+		"code_rag_include_extra",
+		"code_rag_exclude",
+	}
+
+	for _, key := range lists {
+		raw, ok := decoded[key]
+		if !ok {
+			t.Errorf("%s missing from the response", key)
+
+			continue
+		}
+
+		if string(raw) == "null" {
+			t.Errorf("%s serialized as null; clients index it directly", key)
+		}
+	}
+}
+
+// Nested spec lists are covered too, and normalizing them must not write
+// through into the caller's record.
+func TestRedactDoesNotMutateSource(t *testing.T) {
+	src := Settings{RepoSchedules: []RepoSchedule{{Namespace: "a", Specs: nil}}}
+
+	r := src.Redact()
+
+	if r.RepoSchedules[0].Specs == nil {
+		t.Error("nested specs were left nil in the redacted view")
+	}
+
+	if src.RepoSchedules[0].Specs != nil {
+		t.Error("Redact wrote through into the caller's schedules")
+	}
+}
+
+// Normalizing must not change what the settings mean: an empty list and a nil
+// list are both "nothing configured".
+func TestRedactNormalizationPreservesSemantics(t *testing.T) {
+	r := Settings{GitPollInterval: time.Hour}.Redact()
+
+	if len(r.RepoSchedules) != 0 {
+		t.Fatalf("expected no schedules, got %d", len(r.RepoSchedules))
+	}
+
+	// EffectiveSchedules falls back to the fixed interval when no schedule is
+	// configured; an empty slice must behave exactly as nil did.
+	if got := len(r.Settings.EffectiveSchedules()); got != len(Settings{GitPollInterval: time.Hour}.EffectiveSchedules()) {
+		t.Errorf("empty schedules changed EffectiveSchedules (%d entries)", got)
+	}
+}

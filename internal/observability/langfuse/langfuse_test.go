@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/rytsh/krabby/internal/config"
 )
 
@@ -245,5 +248,121 @@ func TestParseCapture(t *testing.T) {
 		if got := config.ParseCapture(in); got != want {
 			t.Errorf("ParseCapture(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// liveTracer builds a real tracer pointed at a dead endpoint. Spans are never
+// exported, but they are recorded, which is all these tests need.
+func liveTracer(t *testing.T, scopes func(*config.Langfuse)) *Tracer {
+	t.Helper()
+
+	cfg := config.Langfuse{
+		Enabled: true, Host: "http://127.0.0.1:1", PublicKey: "pk", SecretKey: "sk",
+		TraceDocs: true, TraceEmbed: true, TraceMCP: true, TraceHTTP: true,
+	}
+	if scopes != nil {
+		scopes(&cfg)
+	}
+
+	tr, err := New(cfg)
+	if err != nil {
+		t.Fatalf("new tracer: %v", err)
+	}
+	t.Cleanup(func() { _ = tr.Shutdown(context.Background()) })
+
+	return tr
+}
+
+// A generation reached with no krabby span above it must start its own trace.
+//
+// This is the REST-search and background-indexing case: the embedder is called
+// with a context that may carry a span from the *other* tracer provider (the
+// telemetry collector). Inheriting it would produce a parent id Langfuse never
+// receives, and Langfuse creates no trace without its root, so the observation
+// would disappear.
+func TestGenerationWithoutParentStartsItsOwnTrace(t *testing.T) {
+	tr := liveTracer(t, nil)
+
+	// A span from a foreign provider, exactly as the HTTP telemetry middleware
+	// leaves on the request context.
+	foreign := sdktrace.NewTracerProvider()
+	t.Cleanup(func() { _ = foreign.Shutdown(context.Background()) })
+
+	ctx, foreignSpan := foreign.Tracer("other").Start(context.Background(), "http.server")
+	defer foreignSpan.End()
+
+	foreignTrace := foreignSpan.SpanContext().TraceID()
+	if !foreignSpan.SpanContext().IsValid() {
+		t.Fatal("test setup: the foreign span is not recording")
+	}
+
+	genCtx, end := tr.StartGeneration(ctx, ScopeEmbed, GenerationInfo{Name: "embeddings"})
+	defer end(GenerationResult{})
+
+	got := trace.SpanContextFromContext(genCtx)
+	if !got.IsValid() {
+		t.Fatal("generation span is not valid")
+	}
+
+	if got.TraceID() == foreignTrace {
+		t.Fatal("generation attached to the foreign provider's trace; Langfuse would drop it as an orphan")
+	}
+}
+
+// When krabby did create a root, the generation must nest under it rather than
+// splitting off into a trace of its own.
+func TestGenerationNestsUnderKrabbyRoot(t *testing.T) {
+	tr := liveTracer(t, nil)
+
+	rootCtx, endRoot := tr.StartTrace(context.Background(), ScopeDocs, TraceInfo{Name: "docs.generate"})
+	defer endRoot(nil, nil)
+
+	rootTrace := trace.SpanContextFromContext(rootCtx).TraceID()
+
+	genCtx, end := tr.StartGeneration(rootCtx, ScopeDocs, GenerationInfo{Name: "chat.summary"})
+	defer end(GenerationResult{})
+
+	if got := trace.SpanContextFromContext(genCtx).TraceID(); got != rootTrace {
+		t.Fatalf("generation started a new trace (%s) instead of nesting under the root (%s)", got, rootTrace)
+	}
+}
+
+// A root is a root even when a foreign span is in scope.
+func TestStartTraceIgnoresForeignParent(t *testing.T) {
+	tr := liveTracer(t, nil)
+
+	foreign := sdktrace.NewTracerProvider()
+	t.Cleanup(func() { _ = foreign.Shutdown(context.Background()) })
+
+	ctx, foreignSpan := foreign.Tracer("other").Start(context.Background(), "http.server")
+	defer foreignSpan.End()
+
+	rootCtx, end := tr.StartTrace(ctx, ScopeMCP, TraceInfo{Name: "search_code"})
+	defer end(nil, nil)
+
+	if trace.SpanContextFromContext(rootCtx).TraceID() == foreignSpan.SpanContext().TraceID() {
+		t.Fatal("StartTrace inherited the foreign trace")
+	}
+}
+
+// A scope that is off must not mark the context, or the next span would think
+// it has a Langfuse parent and attach to nothing.
+func TestDisabledScopeDoesNotMarkContext(t *testing.T) {
+	tr := liveTracer(t, func(c *config.Langfuse) { c.TraceHTTP = false })
+
+	// The HTTP scope is off, so this is a no-op and leaves ctx untouched.
+	ctx, endHTTP := tr.StartTrace(context.Background(), ScopeHTTP, TraceInfo{Name: "GET /api/v1/docs/search"})
+	defer endHTTP(nil, nil)
+
+	if marked(ctx) {
+		t.Fatal("a skipped span marked the context")
+	}
+
+	// The embedding underneath must therefore still become its own root.
+	genCtx, end := tr.StartGeneration(ctx, ScopeEmbed, GenerationInfo{Name: "embeddings"})
+	defer end(GenerationResult{})
+
+	if !trace.SpanContextFromContext(genCtx).IsValid() {
+		t.Fatal("generation span is not valid")
 	}
 }

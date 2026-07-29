@@ -52,6 +52,20 @@
     }
   }
 
+  // adoptDocsCfg is the single place docsCfg is replaced by a server response.
+  //
+  // A Go nil slice marshals to null, not [], so any list the user has never
+  // touched arrives as null — and the template indexes repo_schedules
+  // directly. Every assignment therefore has to normalize, which is exactly
+  // what a partial save (the observability form, which sends no list fields at
+  // all) used to skip.
+  function adoptDocsCfg(cfg) {
+    if (!cfg) return;
+    if (!Array.isArray(cfg.repo_schedules)) cfg.repo_schedules = [];
+    docsCfg = cfg;
+    stopWordsText = (cfg.rag_lexical_stop_words ?? []).join(", ");
+  }
+
   async function load() {
     try {
       settings = await api.settings();
@@ -65,9 +79,7 @@
     }
 
     try {
-      docsCfg = await api.docsConfig();
-      if (docsCfg && !Array.isArray(docsCfg.repo_schedules)) docsCfg.repo_schedules = [];
-      stopWordsText = (docsCfg?.rag_lexical_stop_words ?? []).join(", ");
+      adoptDocsCfg(await api.docsConfig());
     } catch (e) {
       docsErr = e.message;
     }
@@ -167,7 +179,7 @@
     docsErr = "";
     docsMsg = "";
     try {
-      docsCfg = await api.setDocsConfig(buildPatch());
+      adoptDocsCfg(await api.setDocsConfig(buildPatch()));
       llmKey = embedKey = codeEmbedKey = "";
       docsMsg = "Saved. Existing repositories queued for reindex.";
       successToast("Saved");
@@ -196,7 +208,7 @@
       docsCfg.repo_schedules = schedules;
       if (clearWebhook) patch.webhook_secret = "";
       else if (webhookSecret) patch.webhook_secret = webhookSecret;
-      docsCfg = await api.setDocsConfig(patch);
+      adoptDocsCfg(await api.setDocsConfig(patch));
       webhookSecret = "";
       runtimeMsg = clearWebhook ? "Webhook verification disabled." : "Runtime settings saved.";
       successToast("Saved");
@@ -273,7 +285,7 @@
     langfuseErr = "";
     langfuseMsg = "";
     try {
-      docsCfg = await api.setDocsConfig(buildLangfusePatch());
+      adoptDocsCfg(await api.setDocsConfig(buildLangfusePatch()));
       langfuseKey = "";
       langfuseMsg = docsCfg.langfuse_enabled
         ? "Saved. Traces export from the next model call."
@@ -994,8 +1006,11 @@
         <span>
           REST API requests
           <span class="block text-[12px] text-faint">
-            Off by default. These carry no model, tokens or cost, and the UI polls — expect the
-            observation count to be dominated by them.
+            Wraps each <code>/api/v1</code> call in a trace, so a search made from this UI shows the
+            embedding it caused underneath it instead of as a standalone observation. Only the API
+            is covered — health checks, the UI's own assets and the MCP endpoint are not.
+            Off by default: the UI polls, so most of what this adds is requests that did no model
+            work at all.
           </span>
         </span>
       </label>

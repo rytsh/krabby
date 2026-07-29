@@ -288,7 +288,43 @@ func (s Settings) Redact() Redacted {
 	r.Settings.WebhookSecret = ""
 	r.Settings.LangfuseSecretKey = ""
 
+	// A Go nil slice marshals to null, so a list the user has never set would
+	// reach clients as null rather than []. Callers then have to null-guard
+	// every list on every response, and a partial update - which returns
+	// fields the request never mentioned - is exactly where that gets
+	// forgotten. Normalize once here instead: this is the single funnel for
+	// everything GET and PUT return.
+	r.Settings.DocsInclude = orEmpty(r.Settings.DocsInclude)
+	r.Settings.DocsIncludeExtra = orEmpty(r.Settings.DocsIncludeExtra)
+	r.Settings.DocsExclude = orEmpty(r.Settings.DocsExclude)
+	r.Settings.RAGLexicalStopWords = orEmpty(r.Settings.RAGLexicalStopWords)
+	r.Settings.CodeRAGInclude = orEmpty(r.Settings.CodeRAGInclude)
+	r.Settings.CodeRAGIncludeExtra = orEmpty(r.Settings.CodeRAGIncludeExtra)
+	r.Settings.CodeRAGExclude = orEmpty(r.Settings.CodeRAGExclude)
+
+	// Copied rather than normalized in place: the embedded Settings is a
+	// shallow copy, so writing through the slice would reach into the caller's
+	// record.
+	schedules := make([]RepoSchedule, len(r.Settings.RepoSchedules))
+	for i, sc := range r.Settings.RepoSchedules {
+		sc.Specs = orEmpty(sc.Specs)
+		schedules[i] = sc
+	}
+
+	r.Settings.RepoSchedules = schedules
+
 	return r
+}
+
+// orEmpty replaces a nil slice with an empty one. An empty and a nil slice are
+// indistinguishable to every reader (both have length zero), so this changes
+// no behaviour - only the JSON shape.
+func orEmpty(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+
+	return s
 }
 
 // Patch is the JSON-decodable input for updating settings over the REST API.

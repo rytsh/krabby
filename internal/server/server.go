@@ -50,9 +50,6 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 		mrequestid.Middleware(),
 		mlog.Middleware(),
 		mtelemetry.Middleware(),
-		// Langfuse export of REST traffic. Inert unless the http scope is
-		// switched on in settings; see internal/server/trace.go.
-		langfuseMiddleware(mgr),
 	)
 
 	// base mounts every route (UI, REST, MCP, webhook, healthz) under the
@@ -99,7 +96,12 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	// protocol traffic reaches the SDK.
 	base.Handle(cfg.MCP.Path, mcpProbe(mcpHandler), apiKeyMiddleware(mgr.MCPAPIKey))
 
-	api := base.Group("/api/v1")
+	// The Langfuse HTTP scope is attached to the API group rather than the
+	// whole mux on purpose: /healthz, the pprof endpoints, the embedded UI
+	// assets and the MCP path itself either carry no LLM work at all or are
+	// already traced by their own scope, and Langfuse bills per observation.
+	// A liveness probe every ten seconds is 8.6k observations a day of nothing.
+	api := base.Group("/api/v1", langfuseMiddleware(mgr))
 	api.GET("/settings", server.Wrap(getSettings(cfg, mgr)))
 	api.GET("/mcp/api-key", server.Wrap(getMCPKey(mgr)))
 	api.PUT("/mcp/api-key", server.Wrap(setMCPKey(mgr)))

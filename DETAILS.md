@@ -315,10 +315,26 @@ own traces, which is what shows an agent's actual behaviour. Retries are folded
 into the observation they belong to rather than emitted as siblings, so a
 rate-limited build does not triple its observation count.
 
-**Scopes** are switched independently — documentation LLM calls, embedding
-calls, MCP tool calls, REST requests. Embeddings emit one observation per
-`Embed` call rather than per batch; indexing a large repository issues thousands
-of batches. REST is off by default: those spans carry no model, tokens or cost.
+**Scopes** are switched independently:
+
+- **Documentation LLM calls** — the summary and synthesis chat calls.
+- **Embedding calls** — one observation per `Embed` call rather than per batch;
+  indexing a large repository issues thousands of batches.
+- **MCP tool calls** — what a connected agent actually asked for.
+- **REST API requests** — wraps each `/api/v1` call so a search made from the UI
+  shows the embedding it caused nested underneath it, rather than as a
+  standalone observation. Scoped to the API group only: `/healthz`, the pprof
+  endpoints, the embedded UI assets and the MCP path are excluded, because a
+  liveness probe every ten seconds is 8.6k observations a day of nothing. Off by
+  default — the UI polls, so most of what it adds is requests that did no model
+  work.
+
+A span attaches to whichever krabby unit of work is above it and starts its own
+trace when there is none. That distinction is explicit rather than inherited
+from OpenTelemetry: with the `telemetry` collector configured, the HTTP
+middleware leaves a span from the *other* provider on the request context, and a
+generation that parented to it would carry a parent id Langfuse never receives —
+which Langfuse drops, since it does not materialise a trace without its root.
 
 **Content capture** is the setting that deserves thought, and the UI states this
 next to the control:
