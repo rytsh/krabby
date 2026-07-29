@@ -143,6 +143,9 @@ func TestIndexAndRetrieveExcerpt(t *testing.T) {
 func TestRetrieveClampsCountAndExcerpt(t *testing.T) {
 	ctx := context.Background()
 	long := strings.Repeat("alpha ", MaxExcerptRunes+100)
+	if MaxTopDocs != 20 {
+		t.Fatalf("MaxTopDocs = %d, want 20", MaxTopDocs)
+	}
 	docsDir := writeDocs(t, map[string]string{
 		"a.md": long,
 		"b.md": "alpha beta",

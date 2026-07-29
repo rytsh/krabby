@@ -437,7 +437,7 @@ type bumpTaskArgs struct {
 
 type cancelTaskArgs struct {
 	Seq  uint64 `json:"seq,omitempty" jsonschema:"cancel the queued or running task with this sequence number (seq) from queue_status; takes precedence over repo"`
-	Repo string `json:"repo,omitempty" jsonschema:"cancel all queued (not-yet-started) tasks for this repo id; ignored when seq is set"`
+	Repo string `json:"repo,omitempty" jsonschema:"cancel all queued and running tasks for this repo id or web-source key; ignored when seq is set"`
 }
 
 type setTaskConcurrencyArgs struct {
@@ -475,7 +475,7 @@ func addQueueTools(server *mcp.Server, mgr *manager.Manager) {
 		Name: "cancel_task",
 		Description: "Cancel background work. Pass seq to cancel one task (from queue_status): a queued task " +
 			"is dropped from the backlog and a running task has its job aborted. Or pass repo to cancel every " +
-			"queued task for a repo id (running work for a repo is aborted with cancel_repo_job). seq takes " +
+			"queued and running task for a repo id or web-source key (web:<name>). seq takes " +
 			"precedence when both are given.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, args cancelTaskArgs) (*mcp.CallToolResult, any, error) {
 		if args.Seq != 0 {
@@ -490,9 +490,9 @@ func addQueueTools(server *mcp.Server, mgr *manager.Manager) {
 			return nil, nil, fmt.Errorf("provide seq or repo to cancel")
 		}
 
-		n := mgr.CancelPendingForRepo(args.Repo)
+		n := mgr.CancelTasks(args.Repo)
 
-		return textResult(fmt.Sprintf("cancelled %d queued task(s) for %s", n, args.Repo)), nil, nil
+		return textResult(fmt.Sprintf("cancelled %d task(s) for %s", n, args.Repo)), nil, nil
 	})
 
 	addTool(server, &mcp.Tool{

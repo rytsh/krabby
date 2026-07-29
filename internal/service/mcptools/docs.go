@@ -23,7 +23,7 @@ type searchDocsArgs struct {
 	Namespace string `json:"namespace,omitempty" jsonschema:"when repo is omitted, scope repo docs to this namespace; empty means the 'default' namespace, '*' searches all namespaces. Web sources are never namespaced and always participate"`
 	Scope     string `json:"scope,omitempty" jsonschema:"when repo is unknown: 'all' (default), 'repos', or 'sources'"`
 	Mode      string `json:"mode,omitempty" jsonschema:"retrieval mode: 'semantic' (default) uses embeddings and is best for conceptual natural-language questions; 'lexical' uses only local BM25 and is best for Jira keys, error codes, exact titles and identifiers; 'hybrid' fuses both ranks and is the most thorough but the slowest on large collections. When no embedder is configured the default is 'lexical'"`
-	TopDocs   int    `json:"top_docs,omitempty" jsonschema:"number of ranked documents to return (default 3, max 5)"`
+	TopDocs   int    `json:"top_docs,omitempty" jsonschema:"number of ranked documents to return (default 3, max 20)"`
 }
 
 func (a searchDocsArgs) searchMode() (string, error) {
@@ -483,7 +483,7 @@ type setDocsConfigArgs struct {
 	RAGChunkSize    int  `json:"rag_chunk_size,omitempty" jsonschema:"target chunk length in characters"`
 	RAGChunkOverlap int  `json:"rag_chunk_overlap,omitempty" jsonschema:"character overlap between chunks"`
 	RAGTopK         int  `json:"rag_top_k,omitempty" jsonschema:"chunk matches fetched before grouping"`
-	RAGTopDocs      int  `json:"rag_top_docs,omitempty" jsonschema:"ranked document excerpts returned (max 5)"`
+	RAGTopDocs      int  `json:"rag_top_docs,omitempty" jsonschema:"ranked document excerpts returned (max 20)"`
 
 	RAGHybridCandidates     int      `json:"rag_hybrid_candidates,omitempty" jsonschema:"documents each ranker contributes to hybrid rank fusion (default 12, max 40); both rankers always use the same depth"`
 	RAGHybridRRFK           int      `json:"rag_hybrid_rrf_k,omitempty" jsonschema:"reciprocal rank fusion smoothing constant (default 20); larger values flatten the difference between ranks"`

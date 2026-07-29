@@ -50,6 +50,12 @@ type sourceUpdateRequest struct {
 	Config json.RawMessage `json:"config"`
 }
 
+type sourceConfigTestRequest struct {
+	Type         string          `json:"type"`
+	ExistingName string          `json:"existing_name,omitempty"`
+	Config       json.RawMessage `json:"config"`
+}
+
 func (r sourceRequest) collection() (*websource.Collection, error) {
 	specs := make([]string, 0, len(r.Specs))
 	for _, s := range r.Specs {
@@ -88,6 +94,7 @@ type sourceView struct {
 	ScopeKey        string `json:"scope_key"`
 	PageCount       int    `json:"page_count"`
 	Running         string `json:"running,omitempty"`
+	TaskState       string `json:"task_state,omitempty"`
 	// Progress carries one entry per phase currently running, each with its
 	// counters and remaining-time estimate.
 	Progress []manager.Progress `json:"progress,omitempty"`
@@ -109,6 +116,7 @@ func viewSource(mgr *manager.Manager, col *websource.Collection, pageCount int) 
 		ScopeKey:        scope,
 		PageCount:       pageCount,
 		Running:         mgr.Activity(scope),
+		TaskState:       mgr.TaskState(scope),
 		Progress:        progress,
 	}
 }
@@ -131,6 +139,17 @@ func listSources(mgr *manager.Manager) ada.HandlerFunc {
 		}
 
 		return c.SendJSON(views)
+	}
+}
+
+func testSourceConfig(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		var req sourceConfigTestRequest
+		if err := c.Bind(&req); err != nil {
+			return c.SetStatus(http.StatusBadRequest).Err(err)
+		}
+
+		return c.SendJSON(mgr.TestWebSource(c.Request.Context(), req.Type, req.ExistingName, req.Config))
 	}
 }
 
@@ -279,6 +298,21 @@ func refreshSource(mgr *manager.Manager) ada.HandlerFunc {
 		mgr.TriggerWebRefresh(name)
 
 		return c.SetStatus(http.StatusAccepted).SendJSON(map[string]string{"status": "refresh queued", "source": name})
+	}
+}
+
+func cancelSource(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		name := c.Request.PathValue("name")
+		scope := websource.ScopeKey(name)
+
+		if mgr.CancelTasks(scope) == 0 {
+			return c.SetStatus(http.StatusConflict).SendJSON(map[string]string{
+				"error": "no sync queued or running for " + name,
+			})
+		}
+
+		return c.SetStatus(http.StatusAccepted).SendJSON(map[string]string{"status": "cancelling", "source": name})
 	}
 }
 

@@ -239,20 +239,41 @@ func TestEffectiveSpecs(t *testing.T) {
 }
 
 func TestFullResyncDue(t *testing.T) {
+	now := time.Date(2026, 7, 29, 3, 0, 0, 0, time.UTC)
+	schedule := "0 2 * * *"
+
 	// First run (zero time) always forces a full pass.
-	if !FullResyncDue(time.Time{}, time.Hour) {
+	if !FullResyncDue(time.Time{}, schedule, now) {
 		t.Fatal("zero lastFull should be due")
 	}
-	// Recent full pass within the interval is not due.
-	if FullResyncDue(time.Now().Add(-30*time.Minute), time.Hour) {
-		t.Fatal("recent full pass should not be due")
+	// A full pass after today's activation satisfies the schedule.
+	if FullResyncDue(time.Date(2026, 7, 29, 2, 30, 0, 0, time.UTC), schedule, now) {
+		t.Fatal("full pass after the latest cron activation should not be due")
 	}
-	// Older than the interval is due.
-	if !FullResyncDue(time.Now().Add(-2*time.Hour), time.Hour) {
-		t.Fatal("stale full pass should be due")
+	// A full pass before today's activation is stale.
+	if !FullResyncDue(time.Date(2026, 7, 28, 3, 0, 0, 0, time.UTC), schedule, now) {
+		t.Fatal("cron activation after the last full pass should be due")
 	}
-	// Non-positive interval falls back to the default (24h).
-	if FullResyncDue(time.Now().Add(-1*time.Hour), 0) {
-		t.Fatal("with default interval a 1h-old pass should not be due")
+	// Invalid persisted values fall back to the default daily 02:00 schedule.
+	if FullResyncDue(time.Date(2026, 7, 29, 2, 30, 0, 0, time.UTC), "invalid", now) {
+		t.Fatal("default schedule should be satisfied by a 02:30 full pass")
+	}
+}
+
+func TestFullResyncScheduleCompatibility(t *testing.T) {
+	if got := FullResyncSchedule(" 0 3 * * * ", "24h"); got != "0 3 * * *" {
+		t.Fatalf("explicit schedule = %q", got)
+	}
+	if got := FullResyncSchedule("", "24h"); got != "@every 24h0m0s" {
+		t.Fatalf("legacy duration = %q", got)
+	}
+	if got := FullResyncSchedule("", ""); got != DefaultFullResyncSchedule {
+		t.Fatalf("default schedule = %q", got)
+	}
+	if err := ValidateFullResyncSchedule("0 2 * * *"); err != nil {
+		t.Fatalf("valid schedule rejected: %v", err)
+	}
+	if err := ValidateFullResyncSchedule("not cron"); err == nil {
+		t.Fatal("invalid schedule accepted")
 	}
 }

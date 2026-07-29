@@ -255,10 +255,15 @@ func (m *Manager) CancelTask(seq uint64) bool {
 	return m.queue.CancelSeq(seq)
 }
 
-// CancelPendingForRepo drops every queued (not-yet-started) task for a repo id
-// and returns how many were removed. Running work is left alone.
-func (m *Manager) CancelPendingForRepo(id string) int {
-	return m.queue.CancelPending(id)
+// CancelTasks cancels every queued and running task for a repository or web
+// source scope and returns how many tasks cancellation was requested for.
+func (m *Manager) CancelTasks(id string) int {
+	return m.queue.CancelID(id)
+}
+
+// TaskState returns the live queue state for a repository or web-source scope.
+func (m *Manager) TaskState(id string) string {
+	return string(m.queue.LiveState(id))
 }
 
 // TaskStore persists queued/running tasks so the work queue survives a restart.
@@ -665,16 +670,16 @@ func (m *Manager) registerJob(ctx context.Context, id string) (context.Context, 
 // cancelling its context; the in-flight git/graphify subprocess is killed and
 // the outcome is recorded as cancelled. It reports whether a job was running.
 func (m *Manager) CancelJob(id string) bool {
-	// Drop any not-yet-started tasks for this repo from the queue so a backlog
-	// can be cleared, then cancel the running job (if any).
-	dropped := m.queue.CancelPending(id)
+	// Cancel top-level queue work first. The job handle remains as a fallback for
+	// synchronous callers that did not enter through the central queue.
+	canceled := m.CancelTasks(id)
 
 	m.jobMu.Lock()
 	j := m.jobs[id]
 	m.jobMu.Unlock()
 
 	if j == nil {
-		return dropped > 0
+		return canceled > 0
 	}
 
 	slog.Info("cancelling running job", "repo", id)

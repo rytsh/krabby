@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -219,6 +220,82 @@ func (m *Manager) WebSourceConfigView(col *websource.Collection) any {
 		return nil
 	}
 	return fetcher.ConfigView(col.Config)
+}
+
+// WebSourceTestResult reports a read-only validation of unsaved JIRA or
+// Confluence config. No collection, page, activity or index state is changed.
+type WebSourceTestResult struct {
+	OK        bool   `json:"ok"`
+	Type      string `json:"type,omitempty"`
+	LatencyMS int64  `json:"latency_ms"`
+	Error     string `json:"error,omitempty"`
+	websource.PreviewResult
+}
+
+// TestWebSource merges an unsaved provider config with the stored config when
+// editing (so a blank write-only token keeps working), then previews the full
+// configured scope without persisting or queueing work.
+func (m *Manager) TestWebSource(ctx context.Context, sourceType, existingName string, patch json.RawMessage) WebSourceTestResult {
+	result := WebSourceTestResult{Type: sourceType}
+	fetcher := m.webFetchers[sourceType]
+	if fetcher == nil {
+		result.Error = fmt.Sprintf("unknown source type %q", sourceType)
+
+		return result
+	}
+
+	var current json.RawMessage
+	if existingName != "" {
+		if m.webStore == nil {
+			result.Error = ErrNoWebSources.Error()
+
+			return result
+		}
+		col, err := m.webStore.GetCollection(ctx, strings.TrimSpace(strings.ToLower(existingName)))
+		if err != nil {
+			result.Error = err.Error()
+
+			return result
+		}
+		if col == nil {
+			result.Error = fmt.Sprintf("collection %s not found", existingName)
+
+			return result
+		}
+		if col.Type != sourceType {
+			result.Error = fmt.Sprintf("collection %s is type %q, not %q", existingName, col.Type, sourceType)
+
+			return result
+		}
+		current = col.Config
+	}
+
+	config, err := fetcher.MergeConfig(current, patch)
+	if err != nil {
+		result.Error = err.Error()
+
+		return result
+	}
+	previewer, ok := fetcher.(websource.Previewer)
+	if !ok {
+		result.Error = fmt.Sprintf("source type %q does not support config testing", sourceType)
+
+		return result
+	}
+
+	start := time.Now()
+	preview, err := previewer.Preview(ctx, config)
+	result.LatencyMS = time.Since(start).Milliseconds()
+	result.PreviewResult = preview
+	if err != nil {
+		result.Error = err.Error()
+
+		return result
+	}
+
+	result.OK = true
+
+	return result
 }
 
 // DeleteWebCollection removes the collection, its pages, files and indexes.
@@ -626,10 +703,10 @@ type WebSourceSchedule struct {
 }
 
 // WebSourceSchedules returns the effective cron schedules of every collection
-// that has one (explicit Specs, or an "@every <RefreshInterval>" fallback).
-// Collections with neither are manual-only and omitted. The scheduler rebuilds
-// its web-source cron set from this on every reconcile tick, so UI/REST changes
-// take effect without a restart.
+// that has one (explicit Specs, or an "@every <RefreshInterval>" fallback),
+// plus its provider's full-reconciliation cron. Collections with no automatic
+// refresh remain manual-only and are omitted. The scheduler rebuilds its cron
+// set from this on every reconcile tick, so UI/REST changes apply live.
 func (m *Manager) WebSourceSchedules(ctx context.Context) []WebSourceSchedule {
 	if m.webStore == nil {
 		return nil
@@ -647,6 +724,14 @@ func (m *Manager) WebSourceSchedules(ctx context.Context) []WebSourceSchedule {
 		specs := col.EffectiveSpecs()
 		if len(specs) == 0 {
 			continue
+		}
+		if scheduler, ok := m.webFetchers[col.Type].(websource.FullResyncScheduler); ok {
+			fullSpec, err := scheduler.FullResyncSpec(col.Config)
+			if err != nil {
+				slog.Error("read web source full resync schedule", "source", col.Name, "error", err)
+			} else if fullSpec != "" && !slices.Contains(specs, fullSpec) {
+				specs = append(specs, fullSpec)
+			}
 		}
 		out = append(out, WebSourceSchedule{Name: col.Name, Specs: specs})
 	}
@@ -713,6 +798,9 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 	})
 
 	fail := func(ferr error) error {
+		if errors.Is(ferr, context.Canceled) {
+			ferr = ErrCancelled
+		}
 		setSyncState(context.WithoutCancel(ctx), func(cur *websource.Collection) {
 			cur.Status = websource.StatusError
 			cur.LastError = ferr.Error()

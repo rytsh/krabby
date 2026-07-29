@@ -784,7 +784,7 @@
     <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Docs returned (top_docs)
-        <input class="input" type="number" bind:value={docsCfg.rag_top_docs} />
+        <input class="input" type="number" min="1" max="20" bind:value={docsCfg.rag_top_docs} />
       </label>
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Chunk size (chars)

@@ -121,6 +121,8 @@ func TestValidate(t *testing.T) {
 	}{
 		{name: "project", raw: `{"base_url":"https://j.example.com","project":"PROJ"}`, ok: true},
 		{name: "jql", raw: `{"base_url":"https://j.example.com","jql":"assignee = currentUser()"}`, ok: true},
+		{name: "full cron", raw: `{"base_url":"https://j.example.com","project":"PROJ","full_resync_schedule":"0 3 * * *"}`, ok: true},
+		{name: "invalid full cron", raw: `{"base_url":"https://j.example.com","project":"PROJ","full_resync_schedule":"tomorrow"}`, ok: false},
 		{name: "missing base_url", raw: `{"project":"PROJ"}`, ok: false},
 		{name: "missing selector", raw: `{"base_url":"https://j.example.com"}`, ok: false},
 	}
@@ -136,8 +138,8 @@ func TestValidate(t *testing.T) {
 }
 
 func TestBuildJQL(t *testing.T) {
-	// Raw JQL is preserved, with our ordering appended.
-	if got := buildJQL(resolvedConfig{JQL: "status = Done"}, ""); got != "status = Done ORDER BY updated ASC" {
+	// Raw JQL is preserved, with its ordering replaced by the monotonic one.
+	if got := buildJQL(resolvedConfig{JQL: "status = Done ORDER BY created DESC"}, ""); got != "status = Done ORDER BY updated ASC" {
 		t.Fatalf("raw jql = %q", got)
 	}
 
@@ -298,6 +300,44 @@ func TestFetchIncludeSubtasks(t *testing.T) {
 	slugs, _ := fetchSlugs(t, srv.URL, `{"base_url":%q,"project":"PROJ","include_subtasks":true}`, nil)
 	if len(slugs) != 2 {
 		t.Fatalf("emitted %v, want both issues", slugs)
+	}
+}
+
+func TestPreviewCountsFilteredIssuesWithoutContentFields(t *testing.T) {
+	t.Parallel()
+
+	var requestedFields string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestedFields = r.URL.Query().Get("fields")
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"startAt":0,"maxResults":50,"total":2,"issues":[%s]}`, twoIssues)
+	}))
+	defer srv.Close()
+
+	raw := json.RawMessage(fmt.Sprintf(`{"base_url":%q,"project":"PROJ"}`, srv.URL))
+	got, err := New().Preview(context.Background(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ItemCount != 1 || got.Scanned != 2 || got.Total != 2 || got.Truncated {
+		t.Fatalf("Preview() = %+v, want 1 selected from 2", got)
+	}
+	if strings.Contains(requestedFields, "description") || strings.Contains(requestedFields, "summary") {
+		t.Fatalf("preview downloaded content fields: %q", requestedFields)
+	}
+}
+
+func TestPreviewRespectsMaxIssuesExactly(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := jiraServer(t, twoIssues)
+	raw := json.RawMessage(fmt.Sprintf(`{"base_url":%q,"project":"PROJ","include_subtasks":true,"max_issues":1}`, srv.URL))
+	got, err := New().Preview(context.Background(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ItemCount != 1 || got.Scanned != 1 || !got.Truncated {
+		t.Fatalf("Preview() = %+v, want one scanned item and truncation", got)
 	}
 }
 

@@ -64,9 +64,11 @@ type Config struct {
 	IncludeLabels types.Null[[]string] `json:"include_labels,omitempty"`
 	ExcludeLabels types.Null[[]string] `json:"exclude_labels,omitempty"`
 
-	// FullResyncEvery is a Go duration ("24h") controlling how often a full,
-	// non-incremental pass runs to reconcile remotely-deleted pages. Empty or
-	// invalid uses the default (24h).
+	// FullResyncSchedule is a hardloop cron expression controlling when a full,
+	// non-incremental pass reconciles remotely-deleted pages.
+	FullResyncSchedule types.Null[string] `json:"full_resync_schedule,omitempty"`
+	// FullResyncEvery is retained only to read configs persisted before full
+	// resyncs became cron-based.
 	FullResyncEvery types.Null[string] `json:"full_resync_every,omitempty"`
 
 	// MaxPages caps how many results a single sync walks; 0 (the default) is
@@ -84,16 +86,16 @@ type Config struct {
 // logic. Strings are trimmed, the base URL has its trailing slash removed and
 // IncludeRoot defaults to true.
 type resolvedConfig struct {
-	BaseURL         string
-	Space           string
-	User            string
-	APIToken        string
-	RootPage        string
-	IncludeRoot     bool
-	IncludeLabels   []string
-	ExcludeLabels   []string
-	FullResyncEvery string
-	MaxPages        int
+	BaseURL            string
+	Space              string
+	User               string
+	APIToken           string
+	RootPage           string
+	IncludeRoot        bool
+	IncludeLabels      []string
+	ExcludeLabels      []string
+	FullResyncSchedule string
+	MaxPages           int
 }
 
 // resolve flattens the nullable config into plain values with defaults applied.
@@ -104,43 +106,31 @@ func (c Config) resolve() resolvedConfig {
 	}
 
 	return resolvedConfig{
-		BaseURL:         strings.TrimRight(strings.TrimSpace(c.BaseURL.ValueOrZero()), "/"),
-		Space:           strings.TrimSpace(c.Space.ValueOrZero()),
-		User:            strings.TrimSpace(c.User.ValueOrZero()),
-		APIToken:        c.APIToken.ValueOrZero(),
-		RootPage:        strings.TrimSpace(c.RootPage.ValueOrZero()),
-		IncludeRoot:     includeRoot,
-		IncludeLabels:   c.IncludeLabels.ValueOrZero(),
-		ExcludeLabels:   c.ExcludeLabels.ValueOrZero(),
-		FullResyncEvery: strings.TrimSpace(c.FullResyncEvery.ValueOrZero()),
-		MaxPages:        c.MaxPages.ValueOrZero(),
+		BaseURL:       strings.TrimRight(strings.TrimSpace(c.BaseURL.ValueOrZero()), "/"),
+		Space:         strings.TrimSpace(c.Space.ValueOrZero()),
+		User:          strings.TrimSpace(c.User.ValueOrZero()),
+		APIToken:      c.APIToken.ValueOrZero(),
+		RootPage:      strings.TrimSpace(c.RootPage.ValueOrZero()),
+		IncludeRoot:   includeRoot,
+		IncludeLabels: c.IncludeLabels.ValueOrZero(),
+		ExcludeLabels: c.ExcludeLabels.ValueOrZero(),
+		FullResyncSchedule: websource.FullResyncSchedule(
+			c.FullResyncSchedule.ValueOrZero(), c.FullResyncEvery.ValueOrZero()),
+		MaxPages: c.MaxPages.ValueOrZero(),
 	}
 }
 
 type configView struct {
-	BaseURL         string   `json:"base_url"`
-	Space           string   `json:"space,omitempty"`
-	User            string   `json:"user,omitempty"`
-	APITokenSet     bool     `json:"api_token_set"`
-	RootPage        string   `json:"root_page,omitempty"`
-	IncludeRoot     *bool    `json:"include_root,omitempty"`
-	IncludeLabels   []string `json:"include_labels,omitempty"`
-	ExcludeLabels   []string `json:"exclude_labels,omitempty"`
-	FullResyncEvery string   `json:"full_resync_every,omitempty"`
-	MaxPages        int      `json:"max_pages,omitempty"`
-}
-
-// fullResyncEvery parses the configured interval, falling back to the default.
-func (c resolvedConfig) fullResyncEvery() time.Duration {
-	if c.FullResyncEvery == "" {
-		return websource.DefaultFullResyncEvery
-	}
-	d, err := time.ParseDuration(c.FullResyncEvery)
-	if err != nil || d <= 0 {
-		return websource.DefaultFullResyncEvery
-	}
-
-	return d
+	BaseURL            string   `json:"base_url"`
+	Space              string   `json:"space,omitempty"`
+	User               string   `json:"user,omitempty"`
+	APITokenSet        bool     `json:"api_token_set"`
+	RootPage           string   `json:"root_page,omitempty"`
+	IncludeRoot        *bool    `json:"include_root,omitempty"`
+	IncludeLabels      []string `json:"include_labels,omitempty"`
+	ExcludeLabels      []string `json:"exclude_labels,omitempty"`
+	FullResyncSchedule string   `json:"full_resync_schedule,omitempty"`
+	MaxPages           int      `json:"max_pages,omitempty"`
 }
 
 // New creates the fetcher.
@@ -187,6 +177,9 @@ func (f *Fetcher) Validate(raw json.RawMessage) error {
 	if cfg.RootPage != "" && !isDigits(cfg.RootPage) {
 		return fmt.Errorf("confluence root_page must be a numeric page id, got %q", cfg.RootPage)
 	}
+	if err := websource.ValidateFullResyncSchedule(cfg.FullResyncSchedule); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -230,6 +223,7 @@ func (f *Fetcher) MergeConfig(current, update json.RawMessage) (json.RawMessage,
 		next.IncludeRoot = websource.MergeNull(next.IncludeRoot, prev.IncludeRoot)
 		next.IncludeLabels = websource.MergeNull(next.IncludeLabels, prev.IncludeLabels)
 		next.ExcludeLabels = websource.MergeNull(next.ExcludeLabels, prev.ExcludeLabels)
+		next.FullResyncSchedule = websource.MergeNull(next.FullResyncSchedule, prev.FullResyncSchedule)
 		next.FullResyncEvery = websource.MergeNull(next.FullResyncEvery, prev.FullResyncEvery)
 		next.MaxPages = websource.MergeNull(next.MaxPages, prev.MaxPages)
 
@@ -263,9 +257,89 @@ func (f *Fetcher) ConfigView(raw json.RawMessage) any {
 		APITokenSet: cfg.APIToken != "", RootPage: cfg.RootPage,
 		IncludeRoot:   &includeRoot,
 		IncludeLabels: cfg.IncludeLabels, ExcludeLabels: cfg.ExcludeLabels,
-		FullResyncEvery: cfg.FullResyncEvery,
-		MaxPages:        cfg.MaxPages,
+		FullResyncSchedule: cfg.FullResyncSchedule,
+		MaxPages:           cfg.MaxPages,
 	}
+}
+
+func (f *Fetcher) FullResyncSpec(raw json.RawMessage) (string, error) {
+	cfg, err := decodeConfig(raw)
+	if err != nil {
+		return "", err
+	}
+	if err := websource.ValidateFullResyncSchedule(cfg.FullResyncSchedule); err != nil {
+		return "", err
+	}
+
+	return cfg.FullResyncSchedule, nil
+}
+
+// Preview validates an unsaved Confluence scope and counts pages that would be
+// indexed after label filtering. It requests metadata only, avoiding page-body
+// downloads and HTML conversion. A configured root page is fetched even when
+// excluded from indexing so an invalid or inaccessible root fails the test.
+func (f *Fetcher) Preview(ctx context.Context, raw json.RawMessage) (websource.PreviewResult, error) {
+	var out websource.PreviewResult
+	if err := f.Validate(raw); err != nil {
+		return out, err
+	}
+
+	cfg, err := decodeConfig(raw)
+	if err != nil {
+		return out, err
+	}
+	out.Limit = cfg.MaxPages
+
+	next := firstEndpointWithExpand(cfg, "", "metadata.labels")
+	seen := map[string]bool{}
+	for next != "" {
+		if seen[next] {
+			return out, fmt.Errorf("confluence pagination repeated cursor %q", next)
+		}
+		seen[next] = true
+
+		list, err := f.listContent(ctx, cfg, absoluteEndpoint(cfg.BaseURL, next))
+		if err != nil {
+			return out, err
+		}
+
+		processed := 0
+		for _, page := range list.Results {
+			if cfg.MaxPages > 0 && out.Scanned >= cfg.MaxPages {
+				out.Truncated = true
+
+				break
+			}
+			out.Scanned++
+			processed++
+			if labelSelected(page, cfg.IncludeLabels, cfg.ExcludeLabels) {
+				out.ItemCount++
+			}
+		}
+		if out.Truncated || (cfg.MaxPages > 0 && out.Scanned >= cfg.MaxPages && (processed < len(list.Results) || list.Links.Next != "")) {
+			out.Truncated = true
+
+			break
+		}
+		if len(list.Results) == 0 {
+			break
+		}
+
+		next = list.Links.Next
+	}
+
+	if cfg.RootPage != "" {
+		root, err := f.fetchOneExpanded(ctx, cfg, cfg.BaseURL, cfg.RootPage, "metadata.labels")
+		if err != nil {
+			return out, fmt.Errorf("validate confluence root page %s; %w", cfg.RootPage, err)
+		}
+		out.Scanned++
+		if cfg.IncludeRoot && labelSelected(*root, cfg.IncludeLabels, cfg.ExcludeLabels) {
+			out.ItemCount++
+		}
+	}
+
+	return out, nil
 }
 
 // contentPage mirrors the fields we consume from the Confluence content API.
@@ -396,7 +470,7 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 	// format change forces one too: the stored records are keyed by the old
 	// format, so only a complete sweep can re-emit every page under the new one
 	// and prune the old-format leftovers in the same run.
-	full := state.V < slugGeneration || websource.FullResyncDue(state.FullAt, cfg.fullResyncEvery())
+	full := state.V < slugGeneration || websource.FullResyncDue(state.FullAt, cfg.FullResyncSchedule, time.Now())
 	watermark := state.Watermark
 	if full {
 		watermark = ""
@@ -418,13 +492,20 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 			break
 		}
 
-		list, err := f.listContent(ctx, cfg, base+next)
+		list, err := f.listContent(ctx, cfg, absoluteEndpoint(base, next))
 		if err != nil {
 			return nil, err
 		}
 
+		processed := 0
 		for _, page := range list.Results {
+			if capped && count >= cfg.MaxPages {
+				truncated = true
+
+				break
+			}
 			count++
+			processed++
 
 			if w := parseConfluenceTime(page.Version.When); w.After(maxSeen) {
 				maxSeen = w
@@ -437,6 +518,11 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 			if err := emit(pageToRemote(base, page)); err != nil {
 				return nil, err
 			}
+		}
+		if truncated || (capped && count >= cfg.MaxPages && (processed < len(list.Results) || list.Links.Next != "")) {
+			truncated = true
+
+			break
 		}
 
 		// Confluence pages a cursor without publishing a result-set size, so
@@ -552,6 +638,10 @@ func pageToRemote(base string, page contentPage) websource.RemotePage {
 // ascending order (for a monotonic watermark) apply uniformly. Both return a
 // "_links.next" cursor for subsequent pages.
 func firstEndpoint(cfg resolvedConfig, watermark string) string {
+	return firstEndpointWithExpand(cfg, watermark, "body.storage,metadata.labels,version,ancestors")
+}
+
+func firstEndpointWithExpand(cfg resolvedConfig, watermark, expand string) string {
 	clauses := []string{"type = page"}
 	if cfg.Space != "" {
 		clauses = append(clauses, fmt.Sprintf("space = %q", cfg.Space))
@@ -568,7 +658,7 @@ func firstEndpoint(cfg resolvedConfig, watermark string) string {
 	params := url.Values{}
 	params.Set("cql", cql)
 	params.Set("limit", strconv.Itoa(pageLimit))
-	params.Set("expand", "body.storage,metadata.labels,version,ancestors")
+	params.Set("expand", expand)
 
 	return "/rest/api/content/search?" + params.Encode()
 }
@@ -594,8 +684,12 @@ func parseConfluenceTime(s string) time.Time {
 // fetchOne retrieves a single page by id with body + labels (used for the root
 // page in subtree mode).
 func (f *Fetcher) fetchOne(ctx context.Context, cfg resolvedConfig, base, id string) (*contentPage, error) {
+	return f.fetchOneExpanded(ctx, cfg, base, id, "body.storage,metadata.labels,version,ancestors")
+}
+
+func (f *Fetcher) fetchOneExpanded(ctx context.Context, cfg resolvedConfig, base, id, expand string) (*contentPage, error) {
 	params := url.Values{}
-	params.Set("expand", "body.storage,metadata.labels,version,ancestors")
+	params.Set("expand", expand)
 	endpoint := base + "/rest/api/content/" + url.PathEscape(id) + "?" + params.Encode()
 
 	body, err := f.get(ctx, cfg, endpoint)
@@ -609,6 +703,21 @@ func (f *Fetcher) fetchOne(ctx context.Context, cfg resolvedConfig, base, id str
 	}
 
 	return &page, nil
+}
+
+func absoluteEndpoint(base, endpoint string) string {
+	if strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://") {
+		return endpoint
+	}
+	baseURL, err := url.Parse(base)
+	if err == nil {
+		basePath := strings.TrimRight(baseURL.Path, "/")
+		if basePath != "" && strings.HasPrefix(endpoint, basePath+"/") {
+			return baseURL.Scheme + "://" + baseURL.Host + endpoint
+		}
+	}
+
+	return strings.TrimRight(base, "/") + "/" + strings.TrimLeft(endpoint, "/")
 }
 
 // listContent fetches one result page from a fully-formed endpoint URL.

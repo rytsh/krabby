@@ -25,7 +25,7 @@ import (
 
 const (
 	DefaultTopDocs  = 3
-	MaxTopDocs      = 5
+	MaxTopDocs      = 20
 	MaxExcerptRunes = 4000
 
 	// MaxCandidates bounds RetrieveCandidates. It mirrors the lexical index's
@@ -634,4 +634,3 @@ func manifestTitles(docsDir string) map[string]string {
 
 	return out
 }
-

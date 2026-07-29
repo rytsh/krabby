@@ -148,10 +148,12 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	// pages are synced to markdown and indexed into the docs RAG.
 	api.GET("/sources", server.Wrap(listSources(mgr)))
 	api.POST("/sources", server.Wrap(addSource(mgr)))
+	api.POST("/sources/config/test", server.Wrap(testSourceConfig(mgr)))
 	api.GET("/sources/{name}", server.Wrap(getSource(mgr)))
 	api.PUT("/sources/{name}", server.Wrap(updateSource(mgr)))
 	api.DELETE("/sources/{name}", server.Wrap(deleteSource(mgr)))
 	api.POST("/sources/{name}/refresh", server.Wrap(refreshSource(mgr)))
+	api.POST("/sources/{name}/cancel", server.Wrap(cancelSource(mgr)))
 	api.POST("/sources/{name}/pages", server.Wrap(addSourcePage(mgr)))
 	api.POST("/sources/{name}/sitemap", server.Wrap(importSourceSitemap(mgr)))
 	api.DELETE("/sources/{name}/pages", server.Wrap(deleteSourcePage(mgr)))

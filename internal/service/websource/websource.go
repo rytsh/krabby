@@ -221,6 +221,33 @@ type Fetcher interface {
 	Fetch(ctx context.Context, col *Collection, pages []*Page, state json.RawMessage, emit Emit) (*FetchResult, error)
 }
 
+// PreviewResult summarizes a read-only provider query before a collection is
+// saved. ItemCount is the number of records left after provider-specific
+// filters; Scanned is the number of remote candidates inspected. Total is set
+// when the provider publishes the full result size (JIRA does, Confluence does
+// not). Truncated reports that a configured sync limit stopped the walk early.
+type PreviewResult struct {
+	ItemCount int  `json:"item_count"`
+	Scanned   int  `json:"scanned"`
+	Total     int  `json:"total,omitempty"`
+	Limit     int  `json:"limit,omitempty"`
+	Truncated bool `json:"truncated,omitempty"`
+}
+
+// Previewer is an optional provider capability for validating unsaved config
+// and counting its scope without fetching content, persisting pages or indexing.
+type Previewer interface {
+	Preview(ctx context.Context, config json.RawMessage) (PreviewResult, error)
+}
+
+// FullResyncScheduler is implemented by incremental providers that need an
+// occasional complete reconciliation. The manager adds this cron spec to the
+// collection's regular auto-refresh specs, so the full-sync time itself wakes
+// the source instead of waiting for a later incremental run.
+type FullResyncScheduler interface {
+	FullResyncSpec(config json.RawMessage) (string, error)
+}
+
 // SitemapFetcher is implemented by source types that can discover page URLs
 // from a sitemap. It stays separate from Fetcher because discovery is only
 // meaningful for user-managed URL collections.

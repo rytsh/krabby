@@ -154,6 +154,7 @@ export const api = {
   // Web content sources (wikis, Confluence spaces).
   sources: () => req("/sources"),
   addSource: (body) => req("/sources", { method: "POST", keepalive: true, body: JSON.stringify(body) }),
+  testSourceConfig: (body) => req("/sources/config/test", { method: "POST", body: JSON.stringify(body) }),
   source: (name, team = "", page = 1, perPage = 50) => {
     const q = new URLSearchParams();
     if (team) q.set("team", team);
@@ -165,6 +166,7 @@ export const api = {
   updateSource: (name, body) => req(`/sources/${name}`, { method: "PUT", body: JSON.stringify(body) }),
   deleteSource: (name) => req(`/sources/${name}`, { method: "DELETE", keepalive: true }),
   refreshSource: (name) => req(`/sources/${name}/refresh`, { method: "POST", keepalive: true }),
+  cancelSource: (name) => req(`/sources/${name}/cancel`, { method: "POST", keepalive: true }),
   addSourcePage: (name, url) =>
     req(`/sources/${name}/pages`, { method: "POST", keepalive: true, body: JSON.stringify({ url }) }),
   importSourceSitemap: (name, url) =>

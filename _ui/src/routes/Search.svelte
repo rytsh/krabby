@@ -35,6 +35,15 @@
     } catch {
       namespaceOptions = [];
     }
+    if (!hasSavedDocsTop) {
+      try {
+        const cfg = await api.docsConfig();
+        const configured = Number(cfg?.rag_top_docs);
+        if (Number.isInteger(configured) && configured >= 1) docsTop = Math.min(20, configured);
+      } catch {
+        // Keep the built-in default when settings cannot be loaded.
+      }
+    }
   }
 
   let q = $state("");
@@ -49,6 +58,10 @@
   // Semantic is the default: on a large single-domain collection the BM25
   // arm has to score most of the corpus, and hybrid waits for it.
   let docsMode = $state("semantic");
+  const DOCS_TOP_KEY = "krabby-search-docs-top";
+  const savedDocsTop = Number(localStorage.getItem(DOCS_TOP_KEY));
+  const hasSavedDocsTop = Number.isInteger(savedDocsTop) && savedDocsTop >= 1 && savedDocsTop <= 20;
+  let docsTop = $state(hasSavedDocsTop ? savedDocsTop : 3);
   let results = $state(null); // null = not searched yet
   let total = $state(0);
   let page = $state(1);
@@ -97,7 +110,7 @@
       const opts = { signal: controller.signal };
       const response =
         searchScope === "docs"
-          ? await api.searchDocs(query, key, 5, docsScope, namespaceFilter, searchMode, opts)
+          ? await api.searchDocs(query, key, docsTop, docsScope, namespaceFilter, searchMode, opts)
           : await api.searchCode(query, repoFilter, searchMode, nextPage, perPage, 0, namespaceFilter, opts);
       if (seq !== searchSeq) return;
       results = searchScope === "docs" ? (Array.isArray(response) ? response : []) : response?.results || [];
@@ -197,6 +210,12 @@
       return "BM25 keyword search; best for exact identifiers and titles. Quote a phrase or use OR/NOT for full control.";
     if (docsMode === "semantic") return "Embedding search; best for concepts and paraphrased questions.";
     return "Fuses BM25 and semantic ranks. The most thorough mode, and the slowest on large collections.";
+  }
+
+  function setDocsTop(value) {
+    docsTop = Number(value);
+    localStorage.setItem(DOCS_TOP_KEY, String(docsTop));
+    resetResults();
   }
 
   onMount(loadRepoOptions);
@@ -310,6 +329,23 @@
       <option value="lexical">Lexical (BM25)</option>
       <option value="hybrid">Hybrid</option>
     </select>
+    <label class="inline-flex items-center gap-1.5 text-[12px] text-dim">
+      Results
+      <select
+        class="input !w-auto sm:basis-[70px]"
+        value={docsTop}
+        onchange={(e) => setDocsTop(e.currentTarget.value)}
+        aria-label="Documentation result count"
+      >
+        {#if ![3, 5, 10, 20].includes(docsTop)}
+          <option value={docsTop}>{docsTop}</option>
+        {/if}
+        <option value={3}>3</option>
+        <option value={5}>5</option>
+        <option value={10}>10</option>
+        <option value={20}>20</option>
+      </select>
+    </label>
   {/if}
   <button class="btn btn-primary" onclick={() => search()} disabled={loading || !q.trim()}>
     {loading ? "Searching…" : "Search"}

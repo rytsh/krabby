@@ -1,7 +1,11 @@
 package confluence
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -81,6 +85,8 @@ func TestValidateSpaceOrRootPage(t *testing.T) {
 	}{
 		{name: "space", raw: `{"base_url":"https://w.example.com","space":"FIN"}`, ok: true},
 		{name: "root page", raw: `{"base_url":"https://w.example.com","root_page":"1254228318"}`, ok: true},
+		{name: "full cron", raw: `{"base_url":"https://w.example.com","space":"FIN","full_resync_schedule":"0 3 * * *"}`, ok: true},
+		{name: "invalid full cron", raw: `{"base_url":"https://w.example.com","space":"FIN","full_resync_schedule":"tomorrow"}`, ok: false},
 		{name: "neither", raw: `{"base_url":"https://w.example.com"}`, ok: false},
 		{name: "no base", raw: `{"root_page":"123"}`, ok: false},
 	}
@@ -90,6 +96,51 @@ func TestValidateSpaceOrRootPage(t *testing.T) {
 				t.Fatalf("Validate() err = %v, want ok=%v", err, tt.ok)
 			}
 		})
+	}
+}
+
+func TestPreviewCountsFilteredPagesWithoutBodies(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("expand"); got != "metadata.labels" {
+			t.Errorf("expand = %q, want metadata.labels", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"results":[
+			{"id":"1","metadata":{"labels":{"results":[{"name":"published"}]}}},
+			{"id":"2","metadata":{"labels":{"results":[{"name":"draft"}]}}}
+		],"size":2,"_links":{}}`)
+	}))
+	defer srv.Close()
+
+	raw := json.RawMessage(fmt.Sprintf(`{"base_url":%q,"space":"FIN","include_labels":["published"]}`, srv.URL))
+	got, err := New().Preview(context.Background(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ItemCount != 1 || got.Scanned != 2 || got.Truncated {
+		t.Fatalf("Preview() = %+v, want 1 selected from 2", got)
+	}
+}
+
+func TestPreviewValidatesExcludedRootPage(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/rest/api/content/search") {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"results":[],"size":0,"_links":{}}`)
+
+			return
+		}
+		http.Error(w, "missing root", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	raw := json.RawMessage(fmt.Sprintf(`{"base_url":%q,"root_page":"123","include_root":false}`, srv.URL))
+	if _, err := New().Preview(context.Background(), raw); err == nil || !strings.Contains(err.Error(), "root page") {
+		t.Fatalf("Preview() error = %v, want inaccessible root error", err)
 	}
 }
 
@@ -281,7 +332,7 @@ func TestSlugGenerationForcesFullSweep(t *testing.T) {
 
 	// The stored state is recent enough that the periodic full pass is not due,
 	// so the generation check is the only thing that can force one.
-	if websource.FullResyncDue(state.FullAt, 24*time.Hour) {
+	if websource.FullResyncDue(state.FullAt, "@every 24h", time.Now()) {
 		t.Fatal("precondition: the periodic full pass must not be due")
 	}
 	if state.V >= slugGeneration {

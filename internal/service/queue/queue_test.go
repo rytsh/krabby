@@ -476,6 +476,44 @@ func TestCancelSeqCancelsRunningTask(t *testing.T) {
 	}
 }
 
+func TestCancelIDCancelsQueuedAndRunningTasks(t *testing.T) {
+	t.Parallel()
+
+	q := New(context.Background(), 1)
+	defer q.Close()
+
+	started := make(chan struct{})
+	running := q.Submit(Task{ID: "web:wiki", Run: func(ctx context.Context) error {
+		close(started)
+		<-ctx.Done()
+
+		return ctx.Err()
+	}})
+	<-started
+	var queuedRan atomic.Bool
+	queued := q.Submit(Task{ID: "web:wiki", Run: func(context.Context) error {
+		queuedRan.Store(true)
+
+		return nil
+	}})
+
+	if got := q.LiveState("web:wiki"); got != StateRunning {
+		t.Fatalf("LiveState = %q, want %q", got, StateRunning)
+	}
+	if got := q.CancelID("web:wiki"); got != 2 {
+		t.Fatalf("CancelID = %d, want 2", got)
+	}
+
+	<-running.Done()
+	<-queued.Done()
+	if got := q.LiveState("web:wiki"); got != "" {
+		t.Fatalf("LiveState after cancel = %q, want empty", got)
+	}
+	if queuedRan.Load() {
+		t.Fatal("canceled queued task ran")
+	}
+}
+
 func TestPanicInTaskIsContained(t *testing.T) {
 	t.Parallel()
 

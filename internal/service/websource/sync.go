@@ -1,24 +1,50 @@
 package websource
 
-import "time"
+import (
+	"fmt"
+	"strings"
+	"time"
 
-// DefaultFullResyncEvery is how often an incremental provider (JIRA,
-// Confluence) forces a full, non-incremental pass so remotely-deleted items are
-// reconciled (pruned). Incremental "updated/lastmodified >= watermark" queries
-// never return deletions, so a periodic full sweep is required.
-const DefaultFullResyncEvery = 24 * time.Hour
+	"github.com/worldline-go/hardloop"
+)
 
-// FullResyncDue reports whether a full pass should run now. lastFull is the time
-// of the last full pass (zero on first run); every is the provider's configured
-// interval (<= 0 uses DefaultFullResyncEvery). A zero lastFull always forces a
-// full pass, so the first sync of a source is always complete.
-func FullResyncDue(lastFull time.Time, every time.Duration) bool {
+// DefaultFullResyncSchedule runs a full reconciliation daily at 02:00 in the
+// server's local timezone. Incremental syncs between those runs remain cheap.
+const DefaultFullResyncSchedule = "0 2 * * *"
+
+// FullResyncSchedule returns the effective cron schedule. legacyEvery supports
+// persisted provider configs from before full resyncs became cron-based.
+func FullResyncSchedule(schedule, legacyEvery string) string {
+	if schedule = strings.TrimSpace(schedule); schedule != "" {
+		return schedule
+	}
+	if d, err := time.ParseDuration(strings.TrimSpace(legacyEvery)); err == nil && d > 0 {
+		return "@every " + d.String()
+	}
+
+	return DefaultFullResyncSchedule
+}
+
+// ValidateFullResyncSchedule checks one hardloop cron expression.
+func ValidateFullResyncSchedule(schedule string) error {
+	if _, err := hardloop.ParseStandard(schedule); err != nil {
+		return fmt.Errorf("invalid full resync schedule %q: %w", schedule, err)
+	}
+
+	return nil
+}
+
+// FullResyncDue reports whether the first cron activation after lastFull has
+// arrived. A zero lastFull always forces the initial complete pass.
+func FullResyncDue(lastFull time.Time, schedule string, now time.Time) bool {
 	if lastFull.IsZero() {
 		return true
 	}
-	if every <= 0 {
-		every = DefaultFullResyncEvery
+	parsed, err := hardloop.ParseStandard(schedule)
+	if err != nil {
+		parsed, _ = hardloop.ParseStandard(DefaultFullResyncSchedule)
 	}
+	next := parsed.Next(lastFull)
 
-	return time.Since(lastFull) >= every
+	return !next.IsZero() && !next.After(now)
 }

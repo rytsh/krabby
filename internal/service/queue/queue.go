@@ -360,6 +360,66 @@ func (q *Queue) CancelPending(id string) int {
 	return n
 }
 
+// CancelID cancels every queued and running task whose ID matches id. It
+// returns the number of tasks cancellation was requested for.
+func (q *Queue) CancelID(id string) int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	kept := q.pending[:0]
+	n := 0
+	for _, t := range q.pending {
+		if t.id != id {
+			kept = append(kept, t)
+
+			continue
+		}
+
+		t.state = StateCanceled
+		t.endedAt = time.Now()
+		q.removeKeyLocked(t)
+		q.removePersistedLocked(t)
+		q.pushRecentLocked(t)
+		close(t.handle.done)
+		n++
+	}
+	q.pending = kept
+
+	for _, t := range q.active {
+		if t.id != id || t.canceled {
+			continue
+		}
+
+		t.canceled = true
+		if t.cancel != nil {
+			t.cancel()
+		}
+		n++
+	}
+
+	return n
+}
+
+// LiveState returns the current state of work for id. Running wins over queued
+// when both a current run and a follow-up task exist.
+func (q *Queue) LiveState(id string) State {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	for _, t := range q.active {
+		if t.id == id && !t.canceled {
+			return StateRunning
+		}
+	}
+	for _, t := range q.pending {
+		if t.id == id {
+			return StateQueued
+		}
+	}
+
+	return ""
+}
+
 // CancelSeq cancels the single queued or running task with the given seq. A
 // queued task is removed immediately; a running task's context is canceled and
 // reaches the terminal canceled state when its Run function returns.

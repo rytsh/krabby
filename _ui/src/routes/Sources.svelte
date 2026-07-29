@@ -47,6 +47,9 @@
   let editingName = $state("");
   let adding = $state(false);
   let form = $state(newForm());
+  let testingConfig = $state(false);
+  let configTest = $state(null);
+  let testedConfigSignature = $state("");
 
   function newForm() {
     return {
@@ -74,7 +77,7 @@
       team_fields: "",
       max_issues: "",
       // Confluence + JIRA
-      full_resync_every: "",
+      full_resync_schedule: "0 2 * * *",
     };
   }
 
@@ -93,7 +96,7 @@
   // progress bar and page counts update live without a manual refresh.
   let pollTimer = null;
   function anyRunning() {
-    return sources.some((s) => s.running || s.status === "fetching" || s.progress?.length);
+    return sources.some((s) => s.task_state || s.running || s.status === "fetching" || s.progress?.length);
   }
   $effect(() => {
     if (anyRunning() && !pollTimer) {
@@ -188,63 +191,93 @@
       .filter(Boolean);
   }
 
+  function providerConfig() {
+    if (form.type === "confluence") {
+      return {
+        base_url: form.base_url.trim(),
+        space: form.space.trim(),
+        root_page: form.root_page.trim(),
+        include_root: form.include_root,
+        user: form.user.trim(),
+        api_token: form.api_token,
+        include_labels: splitLabels(form.include_labels),
+        exclude_labels: splitLabels(form.exclude_labels),
+        full_resync_schedule: form.full_resync_schedule.trim(),
+        max_pages: form.max_pages ? Number(form.max_pages) : 0,
+      };
+    }
+    if (form.type === "jira") {
+      return {
+        base_url: form.base_url.trim(),
+        user: form.user.trim(),
+        api_token: form.api_token,
+        project: form.project.trim(),
+        jql: form.jql.trim(),
+        include_labels: splitLabels(form.include_labels),
+        exclude_labels: splitLabels(form.exclude_labels),
+        include_subtasks: form.include_subtasks,
+        team_fields: splitLabels(form.team_fields),
+        max_issues: form.max_issues ? Number(form.max_issues) : 0,
+        full_resync_schedule: form.full_resync_schedule.trim(),
+      };
+    }
+    return {};
+  }
+
+  function sourceBody() {
+    const specs = form.schedule
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean);
+    return {
+      name: form.name.trim(),
+      type: form.type,
+      description: form.description.trim(),
+      refresh_interval: specs.length || form.refresh_interval === "manual" ? "" : form.refresh_interval,
+      specs,
+      config: providerConfig(),
+    };
+  }
+
+  let configSignature = $derived(JSON.stringify(providerConfig()));
+
   async function add() {
     adding = true;
     try {
-      let config = {};
-      if (form.type === "confluence") {
-        config = {
-          base_url: form.base_url.trim(),
-          space: form.space.trim(),
-          root_page: form.root_page.trim(),
-          include_root: form.include_root,
-          user: form.user.trim(),
-          api_token: form.api_token,
-          include_labels: splitLabels(form.include_labels),
-          exclude_labels: splitLabels(form.exclude_labels),
-          full_resync_every: form.full_resync_every.trim(),
-          max_pages: form.max_pages ? Number(form.max_pages) : 0,
-        };
-      } else if (form.type === "jira") {
-        config = {
-          base_url: form.base_url.trim(),
-          user: form.user.trim(),
-          api_token: form.api_token,
-          project: form.project.trim(),
-          jql: form.jql.trim(),
-          include_labels: splitLabels(form.include_labels),
-          exclude_labels: splitLabels(form.exclude_labels),
-          include_subtasks: form.include_subtasks,
-          team_fields: splitLabels(form.team_fields),
-          max_issues: form.max_issues ? Number(form.max_issues) : 0,
-          full_resync_every: form.full_resync_every.trim(),
-        };
-      }
-      const specs = form.schedule
-        .split(",")
-        .map((x) => x.trim())
-        .filter(Boolean);
-      const body = {
-        name: form.name.trim(),
-        type: form.type,
-        description: form.description.trim(),
-        // A cron schedule, when given, is authoritative; otherwise the interval.
-        refresh_interval:
-          specs.length || form.refresh_interval === "manual" ? "" : form.refresh_interval,
-        specs,
-        config,
-      };
+      const body = sourceBody();
       if (editingName) await api.updateSource(editingName, body);
       else await api.addSource(body);
       form = newForm();
       editingName = "";
       showAdd = false;
+      configTest = null;
+      testedConfigSignature = "";
       error = "";
       await load();
     } catch (e) {
       error = e.message;
     } finally {
       adding = false;
+    }
+  }
+
+  async function testConfig() {
+    const signature = configSignature;
+    testingConfig = true;
+    configTest = null;
+    error = "";
+    try {
+      configTest = await api.testSourceConfig({
+        type: form.type,
+        existing_name: editingName || "",
+        config: providerConfig(),
+      });
+      testedConfigSignature = signature;
+    } catch (e) {
+      configTest = { ok: false, error: e.message };
+      testedConfigSignature = signature;
+    } finally {
+      testingConfig = false;
     }
   }
 
@@ -271,8 +304,10 @@
       include_subtasks: source.config?.include_subtasks === true,
       team_fields: (source.config?.team_fields || []).join(", "),
       max_issues: source.config?.max_issues || "",
-      full_resync_every: source.config?.full_resync_every || "",
+      full_resync_schedule: source.config?.full_resync_schedule || "0 2 * * *",
     };
+    configTest = null;
+    testedConfigSignature = "";
     showAdd = true;
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -281,6 +316,8 @@
     showAdd = false;
     editingName = "";
     form = newForm();
+    configTest = null;
+    testedConfigSignature = "";
   }
 
   async function refresh(name, e) {
@@ -291,6 +328,21 @@
       await load();
     } catch (err) {
       error = err.message;
+    }
+  }
+
+  let canceling = $state({});
+  async function cancel(name, e) {
+    e.stopPropagation();
+    canceling = { ...canceling, [name]: true };
+    try {
+      await api.cancelSource(name);
+      successToast("Cancel requested");
+      await load();
+    } catch (err) {
+      error = err.message;
+    } finally {
+      canceling = { ...canceling, [name]: false };
     }
   }
 
@@ -498,8 +550,9 @@
               <input class="input" placeholder="draft, archived" bind:value={form.exclude_labels} />
             </label>
             <label class="flex flex-col gap-1 text-[13px] text-dim">
-              Full re-sync every (e.g. 24h; reconciles deletions)
-              <input class="input" placeholder="24h" bind:value={form.full_resync_every} />
+              Full re-sync schedule (cron; reconciles deletions)
+              <input class="input font-mono" placeholder="0 2 * * *" bind:value={form.full_resync_schedule} />
+              <span class="text-[11px] text-faint">Default: daily at 02:00 in the server timezone.</span>
             </label>
             <label class="flex flex-col gap-1 text-[13px] text-dim">
               Max pages per sync (0 = no limit)
@@ -554,8 +607,9 @@
               <input class="input" type="number" min="0" placeholder="0" bind:value={form.max_issues} />
             </label>
             <label class="flex flex-col gap-1 text-[13px] text-dim">
-              Full re-sync every (e.g. 24h; reconciles deletions)
-              <input class="input" placeholder="24h" bind:value={form.full_resync_every} />
+              Full re-sync schedule (cron; reconciles deletions)
+              <input class="input font-mono" placeholder="0 2 * * *" bind:value={form.full_resync_schedule} />
+              <span class="text-[11px] text-faint">Default: daily at 02:00 in the server timezone.</span>
             </label>
             <label class="flex items-center gap-2 text-[13px] text-dim sm:col-span-2">
               <input type="checkbox" bind:checked={form.include_subtasks} />
@@ -585,8 +639,36 @@
           </p>
         {/if}
 
-        <div class="flex gap-2">
-          <button class="btn btn-primary" onclick={add} disabled={adding || !form.name.trim()}>
+        {#if configTest}
+          {#if testedConfigSignature !== configSignature}
+            <div class="rounded-md border border-warn bg-warn/10 px-3 py-2.5 text-[13px] text-warn">
+              Provider settings changed after the test. Run it again before saving.
+            </div>
+          {:else if configTest.ok}
+            <div class="rounded-md border border-ok bg-ok/10 px-3 py-2.5 text-[13px] text-ok">
+              <strong>{configTest.item_count} items</strong> would be indexed from {configTest.scanned} checked
+              {#if configTest.total} ({configTest.total} returned by JIRA){/if}.
+              Test completed in {configTest.latency_ms}ms.
+              {#if configTest.truncated}
+                <span class="block text-warn">
+                  Count was truncated by the configured limit of {configTest.limit}; more items may match.
+                </span>
+              {/if}
+            </div>
+          {:else}
+            <div class="rounded-md border border-err bg-err/10 px-3 py-2.5 text-[13px] text-err">
+              Test failed: {configTest.error}
+            </div>
+          {/if}
+        {/if}
+
+        <div class="flex flex-wrap gap-2">
+          {#if form.type === "jira" || form.type === "confluence"}
+            <button class="btn" onclick={testConfig} disabled={testingConfig || adding}>
+              {testingConfig ? "Testing…" : "Test & preview"}
+            </button>
+          {/if}
+          <button class="btn btn-primary" onclick={add} disabled={adding || testingConfig || !form.name.trim()}>
             {adding ? "Saving…" : editingName ? "Save source" : "Create source"}
           </button>
           <button class="btn" onclick={closeForm}>Cancel</button>
@@ -631,6 +713,8 @@
                 </span>
               {:else if s.running}
                 <span class="text-busy">({s.running})</span>
+              {:else if s.task_state === "queued"}
+                <span class="text-warn">(queued)</span>
               {/if}
               <span>{s.page_count} {s.page_count === 1 ? "page" : "pages"}</span>
               <Status status={s.status} />
@@ -669,7 +753,17 @@
                   <span class="text-err" title={s.last_error}>error: {s.last_error.slice(0, 120)}</span>
                 {/if}
                 <span class="ml-auto flex gap-1.5">
-                  <button class="btn btn-sm" onclick={(e) => refresh(s.name, e)}>Sync now</button>
+                  {#if s.task_state || s.running}
+                    <button
+                      class="btn btn-sm btn-danger"
+                      onclick={(e) => cancel(s.name, e)}
+                      disabled={canceling[s.name]}
+                    >
+                      {canceling[s.name] ? "Stopping…" : "Stop"}
+                    </button>
+                  {:else}
+                    <button class="btn btn-sm" onclick={(e) => refresh(s.name, e)}>Sync now</button>
+                  {/if}
                   <button class="btn btn-sm" onclick={(e) => editSource(s, e)}>Edit</button>
                   <button class="btn btn-sm btn-danger" onclick={(e) => remove(s.name, e)}>Delete</button>
                 </span>

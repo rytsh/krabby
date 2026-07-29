@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/rytsh/krabby/internal/service/progress"
 	"github.com/rytsh/krabby/internal/service/websource"
@@ -20,6 +21,25 @@ type reportingFetcher struct {
 	mu       sync.Mutex
 	observed []Progress
 	observe  func() (Progress, bool)
+}
+
+type cancelBlockingFetcher struct {
+	started chan struct{}
+}
+
+func (f *cancelBlockingFetcher) Validate(json.RawMessage) error { return nil }
+
+func (f *cancelBlockingFetcher) MergeConfig(_, update json.RawMessage) (json.RawMessage, error) {
+	return update, nil
+}
+
+func (f *cancelBlockingFetcher) ConfigView(json.RawMessage) any { return struct{}{} }
+
+func (f *cancelBlockingFetcher) Fetch(ctx context.Context, _ *websource.Collection, _ []*websource.Page, _ json.RawMessage, _ websource.Emit) (*websource.FetchResult, error) {
+	close(f.started)
+	<-ctx.Done()
+
+	return nil, ctx.Err()
 }
 
 func (f *reportingFetcher) Validate(json.RawMessage) error { return nil }
@@ -123,5 +143,48 @@ func TestRefreshWebSourcePublishesFetchProgress(t *testing.T) {
 	// Progress is transient: it is gone once the sync finishes.
 	if p, ok := m.Progress(websource.ScopeKey("wiki")); ok {
 		t.Fatalf("progress survived the sync: %#v", p)
+	}
+}
+
+func TestCancelTasksStopsRunningWebSource(t *testing.T) {
+	ctx := context.Background()
+	fetcher := &cancelBlockingFetcher{started: make(chan struct{})}
+	m, webStore := newReconcileManager(t, fetcher)
+
+	if err := webStore.UpsertCollection(ctx, &websource.Collection{
+		Name: "wiki", Type: "fake", Status: websource.StatusPending, Config: json.RawMessage(`{}`),
+	}); err != nil {
+		t.Fatalf("seed collection: %v", err)
+	}
+
+	m.TriggerWebRefresh("wiki")
+	select {
+	case <-fetcher.started:
+	case <-time.After(time.Second):
+		t.Fatal("web-source sync did not start")
+	}
+
+	scope := websource.ScopeKey("wiki")
+	if got := m.TaskState(scope); got != "running" {
+		t.Fatalf("TaskState = %q, want running", got)
+	}
+	if got := m.CancelTasks(scope); got != 1 {
+		t.Fatalf("CancelTasks = %d, want 1", got)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for m.Activity(scope) != "" && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := m.Activity(scope); got != "" {
+		t.Fatalf("activity survived cancellation: %q", got)
+	}
+
+	col, err := webStore.GetCollection(ctx, "wiki")
+	if err != nil {
+		t.Fatalf("get collection: %v", err)
+	}
+	if col.Status != websource.StatusError || col.LastError != ErrCancelled.Error() {
+		t.Fatalf("canceled collection status = %q, error = %q", col.Status, col.LastError)
 	}
 }

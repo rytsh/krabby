@@ -95,26 +95,28 @@ type Config struct {
 	// Set it only if you want that trade.
 	MaxIssues types.Null[int] `json:"max_issues,omitempty"`
 
-	// FullResyncEvery is a Go duration ("24h") controlling how often a full,
-	// non-incremental pass runs to reconcile remotely-deleted tickets. Empty or
-	// invalid uses the default (24h).
+	// FullResyncSchedule is a hardloop cron expression controlling when a full,
+	// non-incremental pass reconciles remotely-deleted tickets.
+	FullResyncSchedule types.Null[string] `json:"full_resync_schedule,omitempty"`
+	// FullResyncEvery is retained only to read configs persisted before full
+	// resyncs became cron-based.
 	FullResyncEvery types.Null[string] `json:"full_resync_every,omitempty"`
 }
 
 // resolvedConfig is the plain, validated view of a Config used by the sync
 // logic (strings trimmed, base URL de-slashed).
 type resolvedConfig struct {
-	BaseURL         string
-	User            string
-	APIToken        string
-	Project         string
-	JQL             string
-	IncludeLabels   []string
-	ExcludeLabels   []string
-	IncludeSubtasks bool
-	TeamFields      []string
-	MaxIssues       int
-	FullResyncEvery string
+	BaseURL            string
+	User               string
+	APIToken           string
+	Project            string
+	JQL                string
+	IncludeLabels      []string
+	ExcludeLabels      []string
+	IncludeSubtasks    bool
+	TeamFields         []string
+	MaxIssues          int
+	FullResyncSchedule string
 }
 
 // resolve flattens the nullable config into plain values.
@@ -130,7 +132,8 @@ func (c Config) resolve() resolvedConfig {
 		IncludeSubtasks: c.IncludeSubtasks.ValueOrZero(),
 		TeamFields:      c.TeamFields.ValueOrZero(),
 		MaxIssues:       c.MaxIssues.ValueOrZero(),
-		FullResyncEvery: strings.TrimSpace(c.FullResyncEvery.ValueOrZero()),
+		FullResyncSchedule: websource.FullResyncSchedule(
+			c.FullResyncSchedule.ValueOrZero(), c.FullResyncEvery.ValueOrZero()),
 	}
 }
 
@@ -138,30 +141,17 @@ func (c Config) resolve() resolvedConfig {
 // is the one field emitted unconditionally: a checkbox has to be able to tell
 // "off" from "not configured", and both mean off.
 type configView struct {
-	BaseURL         string   `json:"base_url"`
-	User            string   `json:"user,omitempty"`
-	APITokenSet     bool     `json:"api_token_set"`
-	Project         string   `json:"project,omitempty"`
-	JQL             string   `json:"jql,omitempty"`
-	IncludeLabels   []string `json:"include_labels,omitempty"`
-	ExcludeLabels   []string `json:"exclude_labels,omitempty"`
-	IncludeSubtasks bool     `json:"include_subtasks"`
-	TeamFields      []string `json:"team_fields,omitempty"`
-	MaxIssues       int      `json:"max_issues,omitempty"`
-	FullResyncEvery string   `json:"full_resync_every,omitempty"`
-}
-
-// fullResyncEvery parses the configured interval, falling back to the default.
-func (c resolvedConfig) fullResyncEvery() time.Duration {
-	if c.FullResyncEvery == "" {
-		return websource.DefaultFullResyncEvery
-	}
-	d, err := time.ParseDuration(c.FullResyncEvery)
-	if err != nil || d <= 0 {
-		return websource.DefaultFullResyncEvery
-	}
-
-	return d
+	BaseURL            string   `json:"base_url"`
+	User               string   `json:"user,omitempty"`
+	APITokenSet        bool     `json:"api_token_set"`
+	Project            string   `json:"project,omitempty"`
+	JQL                string   `json:"jql,omitempty"`
+	IncludeLabels      []string `json:"include_labels,omitempty"`
+	ExcludeLabels      []string `json:"exclude_labels,omitempty"`
+	IncludeSubtasks    bool     `json:"include_subtasks"`
+	TeamFields         []string `json:"team_fields,omitempty"`
+	MaxIssues          int      `json:"max_issues,omitempty"`
+	FullResyncSchedule string   `json:"full_resync_schedule,omitempty"`
 }
 
 // New creates the fetcher.
@@ -203,6 +193,9 @@ func (f *Fetcher) Validate(raw json.RawMessage) error {
 	if cfg.Project == "" && cfg.JQL == "" {
 		return fmt.Errorf("jira requires a project key or a jql query")
 	}
+	if err := websource.ValidateFullResyncSchedule(cfg.FullResyncSchedule); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -232,6 +225,7 @@ func (f *Fetcher) MergeConfig(current, update json.RawMessage) (json.RawMessage,
 		next.IncludeSubtasks = websource.MergeNull(next.IncludeSubtasks, prev.IncludeSubtasks)
 		next.TeamFields = websource.MergeNull(next.TeamFields, prev.TeamFields)
 		next.MaxIssues = websource.MergeNull(next.MaxIssues, prev.MaxIssues)
+		next.FullResyncSchedule = websource.MergeNull(next.FullResyncSchedule, prev.FullResyncSchedule)
 		next.FullResyncEvery = websource.MergeNull(next.FullResyncEvery, prev.FullResyncEvery)
 
 		if next.APIToken.ValueOrZero() == "" {
@@ -260,11 +254,81 @@ func (f *Fetcher) ConfigView(raw json.RawMessage) any {
 		BaseURL: cfg.BaseURL, User: cfg.User, APITokenSet: cfg.APIToken != "",
 		Project: cfg.Project, JQL: cfg.JQL,
 		IncludeLabels: cfg.IncludeLabels, ExcludeLabels: cfg.ExcludeLabels,
-		IncludeSubtasks: cfg.IncludeSubtasks,
-		TeamFields:      cfg.TeamFields,
-		MaxIssues:       cfg.MaxIssues,
-		FullResyncEvery: cfg.FullResyncEvery,
+		IncludeSubtasks:    cfg.IncludeSubtasks,
+		TeamFields:         cfg.TeamFields,
+		MaxIssues:          cfg.MaxIssues,
+		FullResyncSchedule: cfg.FullResyncSchedule,
 	}
+}
+
+func (f *Fetcher) FullResyncSpec(raw json.RawMessage) (string, error) {
+	cfg, err := decodeConfig(raw)
+	if err != nil {
+		return "", err
+	}
+	if err := websource.ValidateFullResyncSchedule(cfg.FullResyncSchedule); err != nil {
+		return "", err
+	}
+
+	return cfg.FullResyncSchedule, nil
+}
+
+// Preview validates an unsaved JIRA query and counts the issues that would be
+// indexed after label and sub-task filters. Only fields needed for selection
+// are requested; descriptions and other render-only data are not downloaded.
+func (f *Fetcher) Preview(ctx context.Context, raw json.RawMessage) (websource.PreviewResult, error) {
+	var out websource.PreviewResult
+	if err := f.Validate(raw); err != nil {
+		return out, err
+	}
+
+	cfg, err := decodeConfig(raw)
+	if err != nil {
+		return out, err
+	}
+	out.Limit = cfg.MaxIssues
+	jql := buildJQL(cfg, "")
+
+	for start := 0; ; {
+		if cfg.MaxIssues > 0 && start >= cfg.MaxIssues {
+			out.Truncated = out.Total == 0 || start < out.Total
+
+			break
+		}
+
+		res, err := f.search(ctx, cfg, jql, start, []string{"labels", "issuetype"})
+		if err != nil {
+			return out, err
+		}
+		out.Total = res.Total
+
+		issues := res.Issues
+		if remaining := cfg.MaxIssues - start; cfg.MaxIssues > 0 && len(issues) > remaining {
+			issues = issues[:remaining]
+			out.Truncated = true
+		}
+		for _, iss := range issues {
+			out.Scanned++
+			if iss.Fields.IssueType.Subtask && !cfg.IncludeSubtasks {
+				continue
+			}
+			if labelSelected(iss.Fields.Labels, cfg.IncludeLabels, cfg.ExcludeLabels) {
+				out.ItemCount++
+			}
+		}
+
+		start += len(issues)
+		if len(issues) == 0 || start >= res.Total {
+			break
+		}
+		if cfg.MaxIssues > 0 && start >= cfg.MaxIssues {
+			out.Truncated = start < res.Total
+
+			break
+		}
+	}
+
+	return out, nil
 }
 
 // issue mirrors the fields we consume from the JIRA search API. The typed
@@ -355,7 +419,7 @@ type syncState struct {
 // only ever asks for tickets updated since the watermark, so narrowing the
 // selection (excluding sub-tasks, adding a skip label, tightening the JQL)
 // would otherwise leave the tickets that just dropped out sitting in the index
-// until the next scheduled full pass, up to full_resync_every away.
+// until the next scheduled full pass.
 //
 // A mismatch forces one full pass, and a full pass is the only kind that
 // reports Complete — which is what lets the manager read "not seen" as "deleted
@@ -413,7 +477,7 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 	// one immediately when the selection filter changed, so tickets that no
 	// longer qualify are pruned now rather than at the next scheduled sweep.
 	filter := filterSignature(cfg)
-	full := filter != state.Filter || websource.FullResyncDue(state.FullAt, cfg.fullResyncEvery())
+	full := filter != state.Filter || websource.FullResyncDue(state.FullAt, cfg.FullResyncSchedule, time.Now())
 	watermark := state.Watermark
 	if full {
 		watermark = ""
@@ -426,19 +490,25 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 	capped := maxIssues > 0
 	truncated := false
 
-	for start := 0; ; start += pageLimit {
+	for start := 0; ; {
 		if capped && start >= maxIssues {
 			truncated = true
 
 			break
 		}
 
-		res, err := f.search(ctx, cfg, jql, start)
+		res, err := f.search(ctx, cfg, jql, start, issueFields(cfg))
 		if err != nil {
 			return nil, err
 		}
 
-		for _, iss := range res.Issues {
+		issues := res.Issues
+		if remaining := maxIssues - start; capped && len(issues) > remaining {
+			issues = issues[:remaining]
+			truncated = true
+		}
+
+		for _, iss := range issues {
 			if u := parseJiraTime(iss.Fields.Updated); u.After(maxSeen) {
 				maxSeen = u
 			}
@@ -477,16 +547,22 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 
 		// Report raw discovery progress (issues scanned, not issues kept), so
 		// the bar tracks the remote paging rather than the label filter.
-		scanned := res.StartAt + len(res.Issues)
+		scanned := res.StartAt + len(issues)
 		if capped {
 			progress.Report(ctx, min(scanned, maxIssues), min(res.Total, maxIssues))
 		} else {
 			progress.Report(ctx, scanned, res.Total)
 		}
 
-		if len(res.Issues) == 0 || scanned >= res.Total {
+		if len(issues) == 0 || scanned >= res.Total {
 			break
 		}
+		if capped && scanned >= maxIssues {
+			truncated = scanned < res.Total
+
+			break
+		}
+		start = scanned
 	}
 
 	// Advance the watermark to the newest issue seen. Step back one minute so
@@ -532,13 +608,13 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 // filter is built. Results are ordered by updated ascending so a watermark can
 // advance monotonically even when the run is capped by MaxIssues.
 func buildJQL(cfg resolvedConfig, watermark string) string {
-	base := cfg.JQL
+	base := stripOrderBy(cfg.JQL)
 	if base == "" {
 		base = fmt.Sprintf("project = %q", cfg.Project)
 	}
 
 	if watermark != "" {
-		base = fmt.Sprintf("(%s) AND updated >= %q", stripOrderBy(base), watermark)
+		base = fmt.Sprintf("(%s) AND updated >= %q", base, watermark)
 	}
 
 	return base + " ORDER BY updated ASC"
@@ -573,12 +649,17 @@ func parseJiraTime(s string) time.Time {
 }
 
 // search fetches one page of the issue search.
-func (f *Fetcher) search(ctx context.Context, cfg resolvedConfig, jql string, start int) (*searchResult, error) {
+func issueFields(cfg resolvedConfig) []string {
 	fields := []string{
 		"summary", "description", "labels", "status", "issuetype",
 		"priority", "assignee", "reporter", "created", "updated",
 	}
-	fields = append(fields, cfg.TeamFields...)
+
+	return append(fields, cfg.TeamFields...)
+}
+
+// search fetches one page of the issue search with only the requested fields.
+func (f *Fetcher) search(ctx context.Context, cfg resolvedConfig, jql string, start int, fields []string) (*searchResult, error) {
 
 	params := url.Values{}
 	params.Set("jql", jql)
