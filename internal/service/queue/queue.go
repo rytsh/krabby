@@ -515,9 +515,21 @@ func (q *Queue) Snapshot() Snapshot {
 	for _, t := range q.recent {
 		items = append(items, t.item())
 	}
-	// Newest first: running/queued tasks (highest seq) lead, recent history
-	// trails.
-	sort.Slice(items, func(i, j int) bool { return items[i].Seq > items[j].Seq })
+	// Live work leads by queue order. Finished work follows by completion time:
+	// a long-running task can have an older seq while still being the latest
+	// history entry.
+	sort.Slice(items, func(i, j int) bool {
+		iLive := items[i].State == StateRunning || items[i].State == StateQueued
+		jLive := items[j].State == StateRunning || items[j].State == StateQueued
+		if iLive != jLive {
+			return iLive
+		}
+		if iLive || items[i].EndedAt.Equal(items[j].EndedAt) {
+			return items[i].Seq > items[j].Seq
+		}
+
+		return items[i].EndedAt.After(items[j].EndedAt)
+	})
 
 	return Snapshot{
 		Limit:   q.limit,

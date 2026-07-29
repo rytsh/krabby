@@ -441,6 +441,29 @@ func TestSnapshotStatesAndError(t *testing.T) {
 	}
 }
 
+func TestSnapshotOrdersHistoryByCompletionTime(t *testing.T) {
+	t.Parallel()
+
+	q := New(context.Background(), 1)
+	defer q.Close()
+
+	finishedAt := time.Now()
+	q.mu.Lock()
+	q.recent = []*task{
+		{seq: 1, id: "long-running", state: StateDone, endedAt: finishedAt},
+		{seq: 2, id: "enqueued-later", state: StateDone, endedAt: finishedAt.Add(-time.Minute)},
+	}
+	q.mu.Unlock()
+
+	items := q.Snapshot().Tasks
+	if len(items) != 2 {
+		t.Fatalf("history length = %d, want 2", len(items))
+	}
+	if items[0].ID != "long-running" {
+		t.Fatalf("first history item = %q, want latest completion %q", items[0].ID, "long-running")
+	}
+}
+
 func TestClearHistoryKeepsLiveTasks(t *testing.T) {
 	t.Parallel()
 

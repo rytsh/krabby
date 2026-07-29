@@ -75,6 +75,8 @@
     return [phaseLabel[p.phase] || p.phase, counts, eta && `· ${eta} left`].filter(Boolean).join(" ");
   }
 
+  const ms = (t) => (t ? new Date(t).getTime() : 0);
+
   // Running first (oldest first = longest running), then queued FIFO.
   let live = $derived(
     (snap.tasks || [])
@@ -85,7 +87,9 @@
       }),
   );
   let recent = $derived(
-    (snap.tasks || []).filter((t) => ["done", "error", "canceled"].includes(t.state)).sort((a, b) => b.seq - a.seq),
+    (snap.tasks || [])
+      .filter((t) => ["done", "error", "canceled"].includes(t.state))
+      .sort((a, b) => ms(b.ended_at) - ms(a.ended_at) || b.seq - a.seq),
   );
 
   const pageSize = 8;
@@ -104,7 +108,6 @@
     const h = Math.floor(m / 60);
     return `${h}h ${m % 60}m`;
   }
-  const ms = (t) => (t ? new Date(t).getTime() : 0);
   function timing(task) {
     if (task.state === "running") return `running for ${fmtDur(Date.now() - ms(task.started_at))}`;
     if (task.state === "queued") return `waiting ${fmtDur(Date.now() - ms(task.enqueued_at))}`;
