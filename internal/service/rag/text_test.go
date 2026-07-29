@@ -296,6 +296,29 @@ func TestDocsTextMigrateV1ToV2(t *testing.T) {
 		}
 	}
 
+	// Pad the bucket with documents whose vocabulary is wide enough that a
+	// full batch of them cannot commit in one transaction. A full-text write
+	// costs one key per distinct term, so a real docs corpus reaches that
+	// limit easily — and a migration that cannot batch around it fails
+	// half-way, leaving the index in a state no retry recovers from.
+	for i := range 200 {
+		var sb strings.Builder
+		for w := range 3000 {
+			fmt.Fprintf(&sb, "d%dt%d ", i, w)
+		}
+
+		rec := &textRecordV1{
+			ID:      fmt.Sprintf("acme/bulk/doc%03d.md#0", i),
+			Repo:    "acme/bulk",
+			Path:    fmt.Sprintf("doc%03d.md", i),
+			Title:   "bulk",
+			Excerpt: sb.String(),
+		}
+		if err := old.Insert(ctx, rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	// Registering the current shape runs the migration.
 	store, err := NewTextStore(db)
 	if err != nil {
