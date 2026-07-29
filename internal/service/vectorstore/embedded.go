@@ -126,6 +126,7 @@ func newEmbedded(dir string) (*embedded, error) {
 
 	bucket, err := bw.RegisterBucket[chunkRecord](db, bucketName,
 		bw.WithVersion[chunkRecord](bucketVersion),
+		bw.WithMigrationProgress[chunkRecord](storage.MigrationProgress()),
 		migrateChunksV2ToV3(),
 	)
 	if err != nil {

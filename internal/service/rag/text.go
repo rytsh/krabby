@@ -91,6 +91,7 @@ type TextStore struct {
 func NewTextStore(db *bw.DB) (*TextStore, error) {
 	bucket, err := bw.RegisterBucket[textRecord](db, docsTextBucketName,
 		bw.WithVersion[textRecord](docsTextBucketVersion),
+		bw.WithMigrationProgress[textRecord](storage.MigrationProgress()),
 		migrateDocsTextV1ToV2(),
 	)
 	if err != nil {
