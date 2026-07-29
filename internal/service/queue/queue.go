@@ -147,6 +147,8 @@ type task struct {
 	startedAt  time.Time
 	endedAt    time.Time
 	handle     *Handle
+	cancel     context.CancelFunc
+	canceled   bool
 }
 
 func (t *task) item() Item {
@@ -358,10 +360,9 @@ func (q *Queue) CancelPending(id string) int {
 	return n
 }
 
-// CancelSeq drops the single queued (not-yet-started) task with the given seq,
-// marking it canceled and closing its handle. It reports whether a matching
-// queued task was found and removed; a running or already-finished task is not
-// affected (cancel a running job through its own context via the manager).
+// CancelSeq cancels the single queued or running task with the given seq. A
+// queued task is removed immediately; a running task's context is canceled and
+// reaches the terminal canceled state when its Run function returns.
 func (q *Queue) CancelSeq(seq uint64) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -382,22 +383,16 @@ func (q *Queue) CancelSeq(seq uint64) bool {
 		return true
 	}
 
-	return false
-}
-
-// RunningID returns the ID of the currently running task with the given seq and
-// true when such a task is running. The manager uses it to translate a
-// per-task cancel (by seq) into canceling that task's underlying job context,
-// since the queue itself does not own job cancellation.
-func (q *Queue) RunningID(seq uint64) (string, bool) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-
 	if t, ok := q.active[seq]; ok {
-		return t.id, true
+		t.canceled = true
+		if t.cancel != nil {
+			t.cancel()
+		}
+
+		return true
 	}
 
-	return "", false
+	return false
 }
 
 // Bump moves the queued task with the given seq to the front of the backlog so
@@ -501,8 +496,11 @@ func (q *Queue) dispatch() {
 // goroutine's completion handler re-acquires the lock once the dispatcher
 // releases it.
 func (q *Queue) launchLocked(t *task) {
+	ctx, cancel := context.WithCancel(q.ctx)
+	t.cancel = cancel
 	q.eg.Go(func() error {
-		err := safeRun(q.ctx, t.run)
+		err := safeRun(ctx, t.run)
+		cancel()
 		q.finish(t, err)
 
 		// Errors are recorded per task; never propagate so one failure cannot
@@ -517,6 +515,10 @@ func (q *Queue) finish(t *task, err error) {
 	delete(q.active, t.seq)
 	t.endedAt = time.Now()
 	switch {
+	case t.canceled:
+		t.state = StateCanceled
+		t.err = nil
+		q.removePersistedLocked(t)
 	case err != nil && q.ctx.Err() != nil:
 		// The whole queue is shutting down: this run was interrupted by the
 		// process exiting, not by the user. Keep its durable record so the

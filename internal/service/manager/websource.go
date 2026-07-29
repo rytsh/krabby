@@ -414,6 +414,90 @@ func (m *Manager) AddWebPage(ctx context.Context, name, pageURL string) (*websou
 	return page, nil
 }
 
+// SitemapImportResult summarizes a sitemap import for the REST/UI caller.
+type SitemapImportResult struct {
+	Discovered int `json:"discovered"`
+	Added      int `json:"added"`
+	Existing   int `json:"existing"`
+}
+
+// ImportWebSitemap discovers page URLs from a sitemap and registers them on a
+// user-managed URL collection. All records are added before one background sync
+// is queued, avoiding one full collection sync per imported URL.
+func (m *Manager) ImportWebSitemap(ctx context.Context, name, sitemapURL string) (SitemapImportResult, error) {
+	var result SitemapImportResult
+	if m.webStore == nil {
+		return result, ErrNoWebSources
+	}
+
+	col, err := m.webStore.GetCollection(ctx, name)
+	if err != nil {
+		return result, err
+	}
+	if col == nil {
+		return result, fmt.Errorf("collection %s not found", name)
+	}
+	if col.Type != websource.TypePages {
+		return result, fmt.Errorf("collection %s is type %q; sitemaps are only supported for pages", name, col.Type)
+	}
+
+	importer, ok := m.webFetchers[col.Type].(websource.SitemapFetcher)
+	if !ok {
+		return result, fmt.Errorf("source type %q does not support sitemaps", col.Type)
+	}
+	urls, err := importer.SitemapURLs(ctx, strings.TrimSpace(sitemapURL))
+	if err != nil {
+		return result, err
+	}
+	result.Discovered = len(urls)
+
+	scope := websource.ScopeKey(name)
+	l := m.lock(scope)
+	l.Lock()
+	defer func() {
+		l.Unlock()
+		if result.Added > 0 {
+			m.TriggerWebRefresh(name)
+		}
+	}()
+
+	// The collection may have been deleted while its sitemap was being fetched.
+	col, err = m.webStore.GetCollection(ctx, name)
+	if err != nil {
+		return result, err
+	}
+	if col == nil {
+		return result, fmt.Errorf("collection %s not found", name)
+	}
+
+	for _, pageURL := range urls {
+		slug := slugForURL(pageURL)
+		existing, err := m.webStore.GetPage(ctx, websource.PageID(name, slug))
+		if err != nil {
+			return result, err
+		}
+		if existing != nil {
+			result.Existing++
+
+			continue
+		}
+
+		page := &websource.Page{
+			ID:         websource.PageID(name, slug),
+			Collection: name,
+			Slug:       slug,
+			URL:        pageURL,
+			Status:     websource.StatusPending,
+		}
+		if err := m.webStore.UpsertPage(ctx, page); err != nil {
+			return result, err
+		}
+		result.Added++
+	}
+
+	return result, nil
+}
+
 // DeleteWebPage removes a page record, its markdown file, and reindexes.
 func (m *Manager) DeleteWebPage(ctx context.Context, name, slug string) error {
 	if m.webStore == nil {

@@ -153,6 +153,7 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	api.DELETE("/sources/{name}", server.Wrap(deleteSource(mgr)))
 	api.POST("/sources/{name}/refresh", server.Wrap(refreshSource(mgr)))
 	api.POST("/sources/{name}/pages", server.Wrap(addSourcePage(mgr)))
+	api.POST("/sources/{name}/sitemap", server.Wrap(importSourceSitemap(mgr)))
 	api.DELETE("/sources/{name}/pages", server.Wrap(deleteSourcePage(mgr)))
 	api.GET("/sources/{name}/doc", server.Wrap(getSourceDoc(mgr)))
 

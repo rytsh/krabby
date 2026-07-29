@@ -221,6 +221,13 @@ type Fetcher interface {
 	Fetch(ctx context.Context, col *Collection, pages []*Page, state json.RawMessage, emit Emit) (*FetchResult, error)
 }
 
+// SitemapFetcher is implemented by source types that can discover page URLs
+// from a sitemap. It stays separate from Fetcher because discovery is only
+// meaningful for user-managed URL collections.
+type SitemapFetcher interface {
+	SitemapURLs(ctx context.Context, sitemapURL string) ([]string, error)
+}
+
 // nameRe restricts collection names to something safe for directories, URLS
 // and scope keys.
 var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)

@@ -74,7 +74,7 @@ export const api = {
     req("/tasks/concurrency", { method: "PUT", body: JSON.stringify({ limit }) }),
   // bumpTask moves a queued task (by seq) to the front of the backlog.
   bumpTask: (seq) => req(`/tasks/${seq}/-/bump`, { method: "POST", keepalive: true }),
-  // cancelTask drops a single queued task (by seq) from the backlog.
+  // cancelTask drops a queued task or aborts a running task by seq.
   cancelTask: (seq) => req(`/tasks/${seq}`, { method: "DELETE", keepalive: true }),
   // Repo ids are full paths (host/group/.../name) with any number of "/"
   // segments, so repo actions use a GitLab-style "/-/" separator between the
@@ -167,6 +167,8 @@ export const api = {
   refreshSource: (name) => req(`/sources/${name}/refresh`, { method: "POST", keepalive: true }),
   addSourcePage: (name, url) =>
     req(`/sources/${name}/pages`, { method: "POST", keepalive: true, body: JSON.stringify({ url }) }),
+  importSourceSitemap: (name, url) =>
+    req(`/sources/${name}/sitemap`, { method: "POST", keepalive: true, body: JSON.stringify({ url }) }),
   deleteSourcePage: (name, slug) =>
     req(`/sources/${name}/pages?slug=${encodeURIComponent(slug)}`, { method: "DELETE", keepalive: true }),
   sourceDoc: (name, path) => req(`/sources/${name}/doc?path=${encodeURIComponent(path)}`),

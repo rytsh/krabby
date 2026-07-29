@@ -307,6 +307,8 @@
 
   // Per-collection "add page" inputs (pages type).
   let pageUrl = $state({});
+  let sitemapUrl = $state({});
+  let importingSitemap = $state({});
 
   async function addPage(name) {
     const url = (pageUrl[name] || "").trim();
@@ -318,6 +320,23 @@
       await load();
     } catch (e) {
       error = e.message;
+    }
+  }
+
+  async function importSitemap(name) {
+    const url = (sitemapUrl[name] || "").trim();
+    if (!url) return;
+    importingSitemap = { ...importingSitemap, [name]: true };
+    try {
+      const result = await api.importSourceSitemap(name, url);
+      sitemapUrl = { ...sitemapUrl, [name]: "" };
+      successToast(`Imported ${result?.added || 0} pages (${result?.existing || 0} already present)`);
+      await loadPages(name, 1);
+      await load();
+    } catch (e) {
+      error = e.message;
+    } finally {
+      importingSitemap = { ...importingSitemap, [name]: false };
     }
   }
 
@@ -561,8 +580,8 @@
           </p>
         {:else}
           <p class="m-0 text-[12px] text-faint">
-            Add page URLs after creating the collection. Private pages resolve auth from the git
-            credentials store by URL pattern.
+            Add page URLs or import a sitemap after creating the collection. Private pages resolve
+            auth from the git credentials store by URL pattern.
           </p>
         {/if}
 
@@ -657,17 +676,35 @@
               </div>
 
               {#if s.type === "pages"}
-                <div class="mb-3 flex gap-2">
-                  <input
-                    class="input flex-1"
-                    placeholder="https://wiki.example.com/page"
-                    value={pageUrl[s.name] || ""}
-                    oninput={(e) => (pageUrl = { ...pageUrl, [s.name]: e.target.value })}
-                    onkeydown={(e) => e.key === "Enter" && addPage(s.name)}
-                  />
-                  <button class="btn" onclick={() => addPage(s.name)} disabled={!(pageUrl[s.name] || "").trim()}>
-                    Add page
-                  </button>
+                <div class="mb-3 grid gap-2">
+                  <div class="flex gap-2">
+                    <input
+                      class="input flex-1"
+                      placeholder="https://wiki.example.com/page"
+                      value={pageUrl[s.name] || ""}
+                      oninput={(e) => (pageUrl = { ...pageUrl, [s.name]: e.target.value })}
+                      onkeydown={(e) => e.key === "Enter" && addPage(s.name)}
+                    />
+                    <button class="btn" onclick={() => addPage(s.name)} disabled={!(pageUrl[s.name] || "").trim()}>
+                      Add page
+                    </button>
+                  </div>
+                  <div class="flex gap-2">
+                    <input
+                      class="input flex-1"
+                      placeholder="https://example.com/sitemap.xml"
+                      value={sitemapUrl[s.name] || ""}
+                      oninput={(e) => (sitemapUrl = { ...sitemapUrl, [s.name]: e.target.value })}
+                      onkeydown={(e) => e.key === "Enter" && importSitemap(s.name)}
+                    />
+                    <button
+                      class="btn"
+                      onclick={() => importSitemap(s.name)}
+                      disabled={importingSitemap[s.name] || !(sitemapUrl[s.name] || "").trim()}
+                    >
+                      {importingSitemap[s.name] ? "Importing…" : "Import sitemap"}
+                    </button>
+                  </div>
                 </div>
               {/if}
 

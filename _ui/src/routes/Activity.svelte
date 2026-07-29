@@ -176,10 +176,10 @@
   }
 
   async function cancelRunning(task) {
-    if (task.id === "*" || task.id.startsWith("web:")) return;
     busySeq = task.seq;
     try {
-      await api.cancelRepoJob(task.id);
+      const s = await api.cancelTask(task.seq);
+      if (s && Array.isArray(s.tasks)) snap = s;
     } catch {
       // ignore; toast shown
     } finally {
@@ -202,11 +202,6 @@
     } finally {
       savingLimit = false;
     }
-  }
-
-  // A running repo job can be cancelled; the aggregate "*" and web syncs cannot.
-  function canCancelRunning(task) {
-    return task.id !== "*" && !task.id.startsWith("web:");
   }
 
   function setLiveInterval(value) {
@@ -369,7 +364,7 @@
                   <Icon name="x" size={12} />
                   Cancel
                 </button>
-              {:else if task.state === "running" && canCancelRunning(task)}
+              {:else if task.state === "running"}
                 <button
                   class="btn btn-sm inline-flex items-center gap-1 !py-1 !text-[11px] text-err"
                   title="Abort the running job"

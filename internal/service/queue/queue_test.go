@@ -440,6 +440,42 @@ func TestCloseCancelsRunningContext(t *testing.T) {
 	}
 }
 
+func TestCancelSeqCancelsRunningTask(t *testing.T) {
+	t.Parallel()
+
+	q := New(context.Background(), 1)
+	defer q.Close()
+
+	started := make(chan struct{})
+	h := q.Submit(Task{ID: "long", Run: func(ctx context.Context) error {
+		close(started)
+		<-ctx.Done()
+
+		return ctx.Err()
+	}})
+
+	<-started
+	var seq uint64
+	for _, item := range q.Snapshot().Tasks {
+		if item.ID == "long" {
+			seq = item.Seq
+		}
+	}
+	if seq == 0 {
+		t.Fatal("running task missing from snapshot")
+	}
+	if !q.CancelSeq(seq) {
+		t.Fatal("CancelSeq returned false for a running task")
+	}
+
+	<-h.Done()
+	for _, item := range q.Snapshot().Tasks {
+		if item.Seq == seq && item.State != StateCanceled {
+			t.Fatalf("state = %q, want %q", item.State, StateCanceled)
+		}
+	}
+}
+
 func TestPanicInTaskIsContained(t *testing.T) {
 	t.Parallel()
 

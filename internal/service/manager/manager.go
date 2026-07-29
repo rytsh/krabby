@@ -252,17 +252,7 @@ func (m *Manager) BumpTask(seq uint64) bool {
 // cancelled, killing the in-flight git/graphify/index work). It reports whether
 // a matching task was found in either state.
 func (m *Manager) CancelTask(seq uint64) bool {
-	if m.queue.CancelSeq(seq) {
-		return true
-	}
-
-	// Not queued: it may be the task currently running. Translate the per-task
-	// cancel into cancelling that task's job context via its repo/scope id.
-	if id, ok := m.queue.RunningID(seq); ok {
-		return m.CancelJob(id)
-	}
-
-	return false
+	return m.queue.CancelSeq(seq)
 }
 
 // CancelPendingForRepo drops every queued (not-yet-started) task for a repo id

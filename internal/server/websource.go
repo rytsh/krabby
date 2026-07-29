@@ -286,6 +286,10 @@ type addPageRequest struct {
 	URL string `json:"url"`
 }
 
+type importSitemapRequest struct {
+	URL string `json:"url"`
+}
+
 func addSourcePage(mgr *manager.Manager) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req addPageRequest
@@ -299,6 +303,25 @@ func addSourcePage(mgr *manager.Manager) ada.HandlerFunc {
 		}
 
 		return c.SetStatus(http.StatusAccepted).SendJSON(page)
+	}
+}
+
+func importSourceSitemap(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		var req importSitemapRequest
+		if err := c.Bind(&req); err != nil {
+			return c.SetStatus(http.StatusBadRequest).Err(err)
+		}
+		if strings.TrimSpace(req.URL) == "" {
+			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": "url is required"})
+		}
+
+		result, err := mgr.ImportWebSitemap(c.Request.Context(), c.Request.PathValue("name"), req.URL)
+		if err != nil {
+			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+		}
+
+		return c.SetStatus(http.StatusAccepted).SendJSON(result)
 	}
 }
 

@@ -436,7 +436,7 @@ type bumpTaskArgs struct {
 }
 
 type cancelTaskArgs struct {
-	Seq  uint64 `json:"seq,omitempty" jsonschema:"cancel the single queued task with this sequence number (seq) from queue_status; takes precedence over repo"`
+	Seq  uint64 `json:"seq,omitempty" jsonschema:"cancel the queued or running task with this sequence number (seq) from queue_status; takes precedence over repo"`
 	Repo string `json:"repo,omitempty" jsonschema:"cancel all queued (not-yet-started) tasks for this repo id; ignored when seq is set"`
 }
 
@@ -453,7 +453,7 @@ func addQueueTools(server *mcp.Server, mgr *manager.Manager) {
 		Name: "queue_status",
 		Description: "Inspect the background work queue: the concurrency limit, how many tasks are " +
 			"running vs pending, and the list of tasks (running, queued and recently finished) with each " +
-			"task's seq, id, kind and state. Use the seq of a queued task with bump_task or cancel_task.",
+			"task's seq, id, kind and state. Use a queued task's seq with bump_task, or any live task's seq with cancel_task.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, _ emptyArgs) (*mcp.CallToolResult, any, error) {
 		return jsonResult(mgr.TaskSnapshot()), nil, nil
 	})
