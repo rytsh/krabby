@@ -242,6 +242,56 @@ func TestCancelPending(t *testing.T) {
 	}
 }
 
+func TestCancelAllPendingKeepsRunningTask(t *testing.T) {
+	t.Parallel()
+
+	q := New(context.Background(), 1)
+	defer q.Close()
+
+	release := make(chan struct{})
+	running := q.Submit(Task{ID: "running", Run: func(context.Context) error {
+		<-release
+
+		return nil
+	}})
+	waitFor(t, time.Second, func() bool { return q.Snapshot().Running == 1 })
+
+	var ran atomic.Int32
+	queued := make([]*Handle, 0, 3)
+	for i := range 3 {
+		queued = append(queued, q.Submit(Task{
+			ID:  fmt.Sprintf("queued-%d", i),
+			Key: fmt.Sprintf("queued-%d", i),
+			Run: func(context.Context) error {
+				ran.Add(1)
+
+				return nil
+			},
+		}))
+	}
+
+	if got := q.CancelAllPending(); got != 3 {
+		t.Fatalf("CancelAllPending = %d, want 3", got)
+	}
+	snap := q.Snapshot()
+	if snap.Running != 1 || snap.Pending != 0 {
+		t.Fatalf("live counts after CancelAllPending = running %d, pending %d; want 1, 0", snap.Running, snap.Pending)
+	}
+	for _, h := range queued {
+		select {
+		case <-h.Done():
+		case <-time.After(time.Second):
+			t.Fatal("canceled queued task handle was not closed")
+		}
+	}
+	if got := ran.Load(); got != 0 {
+		t.Fatalf("canceled queued tasks ran %d times, want 0", got)
+	}
+
+	close(release)
+	<-running.Done()
+}
+
 // queuedSeqByID returns the seq of the first queued task with the given id.
 func queuedSeqByID(q *Queue, id string) (uint64, bool) {
 	for _, it := range q.Snapshot().Tasks {
@@ -389,6 +439,40 @@ func TestSnapshotStatesAndError(t *testing.T) {
 	if item.Error != "kaboom" {
 		t.Fatalf("error = %q, want %q", item.Error, "kaboom")
 	}
+}
+
+func TestClearHistoryKeepsLiveTasks(t *testing.T) {
+	t.Parallel()
+
+	q := New(context.Background(), 1)
+	defer q.Close()
+
+	done := q.Submit(Task{ID: "done", Run: func(context.Context) error { return nil }})
+	<-done.Done()
+
+	release := make(chan struct{})
+	running := q.Submit(Task{ID: "running", Run: func(context.Context) error {
+		<-release
+
+		return nil
+	}})
+	waitFor(t, time.Second, func() bool { return q.Snapshot().Running == 1 })
+	queued := q.Submit(Task{ID: "queued", Run: func(context.Context) error { return nil }})
+
+	q.ClearHistory()
+	snap := q.Snapshot()
+	if snap.Running != 1 || snap.Pending != 1 {
+		t.Fatalf("live counts after ClearHistory = running %d, pending %d; want 1, 1", snap.Running, snap.Pending)
+	}
+	for _, item := range snap.Tasks {
+		if item.ID == "done" {
+			t.Fatal("finished task survived ClearHistory")
+		}
+	}
+
+	close(release)
+	<-running.Done()
+	<-queued.Done()
 }
 
 func TestSubmitAfterCloseIsRejected(t *testing.T) {

@@ -247,6 +247,18 @@ func (m *Manager) TaskSnapshot() queue.Snapshot {
 	return m.queue.Snapshot()
 }
 
+// ClearTaskHistory removes finished tasks from the Activity UI without
+// affecting queued or running work.
+func (m *Manager) ClearTaskHistory() {
+	m.queue.ClearHistory()
+}
+
+// CancelPendingTasks removes all queued work while allowing running tasks to
+// continue.
+func (m *Manager) CancelPendingTasks() int {
+	return m.queue.CancelAllPending()
+}
+
 // BumpTask moves the queued task with the given seq to the front of the backlog
 // so it starts next when a slot frees. It reports whether a matching queued
 // task was found (a running or finished task cannot be bumped).

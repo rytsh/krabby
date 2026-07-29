@@ -24,6 +24,7 @@
     Settings,
     Sun,
     Tag,
+    Trash2,
     Warehouse,
     X,
   } from "@lucide/svelte";
@@ -55,6 +56,7 @@
     settings: Settings,
     sun: Sun,
     tag: Tag,
+    trash: Trash2,
     warehouse: Warehouse,
     x: X,
   };

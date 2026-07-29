@@ -111,6 +111,8 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	api.GET("/repos/namespaces", server.Wrap(listRepoNamespaces(mgr)))
 	api.GET("/repos/active", server.Wrap(listActiveRepos(mgr)))
 	api.GET("/tasks", server.Wrap(listTasks(mgr)))
+	api.DELETE("/tasks/history", server.Wrap(clearTaskHistory(mgr)))
+	api.DELETE("/tasks/queued", server.Wrap(cancelPendingTasks(mgr)))
 	api.PUT("/tasks/concurrency", server.Wrap(setTaskConcurrency(mgr)))
 	api.POST("/tasks/{seq}/-/bump", server.Wrap(bumpTask(mgr)))
 	api.DELETE("/tasks/{seq}", server.Wrap(cancelTask(mgr)))
@@ -649,6 +651,25 @@ func listActiveRepos(mgr *manager.Manager) ada.HandlerFunc {
 // Activity page's task view.
 func listTasks(mgr *manager.Manager) ada.HandlerFunc {
 	return func(c *ada.Context) error {
+		return c.SendJSON(mgr.TaskSnapshot())
+	}
+}
+
+// clearTaskHistory removes completed, failed and canceled tasks while leaving
+// queued and running work untouched.
+func clearTaskHistory(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		mgr.ClearTaskHistory()
+
+		return c.SendJSON(mgr.TaskSnapshot())
+	}
+}
+
+// cancelPendingTasks removes every queued task while running work continues.
+func cancelPendingTasks(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		mgr.CancelPendingTasks()
+
 		return c.SendJSON(mgr.TaskSnapshot())
 	}
 }

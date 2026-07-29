@@ -188,6 +188,35 @@
     }
   }
 
+  let clearingHistory = $state(false);
+  async function clearHistory() {
+    clearingHistory = true;
+    try {
+      const s = await api.clearTaskHistory();
+      if (s && Array.isArray(s.tasks)) snap = s;
+      else await refresh();
+    } catch {
+      await refresh();
+    } finally {
+      clearingHistory = false;
+    }
+  }
+
+  let clearingQueue = $state(false);
+  async function clearQueue() {
+    if (!confirm(`Cancel all ${snap.pending} queued task${snap.pending === 1 ? "" : "s"}? Running tasks will continue.`)) return;
+    clearingQueue = true;
+    try {
+      const s = await api.cancelPendingTasks();
+      if (s && Array.isArray(s.tasks)) snap = s;
+      else await refresh();
+    } catch {
+      await refresh();
+    } finally {
+      clearingQueue = false;
+    }
+  }
+
   let savingLimit = $state(false);
   async function changeConcurrency(value) {
     const n = Number(value);
@@ -293,8 +322,20 @@
   </div>
 {:else}
   {#if live.length > 0}
-    <div class="mb-1 text-[11px] font-medium uppercase tracking-wider text-faint">
-      Running &amp; queued ({live.length})
+    <div class="mb-1 flex items-center justify-between">
+      <div class="text-[11px] font-medium uppercase tracking-wider text-faint">
+        Running &amp; queued ({live.length})
+      </div>
+      {#if snap.pending > 0}
+        <button
+          class="btn btn-sm btn-danger inline-flex items-center gap-1 !px-2 !py-1 !text-[11px]"
+          disabled={clearingQueue}
+          onclick={clearQueue}
+        >
+          <Icon name="trash" size={12} />
+          {clearingQueue ? "Clearing…" : `Clear queue (${snap.pending})`}
+        </button>
+      {/if}
     </div>
     <div class="flex flex-col gap-2">
       {#each visibleLive as task (task.seq)}
@@ -407,7 +448,17 @@
   {/if}
 
   {#if recent.length > 0}
-    <div class="mb-1 mt-5 text-[11px] font-medium uppercase tracking-wider text-faint">Recent</div>
+    <div class="mb-1 mt-5 flex items-center justify-between">
+      <div class="text-[11px] font-medium uppercase tracking-wider text-faint">Recent</div>
+      <button
+        class="btn btn-sm btn-danger inline-flex items-center gap-1 !px-2 !py-1 !text-[11px]"
+        disabled={clearingHistory}
+        onclick={clearHistory}
+      >
+        <Icon name="trash" size={12} />
+        {clearingHistory ? "Clearing…" : "Clear history"}
+      </button>
+    </div>
     <div class="card divide-y divide-line overflow-hidden">
       {#each recent.slice(0, 8) as task (task.seq)}
         {@const meta = stateMeta[task.state] || stateMeta.done}

@@ -360,6 +360,26 @@ func (q *Queue) CancelPending(id string) int {
 	return n
 }
 
+// CancelAllPending drops every queued task without affecting running work. The
+// canceled tasks remain in recent history so the cancellation is visible.
+func (q *Queue) CancelAllPending() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	n := len(q.pending)
+	for _, t := range q.pending {
+		t.state = StateCanceled
+		t.endedAt = time.Now()
+		q.removeKeyLocked(t)
+		q.removePersistedLocked(t)
+		q.pushRecentLocked(t)
+		close(t.handle.done)
+	}
+	q.pending = nil
+
+	return n
+}
+
 // CancelID cancels every queued and running task whose ID matches id. It
 // returns the number of tasks cancellation was requested for.
 func (q *Queue) CancelID(id string) int {
@@ -505,6 +525,14 @@ func (q *Queue) Snapshot() Snapshot {
 		Pending: len(q.pending),
 		Tasks:   items,
 	}
+}
+
+// ClearHistory removes finished tasks from the UI history. Queued and running
+// tasks are unaffected.
+func (q *Queue) ClearHistory() {
+	q.mu.Lock()
+	q.recent = nil
+	q.mu.Unlock()
 }
 
 // Close stops accepting new tasks, cancels queued tasks, cancels the context of

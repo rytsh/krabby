@@ -69,6 +69,10 @@ export const api = {
   // { limit, running, pending, tasks: [{ seq, id, kind, title, state, error,
   //   enqueued_at, started_at, ended_at }] }.
   tasks: () => req("/tasks"),
+  // clearTaskHistory removes finished tasks without affecting live work.
+  clearTaskHistory: () => req("/tasks/history", { method: "DELETE" }),
+  // cancelPendingTasks removes every queued task without stopping running work.
+  cancelPendingTasks: () => req("/tasks/queued", { method: "DELETE", keepalive: true }),
   // setTaskConcurrency changes the live queue limit and returns the new snapshot.
   setTaskConcurrency: (limit) =>
     req("/tasks/concurrency", { method: "PUT", body: JSON.stringify({ limit }) }),
