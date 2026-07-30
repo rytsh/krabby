@@ -203,8 +203,9 @@ func getSource(mgr *manager.Manager) ada.HandlerFunc {
 		}
 
 		team := c.Request.URL.Query().Get("team")
+		titleQuery := c.Request.URL.Query().Get("q")
 
-		pages, total, err := mgr.WebPagesPaged(c.Request.Context(), name, team, (page-1)*perPage, perPage)
+		pages, total, err := mgr.WebPagesPaged(c.Request.Context(), name, team, titleQuery, (page-1)*perPage, perPage)
 		if err != nil {
 			return c.Err(err)
 		}
@@ -324,6 +325,10 @@ type importSitemapRequest struct {
 	URL string `json:"url"`
 }
 
+type importPagesRequest struct {
+	Pages []manager.WebPageImport `json:"pages"`
+}
+
 func addSourcePage(mgr *manager.Manager) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req addPageRequest
@@ -356,6 +361,22 @@ func importSourceSitemap(mgr *manager.Manager) ada.HandlerFunc {
 		}
 
 		return c.SetStatus(http.StatusAccepted).SendJSON(result)
+	}
+}
+
+func importSourcePages(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		var req importPagesRequest
+		if err := c.Bind(&req); err != nil {
+			return c.SetStatus(http.StatusBadRequest).Err(err)
+		}
+
+		result, err := mgr.ImportWebPages(c.Request.Context(), c.Request.PathValue("name"), req.Pages)
+		if err != nil {
+			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+		}
+
+		return c.SendJSON(result)
 	}
 }
 

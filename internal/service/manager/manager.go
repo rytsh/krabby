@@ -228,10 +228,11 @@ func New(
 // Background task kinds submitted to the central queue. They classify work in
 // the Activity UI and namespace the dedup keys.
 const (
-	taskKindRefresh  = "refresh"
-	taskKindGenerate = "generate"
-	taskKindWebSync  = "websync"
-	taskKindReindex  = "reindex"
+	taskKindRefresh   = "refresh"
+	taskKindGenerate  = "generate"
+	taskKindWebSync   = "websync"
+	taskKindWebImport = "webimport"
+	taskKindReindex   = "reindex"
 )
 
 // SetTaskConcurrency updates the central work queue's concurrency limit live.

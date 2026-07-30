@@ -224,9 +224,19 @@ func resolveURL(baseURL, ref string) string {
 // rather than discovered remotely, so there is nothing for the manager to
 // prune. Every registered page is emitted here (a failed one included), so the
 // distinction is academic — but claiming an authority this provider does not
-// have would be one refactor away from deleting the user's page list.
+// have would be one refactor away from deleting the user's page list. Pages
+// authored directly in Krabby have no URL and are skipped because their stored
+// Markdown, rather than a remote response, is authoritative.
 func (f *Fetcher) Fetch(ctx context.Context, _ *websource.Collection, pages []*websource.Page, _ json.RawMessage, emit websource.Emit) (*websource.FetchResult, error) {
 	for i, p := range pages {
+		// Pages authored directly in Krabby have no remote URL. Their stored
+		// Markdown is authoritative and must survive collection refreshes.
+		if strings.TrimSpace(p.URL) == "" {
+			progress.Report(ctx, i+1, len(pages))
+
+			continue
+		}
+
 		remote := websource.RemotePage{Slug: p.Slug, URL: p.URL, Title: p.Title}
 
 		title, md, err := f.fetchOne(ctx, p.URL)

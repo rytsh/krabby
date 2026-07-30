@@ -103,6 +103,7 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	// A liveness probe every ten seconds is 8.6k observations a day of nothing.
 	api := base.Group("/api/v1", langfuseMiddleware(mgr))
 	api.GET("/settings", server.Wrap(getSettings(cfg, mgr)))
+	api.GET("/browser-extension.zip", server.Wrap(downloadBrowserExtension()))
 	api.GET("/mcp/api-key", server.Wrap(getMCPKey(mgr)))
 	api.PUT("/mcp/api-key", server.Wrap(setMCPKey(mgr)))
 	api.DELETE("/mcp/api-key", server.Wrap(clearMCPKey(mgr)))
@@ -166,6 +167,7 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	api.POST("/sources/{name}/refresh", server.Wrap(refreshSource(mgr)))
 	api.POST("/sources/{name}/cancel", server.Wrap(cancelSource(mgr)))
 	api.POST("/sources/{name}/pages", server.Wrap(addSourcePage(mgr)))
+	api.POST("/sources/{name}/pages/import", server.Wrap(importSourcePages(mgr)))
 	api.POST("/sources/{name}/sitemap", server.Wrap(importSourceSitemap(mgr)))
 	api.DELETE("/sources/{name}/pages", server.Wrap(deleteSourcePage(mgr)))
 	api.GET("/sources/{name}/doc", server.Wrap(getSourceDoc(mgr)))

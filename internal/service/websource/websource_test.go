@@ -142,9 +142,13 @@ func TestPagesPagedAndTeamFilter(t *testing.T) {
 		{"06", []string{"gamma"}},
 	}
 	for _, s := range specs {
+		title := "Ticket " + s.slug
+		if s.slug == "03" {
+			title = "Disaster Recovery Guide"
+		}
 		if err := store.UpsertPage(ctx, &Page{
 			ID: PageID("proj", s.slug), Collection: "proj", Slug: s.slug,
-			URL: "https://x/" + s.slug, Teams: s.teams,
+			URL: "https://x/" + s.slug, Title: title, Teams: s.teams,
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -170,7 +174,7 @@ func TestPagesPagedAndTeamFilter(t *testing.T) {
 	}
 
 	// Pagination returns a bounded, slug-sorted window with the full total.
-	first, total, err := store.PagesPaged(ctx, "proj", "", 0, 2)
+	first, total, err := store.PagesPaged(ctx, "proj", "", "", 0, 2)
 	if err != nil || total != 6 || len(first) != 2 {
 		t.Fatalf("page1 = %d items total %d, %v; want 2 items total 6", len(first), total, err)
 	}
@@ -178,13 +182,13 @@ func TestPagesPagedAndTeamFilter(t *testing.T) {
 		t.Fatalf("page1 slugs = %q,%q; want 01,02", first[0].Slug, first[1].Slug)
 	}
 
-	second, _, err := store.PagesPaged(ctx, "proj", "", 2, 2)
+	second, _, err := store.PagesPaged(ctx, "proj", "", "", 2, 2)
 	if err != nil || len(second) != 2 || second[0].Slug != "03" {
 		t.Fatalf("page2 = %+v, %v; want start 03", second, err)
 	}
 
 	// Team-filtered pagination scopes both the total and the window.
-	alpha, aTotal, err := store.PagesPaged(ctx, "proj", "Alpha", 0, 10)
+	alpha, aTotal, err := store.PagesPaged(ctx, "proj", "Alpha", "", 0, 10)
 	if err != nil || aTotal != 2 || len(alpha) != 2 {
 		t.Fatalf("alpha page = %d items total %d, %v; want 2/2", len(alpha), aTotal, err)
 	}
@@ -192,6 +196,13 @@ func TestPagesPagedAndTeamFilter(t *testing.T) {
 		if p.Slug != "01" && p.Slug != "03" {
 			t.Fatalf("unexpected alpha page slug %q", p.Slug)
 		}
+	}
+
+	// Title search is case-insensitive, participates in the total and composes
+	// with the team filter before pagination.
+	found, foundTotal, err := store.PagesPaged(ctx, "proj", "alpha", "RECOVERY", 0, 10)
+	if err != nil || foundTotal != 1 || len(found) != 1 || found[0].Slug != "03" {
+		t.Fatalf("title search = %+v total %d, %v; want page 03", found, foundTotal, err)
 	}
 
 	// Distinct teams preserve first-seen casing (by slug order) and are sorted

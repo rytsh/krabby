@@ -414,7 +414,7 @@ func addSourceAdminTools(server *mcp.Server, mgr *manager.Manager) {
 			perPage = 200
 		}
 
-		pages, total, err := mgr.WebPagesPaged(ctx, name, args.Team, (page-1)*perPage, perPage)
+		pages, total, err := mgr.WebPagesPaged(ctx, name, args.Team, "", (page-1)*perPage, perPage)
 		if err != nil {
 			return nil, nil, err
 		}

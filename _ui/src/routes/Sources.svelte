@@ -17,8 +17,13 @@
     const params = new URLSearchParams($routePath.split("?")[1] || "");
     return params.get("doc") || "";
   });
+  let addContentParam = $derived.by(() => {
+    const params = new URLSearchParams($routePath.split("?")[1] || "");
+    return params.get("add") === "1";
+  });
 
   let sources = $state([]);
+  let selectedSource = $derived(sources.find((source) => source.name === sourceName));
   let loaded = $state(false);
   let error = $state("");
 
@@ -28,6 +33,9 @@
   // Per-collection distinct team names and the active team filter (JIRA).
   let teams = $state({});
   let teamFilter = $state({});
+  let titleFilter = $state({});
+  const titleSearchTimers = {};
+  const pageLoadSeq = {};
   // Per-collection pagination: current page (1-based), total matching items and
   // whether more pages exist. The server pages the item list so large sources
   // (thousands of pages) are never loaded whole.
@@ -41,6 +49,7 @@
   let docContent = $state("");
   let docURL = $state("");
   let docError = $state("");
+  let deletingDoc = $state(false);
 
   // Add form.
   let showAdd = $state(false);
@@ -108,6 +117,7 @@
   });
   onMount(() => () => {
     if (pollTimer) clearInterval(pollTimer);
+    for (const timer of Object.values(titleSearchTimers)) clearTimeout(timer);
   });
 
   // A sync runs one phase at a time, but the API reports a list (a repository
@@ -137,9 +147,12 @@
   }
 
   async function loadPages(name, page = pageNum[name] || 1) {
+    const seq = (pageLoadSeq[name] || 0) + 1;
+    pageLoadSeq[name] = seq;
     pageLoading = { ...pageLoading, [name]: true };
     try {
-      const res = await api.source(name, teamFilter[name] || "", page, PER_PAGE);
+      const res = await api.source(name, teamFilter[name] || "", page, PER_PAGE, titleFilter[name] || "");
+      if (pageLoadSeq[name] !== seq) return;
       pages = { ...pages, [name]: res?.pages || [] };
       pageNum = { ...pageNum, [name]: res?.page || page };
       pageTotal = { ...pageTotal, [name]: res?.total ?? (res?.pages?.length || 0) };
@@ -147,10 +160,27 @@
       // teams is the full distinct set across the collection (server-provided).
       if (res?.teams) teams = { ...teams, [name]: res.teams };
     } catch (e) {
+      if (pageLoadSeq[name] !== seq) return;
       error = e.message;
     } finally {
-      pageLoading = { ...pageLoading, [name]: false };
+      if (pageLoadSeq[name] === seq) pageLoading = { ...pageLoading, [name]: false };
     }
+  }
+
+  function setTitleFilter(name, value) {
+    titleFilter = { ...titleFilter, [name]: value };
+    clearTimeout(titleSearchTimers[name]);
+    titleSearchTimers[name] = setTimeout(() => {
+      pageNum = { ...pageNum, [name]: 1 };
+      loadPages(name, 1);
+    }, 300);
+  }
+
+  function clearTitleFilter(name) {
+    clearTimeout(titleSearchTimers[name]);
+    titleFilter = { ...titleFilter, [name]: "" };
+    pageNum = { ...pageNum, [name]: 1 };
+    loadPages(name, 1);
   }
 
   function goToPage(name, page) {
@@ -182,6 +212,12 @@
 
   function lastPage(name) {
     return Math.max(1, Math.ceil((pageTotal[name] || 0) / PER_PAGE));
+  }
+
+  function sourceRefreshPolicy(source) {
+    if (source?.specs?.length) return `Cron (server time): ${source.specs.join(", ")}`;
+    if (source?.refresh_interval) return `Every ${source.refresh_interval}`;
+    return "Manual only, via Sync now";
   }
 
   function splitLabels(s) {
@@ -245,6 +281,7 @@
     adding = true;
     try {
       const body = sourceBody();
+      const isNewPageSource = !editingName && body.type === "pages";
       if (editingName) await api.updateSource(editingName, body);
       else await api.addSource(body);
       form = newForm();
@@ -254,6 +291,7 @@
       testedConfigSignature = "";
       error = "";
       await load();
+      if (isNewPageSource) navigate(`/sources/${encodeURIComponent(body.name)}?add=1`);
     } catch (e) {
       error = e.message;
     } finally {
@@ -358,9 +396,156 @@
   }
 
   // Per-collection "add page" inputs (pages type).
+  let manualTitle = $state("");
+  let manualMarkdown = $state("");
+  let savingManualPage = $state(false);
   let pageUrl = $state({});
   let sitemapUrl = $state({});
   let importingSitemap = $state({});
+  let browserImporting = $state({});
+  let browserProgress = $state({});
+  let corsRelay = $state("");
+  let extensionAvailable = $state(false);
+  let extensionVersion = $state("");
+  let appVersion = $state("");
+  let extensionOutdated = $derived(
+    extensionAvailable && !!appVersion && !!extensionVersion && extensionVersion !== appVersion,
+  );
+  const extensionRequests = new Map();
+
+  function handleExtensionMessage(event) {
+    if (event.source !== window || event.origin !== location.origin) return;
+    if (event.data?.type === "KRABBY_EXTENSION_READY") {
+      extensionAvailable = true;
+      extensionVersion = event.data.version || "unknown";
+      return;
+    }
+    if (event.data?.type !== "KRABBY_EXTENSION_RESPONSE") return;
+    const pending = extensionRequests.get(event.data.requestId);
+    if (!pending) return;
+    extensionRequests.delete(event.data.requestId);
+    clearTimeout(pending.timer);
+    if (event.data.error) pending.reject(new Error(event.data.error));
+    else pending.resolve(event.data.result);
+  }
+
+  function extensionRequest(action, url) {
+    if (!extensionAvailable) return Promise.reject(new Error("Krabby browser extension is not connected"));
+    const requestId = crypto.randomUUID();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        extensionRequests.delete(requestId);
+        reject(new Error(`Browser extension timed out while processing ${url}`));
+      }, 60000);
+      extensionRequests.set(requestId, { resolve, reject, timer });
+      window.postMessage({ type: "KRABBY_EXTENSION_REQUEST", requestId, action, url }, location.origin);
+    });
+  }
+
+  function saveCorsRelay(value) {
+    corsRelay = value;
+    localStorage.setItem("krabby-cors-relay", value);
+  }
+
+  function relayURL(target) {
+    const relay = corsRelay.trim();
+    if (!relay) return "";
+    if (relay.includes("{rawUrl}")) return relay.replaceAll("{rawUrl}", target);
+    if (relay.includes("{url}")) return relay.replaceAll("{url}", encodeURIComponent(target));
+    return relay + encodeURIComponent(target);
+  }
+
+  // Browser imports first try the original URL. Sites that do not opt into
+  // CORS can be reached through a relay the user controls; no page content is
+  // silently sent through a hard-coded third-party service.
+  async function browserFetchText(url) {
+    let directError;
+    try {
+      const response = await fetch(url, { credentials: "omit" });
+      if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+      return await response.text();
+    } catch (e) {
+      directError = e;
+    }
+
+    if (extensionAvailable) {
+      try {
+        return await extensionRequest("fetch", url);
+      } catch (e) {
+        directError = e;
+      }
+    }
+
+    const proxied = relayURL(url);
+    if (!proxied) {
+      throw new Error(
+        `Browser could not read ${url} (${directError?.message || "CORS blocked"}). Configure a CORS relay below and retry.`,
+      );
+    }
+    const response = await fetch(proxied);
+    if (!response.ok) throw new Error(`CORS relay returned ${response.status} ${response.statusText} for ${url}`);
+    return await response.text();
+  }
+
+  async function browserFetchPage(url) {
+    if (extensionAvailable) return await extensionRequest("render", url);
+    return await browserFetchText(url);
+  }
+
+  function prepareBrowserHTML(html, url) {
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const appShell = !!doc.querySelector("#app:empty, #root:empty, #__next:empty, [data-reactroot]:empty");
+    doc.querySelectorAll("script, style, noscript, template, svg, canvas, iframe").forEach((node) => node.remove());
+
+    const contentRoot = doc.querySelector("main, article, [role='main']") || doc.body;
+    const visibleText = (contentRoot?.textContent || "").replace(/\s+/g, " ").trim();
+    if (visibleText.length < 200 || (appShell && visibleText.length < 1000)) {
+      throw new Error(
+        `${url} appears to be an unrendered JavaScript page (${visibleText.length} visible characters). Use a rendering relay or browser extension.`,
+      );
+    }
+
+    const compact = document.implementation.createHTMLDocument(doc.title || "");
+    compact.body.append(contentRoot.cloneNode(true));
+    return compact.documentElement.outerHTML;
+  }
+
+  function parseSitemap(xml, url) {
+    const doc = new DOMParser().parseFromString(xml, "application/xml");
+    const parseError = doc.querySelector("parsererror");
+    if (parseError) throw new Error(`Invalid sitemap XML at ${url}: ${parseError.textContent.trim()}`);
+    const root = doc.documentElement?.localName;
+    if (root !== "urlset" && root !== "sitemapindex") {
+      throw new Error(`Unsupported sitemap root "${root || "unknown"}" at ${url}`);
+    }
+    const locations = [...doc.getElementsByTagNameNS("*", "loc")]
+      .map((node) => node.textContent.trim())
+      .filter(Boolean)
+      .map((location) => new URL(location, url).href);
+    return { root, locations };
+  }
+
+  async function browserSitemapURLs(rootURL) {
+    const pending = [rootURL];
+    const seenSitemaps = new Set();
+    const seenPages = new Set();
+    while (pending.length) {
+      const current = pending.shift();
+      if (seenSitemaps.has(current)) continue;
+      if (seenSitemaps.size >= 100) throw new Error("Sitemap index exceeds 100 files");
+      seenSitemaps.add(current);
+      const parsed = parseSitemap(await browserFetchText(current), current);
+      if (parsed.root === "sitemapindex") {
+        pending.push(...parsed.locations.filter((url) => !seenSitemaps.has(url)));
+      } else {
+        for (const url of parsed.locations) {
+          if (seenPages.size >= 50000) throw new Error("Sitemap exceeds 50,000 page URLs");
+          seenPages.add(url);
+        }
+      }
+    }
+    return [...seenPages];
+  }
 
   async function addPage(name) {
     const url = (pageUrl[name] || "").trim();
@@ -372,6 +557,48 @@
       await load();
     } catch (e) {
       error = e.message;
+    }
+  }
+
+  async function addMarkdownPage(name) {
+    const title = manualTitle.trim();
+    const content = manualMarkdown.trim();
+    if (!title || !content) return;
+    savingManualPage = true;
+    error = "";
+    try {
+      await api.importSourcePages(name, [{ title, content_type: "text/markdown", content }]);
+      manualTitle = "";
+      manualMarkdown = "";
+      successToast("Markdown page saved and indexed");
+      await loadPages(name, 1);
+      await load();
+    } catch (e) {
+      error = e.message;
+    } finally {
+      savingManualPage = false;
+    }
+  }
+
+  async function importPageInBrowser(name) {
+    const url = (pageUrl[name] || "").trim();
+    if (!url) return;
+    browserImporting = { ...browserImporting, [name]: true };
+    browserProgress = { ...browserProgress, [name]: "Fetching page in browser..." };
+    try {
+      const content = prepareBrowserHTML(await browserFetchPage(url), url);
+      browserProgress = { ...browserProgress, [name]: "Converting and indexing..." };
+      await api.importSourcePages(name, [{ url, content_type: "text/html", content }]);
+      pageUrl = { ...pageUrl, [name]: "" };
+      browserProgress = { ...browserProgress, [name]: "" };
+      successToast("Browser-fetched page imported");
+      await loadPages(name, 1);
+      await load();
+    } catch (e) {
+      error = e.message;
+      browserProgress = { ...browserProgress, [name]: "" };
+    } finally {
+      browserImporting = { ...browserImporting, [name]: false };
     }
   }
 
@@ -392,6 +619,95 @@
     }
   }
 
+  async function importSitemapInBrowser(name) {
+    const url = (sitemapUrl[name] || "").trim();
+    if (!url) return;
+    error = "";
+    browserImporting = { ...browserImporting, [name]: true };
+    browserProgress = { ...browserProgress, [name]: "Reading sitemap in browser..." };
+    try {
+      const urls = await browserSitemapURLs(url);
+      if (!urls.length) throw new Error("Sitemap contains no page URLs");
+      if (urls.length > 200 && !confirm(`Fetch and import ${urls.length} pages through this browser?`)) {
+        browserProgress = { ...browserProgress, [name]: "" };
+        return;
+      }
+
+      let imported = 0;
+      let emptyBatches = 0;
+      const failures = [];
+      const batchSize = 5;
+      for (let offset = 0; offset < urls.length; offset += batchSize) {
+        const batchURLs = urls.slice(offset, offset + batchSize);
+        browserProgress = {
+          ...browserProgress,
+          [name]: `Fetching pages ${offset + 1}-${Math.min(offset + batchURLs.length, urls.length)} of ${urls.length}...`,
+        };
+        const fetched = await Promise.allSettled(
+          batchURLs.map(async (pageURL) => ({
+            url: pageURL,
+            content_type: "text/html",
+            content: prepareBrowserHTML(await browserFetchPage(pageURL), pageURL),
+          })),
+        );
+        const pagesToImport = [];
+        fetched.forEach((item, index) => {
+          if (item.status === "fulfilled") pagesToImport.push(item.value);
+          else failures.push(`${batchURLs[index]}: ${item.reason?.message || "fetch failed"}`);
+        });
+
+        let batchImported = 0;
+        if (pagesToImport.length) {
+          browserProgress = {
+            ...browserProgress,
+            [name]: `Indexing ${imported + 1}-${imported + pagesToImport.length} of ${urls.length}...`,
+          };
+          try {
+            const result = await api.importSourcePages(name, pagesToImport);
+            batchImported = result?.imported || pagesToImport.length;
+          } catch {
+            // A malformed page makes the backend reject its whole atomic batch.
+            // Retry individually so one bad URL does not discard its neighbors.
+            for (const page of pagesToImport) {
+              try {
+                const result = await api.importSourcePages(name, [page]);
+                batchImported += result?.imported || 1;
+              } catch (pageError) {
+                failures.push(`${page.url}: ${pageError.message}`);
+              }
+            }
+          }
+        }
+
+        imported += batchImported;
+        if (batchImported > 0) {
+          emptyBatches = 0;
+        } else {
+          emptyBatches++;
+          const detail = failures.slice(-3).join("; ");
+          if (imported === 0 || emptyBatches >= 3) {
+            throw new Error(`No pages could be imported; stopped early. ${detail}`);
+          }
+        }
+      }
+
+      sitemapUrl = { ...sitemapUrl, [name]: "" };
+      browserProgress = { ...browserProgress, [name]: "" };
+      await loadPages(name, 1);
+      await load();
+      const summary = `Browser imported ${imported} pages${failures.length ? `; ${failures.length} failed` : ""}`;
+      successToast(summary);
+      error = failures.length ? `${summary}. ${failures.slice(0, 3).join("; ")}` : "";
+    } catch (e) {
+      browserProgress = { ...browserProgress, [name]: "" };
+      await loadPages(name, 1);
+      await load();
+      error = e.message;
+    } finally {
+      browserImporting = { ...browserImporting, [name]: false };
+    }
+  }
+
   async function removePage(name, slug) {
     if (!confirm(`Remove page ${slug}?`)) return;
     try {
@@ -400,6 +716,21 @@
       await load();
     } catch (e) {
       error = e.message;
+    }
+  }
+
+  async function removeCurrentDoc() {
+    const slug = docParam.endsWith(".md") ? docParam.slice(0, -3) : docParam;
+    if (!slug || !confirm(`Delete ${slug} from ${sourceName}?`)) return;
+    deletingDoc = true;
+    try {
+      await api.deleteSourcePage(sourceName, slug);
+      successToast("Page and its index entries deleted");
+      navigate("/sources");
+    } catch (e) {
+      docError = e.message;
+    } finally {
+      deletingDoc = false;
     }
   }
 
@@ -425,10 +756,204 @@
       .catch((e) => (docError = e.message));
   });
 
-  onMount(load);
+  onMount(() => {
+    corsRelay = localStorage.getItem("krabby-cors-relay") || "";
+    load();
+    api.settings().then((settings) => (appVersion = settings?.version || "")).catch(() => {});
+  });
+  onMount(() => {
+    window.addEventListener("message", handleExtensionMessage);
+    window.postMessage({ type: "KRABBY_EXTENSION_PING" }, location.origin);
+    return () => {
+      window.removeEventListener("message", handleExtensionMessage);
+      for (const pending of extensionRequests.values()) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error("Page closed"));
+      }
+      extensionRequests.clear();
+    };
+  });
 </script>
 
-{#if sourceName && docParam}
+{#if sourceName && addContentParam}
+  <div class="mb-3 flex items-center gap-2 text-[13px]">
+    <a href="/sources" use:link class="text-dim transition-colors hover:text-fg">Sources</a>
+    <span class="text-faint">/</span>
+    <span class="font-mono">{sourceName}</span>
+    <span class="text-faint">/</span>
+    <span>Add content</span>
+  </div>
+
+  {#if error}
+    <div class="mb-3 rounded-md border border-err bg-err/10 px-3 py-2.5 text-[13px] text-err">{error}</div>
+  {/if}
+
+  {#if !loaded}
+    <div class="card p-6 text-center text-dim">Loading…</div>
+  {:else if !selectedSource}
+    <div class="card p-6 text-center text-err">Source not found.</div>
+  {:else if selectedSource.type !== "pages"}
+    <div class="card p-6 text-center text-dim">
+      Content is discovered by the {selectedSource.type} provider and cannot be added manually.
+    </div>
+  {:else}
+    <div class="card overflow-hidden">
+      <div class="border-b border-line bg-surface-2 px-4 py-3">
+        <div class="flex items-center gap-2">
+          <Icon name="plus" size={16} />
+          <h2 class="m-0 text-[15px] font-semibold">Add content to <span class="font-mono">{sourceName}</span></h2>
+        </div>
+        <p class="mb-0 mt-1 text-[12px] text-faint">
+          Write Markdown directly, fetch one page, or crawl a sitemap.
+        </p>
+      </div>
+      <div class="grid gap-4 p-4">
+        <section class="flex items-start gap-2.5 rounded-md border border-line bg-surface-2 px-3 py-2.5">
+          <span class="mt-0.5 shrink-0 text-dim"><Icon name="refresh" size={15} /></span>
+          <div class="min-w-0 text-[12px] text-dim">
+            <div class="font-medium text-fg">Remote page refresh: {sourceRefreshPolicy(selectedSource)}</div>
+            <div class="mt-0.5 text-faint">
+              URL and sitemap pages follow this source-level policy. Manually written Markdown is stored as-is and
+              is never fetched or overwritten by scheduled refreshes.
+              {#if selectedSource.last_refresh_at}
+                Last source sync: {fmtDate(selectedSource.last_refresh_at)}.
+              {/if}
+            </div>
+          </div>
+        </section>
+
+        <section class="grid gap-2">
+          <div>
+            <div class="text-[13px] font-medium">Write Markdown</div>
+            <p class="mb-0 mt-0.5 text-[12px] text-faint">
+              Stored in Krabby without a remote URL, so scheduled refreshes leave it unchanged. The title identifies
+              the page; saving the same title again updates it.
+            </p>
+          </div>
+          <label class="flex flex-col gap-1 text-[12px] text-faint">
+            Title
+            <input
+              class="input text-[13px]"
+              placeholder="e.g. Production recovery runbook"
+              bind:value={manualTitle}
+            />
+          </label>
+          <label class="flex flex-col gap-1 text-[12px] text-faint">
+            Markdown
+            <textarea
+              class="input min-h-64 resize-y font-mono text-[13px] leading-5"
+              placeholder={"## Overview\n\nWrite or paste Markdown here..."}
+              bind:value={manualMarkdown}
+              spellcheck="true"
+            ></textarea>
+          </label>
+          <div class="flex justify-end">
+            <button
+              class="btn btn-primary"
+              onclick={() => addMarkdownPage(sourceName)}
+              disabled={savingManualPage || !manualTitle.trim() || !manualMarkdown.trim()}
+            >
+              {savingManualPage ? "Saving…" : "Save Markdown"}
+            </button>
+          </div>
+        </section>
+
+        <section class="grid gap-2 border-t border-line pt-4">
+          <div class="text-[13px] font-medium">Single page</div>
+          <div class="flex flex-wrap gap-2">
+            <input
+              class="input min-w-64 flex-1"
+              placeholder="https://wiki.example.com/page"
+              value={pageUrl[sourceName] || ""}
+              oninput={(e) => (pageUrl = { ...pageUrl, [sourceName]: e.target.value })}
+              onkeydown={(e) => e.key === "Enter" && addPage(sourceName)}
+            />
+            <button class="btn" onclick={() => addPage(sourceName)} disabled={!(pageUrl[sourceName] || "").trim()}>
+              Fetch on server
+            </button>
+            <button
+              class="btn btn-primary"
+              onclick={() => importPageInBrowser(sourceName)}
+              disabled={browserImporting[sourceName] || !(pageUrl[sourceName] || "").trim()}
+            >
+              {extensionAvailable ? "Render with extension" : "Fetch in browser"}
+            </button>
+          </div>
+        </section>
+
+        <section class="grid gap-2 border-t border-line pt-4">
+          <div class="text-[13px] font-medium">Sitemap</div>
+          <div class="flex flex-wrap gap-2">
+            <input
+              class="input min-w-64 flex-1"
+              placeholder="https://example.com/sitemap.xml"
+              value={sitemapUrl[sourceName] || ""}
+              oninput={(e) => (sitemapUrl = { ...sitemapUrl, [sourceName]: e.target.value })}
+              onkeydown={(e) => e.key === "Enter" && importSitemap(sourceName)}
+            />
+            <button
+              class="btn"
+              onclick={() => importSitemap(sourceName)}
+              disabled={importingSitemap[sourceName] || !(sitemapUrl[sourceName] || "").trim()}
+            >
+              {importingSitemap[sourceName] ? "Importing…" : "Fetch on server"}
+            </button>
+            <button
+              class="btn btn-primary"
+              onclick={() => importSitemapInBrowser(sourceName)}
+              disabled={browserImporting[sourceName] || !(sitemapUrl[sourceName] || "").trim()}
+            >
+              {browserImporting[sourceName]
+                ? "Importing…"
+                : extensionAvailable
+                  ? "Render with extension"
+                  : "Fetch in browser"}
+            </button>
+          </div>
+        </section>
+
+        <div
+          class={`flex flex-col gap-2 rounded border px-3 py-2 text-[12px] sm:flex-row sm:items-center ${extensionOutdated ? "border-warn bg-warn/10 text-warn" : extensionAvailable ? "border-ok bg-ok/10 text-ok" : "border-line bg-surface-2 text-faint"}`}
+        >
+          <div class="min-w-0 flex-1">
+            {#if extensionOutdated}
+              Extension version {extensionVersion} does not match Krabby {appVersion}. Download and reload the current extension.
+            {:else if extensionAvailable}
+              Browser extension {extensionVersion} connected. Pages will be captured after rendering.
+            {:else}
+              Browser extension not detected. Download the ZIP, extract it, load the folder from
+              <code class="font-mono">chrome://extensions</code>, then connect this origin from the extension popup.
+            {/if}
+          </div>
+          <a class="btn btn-sm shrink-0" href="api/v1/browser-extension.zip">
+            {extensionOutdated ? "Download update" : "Download extension"}
+          </a>
+        </div>
+
+        <label class="flex flex-col gap-1 border-t border-line pt-4 text-[12px] text-faint">
+          Optional CORS relay (kept only in this browser)
+          <input
+            class="input font-mono"
+            placeholder={"http://127.0.0.1:8080/?url={url}"}
+            value={corsRelay}
+            oninput={(e) => saveCorsRelay(e.target.value)}
+          />
+          <span>
+            Browser fetch is direct when the site permits CORS. For blocked sites such as docs.n8n.io,
+            use a relay you trust; <code class="font-mono">{`{url}`}</code> receives the encoded target and
+            <code class="font-mono">{`{rawUrl}`}</code> the original URL.
+          </span>
+        </label>
+
+        {#if browserProgress[sourceName]}
+          <div class="rounded border border-line bg-surface-2 px-3 py-2 text-[12px] text-busy">
+            {browserProgress[sourceName]}
+          </div>
+        {/if}
+      </div>
+    </div>
+  {/if}
+{:else if sourceName && docParam}
   <!-- Doc viewer: /sources/<name>?doc=<path> -->
   <div class="mb-3 flex items-center gap-2 text-[13px]">
     <a href="/sources" use:link class="text-dim transition-colors hover:text-fg">Sources</a>
@@ -436,10 +961,19 @@
     <span class="font-mono">{sourceName}</span>
     <span class="text-faint">/</span>
     <span class="truncate font-mono text-dim">{docParam}</span>
-    {#if docURL}
-      <a class="btn btn-sm ml-auto" href={docURL} target="_blank" rel="noreferrer noopener">
-        Open original
-      </a>
+    {#if docURL || selectedSource?.type === "pages"}
+      <span class="ml-auto flex shrink-0 items-center gap-2">
+        {#if docURL}
+          <a class="btn btn-sm" href={docURL} target="_blank" rel="noreferrer noopener">
+            Open original
+          </a>
+        {/if}
+        {#if selectedSource?.type === "pages"}
+          <button class="btn btn-sm btn-danger" onclick={removeCurrentDoc} disabled={deletingDoc}>
+            {deletingDoc ? "Deleting…" : "Delete"}
+          </button>
+        {/if}
+      </span>
     {/if}
   </div>
   {#if docError}
@@ -685,11 +1219,12 @@
     {:else}
       {#each sources as s (s.name)}
         <div class="card overflow-hidden">
-          <button
-            class="flex w-full cursor-pointer items-center gap-2.5 px-3.5 py-2.5 text-left hover:bg-surface-2"
-            onclick={() => toggle(s.name)}
-            aria-expanded={!!expanded[s.name]}
-          >
+          <div class="flex items-center hover:bg-surface-2">
+            <button
+              class="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 px-3.5 py-2.5 text-left"
+              onclick={() => toggle(s.name)}
+              aria-expanded={!!expanded[s.name]}
+            >
             <Icon name={expanded[s.name] ? "chevron-down" : "chevron-right"} size={14} />
             <Icon name={s.type === "confluence" ? "book" : s.type === "jira" ? "tag" : "search"} size={14} />
             <span class="font-mono text-[13.5px] font-medium">{s.name}</span>
@@ -719,7 +1254,16 @@
               <span>{s.page_count} {s.page_count === 1 ? "page" : "pages"}</span>
               <Status status={s.status} />
             </span>
-          </button>
+            </button>
+            {#if s.type === "pages"}
+              <button
+                class="btn btn-sm mr-3 shrink-0"
+                onclick={() => navigate(`/sources/${encodeURIComponent(s.name)}?add=1`)}
+              >
+                Add content
+              </button>
+            {/if}
+          </div>
 
           {#if expanded[s.name]}
             <div class="border-t border-line px-3.5 py-3">
@@ -729,9 +1273,9 @@
               <div class="mb-3 flex flex-wrap items-center gap-x-5 gap-y-1 text-[12px] text-faint">
                 <span>Last sync: {s.last_refresh_at ? fmtDate(s.last_refresh_at) : "never"}</span>
                 {#if s.specs?.length}
-                  <span>Schedule: <span class="font-mono">{s.specs.join(", ")}</span></span>
+                  <span>Remote refresh: <span class="font-mono">{sourceRefreshPolicy(s)}</span></span>
                 {:else}
-                  <span>Auto refresh: {s.refresh_interval || "manual"}</span>
+                  <span>Remote refresh: {sourceRefreshPolicy(s)}</span>
                 {/if}
                 {#if s.type === "confluence"}
                   <span class="font-mono">
@@ -769,38 +1313,26 @@
                 </span>
               </div>
 
-              {#if s.type === "pages"}
-                <div class="mb-3 grid gap-2">
-                  <div class="flex gap-2">
-                    <input
-                      class="input flex-1"
-                      placeholder="https://wiki.example.com/page"
-                      value={pageUrl[s.name] || ""}
-                      oninput={(e) => (pageUrl = { ...pageUrl, [s.name]: e.target.value })}
-                      onkeydown={(e) => e.key === "Enter" && addPage(s.name)}
-                    />
-                    <button class="btn" onclick={() => addPage(s.name)} disabled={!(pageUrl[s.name] || "").trim()}>
-                      Add page
-                    </button>
-                  </div>
-                  <div class="flex gap-2">
-                    <input
-                      class="input flex-1"
-                      placeholder="https://example.com/sitemap.xml"
-                      value={sitemapUrl[s.name] || ""}
-                      oninput={(e) => (sitemapUrl = { ...sitemapUrl, [s.name]: e.target.value })}
-                      onkeydown={(e) => e.key === "Enter" && importSitemap(s.name)}
-                    />
-                    <button
-                      class="btn"
-                      onclick={() => importSitemap(s.name)}
-                      disabled={importingSitemap[s.name] || !(sitemapUrl[s.name] || "").trim()}
-                    >
-                      {importingSitemap[s.name] ? "Importing…" : "Import sitemap"}
-                    </button>
-                  </div>
+              <div class="mb-3 flex flex-wrap items-center gap-2">
+                <div class="relative min-w-64 flex-1">
+                  <span class="pointer-events-none absolute inset-y-0 left-2.5 flex items-center text-faint">
+                    <Icon name="search" size={14} />
+                  </span>
+                  <input
+                    class="input w-full pl-8"
+                    type="search"
+                    placeholder="Search page titles"
+                    value={titleFilter[s.name] || ""}
+                    oninput={(e) => setTitleFilter(s.name, e.target.value)}
+                  />
                 </div>
-              {/if}
+                {#if titleFilter[s.name]}
+                  <button class="btn btn-sm" onclick={() => clearTitleFilter(s.name)}>Clear</button>
+                  <span class="text-[12px] text-faint">
+                    {pageLoading[s.name] ? "Searching…" : `${pageTotal[s.name] || 0} matches`}
+                  </span>
+                {/if}
+              </div>
 
               {#if s.type === "jira" && teams[s.name]?.length}
                 <div class="mb-3 flex items-center gap-2 text-[12px] text-dim">
@@ -820,7 +1352,11 @@
 
               {#if !(pages[s.name]?.length)}
                 <div class="py-3 text-center text-[13px] text-dim">
-                  {pages[s.name] ? "No pages synced yet." : "Loading…"}
+                  {pages[s.name]
+                    ? titleFilter[s.name]
+                      ? "No page titles match this search."
+                      : "No pages synced yet."
+                    : "Loading…"}
                 </div>
               {:else}
                 <table class="w-full border-collapse">
@@ -828,13 +1364,23 @@
                     {#each pages[s.name] as p (p.id)}
                       <tr class="hover:bg-surface-2">
                         <td class="border-b border-line px-2 py-1.5">
-                          <button
-                            class="cursor-pointer text-left font-mono text-[12.5px] hover:text-accent"
-                            onclick={() => navigate(`/sources/${s.name}?doc=${encodeURIComponent(p.slug + ".md")}`)}
-                            title={p.url}
-                          >
-                            {p.title || p.slug}
-                          </button>
+                          <div class="flex flex-wrap items-center gap-1.5">
+                            <button
+                              class="cursor-pointer text-left font-mono text-[12.5px] hover:text-accent"
+                              onclick={() => navigate(`/sources/${s.name}?doc=${encodeURIComponent(p.slug + ".md")}`)}
+                              title={p.url}
+                            >
+                              {p.title || p.slug}
+                            </button>
+                            <span
+                              class="rounded border border-line px-1.5 py-0.5 text-[10px] text-faint"
+                              title={p.url
+                                ? `Fetched according to source policy: ${sourceRefreshPolicy(s)}`
+                                : "Stored as-is; source refreshes do not overwrite this page"}
+                            >
+                              {p.url ? "remote · follows source refresh" : "manual · stored as-is"}
+                            </span>
+                          </div>
                         </td>
                         <td class="border-b border-line px-2 py-1.5"><Status status={p.status} dot /></td>
                         <td class="border-b border-line px-2 py-1.5 text-[11px] text-faint">{fmtDate(p.last_fetch_at)}</td>
@@ -842,7 +1388,9 @@
                           {#if p.last_error}
                             <span class="mr-2 text-[11px] text-err" title={p.last_error}>fetch failed</span>
                           {/if}
-                          <a class="mr-1 text-[11px] text-dim hover:text-fg" href={p.url} target="_blank" rel="noreferrer noopener">open</a>
+                          {#if p.url}
+                            <a class="mr-1 text-[11px] text-dim hover:text-fg" href={p.url} target="_blank" rel="noreferrer noopener">open</a>
+                          {/if}
                           {#if s.type === "pages"}
                             <button class="btn btn-sm btn-danger" onclick={() => removePage(s.name, p.slug)}>Remove</button>
                           {/if}

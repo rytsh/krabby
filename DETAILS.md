@@ -155,7 +155,9 @@ administer them.
 | `GET/PUT/DELETE /api/v1/sources/{name}` | Read/update/delete a collection |
 | `POST /api/v1/sources/{name}/refresh` | Sync and reindex a collection |
 | `POST/DELETE /api/v1/sources/{name}/pages` | Add/remove Custom web URLs |
+| `POST /api/v1/sources/{name}/pages/import` | Import HTML/Markdown pages, including URL-less manually authored Markdown, and index them |
 | `POST /api/v1/sources/{name}/sitemap` | Import URLs from a Custom web sitemap |
+| `GET /api/v1/browser-extension.zip` | Download the browser importer matched to the running Krabby version |
 | `GET /api/v1/docs/search?q=&mode=&scope=&repo=&top=` | Docs search; `mode=hybrid|semantic|lexical`, `scope=all|repos|sources`, `repo=web:<name>` |
 | `GET /api/v1/code/search?q=&repo=&top=` | Semantic source-code snippet search |
 | `GET/PUT /api/v1/docs/config` | Read/update docs and code RAG settings |

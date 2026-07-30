@@ -1,0 +1,53 @@
+:root {
+  color-scheme: dark;
+  font: 13px/1.4 ui-sans-serif, system-ui, sans-serif;
+  background: #111827;
+  color: #e5e7eb;
+}
+
+body {
+  margin: 0;
+  min-width: 300px;
+}
+
+main {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.brand img {
+  border-radius: 4px;
+  background: white;
+  padding: 2px;
+}
+
+p {
+  margin: 0;
+  color: #9ca3af;
+  overflow-wrap: anywhere;
+}
+
+button {
+  border: 1px solid #4b5563;
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: #2563eb;
+  color: white;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.hint {
+  font-size: 11px;
+}

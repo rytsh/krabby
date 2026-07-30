@@ -26,6 +26,10 @@ import (
 // store has been attached.
 var ErrNoWebSources = errors.New("web sources are not configured")
 
+const (
+	maxWebPageImportBatch = 20
+)
+
 // validateWebSpecs checks that every cron spec parses (hardloop syntax, e.g.
 // "0 2 * * *" or "@every 6h"), so create/update fail fast with a clear error
 // instead of the scheduler silently dropping an unparseable schedule.
@@ -430,7 +434,7 @@ func (m *Manager) WebPagesByTeam(ctx context.Context, name, team string) ([]*web
 
 	// A very large upper bound acts as "all matching"; team-filtered sets are
 	// small (jira squads), so this stays bounded in practice.
-	pages, _, err := m.webStore.PagesPaged(ctx, name, team, 0, 1_000_000)
+	pages, _, err := m.webStore.PagesPaged(ctx, name, team, "", 0, 1_000_000)
 
 	return pages, err
 }
@@ -439,12 +443,12 @@ func (m *Manager) WebPagesByTeam(ctx context.Context, name, team string) ([]*web
 // records plus the total count, optionally restricted to a team
 // (case-insensitive). Filtering and paging happen at the store level, so a
 // large collection is never fully loaded into memory.
-func (m *Manager) WebPagesPaged(ctx context.Context, name, team string, offset, limit int) ([]*websource.Page, int, error) {
+func (m *Manager) WebPagesPaged(ctx context.Context, name, team, titleQuery string, offset, limit int) ([]*websource.Page, int, error) {
 	if m.webStore == nil {
 		return nil, 0, ErrNoWebSources
 	}
 
-	return m.webStore.PagesPaged(ctx, name, team, offset, limit)
+	return m.webStore.PagesPaged(ctx, name, team, titleQuery, offset, limit)
 }
 
 // AddWebPage registers a page URL on a "pages" collection and triggers a
@@ -489,6 +493,210 @@ func (m *Manager) AddWebPage(ctx context.Context, name, pageURL string) (*websou
 	m.TriggerWebRefresh(name)
 
 	return page, nil
+}
+
+// WebPageImport is page content supplied by a client. ContentType accepts HTML,
+// Markdown or plain text; HTML is reduced to its readable article before it is
+// indexed. URL may be empty for manually authored Markdown, in which case Title
+// is required and provides a stable page identity.
+type WebPageImport struct {
+	URL         string    `json:"url"`
+	Title       string    `json:"title,omitempty"`
+	ContentType string    `json:"content_type"`
+	Content     string    `json:"content"`
+	UpdatedAt   time.Time `json:"updated_at,omitempty"`
+}
+
+// WebPageImportResult summarizes one direct-content batch.
+type WebPageImportResult struct {
+	Imported  int `json:"imported"`
+	Changed   int `json:"changed"`
+	Unchanged int `json:"unchanged"`
+}
+
+// ImportWebPages writes client-fetched page content and updates the indexes in
+// one queue-tracked batch. The request waits for completion so callers receive
+// exact changed/unchanged counts, while Activity still shows live progress and
+// retains the task in recent history. The task is intentionally transient: its
+// potentially large content payload is not persisted across server restarts.
+func (m *Manager) ImportWebPages(ctx context.Context, name string, imports []WebPageImport) (WebPageImportResult, error) {
+	type outcome struct {
+		result WebPageImportResult
+		err    error
+	}
+
+	resultCh := make(chan outcome, 1)
+	scope := websource.ScopeKey(name)
+	handle := m.queue.Submit(queue.Task{
+		ID:    scope,
+		Kind:  taskKindWebImport,
+		Title: fmt.Sprintf("Import %d pages", len(imports)),
+		Run: func(taskCtx context.Context) error {
+			result, err := m.importWebPages(taskCtx, name, imports)
+			resultCh <- outcome{result: result, err: err}
+
+			return err
+		},
+	})
+
+	select {
+	case result := <-resultCh:
+		return result.result, result.err
+	case <-handle.Done():
+		select {
+		case result := <-resultCh:
+			return result.result, result.err
+		default:
+			return WebPageImportResult{}, errors.New("web page import task was canceled before it ran")
+		}
+	case <-ctx.Done():
+		return WebPageImportResult{}, ctx.Err()
+	}
+}
+
+func (m *Manager) importWebPages(ctx context.Context, name string, imports []WebPageImport) (WebPageImportResult, error) {
+	var result WebPageImportResult
+	if m.webStore == nil {
+		return result, ErrNoWebSources
+	}
+	if len(imports) == 0 {
+		return result, errors.New("at least one page is required")
+	}
+	if len(imports) > maxWebPageImportBatch {
+		return result, fmt.Errorf("page import batch exceeds %d pages", maxWebPageImportBatch)
+	}
+	col, err := m.webStore.GetCollection(ctx, name)
+	if err != nil {
+		return result, err
+	}
+	if col == nil {
+		return result, fmt.Errorf("collection %s not found", name)
+	}
+	if col.Type != websource.TypePages {
+		return result, fmt.Errorf("collection %s is type %q; direct page imports require type %q", name, col.Type, websource.TypePages)
+	}
+
+	now := time.Now()
+	remotes := make([]websource.RemotePage, 0, len(imports))
+	for i, item := range imports {
+		item.URL = strings.TrimSpace(item.URL)
+		item.Title = strings.TrimSpace(item.Title)
+		if item.URL != "" && !strings.HasPrefix(item.URL, "http://") && !strings.HasPrefix(item.URL, "https://") {
+			return result, fmt.Errorf("page %d url must be http(s): %q", i+1, item.URL)
+		}
+		if item.URL == "" && item.Title == "" {
+			return result, fmt.Errorf("page %d title is required when url is empty", i+1)
+		}
+		if strings.TrimSpace(item.Content) == "" {
+			return result, fmt.Errorf("page %d content is required", i+1)
+		}
+
+		contentType, _, _ := strings.Cut(strings.ToLower(strings.TrimSpace(item.ContentType)), ";")
+		title := item.Title
+		var markdown string
+		switch contentType {
+		case "text/html", "application/xhtml+xml":
+			extractedTitle, extractedMarkdown, err := websource.ExtractArticle(item.Content, item.URL)
+			if err != nil {
+				return result, fmt.Errorf("page %d; %w", i+1, err)
+			}
+			markdown = extractedMarkdown
+			if title == "" {
+				title = extractedTitle
+			}
+		case "text/markdown", "text/x-markdown", "markdown", "text/plain":
+			markdown = strings.TrimSpace(item.Content)
+		default:
+			return result, fmt.Errorf("page %d has unsupported content type %q", i+1, item.ContentType)
+		}
+
+		updatedAt := item.UpdatedAt
+		if updatedAt.IsZero() {
+			updatedAt = now
+		}
+		slug := slugForURL(item.URL)
+		if item.URL == "" {
+			slug = "manual-" + websource.Slugify(title) + "-" + websource.Hash(title)[:8]
+		}
+		remotes = append(remotes, websource.RemotePage{
+			Slug:      slug,
+			Title:     title,
+			URL:       item.URL,
+			Markdown:  markdown,
+			UpdatedAt: updatedAt,
+		})
+	}
+
+	scope := websource.ScopeKey(name)
+	l := m.lock(scope)
+	l.Lock()
+	defer l.Unlock()
+
+	col, err = m.webStore.GetCollection(ctx, name)
+	if err != nil {
+		return result, err
+	}
+	if col == nil {
+		return result, fmt.Errorf("collection %s not found", name)
+	}
+	if col.Type != websource.TypePages {
+		return result, fmt.Errorf("collection %s is type %q; direct page imports require type %q", name, col.Type, websource.TypePages)
+	}
+
+	dir := m.sourcesDir(name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return result, fmt.Errorf("mkdir %s; %w", dir, err)
+	}
+
+	changedPaths := make([]string, 0, len(remotes))
+	updatedAt := make(map[string]time.Time, len(remotes))
+	for _, remote := range remotes {
+		rec, err := m.webStore.GetPage(ctx, websource.PageID(name, remote.Slug))
+		if err != nil {
+			return result, err
+		}
+		if rec == nil {
+			rec = &websource.Page{ID: websource.PageID(name, remote.Slug), Collection: name, Slug: remote.Slug}
+		}
+
+		rec.URL = remote.URL
+		rec.Title = remote.Title
+		rec.UpdatedAt = remote.UpdatedAt
+		rec.LastFetchAt = now
+		rec.Status = websource.StatusReady
+		rec.LastError = ""
+
+		markdown := withTitleHeading(remote.Markdown, rec.Title)
+		hash := websource.Hash(markdown)
+		file, err := websource.PageFile(dir, remote.Slug)
+		if err != nil {
+			return result, err
+		}
+		path := remote.Slug + ".md"
+		if hash != rec.Hash || !fileExists(file) {
+			if err := os.WriteFile(file, []byte(markdown), 0o644); err != nil {
+				return result, fmt.Errorf("write %s; %w", file, err)
+			}
+			rec.Hash = hash
+			changedPaths = append(changedPaths, path)
+			updatedAt[path] = remote.UpdatedAt
+			result.Changed++
+		} else {
+			result.Unchanged++
+		}
+		if err := m.webStore.UpsertPage(ctx, rec); err != nil {
+			return result, err
+		}
+		result.Imported++
+	}
+
+	if len(changedPaths) > 0 {
+		if err := m.indexWebSourcePaths(ctx, name, changedPaths, nil, updatedAt); err != nil {
+			return result, fmt.Errorf("index imported pages; %w", err)
+		}
+	}
+
+	return result, nil
 }
 
 // SitemapImportResult summarizes a sitemap import for the REST/UI caller.

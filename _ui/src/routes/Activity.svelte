@@ -26,6 +26,7 @@
     generate: "Generate",
     reindex: "Reindex",
     websync: "Web sync",
+    webimport: "Web import",
   };
 
   const stateMeta = {

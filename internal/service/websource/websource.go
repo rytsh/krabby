@@ -386,7 +386,7 @@ func (s *Store) Pages(ctx context.Context, collection string) ([]*Page, error) {
 // pages tagged with team (case-insensitive, matched against the normalized
 // teams field via the JSON "has any" operator so the scan happens in the
 // store, not in memory). An empty team matches the whole collection.
-func pagesWhere(collection, team string) []query.Expression {
+func pagesWhere(collection, team, titleQuery string) []query.Expression {
 	where := []query.Expression{
 		query.NewExpressionCmp(query.OperatorEq, "collection", collection).Expression(),
 	}
@@ -396,6 +396,11 @@ func pagesWhere(collection, team string) []query.Expression {
 		where = append(where,
 			query.NewExpressionCmp(query.OperatorJIn, "teams_norm", []string{team}).Expression())
 	}
+	titleQuery = strings.TrimSpace(titleQuery)
+	if titleQuery != "" {
+		where = append(where,
+			query.NewExpressionCmp(query.OperatorILike, "title", "%"+titleQuery+"%").Expression())
+	}
 
 	return where
 }
@@ -404,7 +409,7 @@ func pagesWhere(collection, team string) []query.Expression {
 // restricted to a team (case-insensitive).
 func (s *Store) CountPages(ctx context.Context, collection, team string) (int, error) {
 	q := query.New()
-	q.Where = pagesWhere(collection, team)
+	q.Where = pagesWhere(collection, team, "")
 
 	n, err := s.pages.Count(ctx, q)
 	if err != nil {
@@ -421,11 +426,14 @@ func (s *Store) CountPages(ctx context.Context, collection, team string) (int, e
 // source (e.g. a Confluence sub-tree with thousands of pages) is not loaded
 // into memory. offset < 0 is treated as 0; limit <= 0 returns no records (only
 // the count).
-func (s *Store) PagesPaged(ctx context.Context, collection, team string, offset, limit int) ([]*Page, int, error) {
-	total, err := s.CountPages(ctx, collection, team)
+func (s *Store) PagesPaged(ctx context.Context, collection, team, titleQuery string, offset, limit int) ([]*Page, int, error) {
+	countQuery := query.New()
+	countQuery.Where = pagesWhere(collection, team, titleQuery)
+	count, err := s.pages.Count(ctx, countQuery)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, fmt.Errorf("count pages of %s; %w", collection, err)
 	}
+	total := int(count)
 
 	if offset < 0 {
 		offset = 0
@@ -435,7 +443,7 @@ func (s *Store) PagesPaged(ctx context.Context, collection, team string, offset,
 	}
 
 	q := query.New()
-	q.Where = pagesWhere(collection, team)
+	q.Where = pagesWhere(collection, team, titleQuery)
 	q.Sort = []query.ExpressionSort{{Field: "slug"}}
 	q.SetOffset(uint64(offset))
 	q.SetLimit(uint64(limit))

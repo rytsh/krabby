@@ -52,6 +52,24 @@ func TestFetchCustomPages(t *testing.T) {
 	}
 }
 
+func TestFetchSkipsManuallyAuthoredPages(t *testing.T) {
+	fetcher := New(nil)
+	var remotes []websource.RemotePage
+	_, err := fetcher.Fetch(context.Background(), &websource.Collection{Name: "notes"}, []*websource.Page{
+		{Slug: "manual-note", Title: "Manual note"},
+	}, nil, func(p websource.RemotePage) error {
+		remotes = append(remotes, p)
+
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remotes) != 0 {
+		t.Fatalf("manual page was fetched: %+v", remotes)
+	}
+}
+
 func TestSitemapURLsFollowsIndexesAndDeduplicates(t *testing.T) {
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

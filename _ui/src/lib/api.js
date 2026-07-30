@@ -160,11 +160,12 @@ export const api = {
   sources: () => req("/sources"),
   addSource: (body) => req("/sources", { method: "POST", keepalive: true, body: JSON.stringify(body) }),
   testSourceConfig: (body) => req("/sources/config/test", { method: "POST", body: JSON.stringify(body) }),
-  source: (name, team = "", page = 1, perPage = 50) => {
+  source: (name, team = "", page = 1, perPage = 50, search = "") => {
     const q = new URLSearchParams();
     if (team) q.set("team", team);
     if (page > 1) q.set("page", String(page));
     if (perPage !== 50) q.set("per_page", String(perPage));
+    if (search) q.set("q", search);
     const qs = q.toString();
     return req(`/sources/${name}${qs ? `?${qs}` : ""}`);
   },
@@ -174,6 +175,8 @@ export const api = {
   cancelSource: (name) => req(`/sources/${name}/cancel`, { method: "POST", keepalive: true }),
   addSourcePage: (name, url) =>
     req(`/sources/${name}/pages`, { method: "POST", keepalive: true, body: JSON.stringify({ url }) }),
+  importSourcePages: (name, pages) =>
+    req(`/sources/${name}/pages/import`, { method: "POST", body: JSON.stringify({ pages }) }),
   importSourceSitemap: (name, url) =>
     req(`/sources/${name}/sitemap`, { method: "POST", keepalive: true, body: JSON.stringify({ url }) }),
   deleteSourcePage: (name, slug) =>
