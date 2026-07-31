@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/rytsh/krabby/internal/service/registry"
+	"github.com/rytsh/krabby/internal/service/websource"
 	"github.com/rytsh/krabby/internal/storage"
 )
 
@@ -23,7 +24,12 @@ func newNamespaceManager(t *testing.T) (*Manager, *registry.Registry) {
 		t.Fatal(err)
 	}
 
-	return &Manager{reg: reg}, reg
+	webStore, err := websource.New(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return &Manager{reg: reg, webStore: webStore}, reg
 }
 
 func TestRepoInNamespace(t *testing.T) {

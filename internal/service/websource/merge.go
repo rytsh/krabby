@@ -48,7 +48,8 @@ func Present[T any](n types.Null[T]) bool {
 // Name is not part of the payload: it identifies the collection and comes from
 // the route. Type is immutable once created.
 type CollectionUpdate struct {
-	Description types.Null[string] `json:"description"`
+	Description   types.Null[string] `json:"description"`
+	AnalyzeImages types.Null[bool]   `json:"analyze_images"`
 
 	// RefreshInterval is a Go duration string ("24h"). Null or empty means
 	// manual only. It is ignored while Specs is non-empty.
@@ -65,6 +66,9 @@ type CollectionUpdate struct {
 func (u CollectionUpdate) Apply(col *Collection) error {
 	if Present(u.Description) {
 		col.Description = strings.TrimSpace(u.Description.ValueOrZero())
+	}
+	if Present(u.AnalyzeImages) {
+		col.AnalyzeImages = u.AnalyzeImages.ValueOrZero()
 	}
 
 	if Present(u.Specs) {

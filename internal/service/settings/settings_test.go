@@ -1,9 +1,14 @@
 package settings
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/rakunlabs/bw"
+
+	"github.com/rytsh/krabby/internal/config"
 )
 
 func TestPatchApplyPreservesOmittedFields(t *testing.T) {
@@ -30,6 +35,28 @@ func TestPatchApplyPreservesOmittedFields(t *testing.T) {
 
 	if !got.DocsEnabled || !got.RAGEnabled || got.RAGTopK != 20 || got.EmbedModel != "docs-model" {
 		t.Errorf("omitted fields changed: %#v", got)
+	}
+}
+
+func TestSetPreservesInternalDocsIndexProjection(t *testing.T) {
+	t.Parallel()
+
+	db, err := bw.Open("", bw.WithInMemory(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	store, err := New(db, Settings{DocsIndexProjection: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Set(context.Background(), Settings{RAGTopK: 12})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DocsIndexProjection != 7 {
+		t.Fatalf("docs index projection = %d, want 7", got.DocsIndexProjection)
 	}
 }
 
@@ -148,6 +175,103 @@ func TestPatchApplyExplicitFalse(t *testing.T) {
 	got := patch.Apply(Settings{CodeRAGEnabled: true})
 	if got.CodeRAGEnabled {
 		t.Error("explicit false was not applied")
+	}
+}
+
+func TestPatchApplyMarkdownTargetSetting(t *testing.T) {
+	t.Parallel()
+
+	on := true
+	got := (Patch{RAGKeepMarkdownTargets: &on}).Apply(Settings{})
+	if !got.RAGKeepMarkdownTargets {
+		t.Fatal("keep-markdown-targets setting was not enabled")
+	}
+
+	off := false
+	got = (Patch{RAGKeepMarkdownTargets: &off}).Apply(got)
+	if got.RAGKeepMarkdownTargets {
+		t.Fatal("keep-markdown-targets setting was not disabled")
+	}
+}
+
+func TestPatchApplyWebImageSettings(t *testing.T) {
+	t.Parallel()
+
+	var patch Patch
+	if err := json.Unmarshal([]byte(`{
+		"web_image_analysis_enabled":true,
+		"web_image_model":"gpt-4.1-mini",
+		"web_image_max_per_page":5,
+		"web_image_max_bytes":2097152,
+		"web_image_max_pixels":12000000,
+		"web_image_allow_authenticated":true,
+		"task_concurrency":2
+	}`), &patch); err != nil {
+		t.Fatal(err)
+	}
+
+	got := patch.Apply(Settings{})
+	if !got.WebImageAnalysisEnabled || !got.WebImageAllowAuthenticated {
+		t.Fatalf("true image settings were not applied: %#v", got)
+	}
+	if got.WebImageModel != "gpt-4.1-mini" || got.WebImageMaxPerPage != 5 ||
+		got.WebImageMaxBytes != 2<<20 || got.WebImageMaxPixels != 12_000_000 {
+		t.Fatalf("image settings were not applied: %#v", got)
+	}
+	if patch.RuntimeOnly() {
+		t.Fatal("mixed runtime/image-analysis patch incorrectly recognized as runtime-only")
+	}
+
+	patch = Patch{}
+	if err := json.Unmarshal([]byte(`{
+		"web_image_analysis_enabled":false,
+		"web_image_allow_authenticated":false
+	}`), &patch); err != nil {
+		t.Fatal(err)
+	}
+	got = patch.Apply(got)
+	if got.WebImageAnalysisEnabled || got.WebImageAllowAuthenticated {
+		t.Fatalf("explicit false image settings were not applied: %#v", got)
+	}
+}
+
+func TestWebImageDefaults(t *testing.T) {
+	t.Parallel()
+
+	fresh := Defaults()
+	if fresh.WebImageAnalysisEnabled || fresh.WebImageAllowAuthenticated {
+		t.Fatalf("image analysis or authenticated fetching enabled by default: %#v", fresh)
+	}
+	if fresh.WebImageMaxPerPage != 3 || fresh.WebImageMaxBytes != 4<<20 || fresh.WebImageMaxPixels != 16_000_000 {
+		t.Fatalf("fresh image defaults = %#v", fresh)
+	}
+
+	// A migrated record has zero for fields that did not exist in its schema.
+	migrated := Settings{}
+	if migrated.EffectiveWebImageMaxPerPage() != 3 || migrated.EffectiveWebImageMaxBytes() != 4<<20 ||
+		migrated.EffectiveWebImageMaxPixels() != 16_000_000 {
+		t.Fatalf("migrated image defaults = %#v", migrated.Redact().Settings)
+	}
+	redacted := migrated.Redact()
+	if redacted.WebImageMaxPerPage != 3 || redacted.WebImageMaxBytes != 4<<20 ||
+		redacted.WebImageMaxPixels != 16_000_000 {
+		t.Fatalf("redacted image defaults = %#v", redacted.Settings)
+	}
+}
+
+func TestWebImageLimitsRejectUnsafeValues(t *testing.T) {
+	t.Parallel()
+	for _, settings := range []Settings{
+		{WebImageMaxPerPage: -1},
+		{WebImageMaxBytes: -1},
+		{WebImageMaxPixels: -1},
+		{WebImageMaxPerPage: config.MaxWebImageMaxPerPage + 1},
+		{WebImageMaxBytes: config.MaxWebImageMaxBytes + 1},
+		{WebImageMaxPixels: config.MaxWebImageMaxPixels + 1},
+	} {
+		if err := settings.validateWebImageLimits(); err == nil {
+			t.Fatalf("unsafe image limits accepted: %#v", settings)
+		}
 	}
 }
 

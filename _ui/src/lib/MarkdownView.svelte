@@ -5,6 +5,7 @@
   // SVG after the HTML lands in the DOM. Both comark and mermaid are imported
   // lazily so they stay out of the main bundle.
   import { mount, onDestroy, tick, unmount } from "svelte";
+  import DOMPurify from "dompurify";
   import MermaidDiagram from "./MermaidDiagram.svelte";
   import { theme } from "./theme.js";
 
@@ -56,6 +57,101 @@
     return headings;
   }
 
+  /**
+   * Keep rendered Markdown useful without trusting raw HTML or remote URLs from
+   * imported pages. Mermaid SVG is mounted later and does not pass through here.
+   * @param {string} source
+   */
+  function hardenRenderedHTML(source) {
+    const sanitized = DOMPurify.sanitize(source, {
+      ALLOWED_TAGS: [
+        "a",
+        "blockquote",
+        "br",
+        "code",
+        "del",
+        "em",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "hr",
+        "img",
+        "li",
+        "ol",
+        "p",
+        "pre",
+        "strong",
+        "table",
+        "tbody",
+        "td",
+        "th",
+        "thead",
+        "tr",
+        "ul",
+      ],
+      ALLOWED_ATTR: ["href", "title", "src", "alt", "width", "height", "id", "class", "start", "colspan", "rowspan"],
+      ALLOW_DATA_ATTR: false,
+    });
+    const doc = new DOMParser().parseFromString(sanitized, "text/html");
+
+    for (const el of doc.body.querySelectorAll("*")) {
+      for (const attr of [...el.attributes]) {
+        if (
+          attr.name.toLowerCase().startsWith("on") ||
+          attr.name.toLowerCase() === "style" ||
+          attr.name.toLowerCase() === "srcdoc"
+        ) {
+          el.removeAttribute(attr.name);
+        }
+      }
+
+      if (el instanceof HTMLAnchorElement) {
+        el.removeAttribute("ping");
+        const raw = el.getAttribute("href");
+        if (!raw) continue;
+        if (raw.startsWith("#")) continue;
+
+        try {
+          const target = new URL(raw, window.location.href);
+          if (!["http:", "https:", "mailto:"].includes(target.protocol)) {
+            el.removeAttribute("href");
+            continue;
+          }
+          if (["http:", "https:"].includes(target.protocol) && target.origin !== window.location.origin) {
+            el.target = "_blank";
+            el.rel = "noopener noreferrer";
+          }
+        } catch {
+          el.removeAttribute("href");
+        }
+      }
+
+      if (el instanceof HTMLImageElement) {
+        el.removeAttribute("srcset");
+        const raw = el.getAttribute("src");
+        if (!raw) continue;
+
+        try {
+          const target = new URL(raw, window.location.href);
+          if (!["http:", "https:"].includes(target.protocol)) {
+            el.removeAttribute("src");
+            continue;
+          }
+          el.loading = "lazy";
+          el.decoding = "async";
+          el.referrerPolicy = "no-referrer";
+        } catch {
+          el.removeAttribute("src");
+        }
+      }
+    }
+
+    return doc.body.innerHTML;
+  }
+
   /** @param {string} src */
   async function render(src) {
     const id = ++seq;
@@ -67,7 +163,7 @@
     }
     try {
       const { render: renderMarkdown } = await import("@comark/html");
-      const out = await renderMarkdown(src);
+      const out = hardenRenderedHTML(await renderMarkdown(src));
       if (id !== seq) return;
       clearDiagrams();
       html = out;

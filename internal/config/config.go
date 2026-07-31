@@ -264,6 +264,26 @@ type LLM struct {
 	Timeout time.Duration `cfg:"timeout" default:"300s"`
 }
 
+const (
+	DefaultWebImageMaxPerPage = 3
+	DefaultWebImageMaxBytes   = int64(4 << 20)
+	DefaultWebImageMaxPixels  = int64(16_000_000)
+	MaxWebImageMaxPerPage     = 50
+	MaxWebImageMaxBytes       = int64(32 << 20)
+	MaxWebImageMaxPixels      = int64(100_000_000)
+)
+
+// WebImage configures optional vision analysis of images found in web pages.
+// It is a runtime-settings carrier, not part of the file/env configuration.
+type WebImage struct {
+	AnalysisEnabled    bool   `cfg:"web_image_analysis_enabled"`
+	Model              string `cfg:"web_image_model"`
+	MaxPerPage         int    `cfg:"web_image_max_per_page" default:"3"`
+	MaxBytes           int64  `cfg:"web_image_max_bytes" default:"4194304"`
+	MaxPixels          int64  `cfg:"web_image_max_pixels" default:"16000000"`
+	AllowAuthenticated bool   `cfg:"web_image_allow_authenticated"`
+}
+
 // Capture selects how much prompt/completion content is attached to exported
 // LLM traces.
 type Capture string
@@ -360,6 +380,9 @@ type Embedder struct {
 type RAG struct {
 	// Enabled turns on indexing + retrieval in the pipeline and tools.
 	Enabled bool `cfg:"enabled"`
+	// KeepMarkdownTargets keeps link destinations and image sources in indexed
+	// text. The default strips them while preserving visible labels and alt text.
+	KeepMarkdownTargets bool `cfg:"keep_markdown_targets"`
 	// ChunkSize is the target chunk length in characters.
 	ChunkSize int `cfg:"chunk_size" default:"1200"`
 	// ChunkOverlap is the character overlap between adjacent chunks.

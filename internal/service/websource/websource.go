@@ -74,6 +74,10 @@ type Collection struct {
 	// (e.g. "Delivery Support runbooks and TERs"). It is surfaced to MCP
 	// clients via list_sources so a model can pick the right source to search.
 	Description string `bw:"description" json:"description,omitempty"`
+	// AnalyzeImages opts this collection into the globally configured vision
+	// pipeline. It is false by default so enabling a model never sends every
+	// source's images without an explicit per-source choice.
+	AnalyzeImages bool `bw:"analyze_images" json:"analyze_images"`
 	// RefreshInterval is how often the scheduler re-syncs the collection.
 	// 0 disables automatic refresh (manual only). Kept for backward
 	// compatibility and as the fallback when Specs is empty: the scheduler then
@@ -153,6 +157,18 @@ type Page struct {
 	Status      string    `bw:"status"     json:"status"`
 	LastError   string    `bw:"last_error" json:"last_error,omitempty"`
 	LastFetchAt time.Time `bw:"last_fetch" json:"last_fetch_at,omitzero"`
+}
+
+// ImageAnalysis caches one vision result. Raw image bytes and source URLs are
+// deliberately absent: the cache is keyed by a hash of the reference and is
+// valid only when both the downloaded content hash and analyzer engine match.
+type ImageAnalysis struct {
+	ID          string    `bw:"id,pk"`
+	PageID      string    `bw:"page_id,index"`
+	ContentHash string    `bw:"content_hash"`
+	Engine      string    `bw:"engine"`
+	Text        string    `bw:"text"`
+	UpdatedAt   time.Time `bw:"updated_at"`
 }
 
 // RemotePage is one fetched page, already converted to markdown.
@@ -272,12 +288,14 @@ func ValidName(name string) bool { return nameRe.MatchString(name) }
 // case-insensitive team filtering.
 // v7: Collection gained Specs (per-source cron schedules).
 // v8: Page gained UpdatedAt (source last-modified time for recency).
-const schemaVersion = 8
+// v9: Collection gained AnalyzeImages (per-source vision opt-in).
+const schemaVersion = 9
 
 // Store persists collections and pages.
 type Store struct {
 	collections *bw.Bucket[Collection]
 	pages       *bw.Bucket[Page]
+	images      *bw.Bucket[ImageAnalysis]
 }
 
 // New opens the web-source buckets on the given database.
@@ -293,8 +311,12 @@ func New(db *bw.DB) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("register web_pages bucket; %w", err)
 	}
+	images, err := bw.RegisterBucket[ImageAnalysis](db, "web_image_analysis", bw.WithVersion[ImageAnalysis](1))
+	if err != nil {
+		return nil, fmt.Errorf("register web image analysis bucket; %w", err)
+	}
 
-	return &Store{collections: collections, pages: pages}, nil
+	return &Store{collections: collections, pages: pages, images: images}, nil
 }
 
 // GetCollection returns a collection by name, or nil if it does not exist.
@@ -313,7 +335,7 @@ func (s *Store) GetCollection(ctx context.Context, name string) (*Collection, er
 
 // ListCollections returns all collections sorted by name.
 func (s *Store) ListCollections(ctx context.Context) ([]*Collection, error) {
-	q, err := query.Parse("_limit=10000")
+	q, err := query.Parse("_limit=100000")
 	if err != nil {
 		return nil, fmt.Errorf("parse query; %w", err)
 	}
@@ -558,10 +580,53 @@ func normalizeTeams(teams []string) []string {
 
 // DeletePage removes a page record.
 func (s *Store) DeletePage(ctx context.Context, id string) error {
+	if err := s.DeleteImageAnalyses(ctx, id); err != nil {
+		return err
+	}
 	if err := s.pages.Delete(ctx, id); err != nil && !errors.Is(err, bw.ErrNotFound) {
 		return fmt.Errorf("delete page %s; %w", id, err)
 	}
 
+	return nil
+}
+
+// ImageAnalysisID builds a stable cache key from image content, so rotating
+// signed URLs neither leak into storage nor create duplicate cache rows.
+func ImageAnalysisID(pageID, contentHash string) string {
+	return pageID + "/" + contentHash
+}
+
+func (s *Store) GetImageAnalysis(ctx context.Context, id string) (*ImageAnalysis, error) {
+	rec, err := s.images.Get(ctx, id)
+	if err != nil {
+		if errors.Is(err, bw.ErrNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get image analysis %s; %w", id, err)
+	}
+	return rec, nil
+}
+
+func (s *Store) UpsertImageAnalysis(ctx context.Context, rec *ImageAnalysis) error {
+	if err := s.images.Insert(ctx, rec); err != nil {
+		return fmt.Errorf("upsert image analysis %s; %w", rec.ID, err)
+	}
+	return nil
+}
+
+func (s *Store) DeleteImageAnalyses(ctx context.Context, pageID string) error {
+	q := query.New()
+	q.Where = append(q.Where, query.NewExpressionCmp(query.OperatorEq, "page_id", pageID).Expression())
+	q.SetLimit(10000)
+	records, err := s.images.Find(ctx, q)
+	if err != nil {
+		return fmt.Errorf("list image analyses for %s; %w", pageID, err)
+	}
+	for _, rec := range records {
+		if err := s.images.Delete(ctx, rec.ID); err != nil && !errors.Is(err, bw.ErrNotFound) {
+			return fmt.Errorf("delete image analysis %s; %w", rec.ID, err)
+		}
+	}
 	return nil
 }
 

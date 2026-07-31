@@ -14,6 +14,9 @@ importers:
       comark:
         specifier: ^0.5.1
         version: 0.5.1(shiki@4.3.1)
+      dompurify:
+        specifier: ^3.4.12
+        version: 3.4.12
     devDependencies:
       '@iconify-json/vscode-icons':
         specifier: ^1.2.67

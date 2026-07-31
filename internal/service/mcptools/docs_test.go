@@ -18,7 +18,7 @@ func TestSetDocsConfigArgsMergePresence(t *testing.T) {
 		RAGEnabled:   true,
 		RAGTopK:      20,
 	}
-	raw := json.RawMessage(`{"code_rag_enabled":true,"code_rag_top_k":5,"code_embed_timeout":"45s"}`)
+	raw := json.RawMessage(`{"code_rag_enabled":true,"code_rag_top_k":5,"code_embed_timeout":"45s","web_image_analysis_enabled":true,"web_image_model":"vision-fast","rag_keep_markdown_targets":true}`)
 	args := setDocsConfigArgs{
 		CodeRAGEnabled:   true,
 		CodeRAGTopK:      5,
@@ -36,6 +36,50 @@ func TestSetDocsConfigArgsMergePresence(t *testing.T) {
 
 	if !got.DocsEnabled || !got.RAGEnabled || got.RAGTopK != 20 || got.EmbedBaseURL != base.EmbedBaseURL {
 		t.Errorf("omitted fields changed: %#v", got)
+	}
+	if !got.WebImageAnalysisEnabled || got.WebImageModel != "vision-fast" || !got.RAGKeepMarkdownTargets {
+		t.Errorf("vision/projection fields not merged: %#v", got)
+	}
+}
+
+func TestSourceArgsExposeScopeAndImageOptIn(t *testing.T) {
+	t.Parallel()
+	col, err := (addSourceArgs{Name: "Team-Wiki", Type: "pages", AnalyzeImages: true}).collection()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !col.AnalyzeImages {
+		t.Fatal("add_source dropped analyze_images")
+	}
+	summary := summarizeSource(col)
+	if summary.ScopeKey != "web:team-wiki" || summary.Name != "team-wiki" || !summary.AnalyzeImages {
+		t.Fatalf("source summary = %#v", summary)
+	}
+
+	update, err := (updateSourceArgs{AnalyzeImages: false}).update(json.RawMessage(`{"analyze_images":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !update.AnalyzeImages.Valid || update.AnalyzeImages.ValueOrZero() {
+		t.Fatalf("explicit false analyze_images = %#v", update.AnalyzeImages)
+	}
+}
+
+func TestImportSourcePagesArgs(t *testing.T) {
+	t.Parallel()
+	args := importSourcePagesArgs{Name: "notes", Pages: []sourcePageInput{{
+		Title: "Runbook", ContentType: "text/markdown", Content: "Restart it.", UpdatedAt: "2026-07-31T12:00:00Z",
+	}}}
+	imports, err := args.imports()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(imports) != 1 || imports[0].Title != "Runbook" || imports[0].UpdatedAt.IsZero() {
+		t.Fatalf("imports = %#v", imports)
+	}
+	args.Pages[0].UpdatedAt = "not-a-time"
+	if _, err := args.imports(); err == nil {
+		t.Fatal("invalid updated_at was accepted")
 	}
 }
 

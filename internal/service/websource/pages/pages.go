@@ -9,8 +9,10 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"strings"
@@ -18,6 +20,7 @@ import (
 
 	"github.com/rytsh/krabby/internal/service/progress"
 	"github.com/rytsh/krabby/internal/service/websource"
+	"golang.org/x/net/html/charset"
 )
 
 // maxBodyBytes caps a fetched page body (HTML pages beyond this are almost
@@ -69,6 +72,10 @@ type sitemapLocation struct {
 // are followed recursively, with protocol-sized bounds to keep a bad endpoint
 // from consuming unbounded memory or requests.
 func (f *Fetcher) SitemapURLs(ctx context.Context, sitemapURL string) ([]string, error) {
+	sitemapURL = strings.TrimSpace(sitemapURL)
+	if err := validateHTTPURL(sitemapURL); err != nil {
+		return nil, fmt.Errorf("invalid sitemap url; %w", err)
+	}
 	seenSitemaps := make(map[string]struct{})
 	seenURLs := make(map[string]struct{})
 	urls := make([]string, 0)
@@ -76,6 +83,9 @@ func (f *Fetcher) SitemapURLs(ctx context.Context, sitemapURL string) ([]string,
 	var visit func(string) error
 	visit = func(current string) error {
 		current = strings.TrimSpace(current)
+		if !websource.SameOrigin(sitemapURL, current) {
+			return fmt.Errorf("sitemap child changed origin")
+		}
 		if _, ok := seenSitemaps[current]; ok {
 			return nil
 		}
@@ -96,7 +106,7 @@ func (f *Fetcher) SitemapURLs(ctx context.Context, sitemapURL string) ([]string,
 		case "urlset":
 			for _, entry := range doc.URLs {
 				pageURL := strings.TrimSpace(entry.Location)
-				if validateHTTPURL(pageURL) != nil {
+				if validateHTTPURL(pageURL) != nil || !websource.SameOrigin(sitemapURL, pageURL) {
 					continue
 				}
 				if _, ok := seenURLs[pageURL]; ok {
@@ -140,7 +150,15 @@ func (f *Fetcher) fetchSitemap(ctx context.Context, sitemapURL string) (*sitemap
 		return nil, err
 	}
 
-	res, err := f.client.Do(req)
+	parsed, _ := url.Parse(sitemapURL)
+	client := websource.ImageHTTPClient(f.client, parsed.Hostname())
+	client.CheckRedirect = func(req *http.Request, _ []*http.Request) error {
+		if !websource.SameOrigin(sitemapURL, req.URL.String()) {
+			return fmt.Errorf("sitemap redirect changed origin")
+		}
+		return websource.ValidateImageURL(req.URL.String(), true)
+	}
+	res, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch %s; %w", sitemapURL, err)
 	}
@@ -192,12 +210,18 @@ func readSitemapBody(r io.Reader) ([]byte, error) {
 }
 
 func validateHTTPURL(raw string) error {
+	if len(raw) > 8192 {
+		return fmt.Errorf("URL exceeds 8192 bytes")
+	}
 	u, err := url.Parse(raw)
 	if err != nil {
 		return err
 	}
 	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return fmt.Errorf("must be an absolute http(s) URL")
+	}
+	if u.User != nil {
+		return fmt.Errorf("must not contain credentials")
 	}
 
 	return nil
@@ -260,6 +284,9 @@ func (f *Fetcher) Fetch(ctx context.Context, _ *websource.Collection, pages []*w
 }
 
 func (f *Fetcher) fetchOne(ctx context.Context, pageURL string) (title, markdown string, err error) {
+	if err := websource.ValidateImageURL(pageURL, true); err != nil {
+		return "", "", fmt.Errorf("invalid page URL; %w", err)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
 	if err != nil {
 		return "", "", fmt.Errorf("build request; %w", err)
@@ -272,7 +299,16 @@ func (f *Fetcher) fetchOne(ctx context.Context, pageURL string) (title, markdown
 		return "", "", err
 	}
 
-	res, err := f.client.Do(req)
+	parsed, _ := url.Parse(pageURL)
+	client := websource.ImageHTTPClient(f.client, parsed.Hostname())
+	client.CheckRedirect = func(req *http.Request, _ []*http.Request) error {
+		allowPrivate := strings.EqualFold(parsed.Hostname(), req.URL.Hostname())
+		if !websource.SameOrigin(pageURL, req.URL.String()) {
+			req.Header.Del("Authorization")
+		}
+		return websource.ValidateImageURL(req.URL.String(), allowPrivate)
+	}
+	res, err := client.Do(req)
 	if err != nil {
 		return "", "", fmt.Errorf("fetch %s; %w", pageURL, err)
 	}
@@ -282,12 +318,126 @@ func (f *Fetcher) fetchOne(ctx context.Context, pageURL string) (title, markdown
 		return "", "", fmt.Errorf("fetch %s; unexpected status %s", pageURL, res.Status)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(res.Body, maxBodyBytes))
+	contentType := res.Header.Get("Content-Type")
+	if contentType != "" {
+		mediaType, _, parseErr := mime.ParseMediaType(contentType)
+		if parseErr != nil {
+			return "", "", fmt.Errorf("fetch %s; invalid content type %q", pageURL, contentType)
+		}
+		if mediaType != "text/html" && mediaType != "application/xhtml+xml" {
+			return "", "", fmt.Errorf("fetch %s; unsupported content type %q", pageURL, mediaType)
+		}
+	}
+
+	body, err := io.ReadAll(io.LimitReader(res.Body, maxBodyBytes+1))
 	if err != nil {
 		return "", "", fmt.Errorf("read %s; %w", pageURL, err)
 	}
+	if len(body) > maxBodyBytes {
+		return "", "", fmt.Errorf("read %s; page exceeds %d bytes", pageURL, maxBodyBytes)
+	}
 
-	return websource.ExtractArticle(string(body), pageURL)
+	decoded, err := charset.NewReader(bytes.NewReader(body), contentType)
+	if err != nil {
+		return "", "", fmt.Errorf("decode %s; %w", pageURL, err)
+	}
+	body, err = io.ReadAll(decoded)
+	if err != nil {
+		return "", "", fmt.Errorf("decode %s; %w", pageURL, err)
+	}
+
+	finalURL := pageURL
+	if res.Request != nil && res.Request.URL != nil {
+		finalURL = res.Request.URL.String()
+	}
+
+	return websource.ExtractArticle(string(body), finalURL)
+}
+
+// FetchImage downloads one image with the same URL-pattern credentials used by
+// page requests. Credentials are applied only when the global private-image
+// opt-in is enabled.
+func (f *Fetcher) FetchImage(ctx context.Context, _ *websource.Collection, pageURL, imageURL string, maxBytes int64, allowAuthenticated bool) (websource.ImageContent, error) {
+	allowPrivate := allowAuthenticated && websource.SameOrigin(pageURL, imageURL)
+	if err := websource.ValidateImageURL(imageURL, allowPrivate); err != nil {
+		return websource.ImageContent{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, imageURL, nil)
+	if err != nil {
+		return websource.ImageContent{}, fmt.Errorf("build image request; %w", err)
+	}
+	req.Header.Set("User-Agent", "krabby-websource/1.0")
+	req.Header.Set("Accept", "image/png,image/jpeg,image/gif")
+
+	authenticated := false
+	if allowAuthenticated && f.creds != nil {
+		user, secret, err := f.creds(ctx, imageURL)
+		if err != nil {
+			return websource.ImageContent{}, fmt.Errorf("resolve image credentials; %w", err)
+		}
+		switch {
+		case user != "":
+			req.SetBasicAuth(user, secret)
+			authenticated = true
+		case secret != "":
+			req.Header.Set("Authorization", "Bearer "+secret)
+			authenticated = true
+		}
+	}
+
+	privateHost := ""
+	if allowPrivate {
+		if parsed, parseErr := url.Parse(imageURL); parseErr == nil {
+			privateHost = parsed.Hostname()
+		}
+	}
+	client := websource.ImageHTTPClient(f.client, privateHost)
+	client.CheckRedirect = func(req *http.Request, _ []*http.Request) error {
+		if authenticated && !websource.SameOrigin(imageURL, req.URL.String()) {
+			return fmt.Errorf("%w: authenticated image redirect changed origin", websource.ErrImageUnsupported)
+		}
+		redirectAllowsPrivate := allowPrivate && websource.SameOrigin(imageURL, req.URL.String())
+		return websource.ValidateImageURL(req.URL.String(), redirectAllowsPrivate)
+	}
+	return fetchImageResponse(client, req, maxBytes, authenticated)
+}
+
+func fetchImageResponse(client *http.Client, req *http.Request, maxBytes int64, authenticated bool) (websource.ImageContent, error) {
+	res, err := client.Do(req)
+	if err != nil {
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
+		return websource.ImageContent{}, fmt.Errorf("fetch image; %w", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return websource.ImageContent{}, fmt.Errorf("%w: fetch image status %s", websource.ErrImageUnsupported, res.Status)
+	}
+
+	if maxBytes <= 0 {
+		maxBytes = 4 << 20
+	}
+	body, err := io.ReadAll(io.LimitReader(res.Body, maxBytes+1))
+	if err != nil {
+		return websource.ImageContent{}, fmt.Errorf("read image; %w", err)
+	}
+	if int64(len(body)) > maxBytes {
+		return websource.ImageContent{}, fmt.Errorf("%w: image exceeds %d bytes", websource.ErrImageUnsupported, maxBytes)
+	}
+
+	mediaType := strings.ToLower(strings.TrimSpace(strings.Split(res.Header.Get("Content-Type"), ";")[0]))
+	if mediaType == "" || mediaType == "application/octet-stream" {
+		mediaType = http.DetectContentType(body)
+	}
+	switch mediaType {
+	case "image/png", "image/jpeg", "image/gif":
+	default:
+		return websource.ImageContent{}, fmt.Errorf("%w: image has content type %q", websource.ErrImageUnsupported, mediaType)
+	}
+
+	return websource.ImageContent{Data: body, MediaType: mediaType, Authenticated: authenticated}, nil
 }
 
 func (f *Fetcher) setCredentials(ctx context.Context, req *http.Request, pageURL string) error {

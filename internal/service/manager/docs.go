@@ -263,6 +263,12 @@ func (m *Manager) setDocsConfig(ctx context.Context, next settings.Settings, rei
 		return settings.Redacted{}, ErrNoSettingsStore
 	}
 
+	current, err := m.settings.Get(ctx)
+	if err != nil {
+		return settings.Redacted{}, err
+	}
+	imageChanged := webImageSettingsChanged(current, next)
+
 	saved, err := m.settings.Set(ctx, next)
 	if err != nil {
 		return settings.Redacted{}, err
@@ -280,8 +286,39 @@ func (m *Manager) setDocsConfig(ctx context.Context, next settings.Settings, rei
 	if reindex {
 		m.TriggerReindexAll()
 	}
+	if imageChanged {
+		m.triggerImageSourceRefreshes(ctx)
+	}
 
 	return redactSettings(saved), nil
+}
+
+func webImageSettingsChanged(a, b settings.Settings) bool {
+	aVision, bVision := visionLLMConfig(a), visionLLMConfig(b)
+	return a.WebImageAnalysisEnabled != b.WebImageAnalysisEnabled ||
+		strings.TrimRight(aVision.BaseURL, "/") != strings.TrimRight(bVision.BaseURL, "/") ||
+		aVision.Model != bVision.Model ||
+		strings.TrimSpace(a.WebImageModel) != strings.TrimSpace(b.WebImageModel) ||
+		a.EffectiveWebImageMaxPerPage() != b.EffectiveWebImageMaxPerPage() ||
+		a.EffectiveWebImageMaxBytes() != b.EffectiveWebImageMaxBytes() ||
+		a.EffectiveWebImageMaxPixels() != b.EffectiveWebImageMaxPixels() ||
+		a.WebImageAllowAuthenticated != b.WebImageAllowAuthenticated
+}
+
+func (m *Manager) triggerImageSourceRefreshes(ctx context.Context) {
+	if m.webStore == nil {
+		return
+	}
+	collections, err := m.webStore.ListCollections(ctx)
+	if err != nil {
+		slog.Error("list web sources for image refresh", "error", err)
+		return
+	}
+	for _, col := range collections {
+		if col.AnalyzeImages {
+			m.TriggerWebFullRefresh(col.Name)
+		}
+	}
 }
 
 func redactSettings(s settings.Settings) settings.Redacted {
@@ -361,6 +398,7 @@ func (m *Manager) Configure(_ context.Context, s settings.Settings) error {
 	slog.Info("docs/rag reconfigured",
 		"docgen", bundle.gen != nil,
 		"rag", bundle.rag != nil,
+		"vision", bundle.vision != nil,
 		"code_semantic", bundle.codeStore != nil,
 	)
 
@@ -431,7 +469,7 @@ func (m *Manager) Tracer() *langfuse.Tracer {
 // configuration (e.g. docs on, rag off) is valid. Store construction failures
 // leave the previous live bundle active.
 func (m *Manager) buildBundle(s settings.Settings) (*docsBundle, error) {
-	b := &docsBundle{ragCfg: ragConfig(s), tracer: m.tracerFor(s)}
+	b := &docsBundle{ragCfg: ragConfig(s), imageCfg: webImageConfig(s), tracer: m.tracerFor(s)}
 
 	var (
 		codeEmb   *embedder.Client
@@ -455,6 +493,18 @@ func (m *Manager) buildBundle(s settings.Settings) (*docsBundle, error) {
 			}
 
 			b.gen = docgen.New(docsConfig(s), chat, summary, m.engine, b.tracer)
+		}
+	}
+
+	if s.WebImageAnalysisEnabled {
+		vision, err := llm.New(visionLLMConfig(s), llm.WithTracer(b.tracer))
+		switch {
+		case errors.Is(err, llm.ErrNotConfigured):
+			slog.Warn("web image analysis enabled but llm not configured; vision disabled")
+		case err != nil:
+			return nil, fmt.Errorf("build vision client; %w", err)
+		default:
+			b.vision = vision
 		}
 	}
 
@@ -848,6 +898,25 @@ func summaryLLMConfig(s settings.Settings) config.LLM {
 	return cfg
 }
 
+func visionLLMConfig(s settings.Settings) config.LLM {
+	cfg := llmConfig(s)
+	if model := strings.TrimSpace(s.WebImageModel); model != "" {
+		cfg.Model = model
+	}
+	return cfg
+}
+
+func webImageConfig(s settings.Settings) config.WebImage {
+	return config.WebImage{
+		AnalysisEnabled:    s.WebImageAnalysisEnabled,
+		Model:              visionLLMConfig(s).Model,
+		MaxPerPage:         s.EffectiveWebImageMaxPerPage(),
+		MaxBytes:           s.EffectiveWebImageMaxBytes(),
+		MaxPixels:          s.EffectiveWebImageMaxPixels(),
+		AllowAuthenticated: s.WebImageAllowAuthenticated,
+	}
+}
+
 func embedderConfig(s settings.Settings) config.Embedder {
 	return config.Embedder{
 		BaseURL:     s.EmbedBaseURL,
@@ -899,11 +968,12 @@ func langfuseConfig(s settings.Settings) config.Langfuse {
 
 func ragConfig(s settings.Settings) config.RAG {
 	return config.RAG{
-		Enabled:      s.RAGEnabled,
-		ChunkSize:    s.RAGChunkSize,
-		ChunkOverlap: s.RAGChunkOverlap,
-		TopK:         s.RAGTopK,
-		TopDocs:      s.RAGTopDocs,
+		Enabled:             s.RAGEnabled,
+		KeepMarkdownTargets: s.RAGKeepMarkdownTargets,
+		ChunkSize:           s.RAGChunkSize,
+		ChunkOverlap:        s.RAGChunkOverlap,
+		TopK:                s.RAGTopK,
+		TopDocs:             s.RAGTopDocs,
 
 		HybridCandidates:     s.RAGHybridCandidates,
 		HybridRRFK:           s.RAGHybridRRFK,
@@ -936,8 +1006,8 @@ const (
 	ScopeSources = "sources"
 )
 
-// Documentation search modes. Hybrid is the default and combines semantic and
-// lexical ranks with reciprocal rank fusion (RRF).
+// Documentation search modes. Semantic is the default when configured;
+// otherwise lexical is used. Hybrid explicitly combines both ranks with RRF.
 const (
 	DocsSearchHybrid   = "hybrid"
 	DocsSearchSemantic = "semantic"
@@ -1135,7 +1205,9 @@ func (m *Manager) ensureDocsTextKey(ctx context.Context, key, docsDir string) er
 		return err
 	}
 	if !has {
-		if err := m.docsText.Index(ctx, key, docsDir); err != nil {
+		if err := m.docsText.IndexWithOptions(ctx, key, docsDir, &rag.IndexOptions{
+			KeepMarkdownTargets: m.ragConfigSnapshot().KeepMarkdownTargets,
+		}); err != nil {
 			return err
 		}
 	}
@@ -1151,12 +1223,16 @@ func (m *Manager) ensureDocsTextKey(ctx context.Context, key, docsDir string) er
 // docs. topDocs <= 0 uses the default.
 func (m *Manager) SearchDocs(ctx context.Context, scope, key, namespace, mode, question string, topDocs int) ([]rag.Doc, error) {
 	searchStarted := time.Now()
+	key = strings.TrimSpace(key)
 
 	mode, err := NormalizeDocsSearchMode(mode)
 	if err != nil {
 		return nil, err
 	}
 	mode = m.resolveDocsSearchMode(mode)
+	if err := m.validateDocsKey(ctx, key); err != nil {
+		return nil, err
+	}
 
 	filter, err := docsFilter(scope, key)
 	if err != nil {
@@ -1172,7 +1248,13 @@ func (m *Manager) SearchDocs(ctx context.Context, scope, key, namespace, mode, q
 		topDocs = rag.MaxTopDocs
 	}
 
-	nsFilter := key == "" && !strings.EqualFold(strings.TrimSpace(namespace), registry.NamespaceAll)
+	filter, emptyScope, err := m.docsNamespaceFilter(ctx, scope, key, namespace, filter)
+	if err != nil {
+		return nil, err
+	}
+	if emptyScope {
+		return []rag.Doc{}, nil
+	}
 	ragCfg := m.ragConfigSnapshot()
 
 	// Both rankers are asked for the same candidate depth. An asymmetric depth
@@ -1235,17 +1317,6 @@ func (m *Manager) SearchDocs(ctx context.Context, scope, key, namespace, mode, q
 		return nil, err
 	}
 
-	if nsFilter {
-		semanticDocs, err = m.filterDocsByNamespace(ctx, semanticDocs, namespace, 0)
-		if err != nil {
-			return nil, err
-		}
-		lexicalDocs, err = m.filterDocsByNamespace(ctx, lexicalDocs, namespace, 0)
-		if err != nil {
-			return nil, err
-		}
-	}
-
 	var docs []rag.Doc
 	switch mode {
 	case DocsSearchSemantic:
@@ -1256,11 +1327,76 @@ func (m *Manager) SearchDocs(ctx context.Context, scope, key, namespace, mode, q
 		docs = fuseDocs(lexicalDocs, semanticDocs, topDocs, fuseParamsFor(ragCfg))
 	}
 
-	m.enrichWebDocs(ctx, docs)
+	m.enrichDocSources(ctx, docs)
 
 	logDocsSearch(mode, scope, key, time.Since(searchStarted), semanticTook, lexicalTook, semanticSplit, len(docs))
 
 	return docs, nil
+}
+
+func (m *Manager) validateDocsKey(ctx context.Context, key string) error {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return nil
+	}
+	if strings.HasPrefix(key, websource.ScopePrefix) {
+		name := websource.CollectionName(key)
+		if name == "" || m.webStore == nil {
+			return fmt.Errorf("unknown web source scope %q; use list_sources and pass its scope_key", key)
+		}
+		col, err := m.webStore.GetCollection(ctx, name)
+		if err != nil {
+			return err
+		}
+		if col == nil {
+			return fmt.Errorf("unknown web source scope %q; use list_sources and pass its scope_key", key)
+		}
+		return nil
+	}
+	if m.reg == nil {
+		return fmt.Errorf("unknown repository scope %q; use list_repos and pass its exact id", key)
+	}
+	repo, err := m.reg.Get(ctx, key)
+	if err != nil {
+		return err
+	}
+	if repo == nil {
+		return fmt.Errorf("unknown repository scope %q; use list_repos and pass its exact id", key)
+	}
+	return nil
+}
+
+// docsNamespaceFilter resolves a repository namespace before retrieval. Web
+// sources remain eligible for scope=all, but out-of-namespace repositories are
+// never allowed to consume the bounded candidate window.
+func (m *Manager) docsNamespaceFilter(ctx context.Context, scope, key, namespace string, filter vectorstore.Filter) (vectorstore.Filter, bool, error) {
+	if key != "" || strings.EqualFold(strings.TrimSpace(namespace), registry.NamespaceAll) || scope == ScopeSources {
+		return filter, false, nil
+	}
+	repos, err := m.reg.ListNamespace(ctx, namespace)
+	if err != nil {
+		return vectorstore.Filter{}, false, err
+	}
+	keys := make([]string, 0, len(repos))
+	for _, repo := range repos {
+		keys = append(keys, repo.ID)
+	}
+	if scope == "" || scope == ScopeAll {
+		if m.webStore != nil {
+			collections, err := m.webStore.ListCollections(ctx)
+			if err != nil {
+				return vectorstore.Filter{}, false, err
+			}
+			for _, col := range collections {
+				keys = append(keys, websource.ScopeKey(col.Name))
+			}
+		}
+	}
+	if len(keys) == 0 {
+		return vectorstore.Filter{}, true, nil
+	}
+	sort.Strings(keys)
+	return vectorstore.Filter{Keys: keys}, false, nil
 }
 
 // docsSearchSlowThreshold is when one search is worth a log line of its own.
@@ -1573,18 +1709,39 @@ func (m *Manager) filterDocsByNamespace(ctx context.Context, docs []rag.Doc, nam
 	return out, nil
 }
 
-// enrichWebDocs fills the original link and team names on web-source doc hits
-// (e.g. JIRA tickets) from their persisted page records so search results can
-// link back and show ownership. Missing records are left unenriched.
-func (m *Manager) enrichWebDocs(ctx context.Context, docs []rag.Doc) {
-	if m.webStore == nil {
-		return
-	}
-
+// enrichDocSources makes every broad-search result identify its exact scope and
+// source kind. Web hits additionally carry collection metadata and item links.
+func (m *Manager) enrichDocSources(ctx context.Context, docs []rag.Doc) {
+	collections := map[string]*websource.Collection{}
 	for i := range docs {
+		docs[i].ScopeKey = docs[i].Repo
 		name := websource.CollectionName(docs[i].Repo)
 		if name == "" {
+			docs[i].SourceKind = "repository"
+			if m.reg != nil {
+				repo, err := m.reg.Get(ctx, docs[i].Repo)
+				if err == nil && repo != nil {
+					docs[i].Namespace = registry.NormalizeNamespace(repo.Namespace)
+					if docs[i].Namespace == "" {
+						docs[i].Namespace = registry.NamespaceDefault
+					}
+				}
+			}
 			continue
+		}
+		docs[i].SourceKind = "web"
+		docs[i].CollectionName = name
+		if m.webStore == nil {
+			continue
+		}
+		col, seen := collections[name]
+		if !seen {
+			col, _ = m.webStore.GetCollection(ctx, name)
+			collections[name] = col
+		}
+		if col != nil {
+			docs[i].CollectionType = col.Type
+			docs[i].CollectionDescription = col.Description
 		}
 
 		slug := strings.TrimSuffix(docs[i].Path, ".md")
@@ -1890,9 +2047,23 @@ func (m *Manager) GetDoc(ctx context.Context, repoID, docPath string, offset int
 // external docs directory (verifying the repo is tracked and cloned and
 // migrating legacy in-clone docs when needed).
 func (m *Manager) repoDocsDir(ctx context.Context, repoID string) (string, error) {
-	if name := websource.CollectionName(repoID); name != "" {
+	if strings.HasPrefix(repoID, websource.ScopePrefix) {
+		name := websource.CollectionName(repoID)
+		if !websource.ValidName(name) {
+			return "", fmt.Errorf("invalid web source scope %q", repoID)
+		}
 		if m.sourcesRootDir == "" {
 			return "", ErrNoWebSources
+		}
+		if m.webStore == nil {
+			return "", ErrNoWebSources
+		}
+		col, err := m.webStore.GetCollection(ctx, name)
+		if err != nil {
+			return "", err
+		}
+		if col == nil {
+			return "", fmt.Errorf("web source %s not found", name)
 		}
 
 		return m.sourcesDir(name), nil

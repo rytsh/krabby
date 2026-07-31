@@ -58,3 +58,24 @@ func TestImportWebSitemapAddsNewPagesOnce(t *testing.T) {
 		t.Fatalf("pages = %d, want 2", len(pages))
 	}
 }
+
+func TestImportWebSitemapRejectsProviderURLsOutsideRootOrigin(t *testing.T) {
+	ctx := context.Background()
+	fetcher := &sitemapTestFetcher{urls: []string{"https://other.example/secret"}}
+	m, store := newReconcileManager(t, fetcher)
+	m.webFetchers[websource.TypePages] = fetcher
+	if err := store.UpsertCollection(ctx, &websource.Collection{Name: "site", Type: websource.TypePages}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := m.ImportWebSitemap(ctx, "site", "https://example.com/sitemap.xml")
+	if err == nil {
+		t.Fatal("cross-origin sitemap URL was accepted")
+	}
+	pages, listErr := store.Pages(ctx, "site")
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if len(pages) != 0 {
+		t.Fatalf("cross-origin sitemap persisted pages: %#v", pages)
+	}
+}

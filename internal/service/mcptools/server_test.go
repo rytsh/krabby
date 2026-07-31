@@ -21,12 +21,12 @@ import (
 // without a tokenizer, but the number that matters is tokens. Measured with
 // tiktoken over the actual payload:
 //
-//	29,392 B  ->  6,049 tokens (cl100k_base) / 6,254 (o200k_base)
+//	33,010 B  -> roughly 6,700 tokens after adding source-discovery output schemas
 //	 2,399 B  ->    488 tokens  (serverInstructions, on top of this)
 //
 // That is ~4.9 bytes per token, better than plain prose, because the payload is
 // mostly repeated JSON scaffolding and ordinary English — BPE collapses both.
-// So this budget is roughly 6,200 tokens, ~3% of a 200k context and ~20% of a
+// So this budget is roughly 7,100 tokens, ~4% of a 200k context and ~22% of a
 // 32k one, paid on every session.
 //
 // Raising it is a decision, not a formality: check first whether a tool
@@ -34,7 +34,7 @@ import (
 // or whether a jsonschema field is explaining nuance that only matters once a
 // call is being made.
 const (
-	toolsPayloadBudget = 30_000
+	toolsPayloadBudget = 35_000
 	// bytesPerToken is the measured ratio above, for reporting only.
 	bytesPerToken = 5
 )
@@ -45,8 +45,8 @@ func TestToolProfiles(t *testing.T) {
 		count   int
 		admin   bool
 	}{
-		{profile: ToolProfileStandard, count: 33},
-		{profile: ToolProfileFull, count: 47, admin: true},
+		{profile: ToolProfileStandard, count: 34},
+		{profile: ToolProfileFull, count: 52, admin: true},
 	}
 
 	for _, tt := range tests {
@@ -85,8 +85,42 @@ func TestToolProfiles(t *testing.T) {
 			names := map[string]bool{}
 			for _, tool := range result.Tools {
 				names[tool.Name] = true
+				if (tool.Name == "search_docs" || tool.Name == "list_sources" || tool.Name == "list_namespaces" || tool.Name == "get_source" ||
+					tool.Name == "register_source_page" || tool.Name == "import_source_pages" || tool.Name == "import_source_sitemap" || tool.Name == "delete_source_page" ||
+					tool.Name == "get_source_config") && tool.OutputSchema == nil {
+					t.Errorf("discovery tool %q has no output schema", tool.Name)
+				}
+				rawSchema, err := json.Marshal(tool.OutputSchema)
+				if err != nil {
+					t.Fatal(err)
+				}
+				schemaText := string(rawSchema)
+				switch tool.Name {
+				case "search_docs":
+					for _, field := range []string{"source_kind", "scope_key", "namespace", "collection_name"} {
+						if !strings.Contains(schemaText, field) {
+							t.Errorf("search_docs output schema missing %q", field)
+						}
+					}
+				case "get_source":
+					if !strings.Contains(schemaText, `"items"`) || strings.Contains(schemaText, `"config"`) || strings.Contains(schemaText, `"last_error"`) {
+						t.Errorf("get_source output schema is not the bounded discovery DTO: %s", schemaText)
+					}
+				case "set_docs_config":
+					for _, field := range []string{"web_image_model", "web_image_analysis_enabled", "rag_keep_markdown_targets"} {
+						input, _ := json.Marshal(tool.InputSchema)
+						if !strings.Contains(string(input), field) {
+							t.Errorf("set_docs_config input schema missing %q", field)
+						}
+					}
+				case "add_source", "update_source":
+					input, _ := json.Marshal(tool.InputSchema)
+					if !strings.Contains(string(input), "analyze_images") {
+						t.Errorf("%s input schema missing analyze_images", tool.Name)
+					}
+				}
 			}
-			for _, name := range []string{"search_code", "query_graph", "search_docs", "list_files"} {
+			for _, name := range []string{"search_code", "query_graph", "search_docs", "list_files", "get_source"} {
 				if !names[name] {
 					t.Errorf("profile missing core tool %q", name)
 				}
@@ -97,7 +131,10 @@ func TestToolProfiles(t *testing.T) {
 					t.Errorf("profile missing queue tool %q", name)
 				}
 			}
-			for _, name := range []string{"set_docs_config", "test_llm", "list_credentials", "add_source", "refresh_source", "source_types"} {
+			for _, name := range []string{
+				"set_docs_config", "test_llm", "list_credentials", "add_source", "refresh_source", "source_types", "get_source_config",
+				"register_source_page", "import_source_pages", "import_source_sitemap", "delete_source_page",
+			} {
 				if names[name] != tt.admin {
 					t.Errorf("admin tool %q present=%t, want %t", name, names[name], tt.admin)
 				}
@@ -128,6 +165,12 @@ func TestModelGuidanceIsSearchFirstAndBounded(t *testing.T) {
 		if !strings.Contains(serverInstructions, phrase) {
 			t.Errorf("instructions missing %q", phrase)
 		}
+	}
+	if !strings.Contains(serverInstructions, "Semantic is the default when configured") {
+		t.Fatal("instructions do not describe the effective docs-search default")
+	}
+	if strings.Contains(serverInstructions, "Hybrid mode is the default") {
+		t.Fatal("instructions still claim hybrid is the default")
 	}
 	if strings.Contains(serverInstructions, "best first call") {
 		t.Fatal("instructions still recommend query_graph as a universal first call")

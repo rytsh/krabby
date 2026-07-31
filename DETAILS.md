@@ -114,7 +114,9 @@ Example OpenCode config using the full profile:
 | `get_node` / `get_neighbors` / `get_community` | Node-level inspection |
 | `god_nodes` / `graph_stats` / `shortest_path` | Graph-level analysis |
 | `search_docs` / `list_docs` / `get_doc` | Search generated or synced Markdown with semantic (default), hybrid, or lexical retrieval |
-| `list_sources` | Discover named Custom web, Confluence, and Jira collections (`web:<name>`) |
+| `list_namespaces` | Discover repository groups, counts, and human descriptions before broad search |
+| `list_sources` / `get_source` | Discover web collections and their exact `web:<name>` scope keys; inspect bounded item-title samples |
+| `register_source_page` / `import_source_pages` / `import_source_sitemap` / `delete_source_page` | Full-profile management of individual `pages` source items |
 | `get_docs_config` / `set_docs_config` | Read or live-update docs and code RAG settings |
 | `test_llm` / `test_embedder` / `test_code_embedder` | Validate model endpoints without saving |
 
@@ -124,6 +126,10 @@ only for an intentional cross-repository search or merged-graph analysis.
 requests; responses are paginated and agents should not exhaust every page by
 default. Source and document reads are also bounded and expose continuation
 metadata for large files.
+`search_docs`, `list_sources`, and `list_namespaces` expose MCP output schemas
+and structured content. Search hits identify `source_kind` and `scope_key`, plus
+the repository namespace or web collection metadata, so clients do not need to
+infer source identity from an overloaded id string.
 `read_file` and paginated `list_files` responses include a `snapshot` token;
 pass it back on continuation calls so every page stays on the same immutable
 repository version even if a refresh activates meanwhile. The token is a soft
@@ -282,6 +288,18 @@ See [krabby.example.yaml](krabby.example.yaml). Loaded via
 
 Docs RAG and code RAG are independently switchable in the Settings UI. Code RAG
 can use its own embedder; when unset it reuses the docs embedder.
+Optional web-image analysis is also configured globally in Settings and is off
+by default. It is bounded to 3 images per page, 4 MiB per image and about 16
+megapixels; authenticated and same-origin private-network images require a
+separate opt-in. Enabling analysis may send private image bytes to the
+configured vision provider. Each source
+must additionally enable **Analyze images in this source**. Results are cached
+by image content hash and vision model; raw image bytes are not persisted.
+Documentation indexes omit Markdown link destinations and image source URLs by
+default while retaining link labels and image alt text. Enable **Keep link and
+image URLs in search indexes** under Settings → Retrieval when URL terms should
+also participate in lexical and semantic search. Saving either mode rebuilds the
+derived indexes; the stored Markdown is unchanged.
 The embedded backend keeps docs and code in separate stores so different vector
 dimensions are safe.
 Generated markdown is stored outside clones under

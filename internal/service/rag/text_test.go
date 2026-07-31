@@ -77,6 +77,45 @@ func TestTextStoreSearchExactTermsAndFilters(t *testing.T) {
 	}
 }
 
+func TestTextStoreExcludesLinkAndImageDestinations(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newTestTextStore(t)
+	dir := writeDocs(t, map[string]string{
+		"guide.md": "# Guide\n\n[alpha guide](https://docs.example.com/private-token) " +
+			"![beta diagram](data:image/png;base64,large-secret-payload)",
+	})
+	if err := store.Index(ctx, "web:docs", dir); err != nil {
+		t.Fatal(err)
+	}
+
+	docs, err := store.Search(ctx, vectorstore.FilterKey("web:docs"), "alpha", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docs) != 1 {
+		t.Fatalf("docs = %#v", docs)
+	}
+	if !strings.Contains(docs[0].Excerpt, "alpha guide") || !strings.Contains(docs[0].Excerpt, "beta diagram") {
+		t.Fatalf("visible labels missing from excerpt: %q", docs[0].Excerpt)
+	}
+	if strings.Contains(docs[0].Excerpt, "private-token") || strings.Contains(docs[0].Excerpt, "large-secret-payload") {
+		t.Fatalf("destination leaked into excerpt: %q", docs[0].Excerpt)
+	}
+
+	if err := store.IndexWithOptions(ctx, "web:docs", dir, &IndexOptions{KeepMarkdownTargets: true}); err != nil {
+		t.Fatal(err)
+	}
+	docs, err = store.Search(ctx, vectorstore.FilterKey("web:docs"), "alpha", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docs) != 1 || !strings.Contains(docs[0].Excerpt, "private-token") ||
+		!strings.Contains(docs[0].Excerpt, "large-secret-payload") {
+		t.Fatalf("destinations missing from excerpt: %#v", docs)
+	}
+}
+
 // TestTextStoreSearchFiltersDeepInTheRanking is the regression test for the
 // docs search that hung on a large corpus. The filter selects a small
 // partition while a much bigger one dominates the ranking, so every matching

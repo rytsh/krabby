@@ -11,6 +11,7 @@ import (
 
 	"github.com/rytsh/krabby/internal/service/coderag"
 	"github.com/rytsh/krabby/internal/service/manager"
+	"github.com/rytsh/krabby/internal/service/rag"
 	"github.com/rytsh/krabby/internal/service/settings"
 	"github.com/rytsh/krabby/internal/service/websource"
 )
@@ -24,6 +25,10 @@ type searchDocsArgs struct {
 	Scope     string `json:"scope,omitempty" jsonschema:"when repo is unknown: 'all' (default), 'repos', or 'sources'"`
 	Mode      string `json:"mode,omitempty" jsonschema:"retrieval mode: 'semantic' (default) uses embeddings and is best for conceptual natural-language questions; 'lexical' uses only local BM25 and is best for Jira keys, error codes, exact titles and identifiers; 'hybrid' fuses both ranks and is the most thorough but the slowest on large collections. When no embedder is configured the default is 'lexical'"`
 	TopDocs   int    `json:"top_docs,omitempty" jsonschema:"number of ranked documents to return (default 3, max 20)"`
+}
+
+type searchDocsOutput struct {
+	Results []rag.Doc `json:"results"`
 }
 
 func (a searchDocsArgs) searchMode() (string, error) {
@@ -52,14 +57,14 @@ func (a searchCodeArgs) searchMode() (string, error) {
 }
 
 type listDocsArgs struct {
-	Repo    string `json:"repo" jsonschema:"repository id (owner/name) whose generated docs to list"`
+	Repo    string `json:"repo" jsonschema:"exact full repository id returned by list_repos"`
 	Page    int    `json:"page,omitempty" jsonschema:"page number (default 1)"`
 	PerPage int    `json:"per_page,omitempty" jsonschema:"documents per page (default 50, max 200)"`
 }
 
 type getDocArgs struct {
-	Repo     string `json:"repo" jsonschema:"repository id (owner/name) that owns the document"`
-	Path     string `json:"path" jsonschema:"doc path relative to the repository's generated docs directory, as returned by list_docs/search_docs"`
+	Repo     string `json:"repo" jsonschema:"exact repository id or web:<collection> scope_key, as returned by search_docs.repo/search_docs.scope_key"`
+	Path     string `json:"path" jsonschema:"document path exactly as returned by search_docs.path or list_docs"`
 	Offset   int64  `json:"offset,omitempty" jsonschema:"byte offset to start reading from (default 0)"`
 	MaxBytes int    `json:"max_bytes,omitempty" jsonschema:"max bytes to return (default 32768, max 131072)"`
 }
@@ -76,6 +81,7 @@ type addSourceArgs struct {
 	Name            string `json:"name" jsonschema:"collection name; lowercase [a-z0-9._-]; becomes the search scope key web:<name>. Choose a meaningful key, e.g. 'delivery-support'"`
 	Type            string `json:"type" jsonschema:"source type: 'pages', 'confluence' or 'jira' (see source_types)"`
 	Description     string `json:"description,omitempty" jsonschema:"short human summary of what this source holds (e.g. 'Delivery Support runbooks and TERs'); shown to models by list_sources so they can pick the right source to search"`
+	AnalyzeImages   bool   `json:"analyze_images,omitempty" jsonschema:"analyze images in this source when global web image analysis is enabled; off by default"`
 	RefreshInterval string `json:"refresh_interval,omitempty" jsonschema:"legacy fixed interval as a Go duration, e.g. '1h' or '24h'; used only when schedule is empty. Empty or 'manual' means manual only. Prefer schedule for cron-style timing"`
 	Schedule        string `json:"schedule,omitempty" jsonschema:"comma-separated cron schedules (hardloop syntax, e.g. '0 2 * * *' for daily 02:00, or '@every 6h'); mirrors repository schedules and is authoritative over refresh_interval when set"`
 	Config          string `json:"config,omitempty" jsonschema:"provider-owned config as a JSON object encoded in a string, e.g. '{\"base_url\":\"https://...\",\"root_page\":\"123\",\"api_token\":\"...\"}'. jira: base_url, user, api_token, project or jql, include_labels, exclude_labels, include_subtasks (default false: sub-task issue types are skipped), team_fields, max_issues. confluence: base_url, and either space (whole space) or root_page (a page id to index that page and all its descendants as one keyed source), optional include_root, user, api_token, include_labels, exclude_labels. API tokens are write-only; blank on update keeps the stored secret"`
@@ -84,6 +90,7 @@ type addSourceArgs struct {
 type updateSourceArgs struct {
 	Name            string `json:"name" jsonschema:"existing collection name to update; the type is immutable"`
 	Description     string `json:"description,omitempty" jsonschema:"short human summary of what this source holds; shown to models by list_sources"`
+	AnalyzeImages   bool   `json:"analyze_images,omitempty" jsonschema:"enable or disable vision analysis for images in this source; requires global web image analysis"`
 	RefreshInterval string `json:"refresh_interval,omitempty" jsonschema:"legacy fixed interval as a Go duration, e.g. '1h'; used only when schedule is empty. Empty or 'manual' means manual only"`
 	Schedule        string `json:"schedule,omitempty" jsonschema:"comma-separated cron schedules (hardloop syntax, e.g. '0 2 * * *' or '@every 6h'); authoritative over refresh_interval when set"`
 	Config          string `json:"config,omitempty" jsonschema:"provider-owned config as a JSON object encoded in a string; a blank api_token keeps the stored secret"`
@@ -101,6 +108,7 @@ func (a updateSourceArgs) update(raw json.RawMessage) (websource.CollectionUpdat
 
 	return websource.CollectionUpdate{
 		Description:     nullArg(fields, "description", a.Description),
+		AnalyzeImages:   nullArg(fields, "analyze_images", a.AnalyzeImages),
 		RefreshInterval: nullArg(fields, "refresh_interval", a.RefreshInterval),
 		Specs:           nullArg(fields, "schedule", parseSchedule(a.Schedule)),
 	}, nil
@@ -143,9 +151,56 @@ type sourceNameArgs struct {
 	Name string `json:"name" jsonschema:"collection name"`
 }
 
+type registerSourcePageArgs struct {
+	Name string `json:"name" jsonschema:"existing pages source name"`
+	URL  string `json:"url" jsonschema:"absolute HTTP(S) page URL to register for server-side fetching"`
+}
+
+type sourcePageInput struct {
+	URL         string `json:"url,omitempty" jsonschema:"optional absolute HTTP(S) identity and HTML base URL; omit for manually authored content"`
+	Title       string `json:"title,omitempty" jsonschema:"document title; required when url is omitted"`
+	ContentType string `json:"content_type" jsonschema:"text/markdown, text/plain, text/html, application/xhtml+xml, text/x-markdown or markdown"`
+	Content     string `json:"content" jsonschema:"document content; maximum 8 MiB per item and 32 MiB per batch"`
+	UpdatedAt   string `json:"updated_at,omitempty" jsonschema:"optional RFC3339 source modification time"`
+}
+
+type importSourcePagesArgs struct {
+	Name  string            `json:"name" jsonschema:"existing pages source name"`
+	Pages []sourcePageInput `json:"pages" jsonschema:"1-20 pages to create or update; matching URL, or matching title for URL-less content, is upserted"`
+}
+
+func (a importSourcePagesArgs) imports() ([]manager.WebPageImport, error) {
+	imports := make([]manager.WebPageImport, 0, len(a.Pages))
+	for i, page := range a.Pages {
+		var updatedAt time.Time
+		if strings.TrimSpace(page.UpdatedAt) != "" {
+			parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(page.UpdatedAt))
+			if err != nil {
+				return nil, fmt.Errorf("page %d updated_at must be RFC3339: %w", i+1, err)
+			}
+			updatedAt = parsed
+		}
+		imports = append(imports, manager.WebPageImport{
+			URL: page.URL, Title: page.Title, ContentType: page.ContentType,
+			Content: page.Content, UpdatedAt: updatedAt,
+		})
+	}
+	return imports, nil
+}
+
+type importSourceSitemapArgs struct {
+	Name string `json:"name" jsonschema:"existing pages source name"`
+	URL  string `json:"url" jsonschema:"absolute HTTP(S) sitemap or sitemap-index URL to fetch; may register many pages"`
+}
+
+type deleteSourcePageArgs struct {
+	Name string `json:"name" jsonschema:"existing pages source name"`
+	Slug string `json:"slug" jsonschema:"exact item slug returned by get_source"`
+}
+
 type getSourceArgs struct {
 	Name string `json:"name" jsonschema:"collection name"`
-	Team string `json:"team,omitempty" jsonschema:"optional: when set, list only tickets whose teams include this exact team name (case-insensitive)"`
+	Team string `json:"team,omitempty" jsonschema:"optional exact team filter (case-insensitive)"`
 	Page int    `json:"page,omitempty" jsonschema:"page number for the ticket list (default 1)"`
 	Per  int    `json:"per_page,omitempty" jsonschema:"tickets per page (default 50, max 200)"`
 }
@@ -156,11 +211,12 @@ func (a addSourceArgs) collection() (*websource.Collection, error) {
 		return nil, err
 	}
 	col := &websource.Collection{
-		Name:        strings.TrimSpace(strings.ToLower(a.Name)),
-		Type:        strings.TrimSpace(a.Type),
-		Description: strings.TrimSpace(a.Description),
-		Config:      raw,
-		Specs:       parseSchedule(a.Schedule),
+		Name:          strings.TrimSpace(strings.ToLower(a.Name)),
+		Type:          strings.TrimSpace(a.Type),
+		Description:   strings.TrimSpace(a.Description),
+		AnalyzeImages: a.AnalyzeImages,
+		Config:        raw,
+		Specs:         parseSchedule(a.Schedule),
 	}
 	if a.RefreshInterval != "" && a.RefreshInterval != "manual" {
 		d, err := time.ParseDuration(a.RefreshInterval)
@@ -182,6 +238,82 @@ type sourceResult struct {
 	ScopeKey        string             `json:"scope_key"`
 	Running         string             `json:"running,omitempty"`
 	Progress        []manager.Progress `json:"progress,omitempty"`
+}
+
+type sourceSummary struct {
+	Name          string    `json:"name"`
+	ScopeKey      string    `json:"scope_key"`
+	Type          string    `json:"type"`
+	Description   string    `json:"description,omitempty"`
+	Status        string    `json:"status"`
+	AnalyzeImages bool      `json:"analyze_images"`
+	LastRefreshAt time.Time `json:"last_refresh_at,omitzero"`
+}
+
+type sourceInspectSummary struct {
+	sourceSummary
+	Running  string             `json:"running,omitempty"`
+	Progress []manager.Progress `json:"progress,omitempty"`
+}
+
+type sourceItemSummary struct {
+	Slug      string    `json:"slug"`
+	Path      string    `json:"path"`
+	Title     string    `json:"title,omitempty"`
+	URL       string    `json:"url"`
+	Teams     []string  `json:"teams,omitempty"`
+	UpdatedAt time.Time `json:"updated_at,omitzero"`
+	Status    string    `json:"status,omitempty"`
+}
+
+type sourceInspectOutput struct {
+	Source sourceInspectSummary          `json:"source"`
+	Count  int                           `json:"count"`
+	Items  pageResult[sourceItemSummary] `json:"items"`
+}
+
+type registerSourcePageOutput struct {
+	Source   string            `json:"source"`
+	ScopeKey string            `json:"scope_key"`
+	Page     sourceItemSummary `json:"page"`
+}
+
+type importSourcePagesOutput struct {
+	Source    string `json:"source"`
+	ScopeKey  string `json:"scope_key"`
+	Imported  int    `json:"imported"`
+	Changed   int    `json:"changed"`
+	Unchanged int    `json:"unchanged"`
+}
+
+type importSourceSitemapOutput struct {
+	Source     string `json:"source"`
+	ScopeKey   string `json:"scope_key"`
+	Discovered int    `json:"discovered"`
+	Added      int    `json:"added"`
+	Existing   int    `json:"existing"`
+}
+
+type deleteSourcePageOutput struct {
+	Status string `json:"status"`
+	Source string `json:"source"`
+	Slug   string `json:"slug"`
+	Path   string `json:"path"`
+}
+
+func summarizeSourceItem(item *websource.Page) sourceItemSummary {
+	return sourceItemSummary{
+		Slug: item.Slug, Path: item.Slug + ".md", Title: item.Title, URL: item.URL,
+		Teams: item.Teams, UpdatedAt: item.UpdatedAt, Status: item.Status,
+	}
+}
+
+func summarizeSource(col *websource.Collection) sourceSummary {
+	return sourceSummary{
+		Name: col.Name, ScopeKey: websource.ScopeKey(col.Name), Type: col.Type,
+		Description: col.Description, Status: col.Status, AnalyzeImages: col.AnalyzeImages,
+		LastRefreshAt: col.LastRefreshAt,
+	}
 }
 
 func viewSourceMCP(mgr *manager.Manager, col *websource.Collection) sourceResult {
@@ -209,18 +341,19 @@ func addDocTools(server *mcp.Server, mgr *manager.Manager, includeAdmin bool) {
 	addTool(server, &mcp.Tool{
 		Name:        "search_docs",
 		Description: "Search generated documentation and connected knowledge sources, including Confluence, Jira and pages. mode='semantic' (default) uses embedding retrieval and is the best general choice: its cost does not grow with how much of the collection shares the question's wording. mode='hybrid' combines semantic retrieval with local BM25 using weighted reciprocal rank fusion; it is the most thorough but waits for the BM25 arm, which on a large single-domain collection scores most of the corpus. A natural-language question is rewritten for BM25 into an OR of its words, so any shared product name or technical term contributes and the whole sentence is not required verbatim; words that look like keys, error codes, versions or paths (they contain a digit or . - _ / + @) stay required, so they still constrain the result. Semantic retrieval supplies paraphrase and conceptual recall. Use mode='lexical' for exact Jira keys, error codes, identifiers, quoted terms or page titles; it does not call an embedding model. Quote a phrase (\"gateway timeout\"), prefix a word with '-' to exclude it, or use OR/NOT explicitly to bypass the rewrite and control matching yourself. Use mode='semantic' for purely conceptual natural-language questions. Hybrid requires both indexes and does not silently fall back when semantic search is disabled. Scores are mode-specific and must not be compared across modes. Returns bounded ranked excerpts; use get_doc only when a result needs more context. Always scope with repo or web:<collection> when known. When repo is omitted the repo docs searched are limited to the 'default' namespace; pass namespace:'*' to search all namespaces (web sources always participate). Use list_sources only when the collection name is unknown.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args searchDocsArgs) (*mcp.CallToolResult, any, error) {
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args searchDocsArgs) (*mcp.CallToolResult, searchDocsOutput, error) {
 		mode, err := args.searchMode()
 		if err != nil {
-			return nil, nil, err
+			return nil, searchDocsOutput{}, err
 		}
 
 		docs, err := mgr.SearchDocs(ctx, args.Scope, args.Repo, args.Namespace, mode, args.Question, args.TopDocs)
 		if err != nil {
-			return nil, nil, err
+			return nil, searchDocsOutput{}, err
 		}
 
-		return jsonResult(docs), nil, nil
+		out := searchDocsOutput{Results: docs}
+		return jsonResult(docs), out, nil
 	})
 
 	addTool(server, &mcp.Tool{
@@ -270,7 +403,7 @@ func addDocTools(server *mcp.Server, mgr *manager.Manager, includeAdmin bool) {
 
 	addTool(server, &mcp.Tool{
 		Name:        "get_doc",
-		Description: "Read a known generated document path in bounded pages. Prefer search_docs first and continue with offset only while more context is needed.",
+		Description: "Read a known generated or synced Markdown document in bounded pages. Pass repo/scope_key and path exactly as returned by search_docs. Prefer search_docs first and continue with offset only while more context is needed.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args getDocArgs) (*mcp.CallToolResult, any, error) {
 		doc, err := mgr.GetDoc(ctx, args.Repo, args.Path, args.Offset, mcpReadSize(args.MaxBytes))
 		if err != nil {
@@ -282,20 +415,75 @@ func addDocTools(server *mcp.Server, mgr *manager.Manager, includeAdmin bool) {
 
 	addTool(server, &mcp.Tool{
 		Name:        "list_sources",
-		Description: "List web-source collections (name, type, status and a human 'description' of what each holds). Use it to pick which source to scope search_docs to (repo=web:<name>) when the user's question matches a source's description; also for an inventory. Do not call before every search_docs request.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args listSourcesArgs) (*mcp.CallToolResult, any, error) {
+		Description: "List web sources with exact scope_key, type, status and description. Use it when the matching source is unknown; pass scope_key to search_docs.repo.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args listSourcesArgs) (*mcp.CallToolResult, pageResult[sourceSummary], error) {
 		cols, err := mgr.ListWebCollections(ctx)
 		if err != nil {
-			return nil, nil, err
+			return nil, pageResult[sourceSummary]{}, err
 		}
 
-		return jsonResult(pageSlice(cols, args.Page, args.PerPage, 50)), nil, nil
+		summaries := make([]sourceSummary, 0, len(cols))
+		for _, col := range cols {
+			summaries = append(summaries, summarizeSource(col))
+		}
+		page := pageSlice(summaries, args.Page, args.PerPage, 50)
+		return jsonResult(page), page, nil
 	})
+	addSourceInspectTool(server, mgr)
 
 	if includeAdmin {
 		addDocConfigTools(server, mgr)
 		addSourceAdminTools(server, mgr)
 	}
+}
+
+// addSourceInspectTool is read-only and belongs in both MCP profiles: it lets a
+// model inspect sample titles/links after list_sources identifies a likely
+// collection, without exposing administration tools.
+func addSourceInspectTool(server *mcp.Server, mgr *manager.Manager) {
+	addTool(server, &mcp.Tool{
+		Name:        "get_source",
+		Description: "Inspect one source's status and a bounded list of item titles and links when list_sources metadata is insufficient.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args getSourceArgs) (*mcp.CallToolResult, sourceInspectOutput, error) {
+		name := strings.TrimSpace(strings.ToLower(args.Name))
+		col, err := mgr.WebCollection(ctx, name)
+		if err != nil {
+			return nil, sourceInspectOutput{}, err
+		}
+		if col == nil {
+			return nil, sourceInspectOutput{}, fmt.Errorf("source %s not found", name)
+		}
+		page, perPage := args.Page, args.Per
+		if page <= 0 {
+			page = 1
+		}
+		if perPage <= 0 {
+			perPage = 50
+		}
+		if perPage > 200 {
+			perPage = 200
+		}
+		pages, total, err := mgr.WebPagesPaged(ctx, name, args.Team, "", (page-1)*perPage, perPage)
+		if err != nil {
+			return nil, sourceInspectOutput{}, err
+		}
+		items := make([]sourceItemSummary, 0, len(pages))
+		for _, item := range pages {
+			items = append(items, summarizeSourceItem(item))
+		}
+		scope := websource.ScopeKey(name)
+		progress, _ := mgr.Progress(scope)
+		out := sourceInspectOutput{
+			Source: sourceInspectSummary{
+				sourceSummary: summarizeSource(col), Running: mgr.Activity(scope), Progress: progress,
+			},
+			Count: total,
+			Items: pageResult[sourceItemSummary]{
+				Items: items, Total: total, Page: page, PerPage: perPage, HasMore: page*perPage < total,
+			},
+		}
+		return jsonResult(out), out, nil
+	})
 }
 
 // addSourceAdminTools registers the web-source management tools (create,
@@ -308,6 +496,22 @@ func addSourceAdminTools(server *mcp.Server, mgr *manager.Manager) {
 			"so add_source is called with a valid type. Config shape depends on the type.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, _ emptyArgs) (*mcp.CallToolResult, any, error) {
 		return jsonResult(map[string]any{"types": mgr.WebSourceTypes()}), nil, nil
+	})
+
+	addTool(server, &mcp.Tool{
+		Name:        "get_source_config",
+		Description: "Inspect one source's full administrative status, schedule and provider config with secrets redacted. Use get_source instead when only item discovery is needed.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args sourceNameArgs) (*mcp.CallToolResult, sourceResult, error) {
+		name := strings.TrimSpace(strings.ToLower(args.Name))
+		col, err := mgr.WebCollection(ctx, name)
+		if err != nil {
+			return nil, sourceResult{}, err
+		}
+		if col == nil {
+			return nil, sourceResult{}, fmt.Errorf("source %s not found", name)
+		}
+		out := viewSourceMCP(mgr, col)
+		return jsonResult(out), out, nil
 	})
 
 	addTool(server, &mcp.Tool{
@@ -389,48 +593,67 @@ func addSourceAdminTools(server *mcp.Server, mgr *manager.Manager) {
 	})
 
 	addTool(server, &mcp.Tool{
-		Name: "get_source",
-		Description: "Inspect one web source: its (redacted) config and status plus a bounded list of its " +
-			"indexed items with titles and original links. For jira, pass team to list only tickets whose teams " +
-			"include that exact team name (case-insensitive).",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args getSourceArgs) (*mcp.CallToolResult, any, error) {
+		Name:        "register_source_page",
+		Description: "Register one absolute HTTP(S) URL on an existing pages source and queue a source refresh. The server fetch may use matching stored web credentials; use only when the user explicitly requests that URL.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args registerSourcePageArgs) (*mcp.CallToolResult, registerSourcePageOutput, error) {
 		name := strings.TrimSpace(strings.ToLower(args.Name))
-		col, err := mgr.WebCollection(ctx, name)
+		page, err := mgr.AddWebPage(ctx, name, args.URL)
 		if err != nil {
-			return nil, nil, err
+			return nil, registerSourcePageOutput{}, err
 		}
-		if col == nil {
-			return nil, nil, fmt.Errorf("source %s not found", name)
-		}
-
-		page, perPage := args.Page, args.Per
-		if page <= 0 {
-			page = 1
-		}
-		if perPage <= 0 {
-			perPage = 50
-		}
-		if perPage > 200 {
-			perPage = 200
-		}
-
-		pages, total, err := mgr.WebPagesPaged(ctx, name, args.Team, "", (page-1)*perPage, perPage)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		return jsonResult(map[string]any{
-			"source": viewSourceMCP(mgr, col),
-			"count":  total,
-			"items": pageResult[*websource.Page]{
-				Items:   pages,
-				Total:   total,
-				Page:    page,
-				PerPage: perPage,
-				HasMore: page*perPage < total,
-			},
-		}), nil, nil
+		out := registerSourcePageOutput{Source: name, ScopeKey: websource.ScopeKey(name), Page: summarizeSourceItem(page)}
+		return jsonResult(out), out, nil
 	})
+
+	addTool(server, &mcp.Tool{
+		Name:        "import_source_pages",
+		Description: "Create or update supplied Markdown, text or HTML in an existing pages source and index changed content immediately. Accepts 1-20 items; URL identifies remote content, while URL-less manual content is identified by title. If image analysis is enabled, embedded or referenced images may be sent to the configured vision provider.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args importSourcePagesArgs) (*mcp.CallToolResult, importSourcePagesOutput, error) {
+		imports, err := args.imports()
+		if err != nil {
+			return nil, importSourcePagesOutput{}, err
+		}
+		name := strings.TrimSpace(strings.ToLower(args.Name))
+		result, err := mgr.ImportWebPages(ctx, name, imports)
+		if err != nil {
+			return nil, importSourcePagesOutput{}, err
+		}
+		out := importSourcePagesOutput{
+			Source: name, ScopeKey: websource.ScopeKey(name), Imported: result.Imported,
+			Changed: result.Changed, Unchanged: result.Unchanged,
+		}
+		return jsonResult(out), out, nil
+	})
+
+	addTool(server, &mcp.Tool{
+		Name:        "import_source_sitemap",
+		Description: "Fetch a sitemap or sitemap index into an existing pages source, register newly discovered URLs, and queue one source refresh. This can discover many pages and make authenticated outbound requests; use only when explicitly requested.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args importSourceSitemapArgs) (*mcp.CallToolResult, importSourceSitemapOutput, error) {
+		name := strings.TrimSpace(strings.ToLower(args.Name))
+		result, err := mgr.ImportWebSitemap(ctx, name, args.URL)
+		if err != nil {
+			return nil, importSourceSitemapOutput{}, err
+		}
+		out := importSourceSitemapOutput{
+			Source: name, ScopeKey: websource.ScopeKey(name), Discovered: result.Discovered,
+			Added: result.Added, Existing: result.Existing,
+		}
+		return jsonResult(out), out, nil
+	})
+
+	addTool(server, &mcp.Tool{
+		Name:        "delete_source_page",
+		Description: "Delete one manually managed item from a pages source, including its Markdown, image-analysis cache and search-index entries. Pass the exact slug returned by get_source and use only on explicit user request.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args deleteSourcePageArgs) (*mcp.CallToolResult, deleteSourcePageOutput, error) {
+		name := strings.TrimSpace(strings.ToLower(args.Name))
+		slug := strings.TrimSpace(args.Slug)
+		if err := mgr.DeleteWebPage(ctx, name, slug); err != nil {
+			return nil, deleteSourcePageOutput{}, err
+		}
+		out := deleteSourcePageOutput{Status: "deleted", Source: name, Slug: slug, Path: slug + ".md"}
+		return jsonResult(out), out, nil
+	})
+
 }
 
 func boundedCodeSnippets(snippets []coderag.Snippet) []coderag.Snippet {
@@ -463,6 +686,13 @@ type setDocsConfigArgs struct {
 	LLMModel   string `json:"llm_model,omitempty" jsonschema:"chat model name"`
 	LLMTimeout string `json:"llm_timeout,omitempty" jsonschema:"chat request timeout as a Go duration, e.g. 60s"`
 
+	WebImageAnalysisEnabled    bool   `json:"web_image_analysis_enabled,omitempty" jsonschema:"enable vision descriptions for images in opted-in web sources; off by default"`
+	WebImageModel              string `json:"web_image_model,omitempty" jsonschema:"vision-capable model name; blank uses the main LLM model"`
+	WebImageMaxPerPage         int    `json:"web_image_max_per_page,omitempty" jsonschema:"maximum images analyzed per page (default 3, max 50)"`
+	WebImageMaxBytes           int64  `json:"web_image_max_bytes,omitempty" jsonschema:"maximum downloaded bytes per image (default 4194304, max 33554432)"`
+	WebImageMaxPixels          int64  `json:"web_image_max_pixels,omitempty" jsonschema:"maximum decoded pixels per image (default 16000000, max 100000000)"`
+	WebImageAllowAuthenticated bool   `json:"web_image_allow_authenticated,omitempty" jsonschema:"allow authenticated and same-origin private-network images to be sent to the vision provider; off by default"`
+
 	EmbedBaseURL     string `json:"embed_base_url,omitempty" jsonschema:"OpenAI-compatible embeddings base URL, e.g. http://localhost:11434/v1"`
 	EmbedAPIKey      string `json:"embed_api_key,omitempty" jsonschema:"embeddings API key (write-only; leave empty to keep existing)"`
 	EmbedModel       string `json:"embed_model,omitempty" jsonschema:"embedding model name"`
@@ -479,11 +709,12 @@ type setDocsConfigArgs struct {
 	CodeEmbedConcurrency int    `json:"code_embed_concurrency,omitempty" jsonschema:"parallel code embedding batch requests (default 4)"`
 	CodeEmbedTimeout     string `json:"code_embed_timeout,omitempty" jsonschema:"code embeddings request timeout as a Go duration, e.g. 30s"`
 
-	RAGEnabled      bool `json:"rag_enabled,omitempty" jsonschema:"enable indexing + retrieval"`
-	RAGChunkSize    int  `json:"rag_chunk_size,omitempty" jsonschema:"target chunk length in characters"`
-	RAGChunkOverlap int  `json:"rag_chunk_overlap,omitempty" jsonschema:"character overlap between chunks"`
-	RAGTopK         int  `json:"rag_top_k,omitempty" jsonschema:"chunk matches fetched before grouping"`
-	RAGTopDocs      int  `json:"rag_top_docs,omitempty" jsonschema:"ranked document excerpts returned (max 20)"`
+	RAGEnabled             bool `json:"rag_enabled,omitempty" jsonschema:"enable indexing + retrieval"`
+	RAGKeepMarkdownTargets bool `json:"rag_keep_markdown_targets,omitempty" jsonschema:"retain link and image URLs in search indexes; off by default so labels/alt text remain but targets are omitted"`
+	RAGChunkSize           int  `json:"rag_chunk_size,omitempty" jsonschema:"target chunk length in characters"`
+	RAGChunkOverlap        int  `json:"rag_chunk_overlap,omitempty" jsonschema:"character overlap between chunks"`
+	RAGTopK                int  `json:"rag_top_k,omitempty" jsonschema:"chunk matches fetched before grouping"`
+	RAGTopDocs             int  `json:"rag_top_docs,omitempty" jsonschema:"ranked document excerpts returned (max 20)"`
 
 	RAGHybridCandidates     int      `json:"rag_hybrid_candidates,omitempty" jsonschema:"documents each ranker contributes to hybrid rank fusion (default 12, max 40); both rankers always use the same depth"`
 	RAGHybridRRFK           int      `json:"rag_hybrid_rrf_k,omitempty" jsonschema:"reciprocal rank fusion smoothing constant (default 20); larger values flatten the difference between ranks"`

@@ -29,6 +29,7 @@ import (
 	"github.com/rytsh/krabby/internal/service/gitops"
 	"github.com/rytsh/krabby/internal/service/graphify"
 	"github.com/rytsh/krabby/internal/service/graphquery"
+	"github.com/rytsh/krabby/internal/service/llm"
 	"github.com/rytsh/krabby/internal/service/progress"
 	"github.com/rytsh/krabby/internal/service/queue"
 	"github.com/rytsh/krabby/internal/service/rag"
@@ -144,9 +145,11 @@ type Manager struct {
 // that capability is disabled. Bundles are swapped atomically by Configure; the
 // previous bundle's owned store is closed after a swap.
 type docsBundle struct {
-	gen   docgen.Generator
-	rag   *rag.Service
-	store vectorstore.Store // owned; closed on swap
+	gen      docgen.Generator
+	rag      *rag.Service
+	store    vectorstore.Store // owned; closed on swap
+	vision   *llm.Client
+	imageCfg config.WebImage
 
 	codeRag   *coderag.Service
 	codeStore vectorstore.Store // owned; closed on swap
@@ -363,7 +366,7 @@ func (m *Manager) rebuildTask(spec queue.Spec) (queue.Task, bool) {
 			return queue.Task{}, false
 		}
 
-		return m.webSyncTask(name), true
+		return m.webSyncTaskMode(name, spec.Params["force_full"] == "true"), true
 
 	case taskKindReindex:
 		if spec.ID == "*" {
@@ -2044,7 +2047,9 @@ func (m *Manager) buildDocsAndIndex(ctx context.Context, repo *registry.Repo, de
 func (m *Manager) indexDocs(ctx context.Context, d *docsBundle, repo, docsDir string) error {
 	var errs []error
 	if m.docsText != nil {
-		if err := m.docsText.Index(ctx, repo, docsDir); err != nil {
+		if err := m.docsText.IndexWithOptions(ctx, repo, docsDir, &rag.IndexOptions{
+			KeepMarkdownTargets: d.ragCfg.KeepMarkdownTargets,
+		}); err != nil {
 			errs = append(errs, fmt.Errorf("index docs text; %w", err))
 		}
 		// Query tuning is derived from the corpus, so it follows the corpus.

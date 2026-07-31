@@ -3,6 +3,9 @@ package websource
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -42,12 +45,21 @@ func TestNamesAndScopeKeys(t *testing.T) {
 }
 
 func TestHTMLHelpers(t *testing.T) {
-	md, err := MarkdownFromHTML(`<h1>Wine Guide</h1><p>Use <strong>Pinot</strong>.</p>`)
+	md, err := MarkdownFromHTML(`<h1>Wine Guide</h1><p>Use <strong>Pinot</strong>.</p>`, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(md, "# Wine Guide") || !strings.Contains(md, "**Pinot**") {
 		t.Fatalf("unexpected markdown: %q", md)
+	}
+
+	md, err = MarkdownFromHTML(`<a href="next">Next</a><img src="/assets/map.png" alt="Map">`, "https://docs.example.com/guide/start")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(md, `[Next](https://docs.example.com/guide/next)`) ||
+		!strings.Contains(md, `![Map](https://docs.example.com/assets/map.png)`) {
+		t.Fatalf("relative URLs were not resolved: %q", md)
 	}
 
 	title, article, err := ExtractArticle(`<!doctype html><html><head><title>Cellar</title></head><body>
@@ -63,6 +75,53 @@ func TestHTMLHelpers(t *testing.T) {
 	if got := Slugify("  Wine & Food / 2026  "); got != "wine-food-2026" {
 		t.Fatalf("Slugify = %q", got)
 	}
+}
+
+func TestMarkdownImages(t *testing.T) {
+	t.Parallel()
+	markdown := `Before ![Architecture](https://docs.example.com/diagram(v2).png "Diagram")
+and ![Map](<https://docs.example.com/map image.png>) plus [a link](https://example.com).`
+	images := MarkdownImages(markdown)
+	if len(images) != 2 {
+		t.Fatalf("images = %#v", images)
+	}
+	if images[0].Alt != "Architecture" || images[0].URL != "https://docs.example.com/diagram(v2).png" {
+		t.Fatalf("first image = %#v", images[0])
+	}
+	if images[1].Alt != "Map" || images[1].URL != "https://docs.example.com/map image.png" {
+		t.Fatalf("second image = %#v", images[1])
+	}
+}
+
+func TestValidateImageURLPrivateNetworkOptIn(t *testing.T) {
+	t.Parallel()
+	if err := ValidateImageURL("http://127.0.0.1/image.png", false); err == nil {
+		t.Fatal("private image URL accepted without opt-in")
+	}
+	if err := ValidateImageURL("http://127.0.0.1/image.png", true); err != nil {
+		t.Fatalf("private image URL rejected with opt-in: %v", err)
+	}
+	if err := ValidateImageURL("https://user:secret@example.com/image.png", true); err == nil {
+		t.Fatal("URL credentials were accepted")
+	}
+}
+
+func TestImageHTTPClientGuardsResolvedPrivateAddresses(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(server.Close)
+	localURL := strings.Replace(server.URL, "127.0.0.1", "localhost", 1)
+
+	if _, err := ImageHTTPClient(http.DefaultClient, "").Get(localURL); !errors.Is(err, ErrImageUnsupported) {
+		t.Fatalf("resolved private address error = %v", err)
+	}
+	res, err := ImageHTTPClient(http.DefaultClient, "localhost").Get(localURL)
+	if err != nil {
+		t.Fatalf("explicit private host: %v", err)
+	}
+	_ = res.Body.Close()
 }
 
 func TestStoreCollectionsAndPages(t *testing.T) {
@@ -90,6 +149,17 @@ func TestStoreCollectionsAndPages(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	analysis := &ImageAnalysis{
+		ID:     ImageAnalysisID("wine/42-guide", "https://wiki/image.png"),
+		PageID: "wine/42-guide", ContentHash: "content", Engine: "vision:v1", Text: "A diagram",
+	}
+	if err := store.UpsertImageAnalysis(ctx, analysis); err != nil {
+		t.Fatal(err)
+	}
+	gotAnalysis, err := store.GetImageAnalysis(ctx, analysis.ID)
+	if err != nil || gotAnalysis == nil || gotAnalysis.Text != "A diagram" {
+		t.Fatalf("analysis=%+v err=%v", gotAnalysis, err)
+	}
 
 	cols, err := store.ListCollections(ctx)
 	if err != nil || len(cols) != 1 || cols[0].Name != "wine" {
@@ -109,6 +179,10 @@ func TestStoreCollectionsAndPages(t *testing.T) {
 	pages, err = store.Pages(ctx, "wine")
 	if err != nil || len(pages) != 0 {
 		t.Fatalf("pages after delete=%+v err=%v", pages, err)
+	}
+	gotAnalysis, err = store.GetImageAnalysis(ctx, analysis.ID)
+	if err != nil || gotAnalysis != nil {
+		t.Fatalf("analysis after delete=%+v err=%v", gotAnalysis, err)
 	}
 }
 

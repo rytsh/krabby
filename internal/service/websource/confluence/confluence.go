@@ -12,6 +12,7 @@ package confluence
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -618,7 +619,7 @@ func pageToRemote(base string, page contentPage) websource.RemotePage {
 		URL:       base + page.Links.WebUI,
 		UpdatedAt: parseConfluenceTime(page.Version.When),
 	}
-	if md, err := websource.MarkdownFromHTML(page.Body.Storage.Value); err != nil {
+	if md, err := websource.MarkdownFromHTML(page.Body.Storage.Value, remote.URL); err != nil {
 		remote.Err = fmt.Errorf("convert page %s (%s); %w", page.ID, page.Title, err)
 	} else {
 		// Prepend the ancestor breadcrumb so a weakly-titled page carries its
@@ -767,6 +768,88 @@ func (f *Fetcher) get(ctx context.Context, cfg resolvedConfig, endpoint string) 
 	}
 
 	return body, nil
+}
+
+// FetchImage downloads a standard Confluence image URL. Provider credentials
+// are sent only to the configured Confluence origin and only after the global
+// authenticated-image opt-in is enabled.
+func (f *Fetcher) FetchImage(ctx context.Context, col *websource.Collection, pageURL, imageURL string, maxBytes int64, allowAuthenticated bool) (websource.ImageContent, error) {
+	cfg, err := decodeConfig(col.Config)
+	if err != nil {
+		return websource.ImageContent{}, err
+	}
+	privateOrigin := pageURL
+	if privateOrigin == "" {
+		privateOrigin = cfg.BaseURL
+	}
+	allowPrivate := allowAuthenticated && websource.SameOrigin(privateOrigin, imageURL)
+	if err := websource.ValidateImageURL(imageURL, allowPrivate); err != nil {
+		return websource.ImageContent{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, imageURL, nil)
+	if err != nil {
+		return websource.ImageContent{}, fmt.Errorf("build confluence image request; %w", err)
+	}
+	req.Header.Set("Accept", "image/png,image/jpeg,image/gif")
+
+	authenticated := false
+	if allowAuthenticated && websource.SameOrigin(cfg.BaseURL, imageURL) {
+		switch {
+		case cfg.User != "":
+			req.SetBasicAuth(cfg.User, cfg.APIToken)
+			authenticated = true
+		case cfg.APIToken != "":
+			req.Header.Set("Authorization", "Bearer "+cfg.APIToken)
+			authenticated = true
+		}
+	}
+
+	privateHost := ""
+	if allowPrivate {
+		if parsed, parseErr := url.Parse(imageURL); parseErr == nil {
+			privateHost = parsed.Hostname()
+		}
+	}
+	client := websource.ImageHTTPClient(f.client, privateHost)
+	client.CheckRedirect = func(req *http.Request, _ []*http.Request) error {
+		if authenticated && !websource.SameOrigin(imageURL, req.URL.String()) {
+			return fmt.Errorf("%w: authenticated image redirect changed origin", websource.ErrImageUnsupported)
+		}
+		redirectAllowsPrivate := allowPrivate && websource.SameOrigin(imageURL, req.URL.String())
+		return websource.ValidateImageURL(req.URL.String(), redirectAllowsPrivate)
+	}
+	res, err := client.Do(req)
+	if err != nil {
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
+		return websource.ImageContent{}, fmt.Errorf("fetch confluence image; %w", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return websource.ImageContent{}, fmt.Errorf("%w: confluence image status %s", websource.ErrImageUnsupported, res.Status)
+	}
+	if maxBytes <= 0 {
+		maxBytes = 4 << 20
+	}
+	body, err := io.ReadAll(io.LimitReader(res.Body, maxBytes+1))
+	if err != nil {
+		return websource.ImageContent{}, fmt.Errorf("read confluence image; %w", err)
+	}
+	if int64(len(body)) > maxBytes {
+		return websource.ImageContent{}, fmt.Errorf("%w: confluence image exceeds %d bytes", websource.ErrImageUnsupported, maxBytes)
+	}
+	mediaType := strings.ToLower(strings.TrimSpace(strings.Split(res.Header.Get("Content-Type"), ";")[0]))
+	if mediaType == "" || mediaType == "application/octet-stream" {
+		mediaType = http.DetectContentType(body)
+	}
+	switch mediaType {
+	case "image/png", "image/jpeg", "image/gif":
+	default:
+		return websource.ImageContent{}, fmt.Errorf("%w: confluence image content type %q", websource.ErrImageUnsupported, mediaType)
+	}
+	return websource.ImageContent{Data: body, MediaType: mediaType, Authenticated: authenticated}, nil
 }
 
 // labelSelected applies the include/exclude label filters to one page.

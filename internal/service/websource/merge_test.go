@@ -43,6 +43,7 @@ func TestCollectionUpdateApply(t *testing.T) {
 			Description:     "team wiki",
 			RefreshInterval: 6 * time.Hour,
 			Specs:           []string{"0 2 * * *"},
+			AnalyzeImages:   true,
 		}
 	}
 
@@ -64,6 +65,23 @@ func TestCollectionUpdateApply(t *testing.T) {
 		}
 		if col.RefreshInterval != 6*time.Hour {
 			t.Fatalf("updating the description wiped the interval: %v", col.RefreshInterval)
+		}
+		if !col.AnalyzeImages {
+			t.Fatal("updating the description disabled image analysis")
+		}
+	})
+
+	t.Run("image analysis can be disabled", func(t *testing.T) {
+		var update CollectionUpdate
+		if err := json.Unmarshal([]byte(`{"analyze_images":false}`), &update); err != nil {
+			t.Fatal(err)
+		}
+		col := stored()
+		if err := update.Apply(col); err != nil {
+			t.Fatal(err)
+		}
+		if col.AnalyzeImages {
+			t.Fatal("explicit false did not disable image analysis")
 		}
 	})
 

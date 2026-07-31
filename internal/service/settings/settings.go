@@ -27,6 +27,9 @@ const recordID = "docs"
 // Settings is the mutable docs/RAG configuration.
 type Settings struct {
 	ID string `bw:"id,pk" json:"-"` // always recordID
+	// DocsIndexProjection is internal migration state for derived documentation
+	// indexes. It is intentionally absent from REST/MCP settings payloads.
+	DocsIndexProjection int `bw:"docs_index_projection" json:"-"`
 
 	// Docs (generation).
 	DocsEnabled      bool     `bw:"docs_enabled"      json:"docs_enabled"`
@@ -45,6 +48,16 @@ type Settings struct {
 	LLMModel   string        `bw:"llm_model"    json:"llm_model"`
 	LLMTimeout time.Duration `bw:"llm_timeout"  json:"llm_timeout"`
 
+	// Optional vision analysis for images referenced by web pages. Numeric zero
+	// values use effective defaults so records created before these fields were
+	// added retain bounded behavior without a data migration.
+	WebImageAnalysisEnabled    bool   `bw:"web_image_analysis_enabled"   json:"web_image_analysis_enabled"`
+	WebImageModel              string `bw:"web_image_model"              json:"web_image_model"`
+	WebImageMaxPerPage         int    `bw:"web_image_max_per_page"       json:"web_image_max_per_page"`
+	WebImageMaxBytes           int64  `bw:"web_image_max_bytes"          json:"web_image_max_bytes"`
+	WebImageMaxPixels          int64  `bw:"web_image_max_pixels"         json:"web_image_max_pixels"`
+	WebImageAllowAuthenticated bool   `bw:"web_image_allow_authenticated" json:"web_image_allow_authenticated"`
+
 	// Embedder (embeddings) for RAG.
 	EmbedBaseURL     string        `bw:"embed_base_url"    json:"embed_base_url"`
 	EmbedAPIKey      string        `bw:"embed_api_key"     json:"-"` // write-only
@@ -55,11 +68,12 @@ type Settings struct {
 	EmbedTimeout     time.Duration `bw:"embed_timeout"     json:"embed_timeout"`
 
 	// RAG (retrieval over the embedded vector store).
-	RAGEnabled      bool `bw:"rag_enabled"       json:"rag_enabled"`
-	RAGChunkSize    int  `bw:"rag_chunk_size"    json:"rag_chunk_size"`
-	RAGChunkOverlap int  `bw:"rag_chunk_overlap" json:"rag_chunk_overlap"`
-	RAGTopK         int  `bw:"rag_top_k"         json:"rag_top_k"`
-	RAGTopDocs      int  `bw:"rag_top_docs"      json:"rag_top_docs"`
+	RAGEnabled             bool `bw:"rag_enabled"               json:"rag_enabled"`
+	RAGKeepMarkdownTargets bool `bw:"rag_keep_markdown_targets" json:"rag_keep_markdown_targets"`
+	RAGChunkSize           int  `bw:"rag_chunk_size"            json:"rag_chunk_size"`
+	RAGChunkOverlap        int  `bw:"rag_chunk_overlap"         json:"rag_chunk_overlap"`
+	RAGTopK                int  `bw:"rag_top_k"                 json:"rag_top_k"`
+	RAGTopDocs             int  `bw:"rag_top_docs"              json:"rag_top_docs"`
 
 	// Hybrid docs search (rank fusion of the BM25 and semantic rankers). Zero
 	// values mean "use the built-in default", so records written before these
@@ -170,6 +184,10 @@ func Defaults() Settings {
 		LLMModel:   "gpt-4o-mini",
 		LLMTimeout: 300 * time.Second,
 
+		WebImageMaxPerPage: config.DefaultWebImageMaxPerPage,
+		WebImageMaxBytes:   config.DefaultWebImageMaxBytes,
+		WebImageMaxPixels:  config.DefaultWebImageMaxPixels,
+
 		EmbedBatch:       64,
 		EmbedConcurrency: 4,
 		EmbedTimeout:     30 * time.Second,
@@ -211,6 +229,49 @@ func Defaults() Settings {
 
 		GitPollInterval: time.Hour,
 	}
+}
+
+// EffectiveWebImageMaxPerPage returns the per-page image cap, including the
+// default for persisted records that predate the setting.
+func (s Settings) EffectiveWebImageMaxPerPage() int {
+	if s.WebImageMaxPerPage <= 0 {
+		return config.DefaultWebImageMaxPerPage
+	}
+
+	return s.WebImageMaxPerPage
+}
+
+// EffectiveWebImageMaxBytes returns the per-image byte cap, including the
+// default for persisted records that predate the setting.
+func (s Settings) EffectiveWebImageMaxBytes() int64 {
+	if s.WebImageMaxBytes <= 0 {
+		return config.DefaultWebImageMaxBytes
+	}
+
+	return s.WebImageMaxBytes
+}
+
+// EffectiveWebImageMaxPixels returns the decoded-pixel cap, including the
+// default for persisted records that predate the setting.
+func (s Settings) EffectiveWebImageMaxPixels() int64 {
+	if s.WebImageMaxPixels <= 0 {
+		return config.DefaultWebImageMaxPixels
+	}
+
+	return s.WebImageMaxPixels
+}
+
+func (s Settings) validateWebImageLimits() error {
+	if s.WebImageMaxPerPage < 0 || s.WebImageMaxPerPage > config.MaxWebImageMaxPerPage {
+		return fmt.Errorf("web image maximum per page must be zero or between 1 and %d", config.MaxWebImageMaxPerPage)
+	}
+	if s.WebImageMaxBytes < 0 || s.WebImageMaxBytes > config.MaxWebImageMaxBytes {
+		return fmt.Errorf("web image maximum bytes must be zero or between 1 and %d", config.MaxWebImageMaxBytes)
+	}
+	if s.WebImageMaxPixels < 0 || s.WebImageMaxPixels > config.MaxWebImageMaxPixels {
+		return fmt.Errorf("web image maximum pixels must be zero or between 1 and %d", config.MaxWebImageMaxPixels)
+	}
+	return nil
 }
 
 // EffectiveSchedules returns the repo poll schedules the scheduler should run.
@@ -287,6 +348,9 @@ func (s Settings) Redact() Redacted {
 	r.Settings.CodeEmbedAPIKey = ""
 	r.Settings.WebhookSecret = ""
 	r.Settings.LangfuseSecretKey = ""
+	r.Settings.WebImageMaxPerPage = s.EffectiveWebImageMaxPerPage()
+	r.Settings.WebImageMaxBytes = s.EffectiveWebImageMaxBytes()
+	r.Settings.WebImageMaxPixels = s.EffectiveWebImageMaxPixels()
 
 	// A Go nil slice marshals to null, so a list the user has never set would
 	// reach clients as null rather than []. Callers then have to null-guard
@@ -345,6 +409,13 @@ type Patch struct {
 	LLMModel   *string        `json:"llm_model"`
 	LLMTimeout *time.Duration `json:"llm_timeout"`
 
+	WebImageAnalysisEnabled    *bool   `json:"web_image_analysis_enabled"`
+	WebImageModel              *string `json:"web_image_model"`
+	WebImageMaxPerPage         *int    `json:"web_image_max_per_page"`
+	WebImageMaxBytes           *int64  `json:"web_image_max_bytes"`
+	WebImageMaxPixels          *int64  `json:"web_image_max_pixels"`
+	WebImageAllowAuthenticated *bool   `json:"web_image_allow_authenticated"`
+
 	EmbedBaseURL     *string        `json:"embed_base_url"`
 	EmbedAPIKey      *string        `json:"embed_api_key"`
 	EmbedModel       *string        `json:"embed_model"`
@@ -353,11 +424,12 @@ type Patch struct {
 	EmbedConcurrency *int           `json:"embed_concurrency"`
 	EmbedTimeout     *time.Duration `json:"embed_timeout"`
 
-	RAGEnabled      *bool `json:"rag_enabled"`
-	RAGChunkSize    *int  `json:"rag_chunk_size"`
-	RAGChunkOverlap *int  `json:"rag_chunk_overlap"`
-	RAGTopK         *int  `json:"rag_top_k"`
-	RAGTopDocs      *int  `json:"rag_top_docs"`
+	RAGEnabled             *bool `json:"rag_enabled"`
+	RAGKeepMarkdownTargets *bool `json:"rag_keep_markdown_targets"`
+	RAGChunkSize           *int  `json:"rag_chunk_size"`
+	RAGChunkOverlap        *int  `json:"rag_chunk_overlap"`
+	RAGTopK                *int  `json:"rag_top_k"`
+	RAGTopDocs             *int  `json:"rag_top_docs"`
 
 	RAGHybridCandidates     *int      `json:"rag_hybrid_candidates"`
 	RAGHybridRRFK           *int      `json:"rag_hybrid_rrf_k"`
@@ -420,9 +492,11 @@ func (p Patch) RuntimeOnly() bool {
 		p.DocsSummaryModel == nil && p.DocsMaxGroups == nil &&
 		p.DocsInclude == nil && p.DocsIncludeExtra == nil && p.DocsExclude == nil && p.DocsPrompt == nil &&
 		p.LLMBaseURL == nil && p.LLMAPIKey == nil && p.LLMModel == nil && p.LLMTimeout == nil &&
+		p.WebImageAnalysisEnabled == nil && p.WebImageModel == nil && p.WebImageMaxPerPage == nil &&
+		p.WebImageMaxBytes == nil && p.WebImageMaxPixels == nil && p.WebImageAllowAuthenticated == nil &&
 		p.EmbedBaseURL == nil && p.EmbedAPIKey == nil && p.EmbedModel == nil &&
 		p.EmbedDim == nil && p.EmbedBatch == nil && p.EmbedConcurrency == nil && p.EmbedTimeout == nil &&
-		p.RAGEnabled == nil && p.RAGChunkSize == nil && p.RAGChunkOverlap == nil &&
+		p.RAGEnabled == nil && p.RAGKeepMarkdownTargets == nil && p.RAGChunkSize == nil && p.RAGChunkOverlap == nil &&
 		p.RAGTopK == nil && p.RAGTopDocs == nil &&
 		p.RAGHybridCandidates == nil && p.RAGHybridRRFK == nil &&
 		p.RAGHybridWeightLexical == nil && p.RAGHybridWeightSemantic == nil &&
@@ -502,6 +576,24 @@ func (p Patch) Apply(base Settings) Settings {
 	if p.LLMTimeout != nil {
 		base.LLMTimeout = *p.LLMTimeout
 	}
+	if p.WebImageAnalysisEnabled != nil {
+		base.WebImageAnalysisEnabled = *p.WebImageAnalysisEnabled
+	}
+	if p.WebImageModel != nil {
+		base.WebImageModel = *p.WebImageModel
+	}
+	if p.WebImageMaxPerPage != nil {
+		base.WebImageMaxPerPage = *p.WebImageMaxPerPage
+	}
+	if p.WebImageMaxBytes != nil {
+		base.WebImageMaxBytes = *p.WebImageMaxBytes
+	}
+	if p.WebImageMaxPixels != nil {
+		base.WebImageMaxPixels = *p.WebImageMaxPixels
+	}
+	if p.WebImageAllowAuthenticated != nil {
+		base.WebImageAllowAuthenticated = *p.WebImageAllowAuthenticated
+	}
 	if p.EmbedBaseURL != nil {
 		base.EmbedBaseURL = *p.EmbedBaseURL
 	}
@@ -525,6 +617,9 @@ func (p Patch) Apply(base Settings) Settings {
 	}
 	if p.RAGEnabled != nil {
 		base.RAGEnabled = *p.RAGEnabled
+	}
+	if p.RAGKeepMarkdownTargets != nil {
+		base.RAGKeepMarkdownTargets = *p.RAGKeepMarkdownTargets
 	}
 	if p.RAGChunkSize != nil {
 		base.RAGChunkSize = *p.RAGChunkSize
@@ -662,7 +757,11 @@ type Store struct {
 	mcpBucket *bw.Bucket[MCPKey]
 }
 
-// settingsSchemaVersion v11 adds the langfuse_* fields (LLM-observability
+// settingsSchemaVersion v14 adds the web_image_* vision-analysis fields; zero
+// numeric values use effective defaults for records migrated from v13. v13
+// adds rag_keep_markdown_targets. v12 adds the
+// internal docs index projection marker.
+// v11 adds the langfuse_* fields (LLM-observability
 // export). Existing records migrate with langfuse_enabled false, so the
 // exporter stays off until it is configured. v10 added docs_include_extra and
 // code_rag_include_extra. v9 added the hybrid docs-search knobs
@@ -676,7 +775,7 @@ type Store struct {
 // docs_summary_model; v4 docs_max_groups; v3 embed_concurrency /
 // code_embed_concurrency. Bumping the version lets bw migrate existing settings
 // records in place.
-const settingsSchemaVersion = 11
+const settingsSchemaVersion = 14
 
 // New opens the settings bucket. If no record exists yet, seed is persisted as
 // the initial configuration (seeded from file/env config by the caller).
@@ -749,8 +848,15 @@ func (s *Store) Set(ctx context.Context, patch Settings) (Settings, error) {
 
 	next := patch
 	next.ID = recordID
+	if next.DocsIndexProjection == 0 {
+		// Whole-record API writes cannot see this internal field, so preserve it.
+		next.DocsIndexProjection = cur.DocsIndexProjection
+	}
 
 	if err := next.ValidateSchedules(); err != nil {
+		return Settings{}, err
+	}
+	if err := next.validateWebImageLimits(); err != nil {
 		return Settings{}, err
 	}
 

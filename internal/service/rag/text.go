@@ -119,11 +119,16 @@ func NewTextStore(db *bw.DB) (*TextStore, error) {
 // space is thousands of documents, and holding all of their excerpts in memory
 // made startup cost scale with the corpus.
 func (s *TextStore) Index(ctx context.Context, repo, docsDir string) error {
+	return s.IndexWithOptions(ctx, repo, docsDir, nil)
+}
+
+// IndexWithOptions rebuilds one key using the supplied search projection.
+func (s *TextStore) IndexWithOptions(ctx context.Context, repo, docsDir string, opts *IndexOptions) error {
 	if err := s.DeleteRepo(ctx, repo); err != nil {
 		return err
 	}
 
-	err := streamTextRecords(ctx, docsDir, repo, nil, nil, s.insert)
+	err := streamTextRecords(ctx, docsDir, repo, nil, opts, s.insert)
 	if err != nil && errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("docs dir %s does not exist; generate docs first", docsDir)
 	}
@@ -199,14 +204,15 @@ func streamTextRecords(
 			updatedAt = opts.UpdatedAt(docPath)
 		}
 
-		for i, excerpt := range chunk(string(content), 1200, 200) {
+		keepTargets := opts != nil && opts.KeepMarkdownTargets
+		for i, excerpt := range chunk(searchableMarkdown(string(content), keepTargets), 1200, 200) {
 			batch = append(batch, &textRecord{
 				ID:        fmt.Sprintf("%s/%s#%d", repo, docPath, i),
 				Repo:      repo,
 				Kind:      vectorstore.KindOf(repo),
 				Path:      docPath,
 				Title:     title,
-				Excerpt:   excerpt,
+				Excerpt:   withSearchTitle(excerpt, title),
 				UpdatedAt: updatedAt,
 			})
 

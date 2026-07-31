@@ -23,6 +23,7 @@ func TestSanitizeSchemaCollapsesSliceUnions(t *testing.T) {
 		{"query_graph.context_filter", jsonschema.For[queryGraphArgs], "context_filter"},
 		{"refresh_repo.stages", jsonschema.For[refreshRepoArgs], "stages"},
 		{"set_docs_config.docs_include", jsonschema.For[setDocsConfigArgs], "docs_include"},
+		{"import_source_pages.pages", jsonschema.For[importSourcePagesArgs], "pages"},
 	}
 
 	for _, tt := range tests {

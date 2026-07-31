@@ -2,6 +2,7 @@ package mcptools
 
 import (
 	"fmt"
+	"reflect"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -35,6 +36,14 @@ func addTool[In, Out any](server *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[
 
 		sanitizeSchema(schema)
 		t.InputSchema = schema
+	}
+	if t.OutputSchema == nil && reflect.TypeFor[Out]() != reflect.TypeFor[any]() {
+		schema, err := jsonschema.For[Out](nil)
+		if err != nil {
+			panic(fmt.Sprintf("mcptools: build output schema for tool %q: %v", t.Name, err))
+		}
+		sanitizeSchema(schema)
+		t.OutputSchema = schema
 	}
 
 	mcp.AddTool(server, t, h)

@@ -62,6 +62,12 @@
   function adoptDocsCfg(cfg) {
     if (!cfg) return;
     if (!Array.isArray(cfg.repo_schedules)) cfg.repo_schedules = [];
+    if (typeof cfg.rag_keep_markdown_targets !== "boolean") cfg.rag_keep_markdown_targets = false;
+    if (typeof cfg.web_image_analysis_enabled !== "boolean") cfg.web_image_analysis_enabled = false;
+    if (typeof cfg.web_image_allow_authenticated !== "boolean") cfg.web_image_allow_authenticated = false;
+    if (!cfg.web_image_max_per_page) cfg.web_image_max_per_page = 3;
+    if (!cfg.web_image_max_bytes) cfg.web_image_max_bytes = 4 * 1024 * 1024;
+    if (!cfg.web_image_max_pixels) cfg.web_image_max_pixels = 16000000;
     docsCfg = cfg;
     stopWordsText = (cfg.rag_lexical_stop_words ?? []).join(", ");
   }
@@ -700,6 +706,50 @@
       </label>
     </div>
 
+    <!-- Vision analysis for images in web pages -->
+    <div class="mb-2 mt-6 text-[13px] font-semibold text-dim">Web image analysis</div>
+    <p class="mb-3 text-[12px] text-faint">
+      Optionally describe useful images while importing web pages. When enabled, image bytes, including
+      images from private pages if allowed below, may be sent to the configured vision provider. Keep this
+      off unless that provider is approved to receive the source content.
+    </p>
+    <label class="mb-3 flex items-start gap-2 text-[13px]">
+      <input class="mt-1" type="checkbox" bind:checked={docsCfg.web_image_analysis_enabled} />
+      <span>
+        Analyze images with a vision model
+        <span class="block text-[12px] text-faint">Disabled by default. The configured LLM endpoint and credentials are used.</span>
+      </span>
+    </label>
+    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Vision model
+        <input class="input" bind:value={docsCfg.web_image_model} placeholder="blank = main LLM model" />
+      </label>
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Maximum images per page
+        <input class="input" type="number" min="1" max="50" bind:value={docsCfg.web_image_max_per_page} />
+      </label>
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Maximum bytes per image
+        <input class="input" type="number" min="1" max="33554432" bind:value={docsCfg.web_image_max_bytes} />
+        <span class="text-[12px] text-faint">Default 4 MiB (4194304 bytes).</span>
+      </label>
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Maximum decoded pixels
+        <input class="input" type="number" min="1" max="100000000" bind:value={docsCfg.web_image_max_pixels} />
+        <span class="text-[12px] text-faint">Default 16 megapixels (16000000 pixels).</span>
+      </label>
+    </div>
+    <label class="mt-3 flex items-start gap-2 text-[13px]">
+      <input class="mt-1" type="checkbox" bind:checked={docsCfg.web_image_allow_authenticated} />
+      <span>
+        Allow authenticated and private-network images
+        <span class="block text-[12px] text-faint">
+          Off by default. Private-network access is limited to each explicitly configured source origin.
+        </span>
+      </span>
+    </label>
+
     <div class="mt-3 flex flex-col gap-1 text-[13px] text-dim">
       <div class="flex flex-wrap items-center justify-between gap-2">
         <span>Doc generation prompt (system)</span>
@@ -854,6 +904,15 @@
       Enable RAG indexing &amp; retrieval
     </label>
     <p class="mb-3 text-[12px] text-faint">Vectors are stored locally in embedded bw indexes.</p>
+    <label class="mb-3 flex items-start gap-2 text-[13px]">
+      <input class="mt-1" type="checkbox" bind:checked={docsCfg.rag_keep_markdown_targets} />
+      <span>
+        Keep link and image URLs in search indexes
+        <span class="block text-[12px] text-faint">
+          When disabled, link labels and image alt text remain searchable but their destination URLs are omitted.
+        </span>
+      </span>
+    </label>
     <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Docs returned (top_docs)

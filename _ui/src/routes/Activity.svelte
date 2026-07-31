@@ -2,7 +2,7 @@
   import { onDestroy, onMount } from "svelte";
   import { api } from "../lib/api.js";
   import { link } from "../lib/router.js";
-  import { fmtEta } from "../lib/format.js";
+  import { fmtAgo, fmtDate, fmtEta } from "../lib/format.js";
   import Icon from "../lib/Icon.svelte";
 
   // Central work-queue snapshot: { limit, running, pending, tasks: [...] }.
@@ -114,6 +114,9 @@
     if (task.state === "queued") return `waiting ${fmtDur(Date.now() - ms(task.enqueued_at))}`;
     if (task.started_at && task.ended_at) return `took ${fmtDur(ms(task.ended_at) - ms(task.started_at))}`;
     return "";
+  }
+  function recentTiming(task) {
+    return [timing(task), fmtAgo(task.ended_at)].filter(Boolean).join(" · ");
   }
 
   function displayId(id) {
@@ -478,7 +481,7 @@
           {#if task.error}
             <span class="hidden max-w-[20rem] truncate text-[11px] text-err sm:inline" title={task.error}>{task.error}</span>
           {/if}
-          <span class="shrink-0 text-[11px] text-faint">{timing(task)}</span>
+          <span class="shrink-0 text-[11px] text-faint" title={fmtDate(task.ended_at)}>{recentTiming(task)}</span>
         </div>
       {/each}
     </div>

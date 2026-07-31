@@ -191,12 +191,16 @@ func run(ctx context.Context) error {
 	// Build the initial docs/RAG client bundle from the persisted settings and
 	// apply the work-queue concurrency limit. A build error here disables the
 	// docs feature but does not abort startup.
+	var projectionUpgrade *settings.Settings
 	if s, gerr := settingsStore.Get(ctx); gerr != nil {
 		slog.Error("load docs settings", "error", gerr)
 	} else {
 		mgr.SetTaskConcurrency(s.TaskConcurrency)
 		if cerr := mgr.Configure(ctx, s); cerr != nil {
 			slog.Error("configure docs/rag (disabled until fixed via settings)", "error", cerr)
+		} else if s.DocsIndexProjection != rag.IndexProjectionVersion {
+			s.DocsIndexProjection = rag.IndexProjectionVersion
+			projectionUpgrade = &s
 		}
 	}
 	// Repos tracked before full-path ids used the last two URL segments as id,
@@ -231,6 +235,15 @@ func run(ctx context.Context) error {
 	// concurrency limit is applied so the backlog drains under the same bound.
 	if err := mgr.RestoreTasks(ctx); err != nil {
 		slog.Error("restore persisted background tasks", "error", err)
+	}
+	if projectionUpgrade != nil {
+		// Submit after repo-id migration and task restore, but before persisting
+		// the marker. Queue tasks survive restarts, so a crash between these
+		// operations safely submits the deduplicated task again.
+		mgr.TriggerReindexAll()
+		if _, err := settingsStore.Set(ctx, *projectionUpgrade); err != nil {
+			slog.Error("persist docs index projection version", "error", err)
+		}
 	}
 
 	// Background poller. Repo cadence and per-source intervals are read from

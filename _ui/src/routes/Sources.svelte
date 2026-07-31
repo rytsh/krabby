@@ -65,6 +65,7 @@
       name: "",
       type: "pages",
       description: "",
+      analyze_images: false,
       refresh_interval: "24h",
       // Cron schedule(s), comma-separated (hardloop syntax, e.g. "0 2 * * *").
       // When set it is authoritative over refresh_interval, like repo schedules.
@@ -269,6 +270,7 @@
       name: form.name.trim(),
       type: form.type,
       description: form.description.trim(),
+      analyze_images: form.analyze_images,
       refresh_interval: specs.length || form.refresh_interval === "manual" ? "" : form.refresh_interval,
       specs,
       config: providerConfig(),
@@ -326,6 +328,7 @@
       name: source.name,
       type: source.type,
       description: source.description || "",
+      analyze_images: source.analyze_images === true,
       refresh_interval: source.refresh_interval || "manual",
       schedule: (source.specs || []).join(", "),
       base_url: source.config?.base_url || "",
@@ -1045,6 +1048,16 @@
             placeholder="e.g. Delivery Support runbooks and TERs"
             bind:value={form.description}
           />
+        </label>
+
+        <label class="flex items-start gap-2 text-[13px] text-dim">
+          <input class="mt-1" type="checkbox" bind:checked={form.analyze_images} />
+          <span>
+            Analyze images in this source
+            <span class="block text-[11px] text-faint">
+              Requires Web image analysis in Settings. Image descriptions are cached and added to searchable Markdown.
+            </span>
+          </span>
         </label>
 
         {#if form.type === "confluence"}

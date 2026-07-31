@@ -140,6 +140,54 @@ func TestIndexAndRetrieveExcerpt(t *testing.T) {
 	}
 }
 
+func TestIndexExcludesLinkAndImageDestinations(t *testing.T) {
+	ctx := context.Background()
+	docsDir := writeDocs(t, map[string]string{
+		"guide.md": "# Guide\n\nRead the [alpha guide](https://docs.example.com/private-token). " +
+			"![beta diagram](data:image/png;base64,large-secret-payload)",
+	})
+	s := newTestService(t, nil)
+	if err := s.Index(ctx, "web:docs", docsDir); err != nil {
+		t.Fatal(err)
+	}
+
+	docs, err := s.Retrieve(ctx, vectorstore.FilterKey("web:docs"), "alpha", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docs) != 1 {
+		t.Fatalf("docs = %#v", docs)
+	}
+	if !strings.Contains(docs[0].Excerpt, "alpha guide") || !strings.Contains(docs[0].Excerpt, "beta diagram") {
+		t.Fatalf("visible labels missing from excerpt: %q", docs[0].Excerpt)
+	}
+	if strings.Contains(docs[0].Excerpt, "private-token") || strings.Contains(docs[0].Excerpt, "large-secret-payload") {
+		t.Fatalf("destination leaked into excerpt: %q", docs[0].Excerpt)
+	}
+}
+
+func TestIndexCanKeepLinkAndImageDestinations(t *testing.T) {
+	ctx := context.Background()
+	docsDir := writeDocs(t, map[string]string{
+		"guide.md": "# Guide\n\nRead the [alpha guide](https://docs.example.com/private-token). " +
+			"![beta diagram](https://docs.example.com/diagram.png)",
+	})
+	s := newTestService(t, nil)
+	s.cfg.KeepMarkdownTargets = true
+	if err := s.Index(ctx, "web:docs", docsDir); err != nil {
+		t.Fatal(err)
+	}
+
+	docs, err := s.Retrieve(ctx, vectorstore.FilterKey("web:docs"), "alpha", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docs) != 1 || !strings.Contains(docs[0].Excerpt, "private-token") ||
+		!strings.Contains(docs[0].Excerpt, "diagram.png") {
+		t.Fatalf("destinations missing from excerpt: %#v", docs)
+	}
+}
+
 func TestRetrieveClampsCountAndExcerpt(t *testing.T) {
 	ctx := context.Background()
 	long := strings.Repeat("alpha ", MaxExcerptRunes+100)

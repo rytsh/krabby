@@ -25,6 +25,7 @@ type sourceRequest struct {
 	Name            string `json:"name"`
 	Type            string `json:"type"`
 	Description     string `json:"description"`
+	AnalyzeImages   bool   `json:"analyze_images"`
 	RefreshInterval string `json:"refresh_interval"` // Go duration, e.g. "24h"; empty = manual only. Used only when Specs is empty.
 
 	// Specs are cron schedules (hardloop syntax, e.g. "0 2 * * *" or "@every
@@ -65,11 +66,12 @@ func (r sourceRequest) collection() (*websource.Collection, error) {
 	}
 
 	col := &websource.Collection{
-		Name:        strings.TrimSpace(strings.ToLower(r.Name)),
-		Type:        strings.TrimSpace(r.Type),
-		Description: strings.TrimSpace(r.Description),
-		Config:      r.Config,
-		Specs:       specs,
+		Name:          strings.TrimSpace(strings.ToLower(r.Name)),
+		Type:          strings.TrimSpace(r.Type),
+		Description:   strings.TrimSpace(r.Description),
+		AnalyzeImages: r.AnalyzeImages,
+		Config:        r.Config,
+		Specs:         specs,
 	}
 
 	if r.RefreshInterval != "" {

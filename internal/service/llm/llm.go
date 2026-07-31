@@ -6,12 +6,15 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -26,8 +29,46 @@ var ErrNotConfigured = errors.New("llm not configured (set llm.base_url)")
 
 // Message is a single chat message.
 type Message struct {
-	Role    string `json:"role"` // "system" | "user" | "assistant"
-	Content string `json:"content"`
+	Role    string        `json:"role"` // "system" | "user" | "assistant"
+	Content string        `json:"content"`
+	Parts   []ContentPart `json:"-"`
+}
+
+// ContentPart is one item in an OpenAI-compatible multimodal message.
+type ContentPart struct {
+	Type     string    `json:"type"` // "text" | "image_url"
+	Text     string    `json:"text,omitempty"`
+	ImageURL *ImageURL `json:"image_url,omitempty"`
+}
+
+// ImageURL describes an image supplied to a multimodal model.
+type ImageURL struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// TextPart builds a text content part.
+func TextPart(text string) ContentPart {
+	return ContentPart{Type: "text", Text: text}
+}
+
+// ImageURLPart builds an image_url content part.
+func ImageURLPart(rawURL, detail string) ContentPart {
+	return ContentPart{Type: "image_url", ImageURL: &ImageURL{URL: rawURL, Detail: detail}}
+}
+
+// MarshalJSON preserves the original string content representation unless the
+// caller explicitly supplies content parts.
+func (m Message) MarshalJSON() ([]byte, error) {
+	content := any(m.Content)
+	if m.Parts != nil {
+		content = m.Parts
+	}
+
+	return json.Marshal(struct {
+		Role    string `json:"role"`
+		Content any    `json:"content"`
+	}{Role: m.Role, Content: content})
 }
 
 // Client talks to an OpenAI-compatible /chat/completions endpoint.
@@ -114,6 +155,13 @@ func New(cfg config.LLM, opts ...Option) (*Client, error) {
 // Model returns the configured chat model name.
 func (c *Client) Model() string { return c.model }
 
+// CacheIdentity identifies completion behavior without persisting the provider
+// URL itself. Credentials are intentionally excluded.
+func (c *Client) CacheIdentity() string {
+	sum := sha256.Sum256([]byte(c.baseURL))
+	return c.model + "@" + base64.RawURLEncoding.EncodeToString(sum[:12])
+}
+
 type chatRequest struct {
 	Model     string    `json:"model"`
 	Messages  []Message `json:"messages"`
@@ -198,7 +246,7 @@ func (c *Client) CompleteOp(ctx context.Context, op string, messages []Message) 
 		System:    c.system,
 		Operation: "chat",
 		Model:     c.model,
-		Input:     messages,
+		Input:     traceMessages(messages),
 	})
 
 	text, meta, err := c.complete(ctx, messages, 0)
@@ -214,6 +262,102 @@ func (c *Client) CompleteOp(ctx context.Context, op string, messages []Message) 
 	})
 
 	return text, meta, err
+}
+
+type traceMessage struct {
+	Role    string `json:"role"`
+	Content any    `json:"content"`
+}
+
+type traceContentPart struct {
+	Type     string         `json:"type"`
+	Text     string         `json:"text,omitempty"`
+	ImageURL *traceImageURL `json:"image_url,omitempty"`
+}
+
+type traceImageURL struct {
+	Source string `json:"source"`
+	Detail string `json:"detail,omitempty"`
+	MIME   string `json:"mime,omitempty"`
+	Bytes  *int64 `json:"bytes,omitempty"`
+	SHA256 string `json:"sha256,omitempty"`
+}
+
+// traceMessages creates the representation passed to observability. Image URLs
+// are never copied into it: remote query credentials stay private, and data URL
+// payloads are represented only by safe metadata.
+func traceMessages(messages []Message) []traceMessage {
+	out := make([]traceMessage, len(messages))
+	for i, message := range messages {
+		out[i] = traceMessage{Role: message.Role, Content: message.Content}
+		if message.Parts == nil {
+			continue
+		}
+
+		parts := make([]traceContentPart, len(message.Parts))
+		for j, part := range message.Parts {
+			parts[j] = traceContentPart{Type: part.Type}
+			if part.Type == "text" {
+				parts[j].Text = part.Text
+			}
+			if part.ImageURL != nil {
+				parts[j].ImageURL = redactImageURL(part.ImageURL)
+			}
+		}
+		out[i].Content = parts
+	}
+
+	return out
+}
+
+func redactImageURL(image *ImageURL) *traceImageURL {
+	redacted := &traceImageURL{Source: "remote_url", Detail: image.Detail}
+	if len(image.URL) < 5 || !strings.EqualFold(image.URL[:5], "data:") {
+		return redacted
+	}
+
+	redacted.Source = "data_url"
+	metadata, payload, ok := strings.Cut(image.URL[5:], ",")
+	if !ok {
+		return redacted
+	}
+
+	mediaType, _, _ := strings.Cut(metadata, ";")
+	if mediaType == "" {
+		mediaType = "text/plain"
+	}
+	redacted.MIME = mediaType
+
+	var reader io.Reader
+	if hasDataURLFlag(metadata, "base64") {
+		reader = base64.NewDecoder(base64.StdEncoding, strings.NewReader(payload))
+	} else {
+		decoded, err := url.PathUnescape(payload)
+		if err != nil {
+			return redacted
+		}
+		reader = strings.NewReader(decoded)
+	}
+
+	hash := sha256.New()
+	size, err := io.Copy(hash, reader)
+	if err != nil {
+		return redacted
+	}
+	redacted.Bytes = &size
+	redacted.SHA256 = fmt.Sprintf("%x", hash.Sum(nil))
+
+	return redacted
+}
+
+func hasDataURLFlag(metadata, flag string) bool {
+	for field := range strings.SplitSeq(metadata, ";") {
+		if strings.EqualFold(field, flag) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // maxAttempts bounds retries for transient failures (429, 5xx, network).

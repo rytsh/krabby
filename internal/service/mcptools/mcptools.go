@@ -28,7 +28,7 @@ Tool selection (roughly what to reach for, in order):
 - Use query_graph for architecture, dependencies, call/data flow, and relationships across files. It is not a keyword or symbol search.
 - Use git_blame to attribute lines to a commit (start_line/end_line blames a range), then git_diff with that sha to see what it changed.
 - Use git_log with from/to to compare releases or follow one file; list_refs gives tag names.
-- Use search_docs for documentation and knowledge; it covers both generated repo docs and connected web sources (Confluence, Jira, pages). Hybrid mode is the default; use lexical for exact keys/titles/identifiers and semantic for conceptual questions. Pass the user's full question rather than hand-picked keywords: it is rewritten for BM25 into an OR of its words, and keys, error codes and versions stay required. Scope a web source with repo=web:<collection>.
+- Use search_docs for documentation and knowledge; it covers generated repo docs and connected web sources (Confluence, Jira, pages). Semantic is the default when configured, otherwise lexical; request hybrid explicitly for fused retrieval. Use lexical for exact keys/titles/identifiers and semantic for conceptual questions. Pass the user's full question. Scope a web source with the exact scope_key returned by list_sources.
 - Use list_* only when an identifier is unknown or the user explicitly requests an inventory. Do not exhaust pages or request a recursive file tree without a clear need.
 - Use get_* tools only after a search/query identifies the target.
 - If a graph tool returns "Repository selection required", retry it with one of the provided repo ids instead of treating the result as a failure.
@@ -53,7 +53,7 @@ func New(mgr *manager.Manager, version string, waitTimeout time.Duration, profil
 	instructions := serverInstructions
 	if profile == ToolProfileFull {
 		title += " (full administration)"
-		instructions += "\n\nThis connection uses the full profile and can mutate credentials, runtime configuration and web sources. Web sources (pages, confluence, jira) are managed with source_types, add_source, update_source, refresh_source, delete_source and get_source; use them only when explicitly requested."
+		instructions += "\n\nThis connection uses the full profile and can mutate credentials, runtime configuration and web sources. Collections use add/update/refresh/delete_source and get_source_config; pages-source items use register_source_page, import_source_pages, import_source_sitemap and delete_source_page. Use mutation tools only when explicitly requested."
 	}
 
 	server := mcp.NewServer(&mcp.Implementation{
@@ -168,6 +168,10 @@ type upsertNamespaceArgs struct {
 
 type namespaceNameArgs struct {
 	Name string `json:"name" jsonschema:"namespace name to delete the description record for; the repos keep their tag"`
+}
+
+type namespaceListOutput struct {
+	Namespaces []registry.NamespaceGroup `json:"namespaces"`
 }
 
 // repoView decorates a repo record with the transient in-memory activity so
@@ -300,13 +304,14 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 	addTool(server, &mcp.Tool{
 		Name:        "list_namespaces",
 		Description: "List the repository namespaces with their repo counts and descriptions. Untagged repos are reported under 'default'. Use it to discover which namespaces exist and what each holds before scoping a search with the namespace parameter; the description tells you which namespace matches the user's question.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyArgs) (*mcp.CallToolResult, any, error) {
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyArgs) (*mcp.CallToolResult, namespaceListOutput, error) {
 		groups, err := mgr.Registry().Namespaces(ctx)
 		if err != nil {
-			return nil, nil, err
+			return nil, namespaceListOutput{}, err
 		}
 
-		return jsonResult(map[string]any{"namespaces": groups}), nil, nil
+		out := namespaceListOutput{Namespaces: groups}
+		return jsonResult(out), out, nil
 	})
 
 	addTool(server, &mcp.Tool{

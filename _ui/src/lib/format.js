@@ -24,3 +24,29 @@ export function fmtDate(ts) {
   const p = (n) => String(n).padStart(2, "0");
   return `${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
+
+// fmtAgo renders a completed timestamp relative to now using stable, coarse
+// units suitable for a frequently refreshed activity list.
+export function fmtAgo(ts, now = Date.now()) {
+  if (!ts || ts.startsWith("0001")) return "";
+  const then = new Date(ts).getTime();
+  if (Number.isNaN(then)) return "";
+
+  const seconds = Math.max(0, Math.floor((now - then) / 1000));
+  if (seconds < 10) return "just now";
+  if (seconds < 60) return `${seconds}s ago`;
+
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+
+  const months = Math.floor(days / 30);
+  if (months < 12) return `${months}mo ago`;
+
+  return `${Math.floor(months / 12)}y ago`;
+}

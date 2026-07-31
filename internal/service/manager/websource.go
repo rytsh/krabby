@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -27,8 +28,30 @@ import (
 var ErrNoWebSources = errors.New("web sources are not configured")
 
 const (
-	maxWebPageImportBatch = 20
+	maxWebPageImportBatch      = 20
+	maxWebPageImportBytes      = 8 << 20
+	maxWebPageImportTotalBytes = 32 << 20
+	maxWebPageURLBytes         = 8192
+	maxWebPageTitleBytes       = 1000
 )
+
+func validateWebPageURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", errors.New("url is required")
+	}
+	if len(raw) > maxWebPageURLBytes {
+		return "", fmt.Errorf("url exceeds %d bytes", maxWebPageURLBytes)
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return "", fmt.Errorf("url must be an absolute http(s) URL")
+	}
+	if u.User != nil {
+		return "", errors.New("url must not contain credentials")
+	}
+	return raw, nil
+}
 
 // validateWebSpecs checks that every cron spec parses (hardloop syntax, e.g.
 // "0 2 * * *" or "@every 6h"), so create/update fail fast with a clear error
@@ -187,8 +210,10 @@ func (m *Manager) UpdateWebCollection(ctx context.Context, name string, update w
 	// construction rather than by remembering to copy it back — and read it
 	// under the record lock so "stored" means now, not before whatever else
 	// was writing to this collection.
-	return m.mutateCollection(ctx, name, func(col *websource.Collection) error {
+	forceRefresh := false
+	err := m.mutateCollection(ctx, name, func(col *websource.Collection) error {
 		stored := col.Config
+		wasAnalyzed := col.AnalyzeImages
 
 		if err := update.Apply(col); err != nil {
 			return err
@@ -208,9 +233,14 @@ func (m *Manager) UpdateWebCollection(ctx context.Context, name string, update w
 			return err
 		}
 		col.Config = merged
+		forceRefresh = wasAnalyzed != col.AnalyzeImages
 
 		return nil
 	})
+	if err == nil && forceRefresh {
+		m.TriggerWebFullRefresh(name)
+	}
+	return err
 }
 
 // WebSourceConfigView returns a provider-owned, redacted config shape for the
@@ -471,20 +501,20 @@ func (m *Manager) AddWebPage(ctx context.Context, name, pageURL string) (*websou
 		return nil, fmt.Errorf("collection %s is type %q; pages are discovered, not added manually", name, col.Type)
 	}
 
-	pageURL = strings.TrimSpace(pageURL)
-	if !strings.HasPrefix(pageURL, "http://") && !strings.HasPrefix(pageURL, "https://") {
-		return nil, fmt.Errorf("page url must be http(s): %q", pageURL)
+	pageURL, err = validateWebPageURL(pageURL)
+	if err != nil {
+		return nil, fmt.Errorf("page url; %w", err)
 	}
 
-	slug := slugForURL(pageURL)
-
-	page := &websource.Page{
-		ID:         websource.PageID(name, slug),
-		Collection: name,
-		Slug:       slug,
-		URL:        pageURL,
-		Status:     websource.StatusPending,
+	slug, page, err := m.pageForURL(ctx, name, pageURL)
+	if err != nil {
+		return nil, err
 	}
+	if page == nil {
+		page = &websource.Page{ID: websource.PageID(name, slug), Collection: name, Slug: slug}
+	}
+	page.URL = pageURL
+	page.Status = websource.StatusPending
 
 	if err := m.webStore.UpsertPage(ctx, page); err != nil {
 		return nil, err
@@ -520,6 +550,15 @@ type WebPageImportResult struct {
 // retains the task in recent history. The task is intentionally transient: its
 // potentially large content payload is not persisted across server restarts.
 func (m *Manager) ImportWebPages(ctx context.Context, name string, imports []WebPageImport) (WebPageImportResult, error) {
+	imports = append([]WebPageImport(nil), imports...)
+	for i := range imports {
+		imports[i].URL = strings.TrimSpace(imports[i].URL)
+		imports[i].Title = strings.TrimSpace(imports[i].Title)
+		imports[i].ContentType = strings.TrimSpace(imports[i].ContentType)
+	}
+	if err := validateWebPageImportPayload(imports); err != nil {
+		return WebPageImportResult{}, err
+	}
 	type outcome struct {
 		result WebPageImportResult
 		err    error
@@ -554,16 +593,44 @@ func (m *Manager) ImportWebPages(ctx context.Context, name string, imports []Web
 	}
 }
 
+func validateWebPageImportPayload(imports []WebPageImport) error {
+	if len(imports) == 0 {
+		return errors.New("at least one page is required")
+	}
+	if len(imports) > maxWebPageImportBatch {
+		return fmt.Errorf("page import batch exceeds %d pages", maxWebPageImportBatch)
+	}
+	totalBytes := 0
+	for i := range imports {
+		if strings.TrimSpace(imports[i].URL) != "" {
+			if _, err := validateWebPageURL(imports[i].URL); err != nil {
+				return fmt.Errorf("page %d url; %w", i+1, err)
+			}
+		}
+		if len(strings.TrimSpace(imports[i].Title)) > maxWebPageTitleBytes {
+			return fmt.Errorf("page %d title exceeds %d bytes", i+1, maxWebPageTitleBytes)
+		}
+		if len(imports[i].ContentType) > 256 {
+			return fmt.Errorf("page %d content type exceeds 256 bytes", i+1)
+		}
+		if len(imports[i].Content) > maxWebPageImportBytes {
+			return fmt.Errorf("page %d content exceeds %d bytes", i+1, maxWebPageImportBytes)
+		}
+		totalBytes += len(imports[i].Content)
+		if totalBytes > maxWebPageImportTotalBytes {
+			return fmt.Errorf("page import content exceeds %d bytes total", maxWebPageImportTotalBytes)
+		}
+	}
+	return nil
+}
+
 func (m *Manager) importWebPages(ctx context.Context, name string, imports []WebPageImport) (WebPageImportResult, error) {
 	var result WebPageImportResult
 	if m.webStore == nil {
 		return result, ErrNoWebSources
 	}
-	if len(imports) == 0 {
-		return result, errors.New("at least one page is required")
-	}
-	if len(imports) > maxWebPageImportBatch {
-		return result, fmt.Errorf("page import batch exceeds %d pages", maxWebPageImportBatch)
+	if err := validateWebPageImportPayload(imports); err != nil {
+		return result, err
 	}
 	col, err := m.webStore.GetCollection(ctx, name)
 	if err != nil {
@@ -581,11 +648,17 @@ func (m *Manager) importWebPages(ctx context.Context, name string, imports []Web
 	for i, item := range imports {
 		item.URL = strings.TrimSpace(item.URL)
 		item.Title = strings.TrimSpace(item.Title)
-		if item.URL != "" && !strings.HasPrefix(item.URL, "http://") && !strings.HasPrefix(item.URL, "https://") {
-			return result, fmt.Errorf("page %d url must be http(s): %q", i+1, item.URL)
+		if item.URL != "" {
+			item.URL, err = validateWebPageURL(item.URL)
+			if err != nil {
+				return result, fmt.Errorf("page %d url; %w", i+1, err)
+			}
 		}
 		if item.URL == "" && item.Title == "" {
 			return result, fmt.Errorf("page %d title is required when url is empty", i+1)
+		}
+		if len(item.Title) > maxWebPageTitleBytes {
+			return result, fmt.Errorf("page %d title exceeds %d bytes", i+1, maxWebPageTitleBytes)
 		}
 		if strings.TrimSpace(item.Content) == "" {
 			return result, fmt.Errorf("page %d content is required", i+1)
@@ -614,9 +687,14 @@ func (m *Manager) importWebPages(ctx context.Context, name string, imports []Web
 		if updatedAt.IsZero() {
 			updatedAt = now
 		}
-		slug := slugForURL(item.URL)
+		slug := ""
 		if item.URL == "" {
 			slug = "manual-" + websource.Slugify(title) + "-" + websource.Hash(title)[:8]
+		} else {
+			slug, _, err = m.pageForURL(ctx, name, item.URL)
+			if err != nil {
+				return result, fmt.Errorf("page %d identity; %w", i+1, err)
+			}
 		}
 		remotes = append(remotes, websource.RemotePage{
 			Slug:      slug,
@@ -658,6 +736,7 @@ func (m *Manager) importWebPages(ctx context.Context, name string, imports []Web
 		if rec == nil {
 			rec = &websource.Page{ID: websource.PageID(name, remote.Slug), Collection: name, Slug: remote.Slug}
 		}
+		metadataChanged := rec.URL != remote.URL || rec.Title != remote.Title || !rec.UpdatedAt.Equal(remote.UpdatedAt)
 
 		rec.URL = remote.URL
 		rec.Title = remote.Title
@@ -666,7 +745,11 @@ func (m *Manager) importWebPages(ctx context.Context, name string, imports []Web
 		rec.Status = websource.StatusReady
 		rec.LastError = ""
 
-		markdown := withTitleHeading(remote.Markdown, rec.Title)
+		enriched, err := m.enrichWebImages(ctx, col, rec.ID, remote.URL, rec.Title, remote.Markdown)
+		if err != nil {
+			return result, fmt.Errorf("analyze images for %s; %w", rec.ID, err)
+		}
+		markdown := withTitleHeading(enriched, rec.Title)
 		hash := websource.Hash(markdown)
 		file, err := websource.PageFile(dir, remote.Slug)
 		if err != nil {
@@ -683,6 +766,10 @@ func (m *Manager) importWebPages(ctx context.Context, name string, imports []Web
 			result.Changed++
 		} else {
 			result.Unchanged++
+			if metadataChanged {
+				changedPaths = append(changedPaths, path)
+				updatedAt[path] = remote.UpdatedAt
+			}
 		}
 		if err := m.webStore.UpsertPage(ctx, rec); err != nil {
 			return result, err
@@ -730,7 +817,11 @@ func (m *Manager) ImportWebSitemap(ctx context.Context, name, sitemapURL string)
 	if !ok {
 		return result, fmt.Errorf("source type %q does not support sitemaps", col.Type)
 	}
-	urls, err := importer.SitemapURLs(ctx, strings.TrimSpace(sitemapURL))
+	sitemapURL, err = validateWebPageURL(sitemapURL)
+	if err != nil {
+		return result, fmt.Errorf("sitemap url; %w", err)
+	}
+	urls, err := importer.SitemapURLs(ctx, sitemapURL)
 	if err != nil {
 		return result, err
 	}
@@ -754,10 +845,19 @@ func (m *Manager) ImportWebSitemap(ctx context.Context, name, sitemapURL string)
 	if col == nil {
 		return result, fmt.Errorf("collection %s not found", name)
 	}
+	if col.Type != websource.TypePages {
+		return result, fmt.Errorf("collection %s is type %q; sitemaps are only supported for pages", name, col.Type)
+	}
 
 	for _, pageURL := range urls {
-		slug := slugForURL(pageURL)
-		existing, err := m.webStore.GetPage(ctx, websource.PageID(name, slug))
+		pageURL, err = validateWebPageURL(pageURL)
+		if err != nil {
+			return result, fmt.Errorf("sitemap page url; %w", err)
+		}
+		if !websource.SameOrigin(sitemapURL, pageURL) {
+			return result, fmt.Errorf("sitemap page url changed origin")
+		}
+		slug, existing, err := m.pageForURL(ctx, name, pageURL)
 		if err != nil {
 			return result, err
 		}
@@ -801,17 +901,35 @@ func (m *Manager) DeleteWebPage(ctx context.Context, name, slug string) error {
 	if err != nil {
 		return err
 	}
-
-	if err := m.webStore.DeletePage(ctx, websource.PageID(name, slug)); err != nil {
+	col, err := m.webStore.GetCollection(ctx, name)
+	if err != nil {
 		return err
 	}
+	if col == nil {
+		return fmt.Errorf("collection %s not found", name)
+	}
+	if col.Type != websource.TypePages {
+		return fmt.Errorf("collection %s is type %q; only pages source items can be deleted manually", name, col.Type)
+	}
+	page, err := m.webStore.GetPage(ctx, websource.PageID(name, slug))
+	if err != nil {
+		return err
+	}
+	if page == nil {
+		return fmt.Errorf("page %s not found in collection %s", slug, name)
+	}
 
-	_ = os.Remove(file)
+	if err := os.Remove(file); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove page file; %w", err)
+	}
 
 	// Only this page's vectors and text rows go; rebuilding the collection
 	// would re-embed every remaining document to delete one.
 	if err := m.indexWebSourcePaths(ctx, name, nil, []string{slug + ".md"}, nil); err != nil {
 		return fmt.Errorf("drop index entries for %s; %w", slug, err)
+	}
+	if err := m.webStore.DeletePage(ctx, websource.PageID(name, slug)); err != nil {
+		return err
 	}
 
 	return nil
@@ -844,19 +962,36 @@ func (m *Manager) TriggerWebRefresh(name string) {
 	m.queue.Submit(m.webSyncTask(name))
 }
 
+// TriggerWebFullRefresh queues a persisted sync that ignores an incremental
+// provider watermark for one run. It is used when image-analysis behavior
+// changes and existing pages must be regenerated even if the source did not.
+func (m *Manager) TriggerWebFullRefresh(name string) {
+	m.queue.Submit(m.webSyncTaskMode(name, true))
+}
+
 // webSyncTask builds the queue task for a web-source sync, carrying a Spec (the
 // scope key as ID) so the sync is persisted and rebuildable after a restart.
 func (m *Manager) webSyncTask(name string) queue.Task {
+	return m.webSyncTaskMode(name, false)
+}
+
+func (m *Manager) webSyncTaskMode(name string, forceFull bool) queue.Task {
 	scope := websource.ScopeKey(name)
+	key := taskKindWebSync + ":" + name
+	spec := queue.Spec{Kind: taskKindWebSync, ID: scope}
+	if forceFull {
+		key += ":full"
+		spec.Params = map[string]string{"force_full": "true"}
+	}
 
 	return queue.Task{
 		ID:    scope,
 		Kind:  taskKindWebSync,
 		Title: "Sync " + scope,
-		Key:   taskKindWebSync + ":" + name,
-		Spec:  queue.Spec{Kind: taskKindWebSync, ID: scope},
+		Key:   key,
+		Spec:  spec,
 		Run: func(ctx context.Context) error {
-			if err := m.RefreshWebSource(ctx, name); err != nil {
+			if err := m.refreshWebSource(ctx, name, forceFull); err != nil {
 				slog.Error("refresh web source", "source", name, "error", err)
 
 				return err
@@ -950,6 +1085,10 @@ func (m *Manager) WebSourceSchedules(ctx context.Context) []WebSourceSchedule {
 // RefreshWebSource synchronously fetches a collection, writes changed pages
 // to disk and reindexes the collection when anything changed.
 func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
+	return m.refreshWebSource(ctx, name, false)
+}
+
+func (m *Manager) refreshWebSource(ctx context.Context, name string, forceFull bool) error {
 	if m.webStore == nil {
 		return ErrNoWebSources
 	}
@@ -1116,7 +1255,12 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 		rec.UpdatedAt = remote.UpdatedAt
 		updatedAt[remote.Slug+".md"] = remote.UpdatedAt
 
-		markdown := withTitleHeading(remote.Markdown, rec.Title)
+		enriched, err := m.enrichWebImages(ctx, col, rec.ID, remote.URL, rec.Title, remote.Markdown)
+		if err != nil {
+			writeErr = fmt.Errorf("analyze images for %s; %w", rec.ID, err)
+			return writeErr
+		}
+		markdown := withTitleHeading(enriched, rec.Title)
 		hash := websource.Hash(markdown)
 
 		file, err := websource.PageFile(dir, remote.Slug)
@@ -1153,7 +1297,11 @@ func (m *Manager) RefreshWebSource(ctx context.Context, name string) error {
 		return nil
 	}
 
-	result, err := fetcher.Fetch(fetchCtx, col, pages, col.State, write)
+	state := col.State
+	if forceFull {
+		state = nil
+	}
+	result, err := fetcher.Fetch(fetchCtx, col, pages, state, write)
 	if writeErr != nil {
 		return fail(writeErr)
 	}
@@ -1403,7 +1551,8 @@ func (m *Manager) indexWebSourcePaths(ctx context.Context, name string, changed,
 	// Carry each page's source last-modified time onto its vectors so retrieval
 	// can surface and weigh recency.
 	opts := &rag.IndexOptions{
-		UpdatedAt: func(path string) time.Time { return updatedAt[path] },
+		UpdatedAt:           func(path string) time.Time { return updatedAt[path] },
+		KeepMarkdownTargets: d.ragCfg.KeepMarkdownTargets,
 	}
 
 	var errs []error
@@ -1457,13 +1606,46 @@ func withTitleHeading(markdown, title string) string {
 	return "# " + title + "\n\n" + trimmed + "\n"
 }
 
-// slugForURL derives a stable page slug from a URL: the slugified
-// host+path, suffixed with a short hash so distinct URLs never collide.
+// slugForURL derives a stable page slug from a URL with a 64-bit hash suffix.
 func slugForURL(pageURL string) string {
+	return slugForURLHash(pageURL, 16)
+}
+
+func legacySlugForURL(pageURL string) string {
+	return slugForURLHash(pageURL, 8)
+}
+
+func slugForURLHash(pageURL string, hashLen int) string {
 	base := pageURL
 	if _, rest, ok := strings.Cut(pageURL, "://"); ok {
 		base = rest
 	}
 
-	return websource.Slugify(base) + "-" + websource.Hash(pageURL)[:8]
+	return websource.Slugify(base) + "-" + websource.Hash(pageURL)[:hashLen]
+}
+
+// pageForURL preserves the legacy eight-character hash for existing records
+// while assigning new pages a collision-resistant 16-character suffix.
+func (m *Manager) pageForURL(ctx context.Context, name, pageURL string) (string, *websource.Page, error) {
+	slug := slugForURL(pageURL)
+	page, err := m.webStore.GetPage(ctx, websource.PageID(name, slug))
+	if err != nil {
+		return "", nil, err
+	}
+	if page != nil {
+		if page.URL != pageURL {
+			return "", nil, fmt.Errorf("URL identity collision with page %s", slug)
+		}
+		return slug, page, nil
+	}
+
+	legacy := legacySlugForURL(pageURL)
+	page, err = m.webStore.GetPage(ctx, websource.PageID(name, legacy))
+	if err != nil {
+		return "", nil, err
+	}
+	if page != nil && page.URL == pageURL {
+		return legacy, page, nil
+	}
+	return slug, nil, nil
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,8 +47,22 @@ func TestDeleteWebPageRejectsTraversal(t *testing.T) {
 	}
 
 	// The legitimate case must still work.
+	if err := m.DeleteWebPage(ctx, "wiki", "alpha"); err == nil || !strings.Contains(err.Error(), "only pages") {
+		t.Fatalf("provider-owned item deletion error = %v", err)
+	}
+	col, err := m.webStore.GetCollection(ctx, "wiki")
+	if err != nil {
+		t.Fatal(err)
+	}
+	col.Type = websource.TypePages
+	if err := m.webStore.UpsertCollection(ctx, col); err != nil {
+		t.Fatal(err)
+	}
 	if err := m.DeleteWebPage(ctx, "wiki", "alpha"); err != nil {
 		t.Fatalf("deleting a valid page: %v", err)
+	}
+	if err := m.DeleteWebPage(ctx, "wiki", "alpha"); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("missing page deletion error = %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(m.sourcesDir("wiki"), "alpha.md")); !os.IsNotExist(err) {
 		t.Errorf("alpha.md survived its delete: %v", err)

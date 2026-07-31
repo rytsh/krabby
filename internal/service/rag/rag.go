@@ -40,12 +40,14 @@ const (
 
 // Doc is a ranked documentation excerpt returned by retrieval.
 type Doc struct {
-	Repo      string  `json:"repo"`
-	Path      string  `json:"path"` // path relative to the repo's docs directory
-	Title     string  `json:"title"`
-	Score     float32 `json:"score"` // mode-specific score used for ranking
-	Excerpt   string  `json:"excerpt"`
-	Truncated bool    `json:"truncated,omitempty"`
+	Repo       string  `json:"repo"`
+	ScopeKey   string  `json:"scope_key"`
+	SourceKind string  `json:"source_kind"` // "repository" or "web"
+	Path       string  `json:"path"`        // path relative to the repo's docs directory
+	Title      string  `json:"title"`
+	Score      float32 `json:"score"` // mode-specific score used for ranking
+	Excerpt    string  `json:"excerpt"`
+	Truncated  bool    `json:"truncated,omitempty"`
 
 	// UpdatedAt is the source document's last-modified time, when known, so the
 	// model can judge how current a hit is (a decade-old ticket vs. a fresh
@@ -56,6 +58,12 @@ type Doc struct {
 	// tickets): URL is the original item link, Teams the owning team names.
 	URL   string   `json:"url,omitempty"`
 	Teams []string `json:"teams,omitempty"`
+
+	// Source metadata makes broad-search hits self-describing to MCP clients.
+	Namespace             string `json:"namespace,omitempty"`
+	CollectionName        string `json:"collection_name,omitempty"`
+	CollectionType        string `json:"collection_type,omitempty"`
+	CollectionDescription string `json:"collection_description,omitempty"`
 }
 
 // Service indexes generated docs and retrieves bounded excerpts for a question.
@@ -137,7 +145,8 @@ func (s *Service) countDir(docsDir string) (chunks, docs int, err error) {
 			return rerr
 		}
 
-		chunks += len(chunk(string(b), s.cfg.ChunkSize, s.cfg.ChunkOverlap))
+		searchContent := searchableMarkdown(string(b), s.cfg.KeepMarkdownTargets)
+		chunks += len(chunk(searchContent, s.cfg.ChunkSize, s.cfg.ChunkOverlap))
 		docs++
 
 		return nil
@@ -181,9 +190,10 @@ func (s *Service) streamDir(ctx context.Context, repo, docsDir string, batch *ch
 
 		content := string(b)
 		title := docTitle(titles, docPath, content)
+		searchContent := searchableMarkdown(content, s.cfg.KeepMarkdownTargets)
 
-		for i, c := range chunk(content, s.cfg.ChunkSize, s.cfg.ChunkOverlap) {
-			if err := batch.add(chunkItem(repo, docPath, title, c, i, time.Time{})); err != nil {
+		for i, c := range chunk(searchContent, s.cfg.ChunkSize, s.cfg.ChunkOverlap) {
+			if err := batch.add(chunkItem(repo, docPath, title, withSearchTitle(c, title), i, time.Time{})); err != nil {
 				return err
 			}
 		}
@@ -211,13 +221,14 @@ func (s *Service) IndexPaths(ctx context.Context, repo, docsDir string, changed,
 	return s.IndexPathsProgress(ctx, repo, docsDir, changed, removed, nil, nil)
 }
 
-// IndexOptions carries optional per-index inputs. updatedAt, when set, returns
+// IndexOptions carries optional per-index inputs. UpdatedAt, when set, returns
 // a doc's source last-modified time for a given path (slash-separated, e.g.
 // "ofs-1.md"); the returned time is stored on every chunk of that doc so
 // retrieval can surface and weigh recency. A nil func or zero time leaves the
 // timestamp empty.
 type IndexOptions struct {
-	UpdatedAt func(path string) time.Time
+	UpdatedAt           func(path string) time.Time
+	KeepMarkdownTargets bool
 }
 
 // IndexPathsProgress is IndexPaths with an optional progress callback (invoked
@@ -296,7 +307,7 @@ func (s *Service) streamPaths(
 		}
 
 		content := string(b)
-		chunks := chunk(content, s.cfg.ChunkSize, s.cfg.ChunkOverlap)
+		chunks := chunk(searchableMarkdown(content, s.cfg.KeepMarkdownTargets), s.cfg.ChunkSize, s.cfg.ChunkOverlap)
 
 		if batch == nil {
 			*count += len(chunks)
@@ -312,7 +323,7 @@ func (s *Service) streamPaths(
 		}
 
 		for i, c := range chunks {
-			if err := batch.add(chunkItem(repo, docPath, title, c, i, updatedAt)); err != nil {
+			if err := batch.add(chunkItem(repo, docPath, title, withSearchTitle(c, title), i, updatedAt)); err != nil {
 				return err
 			}
 		}

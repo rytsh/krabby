@@ -27,6 +27,7 @@
   },
   "dependencies": {
     "@comark/html": "^0.5.1",
-    "comark": "^0.5.1"
+    "comark": "^0.5.1",
+    "dompurify": "^3.4.12"
   }
 }

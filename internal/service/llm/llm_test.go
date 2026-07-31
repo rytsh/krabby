@@ -2,10 +2,14 @@ package llm
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/rytsh/krabby/internal/config"
@@ -14,6 +18,80 @@ import (
 func TestNewNotConfigured(t *testing.T) {
 	if _, err := New(config.LLM{}); err == nil {
 		t.Fatal("expected ErrNotConfigured for empty base url")
+	}
+}
+
+func TestMarshalRequestJSON(t *testing.T) {
+	c, err := New(config.LLM{BaseURL: "https://llm.example", Model: "test-model"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		messages []Message
+		want     string
+	}{
+		{
+			name:     "text content remains a string",
+			messages: []Message{{Role: "user", Content: "hello"}},
+			want:     `{"model":"test-model","messages":[{"role":"user","content":"hello"}],"stream":true,"stream_options":{"include_usage":true}}`,
+		},
+		{
+			name: "multimodal content is an array",
+			messages: []Message{{Role: "user", Parts: []ContentPart{
+				TextPart("describe this"),
+				ImageURLPart("data:image/png;base64,aW1hZ2U=", "high"),
+			}}},
+			want: `{"model":"test-model","messages":[{"role":"user","content":[{"type":"text","text":"describe this"},{"type":"image_url","image_url":{"url":"data:image/png;base64,aW1hZ2U=","detail":"high"}}]}],"stream":true,"stream_options":{"include_usage":true}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := c.marshalRequest(tt.messages, 0)
+			if err != nil {
+				t.Fatalf("marshalRequest: %v", err)
+			}
+			if string(got) != tt.want {
+				t.Fatalf("request JSON:\n got: %s\nwant: %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTraceMessagesRedactImageURLs(t *testing.T) {
+	image := []byte("private image bytes")
+	encoded := base64.StdEncoding.EncodeToString(image)
+	remoteSecret := "remote-query-secret"
+	messages := []Message{{Role: "user", Parts: []ContentPart{
+		TextPart("compare these images"),
+		ImageURLPart("data:image/png;base64,"+encoded, "high"),
+		{
+			Type:     "image_url",
+			Text:     encoded, // Invalid extra data must not bypass image redaction.
+			ImageURL: &ImageURL{URL: "https://cdn.example/image.jpg?token=" + remoteSecret + "&signature=private", Detail: "low"},
+		},
+	}}}
+
+	got, err := json.Marshal(traceMessages(messages))
+	if err != nil {
+		t.Fatalf("marshal trace input: %v", err)
+	}
+	traceInput := string(got)
+	for _, secret := range []string{encoded, remoteSecret, "signature=private", "cdn.example"} {
+		if strings.Contains(traceInput, secret) {
+			t.Errorf("trace input contains sensitive image URL data %q: %s", secret, traceInput)
+		}
+	}
+
+	sum := sha256.Sum256(image)
+	wantMetadata := fmt.Sprintf(`"source":"data_url","detail":"high","mime":"image/png","bytes":%d,"sha256":"%x"`, len(image), sum)
+	if !strings.Contains(traceInput, wantMetadata) {
+		t.Errorf("trace input lacks safe data URL metadata %s: %s", wantMetadata, traceInput)
+	}
+	if !strings.Contains(traceInput, `"source":"remote_url","detail":"low"`) {
+		t.Errorf("trace input lacks redacted remote URL metadata: %s", traceInput)
 	}
 }
 

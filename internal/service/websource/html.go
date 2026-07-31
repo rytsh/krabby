@@ -8,14 +8,16 @@ import (
 	"strings"
 
 	htmltomarkdown "github.com/JohannesKaufmann/html-to-markdown/v2"
+	"github.com/JohannesKaufmann/html-to-markdown/v2/converter"
 	readability "github.com/go-shiori/go-readability"
 )
 
 // MarkdownFromHTML converts an HTML fragment or document to markdown without
 // any content extraction. Use for sources that already return content-only
-// HTML (e.g. the Confluence storage format).
-func MarkdownFromHTML(html string) (string, error) {
-	md, err := htmltomarkdown.ConvertString(html)
+// HTML (e.g. the Confluence storage format). baseURL resolves relative links
+// and image sources; it may be empty for manually authored fragments.
+func MarkdownFromHTML(html, baseURL string) (string, error) {
+	md, err := htmltomarkdown.ConvertString(html, converter.WithDomain(baseURL))
 	if err != nil {
 		return "", fmt.Errorf("convert html to markdown; %w", err)
 	}
@@ -44,7 +46,7 @@ func ExtractArticle(html, pageURL string) (title, markdown string, err error) {
 		content = html
 	}
 
-	md, err := MarkdownFromHTML(content)
+	md, err := MarkdownFromHTML(content, pageURL)
 	if err != nil {
 		return "", "", err
 	}
