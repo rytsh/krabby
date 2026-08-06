@@ -59,6 +59,10 @@
       graph_exclude: "",
       docs_prompt: "",
       docs_prompt_extra: "",
+      docs_max_source_bytes: "",
+      docs_max_group_bytes: "",
+      docs_max_synthesis_bytes: "",
+      skip_stages: [],
     };
   }
 
@@ -71,7 +75,28 @@
       graph_exclude: (o.graph_exclude || []).join(", "),
       docs_prompt: o.docs_prompt || "",
       docs_prompt_extra: o.docs_prompt_extra || "",
+      docs_max_source_bytes: o.docs_max_source_bytes ? String(o.docs_max_source_bytes) : "",
+      docs_max_group_bytes: o.docs_max_group_bytes ? String(o.docs_max_group_bytes) : "",
+      docs_max_synthesis_bytes: o.docs_max_synthesis_bytes ? String(o.docs_max_synthesis_bytes) : "",
+      skip_stages: [...(o.skip_stages || [])],
     };
+  }
+
+  // Stages a repository can opt out of. The graph is worth skipping for a repo
+  // of plain config, where it yields nothing; its dependents still run, just
+  // without graph anchoring.
+  const skippableStages = [
+    { key: "graph", label: "Knowledge graph" },
+    { key: "code_index", label: "Semantic code index" },
+    { key: "docs", label: "Documentation" },
+    { key: "docs_index", label: "Documentation index" },
+  ];
+
+  function toggleSkip(key) {
+    const next = new Set(overridesForm.skip_stages);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    overridesForm = { ...overridesForm, skip_stages: [...next] };
   }
 
   async function loadSettings() {
@@ -99,6 +124,16 @@
       { label: "Also indexed", value: list(eff.code_include_extra), overridden: Boolean(over.include_extra?.length) },
       { label: "Skipped", value: list(eff.code_exclude), overridden: Boolean(over.exclude?.length) },
       { label: "Graph ignores", value: list(eff.graph_exclude), overridden: Boolean(over.graph_exclude?.length) },
+      {
+        label: "Skipped stages",
+        value: list(eff.skip_stages),
+        overridden: Boolean(over.skip_stages?.length),
+      },
+      {
+        label: "Docs input budget",
+        value: eff.docs_limits ? `${kb(eff.docs_limits.max_source_bytes)} per file` : "",
+        overridden: Boolean(over.docs_max_source_bytes),
+      },
       { label: "Docs prompt", value: eff.docs_prompt_source, overridden: eff.docs_prompt_source === "repo" },
       {
         label: "Extra doc rules",
@@ -106,6 +141,16 @@
         overridden: (eff.docs_prompt_extras || []).includes("repo"),
       },
     ].filter((r) => r.value);
+  }
+
+  function kb(n) {
+    return n ? `${Math.round(n / 1024)} KiB` : "";
+  }
+
+  // An empty box means "inherit"; only a positive number is an override.
+  function positiveInt(s) {
+    const n = Number.parseInt(String(s).trim(), 10);
+    return Number.isFinite(n) && n > 0 ? n : 0;
   }
 
   function splitGlobs(s) {
@@ -122,7 +167,11 @@
         o.include_extra?.length ||
         o.exclude?.length ||
         o.docs_prompt ||
-        o.docs_prompt_extra,
+        o.docs_prompt_extra ||
+        o.docs_max_source_bytes ||
+        o.docs_max_group_bytes ||
+        o.docs_max_synthesis_bytes ||
+        o.skip_stages?.length,
     );
   }
 
@@ -141,6 +190,10 @@
         graph_exclude: splitGlobs(overridesForm.graph_exclude),
         docs_prompt: overridesForm.docs_prompt.trim(),
         docs_prompt_extra: overridesForm.docs_prompt_extra.trim(),
+        docs_max_source_bytes: positiveInt(overridesForm.docs_max_source_bytes),
+        docs_max_group_bytes: positiveInt(overridesForm.docs_max_group_bytes),
+        docs_max_synthesis_bytes: positiveInt(overridesForm.docs_max_synthesis_bytes),
+        skip_stages: overridesForm.skip_stages,
       });
       showOverrides = false;
       successToast("Settings saved; rebuild queued");
@@ -892,6 +945,50 @@
               bind:value={overridesForm.docs_prompt_extra}
             ></textarea>
           </label>
+          <div class="flex flex-col gap-1 text-[13px] text-dim">
+            Documentation input budget, bytes (empty = global default)
+            <div class="flex flex-wrap gap-2">
+              <input
+                class="input flex-1"
+                placeholder="per file, default 49152"
+                bind:value={overridesForm.docs_max_source_bytes}
+              />
+              <input
+                class="input flex-1"
+                placeholder="per summary call, default 98304"
+                bind:value={overridesForm.docs_max_group_bytes}
+              />
+              <input
+                class="input flex-1"
+                placeholder="final synthesis, default 262144"
+                bind:value={overridesForm.docs_max_synthesis_bytes}
+              />
+            </div>
+            <span class="text-[12px] text-faint">
+              Nothing past the per-file budget is ever sent to the model, so a repo whose substance
+              sits in a few very large files is documented from a truncated prefix until this is
+              raised. Raise the per-call budget with it, or that one binds first.
+            </span>
+          </div>
+          <div class="flex flex-col gap-1 text-[13px] text-dim">
+            Stages this repository does not run
+            <div class="flex flex-wrap gap-3">
+              {#each skippableStages as st (st.key)}
+                <label class="flex items-center gap-1 text-[13px]">
+                  <input
+                    type="checkbox"
+                    checked={overridesForm.skip_stages.includes(st.key)}
+                    onchange={() => toggleSkip(st.key)}
+                  />
+                  {st.label}
+                </label>
+              {/each}
+            </div>
+            <span class="text-[12px] text-faint">
+              Dependents still run without a skipped graph, just without symbol anchoring. Asking for
+              a skipped stage from the Generate buttons is rejected rather than silently doing nothing.
+            </span>
+          </div>
           <label class="flex flex-col gap-1 text-[13px] text-dim">
             Replace the documentation prompt
             <textarea

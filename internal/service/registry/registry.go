@@ -132,12 +132,38 @@ type Overrides struct {
 
 	DocsPrompt      string `bw:"docs_prompt"       json:"docs_prompt,omitempty"`
 	DocsPromptExtra string `bw:"docs_prompt_extra" json:"docs_prompt_extra,omitempty"`
+
+	// Documentation input budgets for this repository, in bytes. Zero inherits
+	// the install-wide value. A repo whose substance sits in a handful of very
+	// large files is otherwise documented from a truncated prefix of each, and
+	// no prompt can recover what the model never saw.
+	DocsMaxSourceBytes    int `bw:"docs_max_source_bytes"    json:"docs_max_source_bytes,omitempty"`
+	DocsMaxGroupBytes     int `bw:"docs_max_group_bytes"     json:"docs_max_group_bytes,omitempty"`
+	DocsMaxSynthesisBytes int `bw:"docs_max_synthesis_bytes" json:"docs_max_synthesis_bytes,omitempty"`
+
+	// SkipStages names pipeline stages this repository does not run. It exists
+	// because stage enablement is otherwise global: a deployment repo of plain
+	// YAML gains nothing from a knowledge graph or a semantic code index, but
+	// turning either off install-wide would strip it from every other repo.
+	//
+	// A skipped stage is not attempted and records no state; stages that depend
+	// on it are skipped too (see manager.stageDeps), except that docs still run
+	// without a graph — grouping simply falls back to one call per file.
+	SkipStages []string `bw:"skip_stages" json:"skip_stages,omitempty"`
+}
+
+// SkipsStage reports whether the named pipeline stage is disabled for this
+// repository.
+func (o Overrides) SkipsStage(stage string) bool {
+	return slices.Contains(o.SkipStages, stage)
 }
 
 // Empty reports whether nothing is overridden.
 func (o Overrides) Empty() bool {
 	return len(o.Include) == 0 && len(o.IncludeExtra) == 0 && len(o.Exclude) == 0 &&
-		len(o.GraphExclude) == 0 && o.DocsPrompt == "" && o.DocsPromptExtra == ""
+		len(o.GraphExclude) == 0 && o.DocsPrompt == "" && o.DocsPromptExtra == "" &&
+		o.DocsMaxSourceBytes == 0 && o.DocsMaxGroupBytes == 0 && o.DocsMaxSynthesisBytes == 0 &&
+		len(o.SkipStages) == 0
 }
 
 // Repo is a tracked repository record.
@@ -179,7 +205,8 @@ type Registry struct {
 // mismatch at startup. v2: added per-stage generation states (Stages).
 // v3: added the Namespace field (empty == default namespace).
 // v4: added per-repository Overrides (file selection, graph ignore, docs prompt).
-const repoSchemaVersion = 4
+// v5: added per-repository docs input budgets and SkipStages to Overrides.
+const repoSchemaVersion = 5
 
 // namespaceSchemaVersion mirrors repoSchemaVersion for the namespaces bucket.
 const namespaceSchemaVersion = 1
@@ -623,7 +650,8 @@ func (o Overrides) Changed(other Overrides) bool { return !o.equal(other) }
 // GraphChanged reports whether the knowledge-graph exclusions differ, which is
 // the only part of an override set that invalidates the graph itself.
 func (o Overrides) GraphChanged(other Overrides) bool {
-	return !slices.Equal(o.GraphExclude, other.GraphExclude)
+	return !slices.Equal(o.GraphExclude, other.GraphExclude) ||
+		o.SkipsStage(StageGraph) != other.SkipsStage(StageGraph)
 }
 
 // Normalize drops blank entries and trims whitespace so a form submitting an
@@ -636,7 +664,33 @@ func (o Overrides) Normalize() Overrides {
 		GraphExclude:    trimGlobs(o.GraphExclude),
 		DocsPrompt:      strings.TrimSpace(o.DocsPrompt),
 		DocsPromptExtra: strings.TrimSpace(o.DocsPromptExtra),
+
+		DocsMaxSourceBytes:    max(o.DocsMaxSourceBytes, 0),
+		DocsMaxGroupBytes:     max(o.DocsMaxGroupBytes, 0),
+		DocsMaxSynthesisBytes: max(o.DocsMaxSynthesisBytes, 0),
+
+		SkipStages: normalizeStages(o.SkipStages),
 	}
+}
+
+// normalizeStages lower-cases, trims, drops unknown or duplicate stage names
+// and returns them in a stable order, so a stored skip list is comparable and
+// a typo cannot silently disable nothing while looking set.
+func normalizeStages(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, st := range in {
+		st = strings.ToLower(strings.TrimSpace(st))
+		if !ValidStage(st) || slices.Contains(out, st) {
+			continue
+		}
+		out = append(out, st)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	slices.Sort(out)
+
+	return out
 }
 
 func trimGlobs(in []string) []string {
@@ -659,7 +713,11 @@ func (o Overrides) equal(other Overrides) bool {
 		slices.Equal(o.Exclude, other.Exclude) &&
 		slices.Equal(o.GraphExclude, other.GraphExclude) &&
 		o.DocsPrompt == other.DocsPrompt &&
-		o.DocsPromptExtra == other.DocsPromptExtra
+		o.DocsPromptExtra == other.DocsPromptExtra &&
+		o.DocsMaxSourceBytes == other.DocsMaxSourceBytes &&
+		o.DocsMaxGroupBytes == other.DocsMaxGroupBytes &&
+		o.DocsMaxSynthesisBytes == other.DocsMaxSynthesisBytes &&
+		slices.Equal(o.SkipStages, other.SkipStages)
 }
 
 // Resolve returns the repo identified by ref. An exact id match wins; when

@@ -871,7 +871,13 @@ func docsConfig(s settings.Settings) config.Docs {
 			IncludeExtra: s.DocsIncludeExtra,
 			Exclude:      s.DocsExclude,
 		},
-		Prompt: s.DocsPrompt,
+		Prompt:      s.DocsPrompt,
+		PromptExtra: s.DocsPromptExtra,
+		Limits: config.DocsLimits{
+			MaxSourceBytes:    s.DocsMaxSourceBytes,
+			MaxGroupBytes:     s.DocsMaxGroupBytes,
+			MaxSynthesisBytes: s.DocsMaxSynthesisBytes,
+		},
 	}
 }
 

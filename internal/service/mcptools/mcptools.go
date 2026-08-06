@@ -102,6 +102,12 @@ type repoOverrideArgs struct {
 
 	DocsPrompt      string `json:"docs_prompt,omitempty" jsonschema:"prompt REPLACING the default documentation prompt; prefer docs_prompt_extra"`
 	DocsPromptExtra string `json:"docs_prompt_extra,omitempty" jsonschema:"extra documentation instructions for this repo"`
+
+	DocsMaxSourceBytes    int `json:"docs_max_source_bytes,omitempty" jsonschema:"bytes of ONE file sent to the LLM (default 49152); raise it when the repo's substance sits in a few very large files, which are otherwise documented from a truncated prefix. 0 inherits"`
+	DocsMaxGroupBytes     int `json:"docs_max_group_bytes,omitempty" jsonschema:"source bytes per grouped summary call (default 98304), split across the group's files; raise with docs_max_source_bytes or it binds first. 0 inherits"`
+	DocsMaxSynthesisBytes int `json:"docs_max_synthesis_bytes,omitempty" jsonschema:"summary bytes fed to the final documentation.md synthesis (default 262144); 0 inherits"`
+
+	SkipStages []string `json:"skip_stages,omitempty" jsonschema:"stages this repo does not run: graph, docs, docs_index, code_index. Dependents still run degraded (docs summarize per file without a graph). Requesting a skipped stage is an error, not a no-op"`
 }
 
 func (a repoOverrideArgs) overrides() registry.Overrides {
@@ -112,6 +118,12 @@ func (a repoOverrideArgs) overrides() registry.Overrides {
 		GraphExclude:    a.GraphExclude,
 		DocsPrompt:      a.DocsPrompt,
 		DocsPromptExtra: a.DocsPromptExtra,
+
+		DocsMaxSourceBytes:    a.DocsMaxSourceBytes,
+		DocsMaxGroupBytes:     a.DocsMaxGroupBytes,
+		DocsMaxSynthesisBytes: a.DocsMaxSynthesisBytes,
+
+		SkipStages: a.SkipStages,
 	}
 }
 

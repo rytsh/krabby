@@ -1144,7 +1144,19 @@ func repoDocsOverride(repo *registry.Repo) config.DocsOverride {
 		Filters:     repoFilters(repo),
 		Prompt:      repo.Overrides.DocsPrompt,
 		PromptExtra: repo.Overrides.DocsPromptExtra,
+		Limits: config.DocsLimits{
+			MaxSourceBytes:    repo.Overrides.DocsMaxSourceBytes,
+			MaxGroupBytes:     repo.Overrides.DocsMaxGroupBytes,
+			MaxSynthesisBytes: repo.Overrides.DocsMaxSynthesisBytes,
+		},
 	}
+}
+
+// skipsStage reports whether a repository opted out of a pipeline stage. A nil
+// repo skips nothing, so callers that could not load the record keep the
+// previous, always-run behaviour rather than silently doing less work.
+func skipsStage(repo *registry.Repo, stage string) bool {
+	return repo != nil && repo.Overrides.SkipsStage(stage)
 }
 
 // UpsertNamespace creates or updates the description metadata for a namespace.
@@ -1433,6 +1445,18 @@ func (m *Manager) resolveStageDeps(want map[string]bool, repo *registry.Repo, do
 				continue
 			}
 
+			// A stage the repository opted out of is never pulled back in as
+			// somebody else's prerequisite. Both dependents of the graph
+			// degrade gracefully without it — docs fall back to one summary
+			// call per file, code chunking to line windows — so the dependent
+			// still runs, just without graph anchoring.
+			if skipsStage(repo, dep) {
+				slog.Info("stage dependency skipped by repo override",
+					"repo", id, "stage", name, "dependency", dep)
+
+				continue
+			}
+
 			slog.Info("stage dependency missing; scheduling it first",
 				"repo", id, "stage", name, "dependency", dep)
 			want[dep] = true
@@ -1475,6 +1499,21 @@ func (m *Manager) Generate(ctx context.Context, id string, targets []string, for
 
 	if !fileExists(filepath.Join(repo.Path, ".git")) {
 		return fmt.Errorf("repo %s has no clone yet; refresh it first", id)
+	}
+
+	// A stage this repository opted out of is not silently turned into a no-op
+	// that reports success: an explicit request for it is an error naming the
+	// override, so the caller can either drop the target or clear the skip.
+	var blocked []string
+	for _, name := range generateOrder {
+		if want[name] && skipsStage(repo, name) {
+			blocked = append(blocked, name)
+		}
+	}
+
+	if len(blocked) > 0 {
+		return fmt.Errorf("stage(s) %s are disabled for %s by its skip_stages override; clear it with set_repo_overrides to run them",
+			strings.Join(blocked, ", "), id)
 	}
 
 	docsDir, docsDirErr := m.docsDirForRepo(repo)
@@ -1846,9 +1885,13 @@ func (m *Manager) refresh(ctx context.Context, repo *registry.Repo) error {
 
 	defer m.clearRepoActivity(repo.ID)
 
-	hadGraph := fileExists(graphify.GraphPath(repo.Path))
-	staleIgnore := hadGraph && m.gfy.GraphNeedsIgnoreRebuild(repo.Path, repo.Overrides.GraphExclude)
-	staleVersion := hadGraph && !m.gfy.GraphBuiltWithCurrentVersion(repo.Path)
+	// A repository that skips the graph stage has no graph to be missing or
+	// stale, so none of these may force a snapshot rebuild — otherwise every
+	// refresh would re-clone forever chasing a graph it will never build.
+	graphSkipped := skipsStage(repo, registry.StageGraph)
+	hadGraph := graphSkipped || fileExists(graphify.GraphPath(repo.Path))
+	staleIgnore := !graphSkipped && hadGraph && m.gfy.GraphNeedsIgnoreRebuild(repo.Path, repo.Overrides.GraphExclude)
+	staleVersion := !graphSkipped && hadGraph && !m.gfy.GraphBuiltWithCurrentVersion(repo.Path)
 
 	m.setActivity(repo.ID, "sync")
 	snapshot, err := m.prepareSnapshot(ctx, repo, !hadGraph || staleIgnore || staleVersion)
@@ -1938,7 +1981,7 @@ func (m *Manager) buildDocsAndIndex(ctx context.Context, repo *registry.Repo, de
 	// graph) and hit different backends (embedder vs LLM), so they run in
 	// parallel; runStage serializes their stage-state writes on stageMu.
 	var wg sync.WaitGroup
-	if d.codeRag != nil {
+	if d.codeRag != nil && !skipsStage(repo, registry.StageCodeIndex) {
 		// The delta must be captured before runStage mutates the stage state.
 		var changed []string
 		incremental := false
@@ -1971,6 +2014,10 @@ func (m *Manager) buildDocsAndIndex(ctx context.Context, repo *registry.Repo, de
 		return
 	}
 
+	if skipsStage(repo, registry.StageDocs) && skipsStage(repo, registry.StageDocsIndex) {
+		return
+	}
+
 	docsDir, err := m.docsDirForRepo(repo)
 	if err != nil {
 		slog.Error("resolve generated docs directory", "repo", repo.ID, "error", err)
@@ -1979,7 +2026,7 @@ func (m *Manager) buildDocsAndIndex(ctx context.Context, repo *registry.Repo, de
 	}
 
 	docsChanged := true
-	if d.gen != nil {
+	if d.gen != nil && !skipsStage(repo, registry.StageDocs) {
 		// Documentation is written by an LLM, one call per file group: the
 		// slowest stage of a build and the one most worth estimating.
 		genCtx := progress.With(ctx, m.progressReporter(repo.ID, registry.StageDocs))
@@ -2003,6 +2050,10 @@ func (m *Manager) buildDocsAndIndex(ctx context.Context, repo *registry.Repo, de
 	}
 
 	if d.rag == nil && m.docsText == nil {
+		return
+	}
+
+	if skipsStage(repo, registry.StageDocsIndex) {
 		return
 	}
 
@@ -2553,6 +2604,12 @@ func (m *Manager) buildGraphSnapshot(
 	snapshot *preparedSnapshot,
 	activeStatus string,
 ) error {
+	// The graph stage may be disabled, but this function also promotes the
+	// staging clone to its final path and moves repo.Path/LastCommit forward —
+	// which every other stage depends on. So a skip bypasses only the graphify
+	// work and its stage bookkeeping, never the promotion below.
+	skipGraph := skipsStage(repo, registry.StageGraph)
+
 	st := repo.Stages.Get(registry.StageGraph)
 	fail := func(err error, path string) error {
 		if ctx.Err() != nil {
@@ -2568,24 +2625,29 @@ func (m *Manager) buildGraphSnapshot(
 		return err
 	}
 
-	st.Status = registry.StageRunning
-	st.Error = ""
-	if err := m.reg.Upsert(ctx, repo); err != nil {
-		return fail(err, snapshot.StagingPath)
-	}
-
-	m.setActivity(repo.ID, registry.StageGraph)
-	defer m.clearActivity(repo.ID, registry.StageGraph)
 	start := time.Now()
-	err := m.gfy.Update(ctx, snapshot.StagingPath, repo.Overrides.GraphExclude)
-	if err != nil {
-		return fail(err, snapshot.StagingPath)
-	}
-	if err := graphquery.Validate(graphify.GraphPath(snapshot.StagingPath)); err != nil {
-		return fail(fmt.Errorf("validate graphify output; %w", err), snapshot.StagingPath)
-	}
-	if err := m.gfy.RecordGraphVersion(snapshot.StagingPath); err != nil {
-		return fail(err, snapshot.StagingPath)
+
+	if skipGraph {
+		slog.Info("graph stage disabled for repo; promoting snapshot without building a graph", "repo", repo.ID)
+	} else {
+		st.Status = registry.StageRunning
+		st.Error = ""
+		if err := m.reg.Upsert(ctx, repo); err != nil {
+			return fail(err, snapshot.StagingPath)
+		}
+
+		m.setActivity(repo.ID, registry.StageGraph)
+		defer m.clearActivity(repo.ID, registry.StageGraph)
+
+		if err := m.gfy.Update(ctx, snapshot.StagingPath, repo.Overrides.GraphExclude); err != nil {
+			return fail(err, snapshot.StagingPath)
+		}
+		if err := graphquery.Validate(graphify.GraphPath(snapshot.StagingPath)); err != nil {
+			return fail(fmt.Errorf("validate graphify output; %w", err), snapshot.StagingPath)
+		}
+		if err := m.gfy.RecordGraphVersion(snapshot.StagingPath); err != nil {
+			return fail(err, snapshot.StagingPath)
+		}
 	}
 
 	if err := os.Rename(snapshot.StagingPath, snapshot.FinalPath); err != nil {
@@ -2607,10 +2669,15 @@ func (m *Manager) buildGraphSnapshot(
 	repo.Status = activeStatus
 	repo.LastBuildAt = time.Now()
 	repo.LastError = ""
-	st.Status = registry.StageOK
-	st.Error = ""
-	st.Commit = snapshot.Commit
-	st.FinishedAt = time.Now()
+
+	// A skipped stage records no state, so status output shows it as never run
+	// rather than as a success that produced nothing.
+	if !skipGraph {
+		st.Status = registry.StageOK
+		st.Error = ""
+		st.Commit = snapshot.Commit
+		st.FinishedAt = time.Now()
+	}
 
 	if err := m.reg.Upsert(ctx, repo); err != nil {
 		repo.Path = oldPath

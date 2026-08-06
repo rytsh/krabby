@@ -77,12 +77,11 @@ const docsDirName = "krabby-docs"
 // Files use a .sum extension so the RAG doc indexer (which walks *.md) skips them.
 const summariesDir = ".summaries"
 
-// maxSourceBytes caps how much of a source file is sent to the LLM.
-const maxSourceBytes = 48 * 1024
-
-// maxSynthesisBytes caps the total summary input for the synthesis call. When
-// exceeded, each summary is truncated to an equal share.
-const maxSynthesisBytes = 256 * 1024
+// The byte budgets that bound documentation input — how much of one file is
+// read, how much source goes into one grouped summary call, and how much
+// summary text reaches the final synthesis — are not constants: they live in
+// config.DocsLimits so an install, or a single repository, can raise them.
+// See config.DefaultDocsMaxSourceBytes and friends for the defaults.
 
 // DefaultPrompt is the built-in system prompt for the final synthesis of the
 // comprehensive repository documentation. It is used whenever
@@ -291,6 +290,12 @@ func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir st
 	defer func() { endTrace(traceSummary(man), err) }()
 
 	filters := g.cfg.Filters.Merge(over.Filters)
+	// Input budgets: install-wide values, overlaid by this repository's own,
+	// with any still-unset field falling back to the built-in default. The
+	// resolved MaxSourceBytes also feeds the summary cache key indirectly —
+	// summaries hash the (capped) content — so raising it re-summarizes the
+	// files that were previously truncated, and only those.
+	limits := g.cfg.Limits.Merge(over.Limits).Resolve()
 
 	files, err := g.selectFiles(clonePath, filters)
 	if err != nil {
@@ -356,7 +361,7 @@ func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir st
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			metas, groupRegen, err := g.summaryForGroup(ctx, clonePath, docsDir, grp, graph, prior)
+			metas, groupRegen, err := g.summaryForGroup(ctx, clonePath, docsDir, grp, graph, prior, limits)
 			if err != nil {
 				slog.Error("summarize group", "repo", repo, "community", grp.community, "files", len(grp.files), "error", err)
 
@@ -385,7 +390,7 @@ func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir st
 	sort.Slice(summaries, func(i, j int) bool { return summaries[i].Path < summaries[j].Path })
 
 	// Synthesis: skip the LLM call when nothing changed and the doc exists.
-	docMeta, synthesized, synthErr := g.maybeSynthesize(ctx, repo, docsDir, graph, summaries, priorMan, regen, promptHash, over)
+	docMeta, synthesized, synthErr := g.maybeSynthesize(ctx, repo, docsDir, graph, summaries, priorMan, regen, promptHash, over, limits)
 
 	var docs []DocMeta
 	if docMeta != nil {
@@ -440,11 +445,6 @@ func traceSummary(man *Manifest) any {
 func summaryPath(rel string) string {
 	return path.Join(summariesDir, rel+".sum")
 }
-
-// maxGroupBytes caps the total source bytes sent in a single grouped summary
-// call. A community larger than this is split across several calls so one
-// oversized cluster does not overflow the model context.
-const maxGroupBytes = 96 * 1024
 
 // fileGroup is a set of related files summarized together in one LLM call. A
 // community < 0 marks an ungrouped/fallback batch (graph did not cover it).
@@ -631,6 +631,7 @@ func (g *llmGenerator) summaryForGroup(
 	grp fileGroup,
 	graph *graphquery.Graph,
 	prior map[string]DocMeta,
+	limits config.DocsLimits,
 ) (metas []DocMeta, regen int, err error) {
 	type pending struct {
 		rel     string
@@ -641,7 +642,7 @@ func (g *llmGenerator) summaryForGroup(
 	var todo []pending
 
 	for _, rel := range grp.files {
-		fc, rerr := repofs.ReadFile(clonePath, rel, 0, maxSourceBytes)
+		fc, rerr := repofs.ReadFile(clonePath, rel, 0, limits.MaxSourceBytes)
 		if rerr != nil {
 			return nil, 0, rerr
 		}
@@ -679,7 +680,7 @@ func (g *llmGenerator) summaryForGroup(
 	user.WriteString("Summarize each of the following files. For every file, ")
 	user.WriteString("start a section with a level-2 heading that is exactly the file path.\n\n")
 
-	budget := maxGroupBytes / max(len(todo), 1)
+	budget := limits.MaxGroupBytes / max(len(todo), 1)
 	if budget < 2000 {
 		budget = 2000
 	}
@@ -863,6 +864,7 @@ func (g *llmGenerator) maybeSynthesize(
 	regen int,
 	promptHash string,
 	over config.DocsOverride,
+	limits config.DocsLimits,
 ) (*DocMeta, bool, error) {
 	docAbs := filepath.Join(docsDir, DocName)
 
@@ -894,7 +896,7 @@ func (g *llmGenerator) maybeSynthesize(
 	}
 
 	user.WriteString("Per-file summaries:\n\n")
-	user.WriteString(joinSummaries(docsDir, summaries, maxSynthesisBytes))
+	user.WriteString(joinSummaries(docsDir, summaries, limits.MaxSynthesisBytes))
 
 	out, _, err := g.llm.CompleteOp(ctx, "chat.synthesis", []llm.Message{
 		{Role: "system", Content: system},

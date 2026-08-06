@@ -220,6 +220,9 @@ type Docs struct {
 	// count stays bounded regardless of how fragmented the graph is. 0 uses the
 	// built-in default.
 	MaxGroups int `cfg:"max_groups" default:"40"`
+	// Limits bound how much source and summary text reaches the LLM. See
+	// DocsLimits; the zero value means "use the built-in defaults".
+	Limits DocsLimits `cfg:"limits"`
 	// Filters select which repo files are documented. See Filters.
 	Filters
 	// Prompt is the system prompt for the final synthesis of the comprehensive
@@ -234,6 +237,77 @@ type Docs struct {
 	PromptExtra string `cfg:"prompt_extra"`
 }
 
+// Default input budgets for documentation generation. They are deliberately
+// conservative: they exist so one oversized file cannot overflow a model's
+// context window, not because more input is undesirable. A repository whose
+// value lives in a few very large files — a deployment repo holding one
+// multi-thousand-line compose stack per environment, say — is silently
+// summarized from its first 48 KiB unless these are raised.
+const (
+	DefaultDocsMaxSourceBytes    = 48 * 1024
+	DefaultDocsMaxGroupBytes     = 96 * 1024
+	DefaultDocsMaxSynthesisBytes = 256 * 1024
+)
+
+// DocsLimits bounds the input side of documentation generation. Nothing here
+// caps the generated document itself: the chat calls send no max_tokens, so a
+// thin documentation.md is always a symptom of the model not having been shown
+// enough, never of the output being cut off.
+//
+// A zero field means "use the built-in default" so that a partially specified
+// override — the common case, raising only MaxSourceBytes — keeps sane values
+// for the rest.
+type DocsLimits struct {
+	// MaxSourceBytes caps how much of a single source file is read before it
+	// is sent to the LLM. Anything past it is never seen by the model.
+	MaxSourceBytes int `cfg:"max_source_bytes"`
+	// MaxGroupBytes caps the total source bytes in one grouped summary call.
+	// The budget is split evenly across the files in the group, so this is the
+	// binding limit whenever several large files land in the same cluster.
+	MaxGroupBytes int `cfg:"max_group_bytes"`
+	// MaxSynthesisBytes caps the total per-file summary text fed to the final
+	// synthesis call that writes documentation.md.
+	MaxSynthesisBytes int `cfg:"max_synthesis_bytes"`
+}
+
+// Resolve returns the limits with every unset field filled from the built-in
+// defaults, so callers can use the result directly without re-checking zero.
+func (l DocsLimits) Resolve() DocsLimits {
+	if l.MaxSourceBytes <= 0 {
+		l.MaxSourceBytes = DefaultDocsMaxSourceBytes
+	}
+	if l.MaxGroupBytes <= 0 {
+		l.MaxGroupBytes = DefaultDocsMaxGroupBytes
+	}
+	if l.MaxSynthesisBytes <= 0 {
+		l.MaxSynthesisBytes = DefaultDocsMaxSynthesisBytes
+	}
+
+	return l
+}
+
+// Empty reports whether no limit is set at all.
+func (l DocsLimits) Empty() bool {
+	return l.MaxSourceBytes <= 0 && l.MaxGroupBytes <= 0 && l.MaxSynthesisBytes <= 0
+}
+
+// Merge overlays a per-repository override on install-wide limits. Each field
+// is an independent replacement, so a repo raising only MaxSourceBytes keeps
+// the install-wide values for the other two.
+func (l DocsLimits) Merge(over DocsLimits) DocsLimits {
+	if over.MaxSourceBytes > 0 {
+		l.MaxSourceBytes = over.MaxSourceBytes
+	}
+	if over.MaxGroupBytes > 0 {
+		l.MaxGroupBytes = over.MaxGroupBytes
+	}
+	if over.MaxSynthesisBytes > 0 {
+		l.MaxSynthesisBytes = over.MaxSynthesisBytes
+	}
+
+	return l
+}
+
 // DocsOverride is a per-repository override of the documentation settings. It
 // follows the same replace/extend split as Filters: Prompt replaces the
 // effective system prompt for this repository, PromptExtra is appended to it.
@@ -242,13 +316,14 @@ type Docs struct {
 // common case — while keeping the default prompt's rules in force.
 type DocsOverride struct {
 	Filters
+	Limits      DocsLimits
 	Prompt      string
 	PromptExtra string
 }
 
 // Empty reports whether the override carries nothing at all.
 func (o DocsOverride) Empty() bool {
-	return o.Filters.Empty() && o.Prompt == "" && o.PromptExtra == ""
+	return o.Filters.Empty() && o.Limits.Empty() && o.Prompt == "" && o.PromptExtra == ""
 }
 
 // LLM configures an OpenAI-compatible chat-completions endpoint.

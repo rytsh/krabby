@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/rytsh/krabby/internal/config"
 	"github.com/rytsh/krabby/internal/service/docgen"
 	"github.com/rytsh/krabby/internal/service/graphify"
 	"github.com/rytsh/krabby/internal/service/registry"
@@ -46,6 +47,11 @@ type RepoSettingsGlobal struct {
 	// they are available from the settings endpoint.
 	DocsPromptSet      bool `json:"docs_prompt_set"`
 	DocsPromptExtraSet bool `json:"docs_prompt_extra_set"`
+
+	// Install-wide documentation input budgets, already resolved to the
+	// built-in defaults where unset, so the UI can show a number rather than a
+	// zero meaning "something else decides".
+	DocsLimits config.DocsLimits `json:"docs_limits"`
 }
 
 // RepoSettingsEffective is the merged result, plus a label naming which level
@@ -73,6 +79,12 @@ type RepoSettingsEffective struct {
 	// DocsPromptExtras names the levels contributing appended instructions, in
 	// the order they are appended.
 	DocsPromptExtras []string `json:"docs_prompt_extras,omitempty"`
+
+	// DocsLimits is the budget the next docs build will actually apply.
+	DocsLimits config.DocsLimits `json:"docs_limits"`
+
+	// SkipStages are the pipeline stages this repository will not run.
+	SkipStages []string `json:"skip_stages,omitempty"`
 }
 
 // RepoSettings resolves the effective build configuration of one repository.
@@ -121,6 +133,7 @@ func (m *Manager) RepoSettings(ctx context.Context, ref string) (*RepoSettings, 
 			GraphExclude:       graphGlobal,
 			DocsPromptSet:      docs.Prompt != "",
 			DocsPromptExtraSet: docs.PromptExtra != "",
+			DocsLimits:         docs.Limits.Resolve(),
 		},
 		Effective: RepoSettingsEffective{
 			CodeInclude:          effCode.Include,
@@ -134,6 +147,8 @@ func (m *Manager) RepoSettings(ctx context.Context, ref string) (*RepoSettings, 
 			DocsIncludeIsDefault: len(effDocs.Include) == 0,
 			DocsPromptSource:     promptSource(docs.Prompt, over.DocsPrompt),
 			DocsPromptExtras:     promptExtras(docs.PromptExtra, over.DocsPromptExtra),
+			DocsLimits:           docs.Limits.Merge(repoDocsOverride(repo).Limits).Resolve(),
+			SkipStages:           over.SkipStages,
 		},
 	}
 

@@ -680,6 +680,11 @@ type setDocsConfigArgs struct {
 	DocsIncludeExtra []string `json:"docs_include_extra,omitempty" jsonschema:"source globs added to the built-in allowlist instead of replacing it"`
 	DocsExclude      []string `json:"docs_exclude,omitempty" jsonschema:"source globs to skip"`
 	DocsPrompt       string   `json:"docs_prompt,omitempty" jsonschema:"system prompt for the final documentation synthesis (empty uses the built-in default)"`
+	DocsPromptExtra  string   `json:"docs_prompt_extra,omitempty" jsonschema:"appended to whatever docs_prompt resolved to instead of replacing it, so the default prompt's constraints stay in force"`
+
+	DocsMaxSourceBytes    int `json:"docs_max_source_bytes,omitempty" jsonschema:"bytes of ONE file sent to the LLM (default 49152); anything past it is never seen by the model"`
+	DocsMaxGroupBytes     int `json:"docs_max_group_bytes,omitempty" jsonschema:"source bytes per grouped summary call (default 98304), split across the group's files"`
+	DocsMaxSynthesisBytes int `json:"docs_max_synthesis_bytes,omitempty" jsonschema:"summary bytes fed to the final documentation.md synthesis (default 262144)"`
 
 	LLMBaseURL string `json:"llm_base_url,omitempty" jsonschema:"OpenAI-compatible chat base URL, e.g. https://api.openai.com/v1"`
 	LLMAPIKey  string `json:"llm_api_key,omitempty" jsonschema:"chat API key (write-only; leave empty to keep existing)"`

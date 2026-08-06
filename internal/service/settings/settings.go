@@ -41,6 +41,17 @@ type Settings struct {
 	DocsIncludeExtra []string `bw:"docs_include_extra" json:"docs_include_extra"`
 	DocsExclude      []string `bw:"docs_exclude"      json:"docs_exclude"`
 	DocsPrompt       string   `bw:"docs_prompt"       json:"docs_prompt"`
+	// DocsPromptExtra is appended to whatever DocsPrompt resolved to (including
+	// the built-in default) instead of replacing it, so an install-wide house
+	// rule does not force restating the default prompt's constraints.
+	DocsPromptExtra string `bw:"docs_prompt_extra" json:"docs_prompt_extra"`
+	// Input budgets for documentation generation. Zero uses the built-in
+	// defaults (see config.DocsLimits). Raise DocsMaxSourceBytes for repos
+	// whose value sits in a few very large files, which are otherwise
+	// summarized from their first 48 KiB only.
+	DocsMaxSourceBytes    int `bw:"docs_max_source_bytes"    json:"docs_max_source_bytes"`
+	DocsMaxGroupBytes     int `bw:"docs_max_group_bytes"     json:"docs_max_group_bytes"`
+	DocsMaxSynthesisBytes int `bw:"docs_max_synthesis_bytes" json:"docs_max_synthesis_bytes"`
 
 	// LLM (chat) for doc generation.
 	LLMBaseURL string        `bw:"llm_base_url" json:"llm_base_url"`
@@ -180,6 +191,10 @@ func Defaults() Settings {
 	return Settings{
 		DocsConcurrency: 8,
 		DocsMaxGroups:   40,
+
+		DocsMaxSourceBytes:    config.DefaultDocsMaxSourceBytes,
+		DocsMaxGroupBytes:     config.DefaultDocsMaxGroupBytes,
+		DocsMaxSynthesisBytes: config.DefaultDocsMaxSynthesisBytes,
 
 		LLMModel:   "gpt-4o-mini",
 		LLMTimeout: 300 * time.Second,
@@ -403,6 +418,11 @@ type Patch struct {
 	DocsIncludeExtra *[]string `json:"docs_include_extra"`
 	DocsExclude      *[]string `json:"docs_exclude"`
 	DocsPrompt       *string   `json:"docs_prompt"`
+	DocsPromptExtra  *string   `json:"docs_prompt_extra"`
+
+	DocsMaxSourceBytes    *int `json:"docs_max_source_bytes"`
+	DocsMaxGroupBytes     *int `json:"docs_max_group_bytes"`
+	DocsMaxSynthesisBytes *int `json:"docs_max_synthesis_bytes"`
 
 	LLMBaseURL *string        `json:"llm_base_url"`
 	LLMAPIKey  *string        `json:"llm_api_key"`
@@ -491,6 +511,8 @@ func (p Patch) RuntimeOnly() bool {
 		p.DocsEnabled == nil && p.DocsConcurrency == nil &&
 		p.DocsSummaryModel == nil && p.DocsMaxGroups == nil &&
 		p.DocsInclude == nil && p.DocsIncludeExtra == nil && p.DocsExclude == nil && p.DocsPrompt == nil &&
+		p.DocsPromptExtra == nil && p.DocsMaxSourceBytes == nil && p.DocsMaxGroupBytes == nil &&
+		p.DocsMaxSynthesisBytes == nil &&
 		p.LLMBaseURL == nil && p.LLMAPIKey == nil && p.LLMModel == nil && p.LLMTimeout == nil &&
 		p.WebImageAnalysisEnabled == nil && p.WebImageModel == nil && p.WebImageMaxPerPage == nil &&
 		p.WebImageMaxBytes == nil && p.WebImageMaxPixels == nil && p.WebImageAllowAuthenticated == nil &&
@@ -563,6 +585,18 @@ func (p Patch) Apply(base Settings) Settings {
 	}
 	if p.DocsPrompt != nil {
 		base.DocsPrompt = *p.DocsPrompt
+	}
+	if p.DocsPromptExtra != nil {
+		base.DocsPromptExtra = *p.DocsPromptExtra
+	}
+	if p.DocsMaxSourceBytes != nil {
+		base.DocsMaxSourceBytes = *p.DocsMaxSourceBytes
+	}
+	if p.DocsMaxGroupBytes != nil {
+		base.DocsMaxGroupBytes = *p.DocsMaxGroupBytes
+	}
+	if p.DocsMaxSynthesisBytes != nil {
+		base.DocsMaxSynthesisBytes = *p.DocsMaxSynthesisBytes
 	}
 	if p.LLMBaseURL != nil {
 		base.LLMBaseURL = *p.LLMBaseURL
