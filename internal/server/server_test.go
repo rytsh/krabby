@@ -4,11 +4,17 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/rakunlabs/ada"
+
+	"github.com/rytsh/krabby/internal/service/registry"
 )
 
 func TestVerifyGitWebhook(t *testing.T) {
@@ -140,6 +146,82 @@ func TestMCPServerForRequest(t *testing.T) {
 			req.Header.Set(MCPToolProfileHeader, tt.header)
 			if got := mcpServerForRequest(req, standard, full); got != tt.want {
 				t.Fatalf("selected server %p, want %p", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateStages(t *testing.T) {
+	tests := []struct {
+		name    string
+		stages  []string
+		wantErr bool
+	}{
+		{name: "empty"},
+		{name: "single", stages: []string{registry.StageDocs}},
+		{
+			name: "all",
+			stages: []string{
+				registry.StageGraph, registry.StageDocs,
+				registry.StageDocsIndex, registry.StageCodeIndex,
+			},
+		},
+		{name: "typo", stages: []string{"doc"}, wantErr: true},
+		{name: "mixed", stages: []string{registry.StageDocs, "rag"}, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := validateStages(tt.stages); (err != nil) != tt.wantErr {
+				t.Fatalf("validateStages(%v) error = %v, wantErr %v", tt.stages, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// POST .../-/refresh has always been a body-less call, and the UI still sends
+// it that way. Gaining an optional "skip" must not turn those into 400s.
+func TestBindOptionalJSON(t *testing.T) {
+	tests := []struct {
+		name        string
+		body        io.Reader
+		contentType string
+		want        []string
+		wantErr     bool
+	}{
+		{name: "no body at all", body: nil},
+		{name: "empty body", body: strings.NewReader(""), contentType: "application/json"},
+		{
+			name:        "skip list",
+			body:        strings.NewReader(`{"skip":["docs"]}`),
+			contentType: "application/json",
+			want:        []string{"docs"},
+		},
+		{
+			name:        "malformed json still fails",
+			body:        strings.NewReader(`{"skip":`),
+			contentType: "application/json",
+			wantErr:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/repos/x/-/refresh", tt.body)
+			if tt.contentType != "" {
+				req.Header.Set("Content-Type", tt.contentType)
+			}
+
+			var got refreshRequest
+			err := bindOptionalJSON(ada.NewContext(httptest.NewRecorder(), req), &got)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("bindOptionalJSON error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if !slices.Equal(got.Skip, tt.want) {
+				t.Fatalf("skip = %v, want %v", got.Skip, tt.want)
 			}
 		})
 	}

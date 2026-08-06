@@ -953,14 +953,17 @@ type RepoSpec struct {
 }
 
 // AddRepo registers a repository and starts a background clone+build.
-// If the repo already exists, it just triggers a refresh.
-func (m *Manager) AddRepo(ctx context.Context, spec RepoSpec) (*registry.Repo, error) {
+// If the repo already exists, it just triggers a refresh — which is what makes
+// this the usual "add or re-pull" entry point, so it takes the same per-run
+// skip list as TriggerRefresh. skip applies to the queued build only; use the
+// spec's Overrides.SkipStages to turn a stage off for good.
+func (m *Manager) AddRepo(ctx context.Context, spec RepoSpec, skip ...string) (*registry.Repo, error) {
 	id, repo, _, err := m.registerRepo(ctx, spec)
 	if err != nil {
 		return nil, err
 	}
 
-	m.TriggerRefresh(id)
+	m.TriggerRefresh(id, skip...)
 
 	return repo, nil
 }
@@ -973,13 +976,14 @@ func (m *Manager) AddRepo(ctx context.Context, spec RepoSpec) (*registry.Repo, e
 //
 // A build failure is reported through the returned record's Status ("error") and
 // LastError, not as a Go error, so callers always get the final state back.
-func (m *Manager) AddRepoWait(ctx context.Context, spec RepoSpec) (*registry.Repo, bool, error) {
+// skip drops stages from this build only; see AddRepo.
+func (m *Manager) AddRepoWait(ctx context.Context, spec RepoSpec, skip ...string) (*registry.Repo, bool, error) {
 	id, _, _, err := m.registerRepo(ctx, spec)
 	if err != nil {
 		return nil, false, err
 	}
 
-	return m.RefreshWait(ctx, id)
+	return m.RefreshWait(ctx, id, skip...)
 }
 
 // RefreshWait pulls and rebuilds a repository in the background and waits until

@@ -355,6 +355,11 @@ type addRepoRequest struct {
 	Branch    string             `json:"branch"`
 	Namespace string             `json:"namespace"`
 	Overrides registry.Overrides `json:"overrides"`
+	// Skip drops stages from the build this call queues. Posting an already
+	// tracked url is the common "re-pull this repo" gesture, so it accepts the
+	// same per-run skip list as /-/refresh. It is not persisted; the permanent
+	// switch is Overrides.SkipStages.
+	Skip []string `json:"skip,omitempty"`
 }
 
 // repoRef splits the greedy {ref...} path value into the raw repo id and the
@@ -745,6 +750,10 @@ func addRepo(mgr *manager.Manager) ada.HandlerFunc {
 			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": "url is required"})
 		}
 
+		if err := validateStages(req.Skip); err != nil {
+			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+		}
+
 		// Registration must finish even if the UI navigates away. The clone/build
 		// itself is queued on the manager lifecycle context by AddRepo.
 		repo, err := mgr.AddRepo(context.WithoutCancel(c.Request.Context()), manager.RepoSpec{
@@ -752,7 +761,7 @@ func addRepo(mgr *manager.Manager) ada.HandlerFunc {
 			Branch:    req.Branch,
 			Namespace: req.Namespace,
 			Overrides: req.Overrides,
-		})
+		}, req.Skip...)
 		if err != nil {
 			return c.Err(err)
 		}
@@ -815,12 +824,8 @@ func refreshRepo(mgr *manager.Manager) ada.HandlerFunc {
 			return c.SetStatus(http.StatusBadRequest).Err(err)
 		}
 
-		for _, s := range req.Skip {
-			if !registry.ValidStage(s) {
-				return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{
-					"error": fmt.Sprintf("unknown stage %q (valid: graph, docs, docs_index, code_index)", s),
-				})
-			}
+		if err := validateStages(req.Skip); err != nil {
+			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
 		}
 
 		mgr.TriggerRefresh(id, req.Skip...)
@@ -832,6 +837,20 @@ func refreshRepo(mgr *manager.Manager) ada.HandlerFunc {
 
 		return c.SetStatus(http.StatusAccepted).SendJSON(out)
 	}
+}
+
+// validateStages rejects unknown stage names so a typo fails with a clear 400
+// instead of silently skipping (or building) nothing.
+func validateStages(stages []string) error {
+	for _, s := range stages {
+		if !registry.ValidStage(s) {
+			return fmt.Errorf("unknown stage %q (valid: %s, %s, %s, %s)",
+				s, registry.StageGraph, registry.StageDocs,
+				registry.StageDocsIndex, registry.StageCodeIndex)
+		}
+	}
+
+	return nil
 }
 
 // bindOptionalJSON decodes a request body the caller may legitimately omit. An

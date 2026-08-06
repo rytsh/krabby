@@ -149,7 +149,7 @@ administer them.
 | --- | --- |
 | `GET /healthz` | Liveness — unauthenticated, this is what a health check should target |
 | `GET /api/v1/repos` | List repos |
-| `POST /api/v1/repos` `{"url","branch"}` | Track a repo |
+| `POST /api/v1/repos` `{"url","branch"}` | Track a repo; an already tracked url just queues a refresh, so it takes the same optional `skip` |
 | `GET /api/v1/repos/{full-path...}` | Repo status |
 | `DELETE /api/v1/repos/{full-path...}` | Untrack + delete clone |
 | `POST /api/v1/repos/{full-path...}/-/refresh` | "This repo changed" trigger; optional `{"skip":["docs"]}` drops stages for that run |
@@ -270,8 +270,9 @@ webhook / poll / refresh_repo
 Stages can be dropped in two ways. A repository's `skip_stages` override turns
 a stage off permanently (`set_repo_overrides`, or the checkboxes on the repo
 page). For a one-off — a small code change that cannot affect the
-documentation — pass `skip` to `refresh_repo` or to `POST .../-/refresh`
-instead: it applies to that run only and leaves the override alone. Skipping
+documentation — pass `skip` to `refresh_repo`, to `POST .../-/refresh` or to
+`POST /api/v1/repos` instead: it applies to that run only and leaves the
+override alone. Skipping
 `docs` also skips `docs_index`, which would otherwise re-embed the previous
 run's Markdown at full cost. A run that skips the graph still promotes the new
 clone, so the next unskipped refresh rebuilds the graph even at the same commit.
