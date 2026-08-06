@@ -897,21 +897,45 @@ func (m *Manager) runStage(ctx context.Context, repo *registry.Repo, name string
 	return err
 }
 
-func (m *Manager) lock(id string) *sync.Mutex {
+// lockFor returns the per-key mutex, creating it on first use. It hands back an
+// UNLOCKED mutex, which is why almost nothing should call it: acquire the lock
+// through lockKey instead, so a caller cannot end up unlocking a mutex it never
+// locked (in Go that is an unrecoverable fatal error, not a panic a handler can
+// contain — it takes the whole process down).
+//
+// The two legitimate uses are the TryLock probe in docs.go, which must be able
+// to walk away when the lock is held, and tests that hold a lock to observe
+// contention.
+func (m *Manager) lockFor(key string) *sync.Mutex {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.locks == nil {
 		m.locks = map[string]*sync.Mutex{}
 	}
-	if l, ok := m.locks[id]; ok {
+	if l, ok := m.locks[key]; ok {
 		return l
 	}
 
 	l := &sync.Mutex{}
-	m.locks[id] = l
+	m.locks[key] = l
 
 	return l
+}
+
+// lockKey acquires the per-key mutex and returns its release function, so the
+// only way to obtain an unlock is to have taken the lock first:
+//
+//	defer m.lockKey(repo.ID)()
+//
+// Keys are repository ids and web-source scopes; they share one namespace, so a
+// key must be distinct enough not to collide with another subsystem's (see
+// collectionLock, which suffixes its own).
+func (m *Manager) lockKey(key string) func() {
+	l := m.lockFor(key)
+	l.Lock()
+
+	return l.Unlock
 }
 
 // RepoSpec describes a repository to track. Only URL is required.
@@ -1073,9 +1097,7 @@ func (m *Manager) SetRepoNamespace(ctx context.Context, ref, namespace string) (
 		return nil, fmt.Errorf("repo %s not found", ref)
 	}
 
-	l := m.lock(repo.ID)
-	l.Lock()
-	defer l.Unlock()
+	defer m.lockKey(repo.ID)()
 
 	return m.reg.SetNamespace(ctx, repo.ID, namespace)
 }
@@ -1097,9 +1119,15 @@ func (m *Manager) SetRepoOverrides(ctx context.Context, ref string, over registr
 		return nil, fmt.Errorf("repo %s not found", ref)
 	}
 
-	l := m.lock(repo.ID)
-	updated, prev, err := m.reg.SetOverrides(ctx, repo.ID, over)
-	l.Unlock()
+	// Serialize against the pipeline: a build reads the overrides it was
+	// started with, so writing them under the same per-repo lock keeps a
+	// refresh from picking up half of a change. The rebuild triggers below
+	// take this lock themselves and must stay outside it.
+	updated, prev, err := func() (*registry.Repo, registry.Overrides, error) {
+		defer m.lockKey(repo.ID)()
+
+		return m.reg.SetOverrides(ctx, repo.ID, over)
+	}()
 
 	if err != nil {
 		return nil, err
@@ -1172,9 +1200,7 @@ func (m *Manager) DeleteNamespace(ctx context.Context, name string) error {
 
 // RemoveRepo deletes the record, local clone, generated docs and derived indexes.
 func (m *Manager) RemoveRepo(ctx context.Context, id string) error {
-	l := m.lock(id)
-	l.Lock()
-	defer l.Unlock()
+	defer m.lockKey(id)()
 
 	repo, err := m.reg.Get(ctx, id)
 	if err != nil {
@@ -1484,9 +1510,7 @@ func (m *Manager) Generate(ctx context.Context, id string, targets []string, for
 		return fmt.Errorf("no generate targets given")
 	}
 
-	l := m.lock(id)
-	l.Lock()
-	defer l.Unlock()
+	defer m.lockKey(id)()
 
 	repo, err := m.reg.Get(ctx, id)
 	if err != nil {
@@ -1791,9 +1815,7 @@ func (m *Manager) reindexTask(id string) queue.Task {
 			Key:   taskKindReindex + ":" + scope,
 			Spec:  queue.Spec{Kind: taskKindReindex, ID: scope},
 			Run: func(ctx context.Context) error {
-				l := m.lock(scope)
-				l.Lock()
-				defer l.Unlock()
+				defer m.lockKey(scope)()
 
 				m.indexWebSource(ctx, name)
 
@@ -1822,9 +1844,7 @@ func (m *Manager) scheduleReindex(id string) {
 // reindexRepo rebuilds a single ready repo's docs/code indexes from its
 // existing clone, holding the per-repo lock.
 func (m *Manager) reindexRepo(ctx context.Context, id string) error {
-	l := m.lock(id)
-	l.Lock()
-	defer l.Unlock()
+	defer m.lockKey(id)()
 
 	repo, err := m.reg.Get(ctx, id)
 	if err != nil {
@@ -1843,9 +1863,7 @@ func (m *Manager) reindexRepo(ctx context.Context, id string) error {
 
 // Refresh synchronously clones/pulls the repo and rebuilds its graph if needed.
 func (m *Manager) Refresh(ctx context.Context, id string) error {
-	l := m.lock(id)
-	l.Lock()
-	defer l.Unlock()
+	defer m.lockKey(id)()
 
 	repo, err := m.reg.Get(ctx, id)
 	if err != nil {

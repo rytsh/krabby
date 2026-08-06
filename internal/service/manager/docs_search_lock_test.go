@@ -169,7 +169,7 @@ func TestEnsureDocsTextKeySkipsLockedKey(t *testing.T) {
 	}
 
 	// Simulate a refresh/generate holding the repo lock.
-	lock := m.lock(repo.ID)
+	lock := m.lockFor(repo.ID)
 	lock.Lock()
 
 	done := make(chan error, 1)

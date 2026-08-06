@@ -101,7 +101,7 @@ func (m *Manager) sourcesDir(name string) string {
 // Lock order, where both are taken: sync lock first, then this one. Nothing
 // takes them in the opposite order.
 func (m *Manager) collectionLock(name string) *sync.Mutex {
-	return m.lock(websource.ScopeKey(name) + "#record")
+	return m.lockFor(websource.ScopeKey(name) + "#record")
 }
 
 // mutateCollection applies fn to the current stored record under the record
@@ -340,9 +340,7 @@ func (m *Manager) DeleteWebCollection(ctx context.Context, name string) error {
 
 	scope := websource.ScopeKey(name)
 
-	l := m.lock(scope)
-	l.Lock()
-	defer l.Unlock()
+	defer m.lockKey(scope)()
 
 	// Held for the whole teardown, not just the store read: an update that
 	// slipped in between the record delete and here would re-insert the
@@ -706,9 +704,7 @@ func (m *Manager) importWebPages(ctx context.Context, name string, imports []Web
 	}
 
 	scope := websource.ScopeKey(name)
-	l := m.lock(scope)
-	l.Lock()
-	defer l.Unlock()
+	defer m.lockKey(scope)()
 
 	col, err = m.webStore.GetCollection(ctx, name)
 	if err != nil {
@@ -828,10 +824,11 @@ func (m *Manager) ImportWebSitemap(ctx context.Context, name, sitemapURL string)
 	result.Discovered = len(urls)
 
 	scope := websource.ScopeKey(name)
-	l := m.lock(scope)
-	l.Lock()
+	// The refresh trigger must fire after the lock is released, so the queued
+	// work is not immediately blocked on the lock this call still holds.
+	unlock := m.lockKey(scope)
 	defer func() {
-		l.Unlock()
+		unlock()
 		if result.Added > 0 {
 			m.TriggerWebRefresh(name)
 		}
@@ -891,9 +888,7 @@ func (m *Manager) DeleteWebPage(ctx context.Context, name, slug string) error {
 
 	scope := websource.ScopeKey(name)
 
-	l := m.lock(scope)
-	l.Lock()
-	defer l.Unlock()
+	defer m.lockKey(scope)()
 
 	// Validate before touching anything: slug arrives from a query parameter,
 	// and it is about to name a file to delete.
@@ -1095,9 +1090,7 @@ func (m *Manager) refreshWebSource(ctx context.Context, name string, forceFull b
 
 	scope := websource.ScopeKey(name)
 
-	l := m.lock(scope)
-	l.Lock()
-	defer l.Unlock()
+	defer m.lockKey(scope)()
 
 	col, err := m.webStore.GetCollection(ctx, name)
 	if err != nil {

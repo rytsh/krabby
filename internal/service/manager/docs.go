@@ -1199,7 +1199,10 @@ func (m *Manager) ensureDocsTextKey(ctx context.Context, key, docsDir string) er
 		return nil
 	}
 
-	lock := m.lock(key)
+	// TryLock, not lockKey: a concurrent backfill of the same key is already
+	// doing this work, so walking away is correct and waiting would only stall
+	// a search behind it.
+	lock := m.lockFor(key)
 	if !lock.TryLock() {
 		return nil
 	}
