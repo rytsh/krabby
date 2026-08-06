@@ -669,14 +669,16 @@ func (o Overrides) Normalize() Overrides {
 		DocsMaxGroupBytes:     max(o.DocsMaxGroupBytes, 0),
 		DocsMaxSynthesisBytes: max(o.DocsMaxSynthesisBytes, 0),
 
-		SkipStages: normalizeStages(o.SkipStages),
+		SkipStages: NormalizeStages(o.SkipStages),
 	}
 }
 
-// normalizeStages lower-cases, trims, drops unknown or duplicate stage names
+// NormalizeStages lower-cases, trims, drops unknown or duplicate stage names
 // and returns them in a stable order, so a stored skip list is comparable and
-// a typo cannot silently disable nothing while looking set.
-func normalizeStages(in []string) []string {
+// a typo cannot silently disable nothing while looking set. It is shared by the
+// persisted skip_stages override and by per-request stage lists, which must
+// agree on what a stage name is.
+func NormalizeStages(in []string) []string {
 	out := make([]string, 0, len(in))
 	for _, st := range in {
 		st = strings.ToLower(strings.TrimSpace(st))

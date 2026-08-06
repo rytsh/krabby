@@ -142,6 +142,7 @@ type refreshRepoArgs struct {
 	Wait   bool     `json:"wait,omitempty" jsonschema:"when true, block until the pull and graph rebuild finish and return the final status (ready or error) instead of returning immediately"`
 	Stages []string `json:"stages,omitempty" jsonschema:"optional subset of pipeline stages to rebuild against the existing clone without pulling git: graph, docs, docs_index, code_index. Empty runs the full pull+rebuild pipeline. Use e.g. ['docs_index'] to re-embed docs after they were regenerated. Missing prerequisites (docs_index needs docs, which needs graph) are built automatically only when their output is absent"`
 	Force  bool     `json:"force,omitempty" jsonschema:"when true, the docs stage ignores its incremental caches and regenerates every per-file summary and documentation.md even if nothing changed. Requires stages to include 'docs' (otherwise docs are reused because unchanged). Ignored by the full pull+rebuild pipeline (empty stages)"`
+	Skip   []string `json:"skip,omitempty" jsonschema:"stages the full pull+rebuild must NOT run this time, e.g. ['docs'] to pull commits and refresh the code index without paying for LLM doc generation. Skipping 'docs' also skips 'docs_index'. This run only; not combinable with stages"`
 }
 
 // validateStages rejects unknown stage names so a typo fails fast with a clear
@@ -150,12 +151,34 @@ type refreshRepoArgs struct {
 func (a refreshRepoArgs) validateStages() error {
 	for _, s := range a.Stages {
 		if !registry.ValidStage(s) {
-			return fmt.Errorf("unknown stage %q; valid stages are: %s, %s, %s, %s",
-				s, registry.StageGraph, registry.StageDocs, registry.StageDocsIndex, registry.StageCodeIndex)
+			return unknownStageError(s)
 		}
 	}
 
 	return nil
+}
+
+// validateSkip rejects unknown stage names in the per-run skip list. It also
+// rejects combining skip with stages: stages is an allow-list evaluated against
+// the existing clone, skip a deny-list on the full pull+rebuild pipeline, so a
+// request carrying both has no single meaning worth guessing at.
+func (a refreshRepoArgs) validateSkip() error {
+	if len(a.Skip) > 0 && len(a.Stages) > 0 {
+		return fmt.Errorf("skip and stages cannot be combined; stages already selects exactly what runs")
+	}
+
+	for _, s := range a.Skip {
+		if !registry.ValidStage(s) {
+			return unknownStageError(s)
+		}
+	}
+
+	return nil
+}
+
+func unknownStageError(s string) error {
+	return fmt.Errorf("unknown stage %q; valid stages are: %s, %s, %s, %s",
+		s, registry.StageGraph, registry.StageDocs, registry.StageDocsIndex, registry.StageCodeIndex)
 }
 
 type emptyArgs struct{}
@@ -371,13 +394,16 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 		Name: "refresh_repo",
 		Description: "Pull the latest commits and rebuild the knowledge graph for a repository. " +
 			"By default rebuilds in the background and returns immediately. " +
-			"Pass wait=true to wait for the result: it returns the final status when the rebuild finishes in time, " +
-			"otherwise the in-progress status. The rebuild always continues in the background even if the call " +
+			"The rebuild always continues in the background even if the call " +
 			"times out or is cancelled; poll repo_status until status is 'ready' or 'error'. " +
 			"Use when you know the repo changed. " +
-			"Pass stages to rebuild only a subset of pipeline stages (graph, docs, docs_index, code_index) " +
-			"against the existing clone WITHOUT pulling git; empty stages runs the full pull+rebuild pipeline.",
+			"Pass stages to rebuild only a subset (graph, docs, docs_index, code_index) against the existing " +
+			"clone WITHOUT pulling git, or skip to run the full pull+rebuild minus some stages.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args refreshRepoArgs) (*mcp.CallToolResult, any, error) {
+		if err := args.validateSkip(); err != nil {
+			return nil, nil, err
+		}
+
 		if len(args.Stages) > 0 {
 			if err := args.validateStages(); err != nil {
 				return nil, nil, err
@@ -401,7 +427,11 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 		}
 
 		if !args.Wait {
-			mgr.TriggerRefresh(args.Repo)
+			mgr.TriggerRefresh(args.Repo, args.Skip...)
+
+			if len(args.Skip) > 0 {
+				return textResult(fmt.Sprintf("refresh queued for %s (skipping %v)", args.Repo, args.Skip)), nil, nil
+			}
 
 			return textResult("refresh queued for " + args.Repo), nil, nil
 		}
@@ -409,7 +439,7 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 		wctx, cancel := waitContext(ctx, waitTimeout)
 		defer cancel()
 
-		repo, done, err := mgr.RefreshWait(wctx, args.Repo)
+		repo, done, err := mgr.RefreshWait(wctx, args.Repo, args.Skip...)
 		if err != nil {
 			return nil, nil, err
 		}

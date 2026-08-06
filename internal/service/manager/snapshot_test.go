@@ -90,7 +90,7 @@ func TestSnapshotActivationLeavesActiveCloneUntouchedUntilPublish(t *testing.T) 
 		t.Fatalf("prepared snapshot = %q, want new version", got)
 	}
 
-	if err := m.buildGraphSnapshot(context.Background(), repo, snapshot, registry.StatusReady); err != nil {
+	if err := m.buildGraphSnapshot(context.Background(), repo, snapshot, registry.StatusReady, nil); err != nil {
 		t.Fatal(err)
 	}
 	persisted, err := reg.Get(context.Background(), repo.ID)
@@ -150,7 +150,7 @@ func TestSnapshotActivationLeavesActiveCloneUntouchedUntilPublish(t *testing.T) 
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := m.buildGraphSnapshot(context.Background(), repo, next, registry.StatusReady); err != nil {
+		if err := m.buildGraphSnapshot(context.Background(), repo, next, registry.StatusReady, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -201,7 +201,7 @@ func TestSnapshotBuildFailureKeepsActivePathAndCleansStaging(t *testing.T) {
 
 	m := &Manager{reg: reg, gfy: gfy, engine: graphquery.NewEngine(0), reposDir: filepath.Join(dataDir, "repos"), activity: map[string]map[string]struct{}{}}
 	snapshot := &preparedSnapshot{StagingPath: stagingPath, FinalPath: stagingPath + "-final", Commit: "new"}
-	if err := m.buildGraphSnapshot(context.Background(), repo, snapshot, registry.StatusReady); err == nil {
+	if err := m.buildGraphSnapshot(context.Background(), repo, snapshot, registry.StatusReady, nil); err == nil {
 		t.Fatal("buildGraphSnapshot succeeded with failing graphify")
 	}
 
@@ -254,7 +254,7 @@ func TestSnapshotValidationFailureKeepsActivePathAndCleansStaging(t *testing.T) 
 
 	m := &Manager{reg: reg, gfy: gfy, engine: graphquery.NewEngine(0), reposDir: filepath.Join(dataDir, "repos"), activity: map[string]map[string]struct{}{}}
 	snapshot := &preparedSnapshot{StagingPath: stagingPath, FinalPath: stagingPath + "-final", Commit: "new"}
-	err = m.buildGraphSnapshot(context.Background(), repo, snapshot, registry.StatusReady)
+	err = m.buildGraphSnapshot(context.Background(), repo, snapshot, registry.StatusReady, nil)
 	if err == nil || !strings.Contains(err.Error(), "missing the nodes array") {
 		t.Fatalf("buildGraphSnapshot error = %v, want graph validation failure", err)
 	}

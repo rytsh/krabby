@@ -148,7 +148,7 @@ func TestBuildDocsAndIndexEmptyBundleDefersReindex(t *testing.T) {
 
 	repo := &registry.Repo{ID: "owner/repo", Status: registry.StatusReady}
 
-	m.buildDocsAndIndex(ctx, repo, true, false)
+	m.buildDocsAndIndex(ctx, repo, nil, true, false)
 
 	it := waitForReindex(t, m.queue, repo.ID)
 	if it.State != queue.StateQueued {
@@ -174,7 +174,7 @@ func TestBuildDocsAndIndexEmptyBundleNoRequeueOnReindexPath(t *testing.T) {
 
 	repo := &registry.Repo{ID: "owner/repo", Status: registry.StatusReady}
 
-	m.buildDocsAndIndex(ctx, repo, false, true)
+	m.buildDocsAndIndex(ctx, repo, nil, false, true)
 
 	// Give any (erroneous) submit a moment to land, then assert none did.
 	time.Sleep(50 * time.Millisecond)
@@ -280,7 +280,7 @@ func TestSettingsReindexFullyRebuildsSemanticIndexes(t *testing.T) {
 		},
 	}
 
-	m.buildDocsAndIndex(ctx, repo, false, true)
+	m.buildDocsAndIndex(ctx, repo, nil, false, true)
 
 	docPaths, err := docsStore.IndexedPaths(ctx, repo.ID)
 	if err != nil {

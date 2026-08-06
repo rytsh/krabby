@@ -11,6 +11,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -347,7 +348,7 @@ func (m *Manager) RestoreTasks(ctx context.Context) error {
 func (m *Manager) rebuildTask(spec queue.Spec) (queue.Task, bool) {
 	switch spec.Kind {
 	case taskKindRefresh:
-		return m.refreshTask(spec.ID), true
+		return m.refreshTask(spec.ID, splitTargets(spec.Params["skip"])), true
 
 	case taskKindGenerate:
 		targets := splitTargets(spec.Params["targets"])
@@ -987,11 +988,13 @@ func (m *Manager) AddRepoWait(ctx context.Context, spec RepoSpec) (*registry.Rep
 // continues detached and the record reflects the in-progress state.
 // A build failure is surfaced via the record's Status/LastError rather than a
 // Go error; only unexpected lookup failures return an error.
-func (m *Manager) RefreshWait(ctx context.Context, id string) (*registry.Repo, bool, error) {
+// skip names stages this run must not execute, on top of the repo's persisted
+// skip_stages override.
+func (m *Manager) RefreshWait(ctx context.Context, id string, skip ...string) (*registry.Repo, bool, error) {
 	// The refresh runs on the manager lifecycle context: a client that stops
 	// waiting (client-side tool timeout, ctrl+c, MCP cancellation) must not
 	// kill the clone/build mid-flight.
-	finished := m.refreshAsync(id)
+	finished := m.refreshAsync(id, skip)
 
 	done := false
 	select {
@@ -1015,17 +1018,34 @@ func (m *Manager) RefreshWait(ctx context.Context, id string) (*registry.Repo, b
 }
 
 // refreshTask builds the queue task for a repo refresh, including its Spec so
-// the work is persisted and can be rebuilt after a restart.
-func (m *Manager) refreshTask(id string) queue.Task {
+// the work is persisted and can be rebuilt after a restart. skip names stages
+// this run must not execute, on top of the repo's persisted skip_stages.
+func (m *Manager) refreshTask(id string, skip []string) queue.Task {
+	skipped := newRunSkips(skip).list()
+
+	title := "Refresh " + id
+	// The skip set is part of the dedup key so a partial refresh never swallows
+	// a full one: coalescing "refresh, but not docs" onto a plain "refresh"
+	// would silently do less work than the caller asked for.
+	key := taskKindRefresh + ":" + id
+	var params map[string]string
+
+	if len(skipped) > 0 {
+		joined := strings.Join(skipped, ",")
+		title += " (skip " + joined + ")"
+		key += ":skip=" + joined
+		params = map[string]string{"skip": joined}
+	}
+
 	return queue.Task{
 		ID:    id,
 		Kind:  taskKindRefresh,
-		Title: "Refresh " + id,
-		Key:   taskKindRefresh + ":" + id,
-		Spec:  queue.Spec{Kind: taskKindRefresh, ID: id},
+		Title: title,
+		Key:   key,
+		Spec:  queue.Spec{Kind: taskKindRefresh, ID: id, Params: params},
 		Run: func(ctx context.Context) error {
-			if err := m.Refresh(ctx, id); err != nil {
-				slog.Error("refresh repo", "repo", id, "error", err)
+			if err := m.Refresh(ctx, id, skipped...); err != nil {
+				slog.Error("refresh repo", "repo", id, "skip", skipped, "error", err)
 
 				return err
 			}
@@ -1036,18 +1056,19 @@ func (m *Manager) refreshTask(id string) queue.Task {
 }
 
 // submitRefresh enqueues a repo refresh on the central work queue and returns
-// its handle. Concurrent refreshes for the same repo coalesce onto one queued
-// task (queue dedup), and the queue bounds how many refreshes run at once.
-func (m *Manager) submitRefresh(id string) *queue.Handle {
-	return m.queue.Submit(m.refreshTask(id))
+// its handle. Concurrent refreshes for the same repo and skip set coalesce onto
+// one queued task (queue dedup), and the queue bounds how many refreshes run at
+// once.
+func (m *Manager) submitRefresh(id string, skip []string) *queue.Handle {
+	return m.queue.Submit(m.refreshTask(id, skip))
 }
 
 // refreshAsync enqueues a refresh and returns a channel closed when that
 // refresh attempt completes. Refresh persists StatusError + LastError on
 // failure, so callers read the terminal state back from the registry. During
 // shutdown the channel is closed immediately.
-func (m *Manager) refreshAsync(id string) <-chan struct{} {
-	return m.submitRefresh(id).Done()
+func (m *Manager) refreshAsync(id string, skip []string) <-chan struct{} {
+	return m.submitRefresh(id, skip).Done()
 }
 
 // registerRepo parses the url, upserts a pending record if the repo is new, and
@@ -1185,6 +1206,101 @@ func repoDocsOverride(repo *registry.Repo) config.DocsOverride {
 // previous, always-run behaviour rather than silently doing less work.
 func skipsStage(repo *registry.Repo, stage string) bool {
 	return repo != nil && repo.Overrides.SkipsStage(stage)
+}
+
+// stageSkipCascade maps a stage to the stages that must be skipped along with
+// it because they consume its output directly: indexing documentation that was
+// not regenerated only re-embeds the previous run's markdown at full cost.
+//
+// The graph is deliberately absent. Docs and code_index degrade gracefully
+// without it — one summary call per file, line-window chunking — so skipping
+// the graph still lets them run, the same contract resolveStageDeps applies to
+// the persisted skip_stages override.
+var stageSkipCascade = map[string][]string{
+	registry.StageDocs: {registry.StageDocsIndex},
+}
+
+// runSkips is the set of stages a single refresh run opts out of. It exists
+// because skip_stages is persistent: turning docs off for one quick refresh
+// otherwise means editing the repo overrides and remembering to put them back.
+// A run's skips are additive to the record's — a run may do less than the
+// overrides allow, never more.
+type runSkips map[string]struct{}
+
+// newRunSkips normalizes the requested stage names and expands them over
+// stageSkipCascade. Unknown names are dropped by registry.NormalizeStages;
+// callers that must reject typos validate before calling (see the REST and MCP
+// refresh handlers). A nil result means "skip nothing extra".
+func newRunSkips(stages []string) runSkips {
+	names := registry.NormalizeStages(stages)
+	if len(names) == 0 {
+		return nil
+	}
+
+	skips := make(runSkips, len(names))
+
+	var add func(string)
+	add = func(name string) {
+		if _, ok := skips[name]; ok {
+			return
+		}
+		skips[name] = struct{}{}
+		for _, dependent := range stageSkipCascade[name] {
+			add(dependent)
+		}
+	}
+
+	for _, name := range names {
+		add(name)
+	}
+
+	return skips
+}
+
+// skips reports whether stage must not run, either because this run asked to
+// skip it or because the repository opted out of it permanently.
+func (s runSkips) skips(repo *registry.Repo, stage string) bool {
+	if _, ok := s[stage]; ok {
+		return true
+	}
+
+	return skipsStage(repo, stage)
+}
+
+// list returns the run's skipped stages in a stable order, for the queue dedup
+// key, the persisted spec and log lines.
+func (s runSkips) list() []string {
+	if len(s) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0, len(s))
+	for name := range s {
+		out = append(out, name)
+	}
+	slices.Sort(out)
+
+	return out
+}
+
+// invalidateStage clears a stage's recorded success so a later run cannot
+// mistake it for up to date. A per-run skip is the only way a stage's input can
+// move forward while the stage itself stays untouched, and buildDocsAndIndex's
+// docs-unchanged shortcut trusts StageOK — without this the docs index would
+// stay stale for every future refresh, not just the one that skipped it.
+func (m *Manager) invalidateStage(ctx context.Context, repo *registry.Repo, name string) {
+	m.stageMu.Lock()
+	defer m.stageMu.Unlock()
+
+	st := repo.Stages.Get(name)
+	if st == nil || st.Status != registry.StageOK {
+		return
+	}
+
+	*st = registry.StageState{}
+	if err := m.reg.Upsert(context.WithoutCancel(ctx), repo); err != nil {
+		slog.Error("invalidate stage state", "repo", repo.ID, "stage", name, "error", err)
+	}
 }
 
 // UpsertNamespace creates or updates the description metadata for a namespace.
@@ -1409,10 +1525,12 @@ func (m *Manager) ensureCodeIndex(ctx context.Context, repoID, clonePath string)
 }
 
 // TriggerRefresh queues a background refresh for a repo on the central work
-// queue. Concurrent triggers for the same repo coalesce, and the queue's
-// concurrency limit bounds how many repos refresh at once.
-func (m *Manager) TriggerRefresh(id string) {
-	m.submitRefresh(id)
+// queue. Concurrent triggers for the same repo and skip set coalesce, and the
+// queue's concurrency limit bounds how many repos refresh at once. skip names
+// stages this run must not execute, on top of the repo's persisted skip_stages
+// override; scheduled and webhook-driven refreshes pass none.
+func (m *Manager) TriggerRefresh(id string, skip ...string) {
+	m.submitRefresh(id, skip)
 }
 
 // generateOrder is the canonical stage execution order for selective runs:
@@ -1585,7 +1703,9 @@ func (m *Manager) Generate(ctx context.Context, id string, targets []string, for
 				st.FinishedAt = time.Now()
 				_ = m.reg.Upsert(context.WithoutCancel(ctx), repo)
 			} else {
-				serr = m.buildGraphSnapshot(ctx, repo, snapshot, registry.StatusReady)
+				// Generate is already an explicit stage selection, so it adds
+				// no run-level skips on top of the repo's overrides.
+				serr = m.buildGraphSnapshot(ctx, repo, snapshot, registry.StatusReady, nil)
 			}
 			if serr == nil {
 				if err := m.rebuildMerged(ctx); err != nil {
@@ -1855,14 +1975,16 @@ func (m *Manager) reindexRepo(ctx context.Context, id string) error {
 		// deferReindex=false: this already is the reindex path. Re-queueing on an
 		// empty bundle here would busy-loop; recovery instead rides on the next
 		// Configure/TriggerReindexAll once a healthy bundle is installed.
-		m.buildDocsAndIndex(ctx, repo, false, true)
+		m.buildDocsAndIndex(ctx, repo, nil, false, true)
 	}
 
 	return nil
 }
 
 // Refresh synchronously clones/pulls the repo and rebuilds its graph if needed.
-func (m *Manager) Refresh(ctx context.Context, id string) error {
+// skip names stages this run must not execute (see runSkips), on top of the
+// repo's persisted skip_stages override.
+func (m *Manager) Refresh(ctx context.Context, id string, skip ...string) error {
 	defer m.lockKey(id)()
 
 	repo, err := m.reg.Get(ctx, id)
@@ -1877,7 +1999,7 @@ func (m *Manager) Refresh(ctx context.Context, id string) error {
 	jobCtx, finish := m.registerJob(ctx, id)
 	defer finish()
 
-	if err := m.refresh(jobCtx, repo); err != nil {
+	if err := m.refresh(jobCtx, repo, newRunSkips(skip)); err != nil {
 		// A manual CancelJob cancels jobCtx while the parent stays alive;
 		// record that distinctly from a real failure or a shutdown.
 		if jobCtx.Err() != nil && ctx.Err() == nil {
@@ -1898,15 +2020,19 @@ func (m *Manager) Refresh(ctx context.Context, id string) error {
 	return nil
 }
 
-func (m *Manager) refresh(ctx context.Context, repo *registry.Repo) error {
-	slog.Info("working on repo", "repo", repo.ID, "commit", shortSHA(repo.LastCommit))
+func (m *Manager) refresh(ctx context.Context, repo *registry.Repo, skips runSkips) error {
+	slog.Info("working on repo", "repo", repo.ID, "commit", shortSHA(repo.LastCommit),
+		"skip", skips.list())
 
 	defer m.clearRepoActivity(repo.ID)
 
-	// A repository that skips the graph stage has no graph to be missing or
-	// stale, so none of these may force a snapshot rebuild — otherwise every
-	// refresh would re-clone forever chasing a graph it will never build.
-	graphSkipped := skipsStage(repo, registry.StageGraph)
+	// A run that skips the graph stage has no graph to be missing or stale, so
+	// none of these may force a snapshot rebuild — otherwise every refresh
+	// would re-clone forever chasing a graph it will never build. A per-run
+	// skip needs no special care afterwards: the promoted clone carries no
+	// graph.json, so the next unskipped refresh sees hadGraph=false and forces
+	// the rebuild itself.
+	graphSkipped := skips.skips(repo, registry.StageGraph)
 	hadGraph := graphSkipped || fileExists(graphify.GraphPath(repo.Path))
 	staleIgnore := !graphSkipped && hadGraph && m.gfy.GraphNeedsIgnoreRebuild(repo.Path, repo.Overrides.GraphExclude)
 	staleVersion := !graphSkipped && hadGraph && !m.gfy.GraphBuiltWithCurrentVersion(repo.Path)
@@ -1946,7 +2072,7 @@ func (m *Manager) refresh(ctx context.Context, repo *registry.Repo) error {
 
 	buildStart := time.Now()
 
-	if err := m.buildGraphSnapshot(ctx, repo, snapshot, registry.StatusReady); err != nil {
+	if err := m.buildGraphSnapshot(ctx, repo, snapshot, registry.StatusReady, skips); err != nil {
 		return fmt.Errorf("graphify update; %w", err)
 	}
 
@@ -1964,7 +2090,7 @@ func (m *Manager) refresh(ctx context.Context, repo *registry.Repo) error {
 	// deferReindex=true: if the live bundle is momentarily empty (a Configure
 	// swap coinciding with this post-graph phase), re-queue so a healthy bundle
 	// finishes the indexes instead of leaving them silently missing.
-	m.buildDocsAndIndex(ctx, repo, true, false)
+	m.buildDocsAndIndex(ctx, repo, skips, true, false)
 
 	return nil
 }
@@ -1974,8 +2100,14 @@ func (m *Manager) refresh(ctx context.Context, repo *registry.Repo) error {
 // generator/service or an error is logged and swallowed so the graph build
 // result stands. forceIndexes bypasses incremental/presence shortcuts after a
 // settings change, ensuring a newly enabled embedder or changed model/chunking
-// configuration replaces every derived vector.
-func (m *Manager) buildDocsAndIndex(ctx context.Context, repo *registry.Repo, deferReindex, forceIndexes bool) {
+// configuration replaces every derived vector. skips drops stages for this run
+// only; a nil skips honours just the repository's persisted skip_stages.
+func (m *Manager) buildDocsAndIndex(
+	ctx context.Context,
+	repo *registry.Repo,
+	skips runSkips,
+	deferReindex, forceIndexes bool,
+) {
 	d, releaseDocs := m.acquireDocs()
 	defer releaseDocs()
 	if d.gen == nil && d.rag == nil && d.codeRag == nil && m.docsText == nil {
@@ -1999,7 +2131,7 @@ func (m *Manager) buildDocsAndIndex(ctx context.Context, repo *registry.Repo, de
 	// graph) and hit different backends (embedder vs LLM), so they run in
 	// parallel; runStage serializes their stage-state writes on stageMu.
 	var wg sync.WaitGroup
-	if d.codeRag != nil && !skipsStage(repo, registry.StageCodeIndex) {
+	if d.codeRag != nil && !skips.skips(repo, registry.StageCodeIndex) {
 		// The delta must be captured before runStage mutates the stage state.
 		var changed []string
 		incremental := false
@@ -2032,7 +2164,7 @@ func (m *Manager) buildDocsAndIndex(ctx context.Context, repo *registry.Repo, de
 		return
 	}
 
-	if skipsStage(repo, registry.StageDocs) && skipsStage(repo, registry.StageDocsIndex) {
+	if skips.skips(repo, registry.StageDocs) && skips.skips(repo, registry.StageDocsIndex) {
 		return
 	}
 
@@ -2044,7 +2176,8 @@ func (m *Manager) buildDocsAndIndex(ctx context.Context, repo *registry.Repo, de
 	}
 
 	docsChanged := true
-	if d.gen != nil && !skipsStage(repo, registry.StageDocs) {
+	docsRan := false
+	if d.gen != nil && !skips.skips(repo, registry.StageDocs) {
 		// Documentation is written by an LLM, one call per file group: the
 		// slowest stage of a build and the one most worth estimating.
 		genCtx := progress.With(ctx, m.progressReporter(repo.ID, registry.StageDocs))
@@ -2062,6 +2195,7 @@ func (m *Manager) buildDocsAndIndex(ctx context.Context, repo *registry.Repo, de
 			return // no fresh docs -> skip indexing
 		}
 
+		docsRan = true
 		if man != nil {
 			docsChanged = man.ChangedDocs
 		}
@@ -2071,7 +2205,14 @@ func (m *Manager) buildDocsAndIndex(ctx context.Context, repo *registry.Repo, de
 		return
 	}
 
-	if skipsStage(repo, registry.StageDocsIndex) {
+	if skips.skips(repo, registry.StageDocsIndex) {
+		// Docs moved forward but their index did not, so the shortcut below
+		// must not read the previous success as "still current" on the next
+		// refresh — that would strand the index on this run's stale markdown.
+		if docsRan && docsChanged {
+			m.invalidateStage(ctx, repo, registry.StageDocsIndex)
+		}
+
 		return
 	}
 
@@ -2621,12 +2762,13 @@ func (m *Manager) buildGraphSnapshot(
 	repo *registry.Repo,
 	snapshot *preparedSnapshot,
 	activeStatus string,
+	skips runSkips,
 ) error {
 	// The graph stage may be disabled, but this function also promotes the
 	// staging clone to its final path and moves repo.Path/LastCommit forward —
 	// which every other stage depends on. So a skip bypasses only the graphify
 	// work and its stage bookkeeping, never the promotion below.
-	skipGraph := skipsStage(repo, registry.StageGraph)
+	skipGraph := skips.skips(repo, registry.StageGraph)
 
 	st := repo.Stages.Get(registry.StageGraph)
 	fail := func(err error, path string) error {

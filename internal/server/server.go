@@ -9,6 +9,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -785,6 +786,15 @@ func deleteRepo(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
+type refreshRequest struct {
+	// Skip names stages this run must not execute: graph, docs, docs_index,
+	// code_index. It applies to this refresh only and is additive to the repo's
+	// persisted skip_stages override, so a small code change can be pulled in
+	// without paying for documentation generation. Skipping docs also skips
+	// docs_index, which would otherwise re-embed the previous run's markdown.
+	Skip []string `json:"skip,omitempty"`
+}
+
 func refreshRepo(mgr *manager.Manager) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		id := repoID(c.Request)
@@ -798,10 +808,50 @@ func refreshRepo(mgr *manager.Manager) ada.HandlerFunc {
 			return c.SetStatus(http.StatusNotFound).SendJSON(map[string]string{"error": "not found"})
 		}
 
-		mgr.TriggerRefresh(id)
+		// The body is optional: a plain refresh has always been a POST with no
+		// content and must keep working.
+		var req refreshRequest
+		if err := bindOptionalJSON(c, &req); err != nil {
+			return c.SetStatus(http.StatusBadRequest).Err(err)
+		}
 
-		return c.SetStatus(http.StatusAccepted).SendJSON(map[string]string{"status": "refresh queued", "repo": id})
+		for _, s := range req.Skip {
+			if !registry.ValidStage(s) {
+				return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{
+					"error": fmt.Sprintf("unknown stage %q (valid: graph, docs, docs_index, code_index)", s),
+				})
+			}
+		}
+
+		mgr.TriggerRefresh(id, req.Skip...)
+
+		out := map[string]any{"status": "refresh queued", "repo": id}
+		if len(req.Skip) > 0 {
+			out["skip"] = req.Skip
+		}
+
+		return c.SetStatus(http.StatusAccepted).SendJSON(out)
 	}
+}
+
+// bindOptionalJSON decodes a request body the caller may legitimately omit. An
+// absent or empty body leaves dst at its zero value instead of failing, so an
+// endpoint can gain optional parameters without breaking clients that post
+// nothing.
+func bindOptionalJSON(c *ada.Context, dst any) error {
+	if c.Request.Body == nil || c.Request.ContentLength == 0 {
+		return nil
+	}
+
+	if err := c.Bind(dst); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+
+		return err
+	}
+
+	return nil
 }
 
 type generateRequest struct {
