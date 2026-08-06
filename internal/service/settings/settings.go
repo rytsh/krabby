@@ -246,6 +246,17 @@ func Defaults() Settings {
 	}
 }
 
+// EffectiveDocsLimits returns the documentation input budgets with the
+// built-in defaults filled in, so a record persisted before these fields
+// existed reports the numbers actually in force rather than three zeros.
+func (s Settings) EffectiveDocsLimits() config.DocsLimits {
+	return config.DocsLimits{
+		MaxSourceBytes:    s.DocsMaxSourceBytes,
+		MaxGroupBytes:     s.DocsMaxGroupBytes,
+		MaxSynthesisBytes: s.DocsMaxSynthesisBytes,
+	}.Resolve()
+}
+
 // EffectiveWebImageMaxPerPage returns the per-page image cap, including the
 // default for persisted records that predate the setting.
 func (s Settings) EffectiveWebImageMaxPerPage() int {
@@ -366,6 +377,11 @@ func (s Settings) Redact() Redacted {
 	r.Settings.WebImageMaxPerPage = s.EffectiveWebImageMaxPerPage()
 	r.Settings.WebImageMaxBytes = s.EffectiveWebImageMaxBytes()
 	r.Settings.WebImageMaxPixels = s.EffectiveWebImageMaxPixels()
+
+	docsLimits := s.EffectiveDocsLimits()
+	r.Settings.DocsMaxSourceBytes = docsLimits.MaxSourceBytes
+	r.Settings.DocsMaxGroupBytes = docsLimits.MaxGroupBytes
+	r.Settings.DocsMaxSynthesisBytes = docsLimits.MaxSynthesisBytes
 
 	// A Go nil slice marshals to null, so a list the user has never set would
 	// reach clients as null rather than []. Callers then have to null-guard
@@ -791,7 +807,9 @@ type Store struct {
 	mcpBucket *bw.Bucket[MCPKey]
 }
 
-// settingsSchemaVersion v14 adds the web_image_* vision-analysis fields; zero
+// settingsSchemaVersion v15 adds docs_prompt_extra and the docs_max_*_bytes
+// input budgets; zero numeric values mean "use the built-in default", so
+// records migrated from v14 need no backfill. v14 adds the web_image_* vision-analysis fields; zero
 // numeric values use effective defaults for records migrated from v13. v13
 // adds rag_keep_markdown_targets. v12 adds the
 // internal docs index projection marker.
@@ -809,7 +827,7 @@ type Store struct {
 // docs_summary_model; v4 docs_max_groups; v3 embed_concurrency /
 // code_embed_concurrency. Bumping the version lets bw migrate existing settings
 // records in place.
-const settingsSchemaVersion = 14
+const settingsSchemaVersion = 15
 
 // New opens the settings bucket. If no record exists yet, seed is persisted as
 // the initial configuration (seeded from file/env config by the caller).
