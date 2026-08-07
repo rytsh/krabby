@@ -24,6 +24,7 @@ import (
 
 	"github.com/rytsh/krabby/internal/config"
 	"github.com/rytsh/krabby/internal/observability/langfuse"
+	"github.com/rytsh/krabby/internal/service/apicatalog"
 	"github.com/rytsh/krabby/internal/service/coderag"
 	"github.com/rytsh/krabby/internal/service/credentials"
 	"github.com/rytsh/krabby/internal/service/docgen"
@@ -60,12 +61,19 @@ type Manager struct {
 	docsVectorsDir string
 	codeVectorsDir string
 	sourcesRootDir string
+	apisRootDir    string
 
 	// Web content sources (wiki pages, Confluence spaces). webFetchers maps a
 	// collection type to its fetcher implementation; new source types register
 	// here (see SetWebSources).
 	webStore    *websource.Store
 	webFetchers map[string]websource.Fetcher
+
+	// API catalog (OpenAPI documents, gRPC servers). apiProviders maps a
+	// service kind to its provider implementation; new kinds register here
+	// (see SetAPICatalog).
+	apiStore     *apicatalog.Store
+	apiProviders map[string]apicatalog.Provider
 
 	// queue is the central bounded work queue. Every background task (repo
 	// refresh/generate, web-source sync, reindex) is submitted here so a single
@@ -182,6 +190,10 @@ type DocsDeps struct {
 	CodeVectorsDir string
 	// SourcesRootDir stores synced web-source markdown by collection name.
 	SourcesRootDir string
+	// APIsRootDir stores the API catalog's per-operation markdown projections
+	// by service name. They are indexed beside repo docs and web sources, so
+	// an endpoint is findable by the same search that finds prose about it.
+	APIsRootDir string
 }
 
 // New creates a Manager. baseCtx bounds background refresh jobs. docs carries the
@@ -213,6 +225,7 @@ func New(
 		docsVectorsDir: docs.DocsVectorsDir,
 		codeVectorsDir: docs.CodeVectorsDir,
 		sourcesRootDir: docs.SourcesRootDir,
+		apisRootDir:    docs.APIsRootDir,
 		docs: &docsBundle{
 			codeRag: coderag.New(config.CodeRAG{}, nil, nil, engine, codeText),
 		},
@@ -237,6 +250,7 @@ const (
 	taskKindWebSync   = "websync"
 	taskKindWebImport = "webimport"
 	taskKindReindex   = "reindex"
+	taskKindAPISync   = "apisync"
 )
 
 // SetTaskConcurrency updates the central work queue's concurrency limit live.
@@ -368,6 +382,16 @@ func (m *Manager) rebuildTask(spec queue.Spec) (queue.Task, bool) {
 		}
 
 		return m.webSyncTaskMode(name, spec.Params["force_full"] == "true"), true
+
+	case taskKindAPISync:
+		// Persisted apisync IDs are the scope key ("api:<name>"); recover the
+		// service name for the rebuilt closure.
+		name := apicatalog.ServiceName(spec.ID)
+		if name == "" {
+			return queue.Task{}, false
+		}
+
+		return m.apiSyncTaskMode(name, spec.Params["force_full"] == "true"), true
 
 	case taskKindReindex:
 		if spec.ID == "*" {
@@ -1918,16 +1942,20 @@ func (m *Manager) reindexAll(ctx context.Context) error {
 		}
 	}
 
-	// Web-source vectors live in the same docs index and follow the same
-	// embedder settings, so they are rebuilt from the on-disk markdown too.
+	// Web-source and API-catalog vectors live in the same docs index and follow
+	// the same embedder settings, so they are rebuilt from the on-disk markdown
+	// too.
 	m.enqueueWebReindex(ctx)
+	m.enqueueAPIReindex(ctx)
 
 	return nil
 }
 
-// reindexTask builds a deduplicated reindex task for one repo (or, when id is a
-// web-source scope key, one collection), carrying a Spec so a restart replays
-// it. The rebuilt closure dispatches on the id's shape the same way.
+// reindexTask builds a deduplicated reindex task for one repo, one web-source
+// collection or one API-catalog service, carrying a Spec so a restart replays
+// it. The rebuilt closure dispatches on the id's shape the same way, which is
+// why the scope prefixes have to be unambiguous: a repo id can never contain
+// ':', so a prefixed key is always one of the non-repo kinds.
 func (m *Manager) reindexTask(id string) queue.Task {
 	if name := websource.CollectionName(id); name != "" {
 		scope := id
@@ -1942,6 +1970,25 @@ func (m *Manager) reindexTask(id string) queue.Task {
 				defer m.lockKey(scope)()
 
 				m.indexWebSource(ctx, name)
+
+				return nil
+			},
+		}
+	}
+
+	if name := apicatalog.ServiceName(id); name != "" {
+		scope := id
+
+		return queue.Task{
+			ID:    scope,
+			Kind:  taskKindReindex,
+			Title: "Reindex " + scope,
+			Key:   taskKindReindex + ":" + scope,
+			Spec:  queue.Spec{Kind: taskKindReindex, ID: scope},
+			Run: func(ctx context.Context) error {
+				defer m.lockKey(scope)()
+
+				m.indexAPIService(ctx, name)
 
 				return nil
 			},

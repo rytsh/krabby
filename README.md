@@ -16,6 +16,7 @@ and understand relationships through MCP.
 - Architecture and relationship analysis with knowledge graphs
 - Optional generated documentation and semantic search
 - Web, Confluence, and Jira source indexing
+- API catalog: OpenAPI/Swagger and gRPC endpoints, browsable and searchable, with per-service overrides
 - Web UI, REST API, and MCP support
 
 ## Run with Docker

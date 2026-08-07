@@ -1,10 +1,10 @@
-// Package scheduler periodically refreshes tracked repositories and synced
-// web sources.
+// Package scheduler periodically refreshes tracked repositories, synced web
+// sources and API-catalog services.
 //
 // Repository polling is driven by per-namespace cron schedules (see
 // settings.RepoSchedule) run through github.com/worldline-go/hardloop. Web
-// sources keep their own per-collection refresh intervals, evaluated on a fixed
-// reconcile tick. Both schedule sources live in the runtime settings, so UI/REST
+// sources and API services keep their own per-record schedules, evaluated on a
+// fixed reconcile tick. Every schedule lives in persisted state, so UI/REST
 // changes take effect without restarting the process: every reconcile tick the
 // scheduler re-reads the schedules and, when they change, rebuilds the cron set.
 package scheduler
@@ -44,6 +44,9 @@ type scheduler struct {
 
 	webCron cronRunner
 	webSig  string
+
+	apiCron cronRunner
+	apiSig  string
 }
 
 // Run evaluates repo and web-source schedules until ctx is cancelled. Repo
@@ -61,6 +64,7 @@ func Run(ctx context.Context, mgr *manager.Manager) {
 	// immediately rather than after one interval.
 	s.reconcile(ctx)
 	s.reconcileWeb(ctx)
+	s.reconcileAPI(ctx)
 
 	for {
 		select {
@@ -72,8 +76,10 @@ func Run(ctx context.Context, mgr *manager.Manager) {
 			// Interval-based fallback for web sources without a cron spec
 			// (legacy RefreshInterval-only collections).
 			mgr.RefreshDueWebSources(ctx)
+			mgr.RefreshDueAPIServices(ctx)
 			s.reconcile(ctx)
 			s.reconcileWeb(ctx)
+			s.reconcileAPI(ctx)
 		}
 	}
 }
@@ -203,14 +209,82 @@ func (s *scheduler) buildWebCrons(schedules []manager.WebSourceSchedule) []hardl
 	return crons
 }
 
-// stop cancels the loaded repo and web-source cron sets (if any) and waits for
-// in-flight jobs.
+// reconcileAPI rebuilds the API-catalog cron set when the effective per-service
+// schedules have changed since the last load. Mirrors reconcileWeb: a
+// build/parse failure leaves the previously loaded set running and is retried
+// on the next tick.
+func (s *scheduler) reconcileAPI(ctx context.Context) {
+	schedules := s.mgr.APISchedules(ctx)
+	sig := apiScheduleSignature(schedules)
+	if s.apiCron != nil && sig == s.apiSig {
+		return
+	}
+
+	crons := s.buildAPICrons(schedules)
+
+	// No API schedules: tear down any existing set and remember the empty
+	// signature so we do not rebuild every tick.
+	if len(crons) == 0 {
+		s.stopAPI()
+		s.apiSig = sig
+
+		return
+	}
+
+	job, err := hardloop.NewCron(crons...)
+	if err != nil {
+		slog.Error("build api-service poll schedules", "error", err)
+
+		return
+	}
+
+	if err := job.Start(ctx); err != nil {
+		slog.Error("start api-service poll schedules", "error", err)
+
+		return
+	}
+
+	s.stopAPI()
+	s.apiCron = job
+	s.apiSig = sig
+
+	slog.Info("api-service poll schedules loaded", "jobs", len(crons))
+}
+
+// buildAPICrons turns per-service schedules into hardloop cron jobs, one per
+// service. Each job triggers a background sync; triggers coalesce and the work
+// queue bounds concurrency.
+func (s *scheduler) buildAPICrons(schedules []manager.APISchedule) []hardloop.Cron {
+	crons := make([]hardloop.Cron, 0, len(schedules))
+
+	for _, sc := range schedules {
+		if len(sc.Specs) == 0 {
+			continue
+		}
+
+		name := sc.Name
+		crons = append(crons, hardloop.Cron{
+			Name:  "apicatalog-poll:" + name,
+			Specs: sc.Specs,
+			Func: func(_ context.Context) error {
+				s.mgr.TriggerAPIRefresh(name)
+
+				return nil
+			},
+		})
+	}
+
+	return crons
+}
+
+// stop cancels every loaded cron set (if any) and waits for in-flight jobs.
 func (s *scheduler) stop() {
 	if s.cron != nil {
 		s.cron.Stop()
 		s.cron = nil
 	}
 	s.stopWeb()
+	s.stopAPI()
 }
 
 // stopWeb cancels the loaded web-source cron set (if any).
@@ -218,6 +292,14 @@ func (s *scheduler) stopWeb() {
 	if s.webCron != nil {
 		s.webCron.Stop()
 		s.webCron = nil
+	}
+}
+
+// stopAPI cancels the loaded API-catalog cron set (if any).
+func (s *scheduler) stopAPI() {
+	if s.apiCron != nil {
+		s.apiCron.Stop()
+		s.apiCron = nil
 	}
 }
 
@@ -255,6 +337,21 @@ func scheduleSignature(schedules []settings.RepoSchedule) string {
 // webScheduleSignature is a stable fingerprint of the effective web-source
 // schedules so reconcileWeb only rebuilds crons when they actually change.
 func webScheduleSignature(schedules []manager.WebSourceSchedule) string {
+	var b strings.Builder
+
+	for _, sc := range schedules {
+		b.WriteString(sc.Name)
+		b.WriteString("=")
+		b.WriteString(strings.Join(sc.Specs, ","))
+		b.WriteString(";")
+	}
+
+	return b.String()
+}
+
+// apiScheduleSignature is a stable fingerprint of the effective API-service
+// schedules so reconcileAPI only rebuilds crons when they actually change.
+func apiScheduleSignature(schedules []manager.APISchedule) string {
 	var b strings.Builder
 
 	for _, sc := range schedules {

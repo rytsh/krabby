@@ -173,6 +173,22 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	api.DELETE("/sources/{name}/pages", server.Wrap(deleteSourcePage(mgr)))
 	api.GET("/sources/{name}/doc", server.Wrap(getSourceDoc(mgr)))
 
+	// API catalog: OpenAPI documents and gRPC servers, catalogued as groups of
+	// services whose endpoints are browsable and indexed into the docs RAG.
+	api.GET("/apis/groups", server.Wrap(listAPIGroups(mgr)))
+	api.POST("/apis/groups", server.Wrap(upsertAPIGroup(mgr)))
+	api.DELETE("/apis/groups/{name}", server.Wrap(deleteAPIGroup(mgr)))
+	api.GET("/apis/kinds", server.Wrap(listAPIServiceKinds(mgr)))
+	api.GET("/apis/services", server.Wrap(listAPIServices(mgr)))
+	api.POST("/apis/services", server.Wrap(addAPIService(mgr)))
+	api.POST("/apis/services/config/test", server.Wrap(testAPIServiceConfig(mgr)))
+	api.GET("/apis/services/{name}", server.Wrap(getAPIService(mgr)))
+	api.PUT("/apis/services/{name}", server.Wrap(updateAPIService(mgr)))
+	api.DELETE("/apis/services/{name}", server.Wrap(deleteAPIService(mgr)))
+	api.POST("/apis/services/{name}/refresh", server.Wrap(refreshAPIService(mgr)))
+	api.POST("/apis/services/{name}/cancel", server.Wrap(cancelAPIService(mgr)))
+	api.GET("/apis/services/{name}/operation", server.Wrap(getAPIOperation(mgr)))
+
 	api.GET("/docs/search", server.Wrap(searchDocs(mgr)))
 	api.GET("/code/search", server.Wrap(searchCode(mgr)))
 	api.GET("/docs/config", server.Wrap(getDocsConfig(mgr)))

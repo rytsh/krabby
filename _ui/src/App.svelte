@@ -22,6 +22,7 @@
   import Repos from "./routes/Repos.svelte";
   import RepoDetail from "./routes/RepoDetail.svelte";
   import Sources from "./routes/Sources.svelte";
+  import Apis from "./routes/Apis.svelte";
   import Namespaces from "./routes/Namespaces.svelte";
   import Activity from "./routes/Activity.svelte";
   import Search from "./routes/Search.svelte";
@@ -37,6 +38,8 @@
     if (p.startsWith("/repos/")) return { view: "repo", repoId: p.slice("/repos/".length) };
     if (p === "/sources") return { view: "sources" };
     if (p.startsWith("/sources/")) return { view: "sources", sourceName: p.slice("/sources/".length) };
+    if (p === "/apis") return { view: "apis" };
+    if (p.startsWith("/apis/")) return { view: "apis", apiName: p.slice("/apis/".length) };
     if (p === "/namespaces") return { view: "namespaces" };
     if (p === "/search") return { view: "search" };
     if (p === "/activity") return { view: "activity" };
@@ -50,6 +53,7 @@
   const nav = [
     { href: "/repos", label: "Repositories", icon: "boxes", match: (v) => v === "repos" || v === "repo" },
     { href: "/sources", label: "Sources", icon: "book", match: (v) => v === "sources" },
+    { href: "/apis", label: "APIs", icon: "braces", match: (v) => v === "apis" },
     { href: "/namespaces", label: "Namespaces", icon: "tag", match: (v) => v === "namespaces" },
     { href: "/activity", label: "Activity", icon: "activity", match: (v) => v === "activity" },
     { href: "/search", label: "Search", icon: "search", match: (v) => v === "search" },
@@ -61,6 +65,7 @@
     repos: "Repositories",
     repo: "Repository",
     sources: "Sources",
+    apis: "API catalog",
     namespaces: "Namespaces",
     activity: "Activity",
     search: "Search",
@@ -358,6 +363,8 @@
         {/key}
       {:else if view === "sources"}
         <Sources sourceName={route.sourceName || ""} />
+      {:else if view === "apis"}
+        <Apis apiName={route.apiName || ""} />
       {:else if view === "namespaces"}
         <Namespaces />
       {:else if view === "activity"}

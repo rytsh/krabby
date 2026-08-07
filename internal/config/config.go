@@ -566,6 +566,10 @@ func (c *Config) CodeVectorsDir() string { return filepath.Join(c.DataDir, "code
 // SourcesRootDir holds synced web-source markdown by collection name.
 func (c *Config) SourcesRootDir() string { return filepath.Join(c.DataDir, "sources") }
 
+// APIsRootDir holds the API catalog's per-operation markdown projections by
+// service name.
+func (c *Config) APIsRootDir() string { return filepath.Join(c.DataDir, "apis") }
+
 // NormalizeBasePath cleans a configured base path into a canonical form: either
 // "" (serve at root) or "/segment[/segment...]" with a leading slash and no
 // trailing slash. Whitespace and redundant slashes are collapsed.

@@ -6,32 +6,26 @@ import (
 	"time"
 
 	"github.com/worldline-go/types"
+
+	"github.com/rytsh/krabby/internal/nullx"
 )
 
 // MergeNull returns the update value when the field was present in the update
 // JSON (set to a value OR explicitly null), otherwise the stored value.
 //
 // It implements krabby's partial-update rule — absent = keep, null = clear,
-// value = override — on top of types.Null's ParsedNull marker, which is the one
-// thing a plain Go zero value cannot express: whether the client said "leave
-// this alone" or "make this empty".
-//
-// It lives here rather than in each provider because every partial-update
-// surface (provider configs, the source envelope, settings) has to agree on
-// what an omitted field means.
+// value = override. The rule itself lives in internal/nullx because the
+// API-catalog envelope and provider configs merge the same way; these two
+// wrappers stay so web-source code reads without reaching across packages.
 func MergeNull[T any](update, stored types.Null[T]) types.Null[T] {
-	if update.Valid || update.ParsedNull {
-		return update
-	}
-
-	return stored
+	return nullx.Merge(update, stored)
 }
 
 // Present reports whether the field was in the update JSON at all, with either
 // a value or an explicit null. Use it when a merge is not a straight
 // replacement — a secret that is kept unless explicitly cleared, say.
 func Present[T any](n types.Null[T]) bool {
-	return n.Valid || n.ParsedNull
+	return nullx.Present(n)
 }
 
 // CollectionUpdate is a partial update of a collection's mutable envelope: the

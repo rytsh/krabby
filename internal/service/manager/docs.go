@@ -1005,11 +1005,13 @@ func codeRagConfig(s settings.Settings) config.CodeRAG {
 
 // ---- docs + RAG query surface ----------------------------------------------
 
-// Docs search scopes: everything, repository docs only, or web sources only.
+// Docs search scopes: everything, repository docs, web sources or the API
+// catalog.
 const (
 	ScopeAll     = "all"
 	ScopeRepos   = "repos"
 	ScopeSources = "sources"
+	ScopeAPIs    = "apis"
 )
 
 // Documentation search modes. Semantic is the default when configured;
@@ -1060,8 +1062,8 @@ func (m *Manager) resolveDocsSearchMode(mode string) string {
 }
 
 // docsFilter translates a scope + optional key into a vector-store filter.
-// key may be a repo id or a web-source scope key ("web:<name>"); when set it
-// wins over the scope.
+// key may be a repo id, a web-source scope key ("web:<name>") or an API-catalog
+// scope key ("api:<name>"); when set it wins over the scope.
 func docsFilter(scope, key string) (vectorstore.Filter, error) {
 	if key != "" {
 		return vectorstore.FilterKey(key), nil
@@ -1074,8 +1076,10 @@ func docsFilter(scope, key string) (vectorstore.Filter, error) {
 		return vectorstore.Filter{Kind: vectorstore.KindRepo}, nil
 	case ScopeSources:
 		return vectorstore.Filter{Kind: vectorstore.KindWeb}, nil
+	case ScopeAPIs:
+		return vectorstore.Filter{Kind: vectorstore.KindAPI}, nil
 	default:
-		return vectorstore.Filter{}, fmt.Errorf("unknown scope %q (want all, repos or sources)", scope)
+		return vectorstore.Filter{}, fmt.Errorf("unknown scope %q (want all, repos, sources or apis)", scope)
 	}
 }
 

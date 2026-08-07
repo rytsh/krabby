@@ -182,4 +182,35 @@ export const api = {
   deleteSourcePage: (name, slug) =>
     req(`/sources/${name}/pages?slug=${encodeURIComponent(slug)}`, { method: "DELETE", keepalive: true }),
   sourceDoc: (name, path) => req(`/sources/${name}/doc?path=${encodeURIComponent(path)}`),
+
+  // API catalog (OpenAPI documents, gRPC servers).
+  apiGroups: () => req("/apis/groups"),
+  upsertApiGroup: (body) => req("/apis/groups", { method: "POST", body: JSON.stringify(body) }),
+  deleteApiGroup: (name) => req(`/apis/groups/${name}`, { method: "DELETE", keepalive: true }),
+  apiKinds: () => req("/apis/kinds"),
+  apiServices: (group = "", search = "") => {
+    const q = new URLSearchParams();
+    if (group) q.set("group", group);
+    if (search) q.set("search", search);
+    const qs = q.toString();
+    return req(`/apis/services${qs ? `?${qs}` : ""}`);
+  },
+  addApiService: (body) => req("/apis/services", { method: "POST", keepalive: true, body: JSON.stringify(body) }),
+  testApiConfig: (body) => req("/apis/services/config/test", { method: "POST", body: JSON.stringify(body) }),
+  apiService: (name, { q = "", tag = "", method = "", page = 1, perPage = 50 } = {}) => {
+    const params = new URLSearchParams();
+    if (q) params.set("q", q);
+    if (tag) params.set("tag", tag);
+    if (method) params.set("method", method);
+    if (page > 1) params.set("page", String(page));
+    if (perPage !== 50) params.set("per_page", String(perPage));
+    const qs = params.toString();
+    return req(`/apis/services/${name}${qs ? `?${qs}` : ""}`);
+  },
+  updateApiService: (name, body) => req(`/apis/services/${name}`, { method: "PUT", body: JSON.stringify(body) }),
+  deleteApiService: (name) => req(`/apis/services/${name}`, { method: "DELETE", keepalive: true }),
+  refreshApiService: (name, force = false) =>
+    req(`/apis/services/${name}/refresh${force ? "?force=true" : ""}`, { method: "POST", keepalive: true }),
+  cancelApiService: (name) => req(`/apis/services/${name}/cancel`, { method: "POST", keepalive: true }),
+  apiOperation: (name, id) => req(`/apis/services/${name}/operation?id=${encodeURIComponent(id)}`),
 };

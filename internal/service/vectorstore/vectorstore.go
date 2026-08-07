@@ -44,28 +44,40 @@ type Match struct {
 	Score   float32 `json:"score"`
 }
 
-// ScopePrefix namespaces web-source keys in the shared docs index. Repo ids
-// can never contain ':' so the two key spaces cannot collide.
+// ScopePrefix namespaces web-source keys in the shared docs index, and
+// APIScopePrefix does the same for API-catalog services. Repo ids can never
+// contain ':' so the three key spaces cannot collide.
 //
 // The convention belongs to the store because the store is what has to answer
-// questions about it; websource re-exports this constant.
-const ScopePrefix = "web:"
+// questions about it; websource and apicatalog re-export these constants.
+const (
+	ScopePrefix    = "web:"
+	APIScopePrefix = "api:"
+)
 
-// The two classes of key a stored chunk can belong to. They are persisted in
-// an indexed field rather than derived from the key at query time, so asking
-// for one class is an index seek instead of a scan.
+// The classes of key a stored chunk can belong to. They are persisted in an
+// indexed field rather than derived from the key at query time, so asking for
+// one class is an index seek instead of a scan.
+//
+// KindRepo is the fallback rather than a prefix match, so records written
+// before a prefix existed keep classifying correctly: no migration is needed to
+// add a class, only keys carrying the new prefix change meaning.
 const (
 	KindRepo = "repo"
 	KindWeb  = "web"
+	KindAPI  = "api"
 )
 
 // KindOf classifies a store key.
 func KindOf(key string) string {
-	if strings.HasPrefix(key, ScopePrefix) {
+	switch {
+	case strings.HasPrefix(key, ScopePrefix):
 		return KindWeb
+	case strings.HasPrefix(key, APIScopePrefix):
+		return KindAPI
+	default:
+		return KindRepo
 	}
-
-	return KindRepo
 }
 
 // Filter restricts a search to a subset of the indexed keys (repo ids or

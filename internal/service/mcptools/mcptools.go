@@ -28,7 +28,8 @@ Tool selection (roughly what to reach for, in order):
 - Use query_graph for architecture, dependencies, call/data flow, and relationships across files. It is not a keyword or symbol search.
 - Use git_blame to attribute lines to a commit (start_line/end_line blames a range), then git_diff with that sha to see what it changed.
 - Use git_log with from/to to compare releases or follow one file; list_refs gives tag names.
-- Use search_docs for documentation and knowledge; it covers generated repo docs and connected web sources (Confluence, Jira, pages). Semantic is the default when configured, otherwise lexical; request hybrid explicitly for fused retrieval. Use lexical for exact keys/titles/identifiers and semantic for conceptual questions. Pass the user's full question. Scope a web source with the exact scope_key returned by list_sources.
+- Use search_docs for documentation and knowledge; it covers generated repo docs, web sources (Confluence, Jira, pages) and catalogued API endpoints. Semantic is the default when configured, otherwise lexical; request hybrid explicitly for fused retrieval. Use lexical for exact keys/titles/identifiers and semantic for conceptual questions. Pass the user's full question. Scope a web source with the exact scope_key returned by list_sources.
+- To call an API, walk the catalog: list_api_groups -> list_api_services -> list_api_endpoints -> get_api_endpoint. Only the last returns schemas; narrow with search/tag rather than listing every endpoint.
 - Use list_* only when an identifier is unknown or the user explicitly requests an inventory. Do not exhaust pages or request a recursive file tree without a clear need.
 - Use get_* tools only after a search/query identifies the target.
 - If a graph tool returns "Repository selection required", retry it with one of the provided repo ids instead of treating the result as a failure.
@@ -53,7 +54,7 @@ func New(mgr *manager.Manager, version string, waitTimeout time.Duration, profil
 	instructions := serverInstructions
 	if profile == ToolProfileFull {
 		title += " (full administration)"
-		instructions += "\n\nThis connection uses the full profile and can mutate credentials, runtime configuration and web sources. Collections use add/update/refresh/delete_source and get_source_config; pages-source items use register_source_page, import_source_pages, import_source_sitemap and delete_source_page. Use mutation tools only when explicitly requested."
+		instructions += "\n\nThis connection uses the full profile and can mutate credentials, runtime configuration, web sources and the API catalog. Collections use add/update/refresh/delete_source and get_source_config; pages-source items use register_source_page, import_source_pages, import_source_sitemap and delete_source_page. API services use add/update/refresh/delete_api_service and get_api_service_config. Use mutation tools only when explicitly requested."
 	}
 
 	server := mcp.NewServer(&mcp.Implementation{
@@ -73,6 +74,7 @@ func New(mgr *manager.Manager, version string, waitTimeout time.Duration, profil
 	addFileTools(server, mgr)
 	addHistoryTools(server, mgr)
 	addDocTools(server, mgr, profile == ToolProfileFull)
+	addAPITools(server, mgr, profile == ToolProfileFull)
 	if profile == ToolProfileFull {
 		addCredentialTools(server, mgr)
 	}

@@ -21,20 +21,28 @@ import (
 // without a tokenizer, but the number that matters is tokens. Measured with
 // tiktoken over the actual payload:
 //
-//	33,010 B  -> roughly 6,700 tokens after adding source-discovery output schemas
-//	 2,399 B  ->    488 tokens  (serverInstructions, on top of this)
+//	39,290 B  -> roughly 8,000 tokens after adding the API-catalog tools
+//	 2,585 B  ->    527 tokens  (serverInstructions, on top of this)
 //
 // That is ~4.9 bytes per token, better than plain prose, because the payload is
 // mostly repeated JSON scaffolding and ordinary English — BPE collapses both.
-// So this budget is roughly 7,100 tokens, ~4% of a 200k context and ~22% of a
+// So this budget is roughly 8,500 tokens, ~4% of a 200k context and ~27% of a
 // 32k one, paid on every session.
 //
 // Raising it is a decision, not a formality: check first whether a tool
 // description is carrying detail that belongs in the handler's error messages,
 // or whether a jsonschema field is explaining nuance that only matters once a
 // call is being made.
+//
+// It was last raised from 35,000 for the four API-catalog discovery tools. The
+// alternative considered was one drill-down tool taking a widening set of
+// arguments, which would have cost ~1.5 KB instead of ~6.3 KB — but it makes
+// the progressive-disclosure contract implicit in an argument combination
+// rather than explicit in four names and four descriptions, and a model that
+// misreads it fetches an entire specification. The names are the guardrail, so
+// they were worth the bytes.
 const (
-	toolsPayloadBudget = 35_000
+	toolsPayloadBudget = 42_000
 	// bytesPerToken is the measured ratio above, for reporting only.
 	bytesPerToken = 5
 )
@@ -45,8 +53,8 @@ func TestToolProfiles(t *testing.T) {
 		count   int
 		admin   bool
 	}{
-		{profile: ToolProfileStandard, count: 34},
-		{profile: ToolProfileFull, count: 52, admin: true},
+		{profile: ToolProfileStandard, count: 38},
+		{profile: ToolProfileFull, count: 64, admin: true},
 	}
 
 	for _, tt := range tests {
@@ -152,9 +160,9 @@ func TestToolProfiles(t *testing.T) {
 // pays for it in full, so it must stay a tool-selection map and never grow into
 // per-tool documentation, which belongs in each tool's Description.
 //
-// 2,400 bytes is roughly 490 tokens (see toolsPayloadBudget for the measured
+// 2,700 bytes is roughly 540 tokens (see toolsPayloadBudget for the measured
 // bytes-per-token ratio), on top of the tools/list payload.
-const serverInstructionsBudget = 2400
+const serverInstructionsBudget = 2700
 
 func TestModelGuidanceIsSearchFirstAndBounded(t *testing.T) {
 	if len(serverInstructions) > serverInstructionsBudget {
@@ -165,6 +173,12 @@ func TestModelGuidanceIsSearchFirstAndBounded(t *testing.T) {
 		if !strings.Contains(serverInstructions, phrase) {
 			t.Errorf("instructions missing %q", phrase)
 		}
+	}
+	// The catalog chain has to be named here rather than left to the tool
+	// descriptions: a model that never calls list_api_groups never reads them,
+	// and answers "how do I call X" out of prose it found with search_docs.
+	if !strings.Contains(serverInstructions, "list_api_groups -> list_api_services -> list_api_endpoints -> get_api_endpoint") {
+		t.Error("instructions do not describe the API-catalog drill-down order")
 	}
 	if !strings.Contains(serverInstructions, "Semantic is the default when configured") {
 		t.Fatal("instructions do not describe the effective docs-search default")

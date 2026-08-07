@@ -16,11 +16,15 @@ import (
 //   - lockKey itself is the sanctioned wrapper.
 //   - collectionLock only forwards the mutex under a suffixed key; its callers
 //     go through mutateCollection, which locks it properly.
+//   - serviceLock is collectionLock's API-catalog counterpart, with the same
+//     shape: it forwards a mutex under a suffixed key, and its callers go
+//     through mutateService.
 //   - ensureDocsTextKey needs TryLock so a concurrent backfill of the same key
 //     can be skipped instead of waited on.
 var allowedLockForUses = map[string]bool{
 	"lockKey":           true,
 	"collectionLock":    true,
+	"serviceLock":       true,
 	"ensureDocsTextKey": true,
 }
 

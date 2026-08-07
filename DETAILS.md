@@ -39,6 +39,15 @@ keeps those indexes fresh in the background.
   repos, all web sources, or one collection such as `web:wine`. Providers stream
   their items as they are fetched, so a 35k-ticket JIRA project or a whole
   Confluence space syncs in the same memory as a handful of pages.
+- **API catalog**: OpenAPI/Swagger documents and gRPC servers are catalogued as
+  groups of services, each service holding one endpoint per operation with its
+  parameters, request/response schemas and a ready-to-run `curl`/`grpcurl`
+  command. Endpoints are also indexed beside repo docs (`api:<name>`), so
+  "which endpoint creates an invoice" is answerable by search and "how exactly
+  do I call it" by a single lookup. Published specs are frequently wrong for the
+  reader's environment, so a service can override the base URL, patch the raw
+  document (RFC 7386 JSON Merge Patch, schemas included) and correct or hide
+  individual endpoints.
 - **Semantic code search (optional)**: source is chunked at graphify symbol
   boundaries (with line-window fallback), embedded with a dedicated code model
   such as Codestral Embed, and returned as ranked path/line snippets.
@@ -117,6 +126,9 @@ Example OpenCode config using the full profile:
 | `list_namespaces` | Discover repository groups, counts, and human descriptions before broad search |
 | `list_sources` / `get_source` | Discover web collections and their exact `web:<name>` scope keys; inspect bounded item-title samples |
 | `register_source_page` / `import_source_pages` / `import_source_sitemap` / `delete_source_page` | Full-profile management of individual `pages` source items |
+| `list_api_groups` / `list_api_services` / `list_api_endpoints` / `get_api_endpoint` | Walk the API catalog from domain to service to endpoint to its full request shape |
+| `api_service_kinds` / `add_api_service` / `update_api_service` / `delete_api_service` / `refresh_api_service` / `get_api_service_config` | Full-profile management of catalogued APIs |
+| `set_api_group_description` / `delete_api_group` | Full-profile management of API group descriptions |
 | `get_docs_config` / `set_docs_config` | Read or live-update docs and code RAG settings |
 | `test_llm` / `test_embedder` / `test_code_embedder` | Validate model endpoints without saving |
 
@@ -163,8 +175,16 @@ administer them.
 | `POST/DELETE /api/v1/sources/{name}/pages` | Add/remove Custom web URLs |
 | `POST /api/v1/sources/{name}/pages/import` | Import HTML/Markdown pages, including URL-less manually authored Markdown, and index them |
 | `POST /api/v1/sources/{name}/sitemap` | Import URLs from a Custom web sitemap |
+| `GET/POST /api/v1/apis/groups` | List/describe API catalog groups |
+| `DELETE /api/v1/apis/groups/{name}` | Delete a group description (services keep their tag) |
+| `GET /api/v1/apis/kinds` | List the registered service kinds (`openapi`, `grpc`) |
+| `GET/POST /api/v1/apis/services` | List/create catalogued API services |
+| `POST /api/v1/apis/services/config/test` | Probe a document or gRPC target without saving |
+| `GET/PUT/DELETE /api/v1/apis/services/{name}` | Read one service with a page of its endpoints, update, or delete |
+| `POST /api/v1/apis/services/{name}/refresh` | Re-fetch and reindex; `?force=true` re-renders from an unchanged document |
+| `GET /api/v1/apis/services/{name}/operation?id=` | One endpoint's full structured detail |
 | `GET /api/v1/browser-extension.zip` | Download the browser importer matched to the running Krabby version |
-| `GET /api/v1/docs/search?q=&mode=&scope=&repo=&top=` | Docs search; `mode=hybrid|semantic|lexical`, `scope=all|repos|sources`, `repo=web:<name>` |
+| `GET /api/v1/docs/search?q=&mode=&scope=&repo=&top=` | Docs search; `mode=hybrid|semantic|lexical`, `scope=all|repos|sources|apis`, `repo=web:<name>` or `api:<name>` |
 | `GET /api/v1/code/search?q=&repo=&top=` | Semantic source-code snippet search |
 | `GET/PUT /api/v1/docs/config` | Read/update docs and code RAG settings |
 | `GET /api/v1/credentials` | List credential patterns (secrets never returned) |
@@ -217,6 +237,7 @@ other tools (doc generators, linters, indexers) are free to read it:
 ├── keys/                       # materialized credential SSH keys (0600)
 ├── docs-vectors/               # embedded documentation vector index
 ├── sources/<name>/*.md         # synced Custom web / Confluence pages
+├── apis/<name>/*.md            # API catalog endpoint projections (one per operation)
 ├── code-vectors/               # embedded source-code vector index
 └── state/                      # registry + credentials database
 ```
@@ -255,6 +276,85 @@ under `data_dir/keys/` with 0600 perms; tokens are fed to git via a credential
 helper (never on argv). Secrets are never returned by any API. The global
 Git credentials are persisted by host or host/path pattern through the UI,
 REST API or MCP tools. The most specific pattern wins.
+
+## API catalog
+
+An API service is one OpenAPI/Swagger document fetched over HTTP, or one gRPC
+server enumerated through server reflection. Services are filed into groups, and
+each group carries a description — that description is what an agent reads to
+decide where to look, so it is worth writing.
+
+Reading the catalog is deliberately a walk, not a dump:
+
+```
+list_api_groups     which area of the estate      (tens of tokens)
+list_api_services   which API in that area        (tens per service)
+list_api_endpoints  which endpoint in that API    (~20 per endpoint)
+get_api_endpoint    exactly how to call it        (bounded, ~1-3k)
+```
+
+A single specification routinely runs to hundreds of kilobytes, so handing one
+to a model is both unaffordable and useless. Only the last step returns schemas,
+and what it returns is pre-rendered at sync time: `$ref` resolution, `allOf`
+merging and schema flattening happen once per refresh, not once per question.
+Schemas are capped at 4 levels deep and 40 properties per object; anything cut
+is reported as `truncated` rather than silently dropped. Recursive types are
+stubbed by name at their first repeat.
+
+Every endpoint is also projected to Markdown under `apis/<name>/` and indexed
+into the docs RAG as `api:<name>`, so `search_docs` answers "which endpoint
+creates an invoice" and `get_api_endpoint` answers "how exactly do I call it".
+
+### Overriding a specification
+
+Published documents are frequently wrong for the reader's environment: they name
+a public host the caller cannot reach, their descriptions are thin, or a schema
+does not match what was actually deployed. Rather than requiring the document to
+be fixed at its source, a service carries three override layers, applied from
+most general to most specific so a targeted fix is never undone by a broad one:
+
+| Layer | Field | What it reaches |
+| --- | --- | --- |
+| 1 | `spec_patch` | The raw document, before parsing. An RFC 7386 JSON Merge Patch, so it can change **anything**, schemas included; a `null` value deletes a key. |
+| 2 | `base_url` | Replaces whatever servers the document declares, and therefore every generated request. |
+| 3 | `operations` | Per-endpoint `summary`, `description`, `tags` and `hidden`, keyed by operation id or `"METHOD /path"`. |
+
+`hidden` is the escape hatch for documents that publish internal or deprecated
+endpoints which would otherwise be offered to a model as valid choices.
+
+Changing any override forces a full re-sync. The document has not changed, but
+what krabby renders from it has, and conditional fetching would otherwise leave
+the edit invisible until the upstream specification happened to move.
+
+```jsonc
+{
+  "name": "billing",
+  "kind": "openapi",
+  "group": "finance",
+  "description": "Invoicing, payments and dunning.",
+  "base_url": "https://billing.internal.corp",
+  "config": { "url": "https://docs.corp/billing/openapi.yaml", "token": "..." },
+  "spec_patch": {
+    "components": { "schemas": { "Money": { "properties": {
+      "amount": { "type": "string", "description": "Minor units, as a decimal string." }
+    } } } }
+  },
+  "operations": {
+    "deleteAllInvoices": { "hidden": true },
+    "POST /v1/invoices": { "summary": "Raise a new invoice" }
+  },
+  "specs": ["0 3 * * *"]
+}
+```
+
+Secrets (`token`) are write-only: they are never returned by any API, and a
+blank value on update keeps the stored one. Syncs are conditional — an `ETag`,
+a `Last-Modified`, or a hash of the fetched bytes — so a service polled hourly
+against a static document is not re-embedded twenty-four times a day.
+
+Creating a service points krabby at a URL or a gRPC target of the operator's
+choosing, including private addresses; that is the intended use, and the
+security boundary is who holds the full MCP profile, not the network.
 
 ## Refresh pipeline
 

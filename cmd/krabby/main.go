@@ -14,6 +14,9 @@ import (
 	"github.com/rytsh/krabby/internal/config"
 	"github.com/rytsh/krabby/internal/memlimit"
 	"github.com/rytsh/krabby/internal/server"
+	"github.com/rytsh/krabby/internal/service/apicatalog"
+	"github.com/rytsh/krabby/internal/service/apicatalog/grpcreflect"
+	"github.com/rytsh/krabby/internal/service/apicatalog/openapi"
 	"github.com/rytsh/krabby/internal/service/coderag"
 	"github.com/rytsh/krabby/internal/service/credentials"
 	"github.com/rytsh/krabby/internal/service/gitops"
@@ -153,6 +156,7 @@ func run(ctx context.Context) error {
 			DocsVectorsDir: cfg.DocsVectorsDir(),
 			CodeVectorsDir: cfg.CodeVectorsDir(),
 			SourcesRootDir: cfg.SourcesRootDir(),
+			APIsRootDir:    cfg.APIsRootDir(),
 		},
 	)
 	defer func() {
@@ -176,6 +180,18 @@ func run(ctx context.Context) error {
 		websource.TypeConfluence: confluence.New(),
 		websource.TypeJira:       jira.New(),
 	})
+
+	// API catalog (OpenAPI documents, gRPC servers). Each service kind has a
+	// provider; new kinds plug in here.
+	apiStore, err := apicatalog.New(db)
+	if err != nil {
+		return err
+	}
+	mgr.SetAPICatalog(apiStore, map[string]apicatalog.Provider{
+		apicatalog.KindOpenAPI: openapi.New(),
+		apicatalog.KindGRPC:    grpcreflect.New(),
+	})
+
 	if err := mgr.ReconcileInterruptedStages(ctx); err != nil {
 		slog.Error("reconcile interrupted generation stages", "error", err)
 	}
