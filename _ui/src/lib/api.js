@@ -213,4 +213,6 @@ export const api = {
     req(`/apis/services/${name}/refresh${force ? "?force=true" : ""}`, { method: "POST", keepalive: true }),
   cancelApiService: (name) => req(`/apis/services/${name}/cancel`, { method: "POST", keepalive: true }),
   apiOperation: (name, id) => req(`/apis/services/${name}/operation?id=${encodeURIComponent(id)}`),
+  callApiOperation: (name, body) =>
+    req(`/apis/services/${name}/operation/call`, { method: "POST", body: JSON.stringify(body) }),
 };

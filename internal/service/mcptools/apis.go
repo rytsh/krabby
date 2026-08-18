@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -78,6 +79,19 @@ type addAPIServiceArgs struct {
 
 	RefreshInterval string   `json:"refresh_interval,omitempty" jsonschema:"Go duration between automatic syncs (e.g. 24h); omit for manual only"`
 	Specs           []string `json:"specs,omitempty"            jsonschema:"cron schedules for automatic syncs; when set they replace refresh_interval"`
+}
+
+type callAPIEndpointArgs struct {
+	Service  string `json:"service"  jsonschema:"the api service name from list_api_services"`
+	Endpoint string `json:"endpoint" jsonschema:"the operation id from list_api_endpoints; 'METHOD /path' also resolves"`
+
+	PathParams map[string]string `json:"path_params,omitempty" jsonschema:"values for the {name} placeholders in the endpoint path"`
+	Query      map[string]string `json:"query,omitempty"       jsonschema:"query-string parameters"`
+	Headers    map[string]string `json:"headers,omitempty"     jsonschema:"extra request headers; these override the service's configured headers, and an empty value removes one"`
+
+	Body json.RawMessage `json:"body,omitempty" jsonschema:"request payload; JSON for HTTP endpoints, protojson for gRPC (an array is a sequence of messages for a client-streaming method)"`
+
+	TimeoutSec int `json:"timeout_sec,omitempty" jsonschema:"call timeout in seconds (default 30, max 120)"`
 }
 
 type updateAPIServiceArgs struct {
@@ -172,9 +186,9 @@ type apiServiceConfigOutput struct {
 
 // ---- registration ----------------------------------------------------------
 
-// addAPITools registers the API-catalog discovery tools, plus the
-// administration tools when the full profile is in use.
-func addAPITools(server *mcp.Server, mgr *manager.Manager, includeAdmin bool) {
+// addAPITools registers the API-catalog discovery tools, plus call_api_endpoint
+// for the caller and full profiles and the administration tools for full only.
+func addAPITools(server *mcp.Server, mgr *manager.Manager, includeCall, includeAdmin bool) {
 	addTool(server, &mcp.Tool{
 		Name: "list_api_groups",
 		Description: "List the API catalog's groups with their descriptions and service counts. " +
@@ -306,9 +320,49 @@ func addAPITools(server *mcp.Server, mgr *manager.Manager, includeAdmin bool) {
 		return jsonResult(out), nil, nil
 	})
 
+	if includeCall {
+		addAPICallTool(server, mgr)
+	}
 	if includeAdmin {
 		addAPIAdminTools(server, mgr)
 	}
+}
+
+// addAPICallTool registers call_api_endpoint. Caller and full profiles: the
+// tool has real side effects on the target API, but it cannot reach anything an
+// operator did not already catalogue — which is a weaker trust requirement than
+// the admin tools, and the reason it has a profile of its own.
+func addAPICallTool(server *mcp.Server, mgr *manager.Manager) {
+	addTool(server, &mcp.Tool{
+		Name: "call_api_endpoint",
+		Description: "Send a real request to a catalogued endpoint and return the response. " +
+			"The method, host and path come from the catalog and the service's stored credentials; " +
+			"you supply path_params, query, headers and a body. Works for HTTP and gRPC endpoints " +
+			"(for gRPC the body is protojson; streaming methods accept/return arrays of messages). " +
+			"This has real side effects on the target service — call mutating endpoints only when " +
+			"explicitly asked. A non-2xx status is returned as a result, not an error.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args callAPIEndpointArgs) (*mcp.CallToolResult, any, error) {
+		service := strings.TrimSpace(strings.ToLower(args.Service))
+		if service == "" {
+			return nil, nil, fmt.Errorf("service is required")
+		}
+		if strings.TrimSpace(args.Endpoint) == "" {
+			return nil, nil, fmt.Errorf("endpoint is required")
+		}
+
+		res, err := mgr.CallAPIOperation(ctx, service, args.Endpoint, apicatalog.CallRequest{
+			PathParams: args.PathParams,
+			Query:      args.Query,
+			Headers:    args.Headers,
+			Body:       args.Body,
+			Timeout:    time.Duration(args.TimeoutSec) * time.Second,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return jsonResult(res), res, nil
+	})
 }
 
 // addAPIAdminTools registers the catalog management tools. Admin profile only:

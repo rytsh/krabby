@@ -40,8 +40,17 @@ Repos are grouped into namespaces. When the repo is unknown a search covers only
 
 add_repo and refresh_repo run in the background by default. Poll repo_status until ready or error before querying.`
 
+// The three profiles are strictly nested: standard ⊂ caller ⊂ full.
+//
+// Caller exists because "may send requests to catalogued APIs" and "may rewire
+// krabby itself" are different trust decisions. An agent that helps someone
+// exercise an internal API needs the first and has no business with the second
+// — handing it credentials administration just to unlock call_api_endpoint
+// would make the full profile the default in practice, which is exactly what a
+// smaller standard catalog exists to avoid.
 const (
 	ToolProfileStandard = "standard"
+	ToolProfileCaller   = "caller"
 	ToolProfileFull     = "full"
 )
 
@@ -50,11 +59,18 @@ const (
 // status (the build keeps running in the background); <=0 means no server-side
 // cap.
 func New(mgr *manager.Manager, version string, waitTimeout time.Duration, profile string) *mcp.Server {
+	full := profile == ToolProfileFull
+	canCall := full || profile == ToolProfileCaller
+
 	title := "Krabby codebase search and knowledge"
 	instructions := serverInstructions
-	if profile == ToolProfileFull {
+	switch {
+	case full:
 		title += " (full administration)"
-		instructions += "\n\nThis connection uses the full profile and can mutate credentials, runtime configuration, web sources and the API catalog. Collections use add/update/refresh/delete_source and get_source_config; pages-source items use register_source_page, import_source_pages, import_source_sitemap and delete_source_page. API services use add/update/refresh/delete_api_service and get_api_service_config. Use mutation tools only when explicitly requested."
+		instructions += "\n\nThis connection uses the full profile and can mutate credentials, runtime configuration, web sources and the API catalog. Collections use add/update/refresh/delete_source and get_source_config; pages-source items use register_source_page, import_source_pages, import_source_sitemap and delete_source_page. API services use add/update/refresh/delete_api_service and get_api_service_config. call_api_endpoint sends a real request to a catalogued API. Use mutation tools — and call_api_endpoint against mutating endpoints — only when explicitly requested."
+	case canCall:
+		title += " (api caller)"
+		instructions += "\n\nThis connection uses the caller profile: in addition to the standard read-only tools it can send real requests to catalogued APIs with call_api_endpoint. Walk the catalog first (list_api_endpoints, get_api_endpoint) to learn the parameters, and call mutating endpoints only when explicitly requested."
 	}
 
 	server := mcp.NewServer(&mcp.Implementation{
@@ -73,9 +89,9 @@ func New(mgr *manager.Manager, version string, waitTimeout time.Duration, profil
 	addQueryTools(server, mgr)
 	addFileTools(server, mgr)
 	addHistoryTools(server, mgr)
-	addDocTools(server, mgr, profile == ToolProfileFull)
-	addAPITools(server, mgr, profile == ToolProfileFull)
-	if profile == ToolProfileFull {
+	addDocTools(server, mgr, full)
+	addAPITools(server, mgr, canCall, full)
+	if full {
 		addCredentialTools(server, mgr)
 	}
 

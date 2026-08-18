@@ -126,14 +126,90 @@
 
   async function openDetail(service, operationId) {
     detailBusy = true;
+    tryOpen = false;
+    tryRes = null;
     try {
       const res = await api.apiOperation(service, operationId);
       detail = { service, operationId, ...res };
+      initTry(detail.detail || {});
     } catch {
       detail = null;
     } finally {
       detailBusy = false;
     }
+  }
+
+  // ---- try it ---------------------------------------------------------------
+
+  // The try panel is pre-filled from the operation itself: one row per declared
+  // path/query parameter (example value when the spec gives one) and the
+  // generated example body. The caller edits values, never the request shape —
+  // that is the same boundary the backend enforces.
+  let tryOpen = $state(false);
+  let tryBusy = $state(false);
+  let tryRes = $state(null);
+  let tryReq = $state({ pathParams: [], query: [], headers: [], body: "" });
+
+  function initTry(d) {
+    const params = d.parameters || [];
+    const prefill = (p) => p.example || p.default || "";
+    tryReq = {
+      pathParams: params
+        .filter((p) => p.in === "path")
+        .map((p) => ({ name: p.name, value: prefill(p), required: true })),
+      query: params
+        .filter((p) => p.in === "query")
+        .map((p) => ({ name: p.name, value: prefill(p), required: !!p.required })),
+      headers: [{ name: "", value: "" }],
+      body: d.request?.body ? JSON.stringify(d.request.body, null, 2) : "",
+    };
+    tryRes = null;
+  }
+
+  function rowsToMap(rows, { keepEmpty = false } = {}) {
+    const out = {};
+    for (const r of rows) {
+      const name = (r.name || "").trim();
+      if (!name) continue;
+      if (!keepEmpty && r.value === "") continue;
+      out[name] = r.value;
+    }
+    return out;
+  }
+
+  async function sendTry() {
+    if (!detail) return;
+    tryBusy = true;
+    tryRes = null;
+    try {
+      const body = tryReq.body.trim();
+      tryRes = await api.callApiOperation(detail.service, {
+        endpoint: detail.operationId,
+        path_params: rowsToMap(tryReq.pathParams),
+        query: rowsToMap(tryReq.query),
+        // Headers keep explicit empties: an empty value removes a configured
+        // header on the backend, which is how "call it unauthenticated" works.
+        headers: rowsToMap(tryReq.headers, { keepEmpty: true }),
+        ...(body ? { body: JSON.parse(body) } : {}),
+      });
+    } catch (e) {
+      // A request krabby refused to assemble (missing parameter, bad JSON body).
+      tryRes = { status_text: "not sent", error: e.message, ok: false };
+    } finally {
+      tryBusy = false;
+    }
+  }
+
+  function prettyBody(res) {
+    if (!res?.body) return "";
+    if ((res.content_type || "").includes("json")) {
+      try {
+        return JSON.stringify(JSON.parse(res.body), null, 2);
+      } catch {
+        /* not actually JSON; show as-is */
+      }
+    }
+    return res.body;
   }
 
   // ---- service form --------------------------------------------------------
@@ -727,6 +803,99 @@
           <h3 class="mb-1 text-[13px] font-medium">Example request</h3>
           <pre class="mb-3 overflow-x-auto rounded-md bg-surface-2 p-3 font-mono text-[11.5px]">{d.request.command}</pre>
         {/if}
+
+        <!-- Try it -->
+        <div class="mb-3 rounded-md border border-line">
+          <button
+            class="flex w-full items-center justify-between px-3 py-2 text-[13px] font-medium"
+            onclick={() => (tryOpen = !tryOpen)}
+          >
+            <span>Try it</span>
+            <Icon name={tryOpen ? "chevron-down" : "chevron-right"} size={14} />
+          </button>
+
+          {#if tryOpen}
+            <div class="border-t border-line p-3">
+              {#if tryReq.pathParams.length}
+                <div class="mb-1 text-[12px] font-medium text-dim">Path parameters</div>
+                {#each tryReq.pathParams as p (p.name)}
+                  <div class="mb-1 flex items-center gap-2">
+                    <span class="w-40 shrink-0 truncate font-mono text-[12px]">{p.name} <span class="text-warn">*</span></span>
+                    <input class="input h-7 flex-1 text-[12px]" bind:value={p.value} placeholder="value" />
+                  </div>
+                {/each}
+              {/if}
+
+              {#if tryReq.query.length}
+                <div class="mb-1 mt-2 text-[12px] font-medium text-dim">Query</div>
+                {#each tryReq.query as p (p.name)}
+                  <div class="mb-1 flex items-center gap-2">
+                    <span class="w-40 shrink-0 truncate font-mono text-[12px]">{p.name}{#if p.required}
+                        <span class="text-warn">*</span>{/if}</span>
+                    <input class="input h-7 flex-1 text-[12px]" bind:value={p.value} placeholder="value" />
+                  </div>
+                {/each}
+              {/if}
+
+              <div class="mb-1 mt-2 flex items-center justify-between">
+                <span class="text-[12px] font-medium text-dim">Headers</span>
+                <button
+                  class="text-[12px] text-faint hover:text-dim"
+                  onclick={() => (tryReq.headers = [...tryReq.headers, { name: "", value: "" }])}
+                >
+                  + add
+                </button>
+              </div>
+              {#each tryReq.headers as h, i (i)}
+                <div class="mb-1 flex items-center gap-2">
+                  <input class="input h-7 w-40 shrink-0 font-mono text-[12px]" bind:value={h.name} placeholder="Name" />
+                  <input class="input h-7 flex-1 text-[12px]" bind:value={h.value} placeholder="value (empty removes a configured header)" />
+                </div>
+              {/each}
+
+              {#if d.request_body || d.method === "GRPC"}
+                <div class="mb-1 mt-2 text-[12px] font-medium text-dim">
+                  Body <span class="font-mono text-[11px] text-faint">{d.request_body?.content_type || "application/json"}</span>
+                </div>
+                <textarea class="input h-32 w-full font-mono text-[12px]" bind:value={tryReq.body}></textarea>
+              {/if}
+
+              <div class="mt-2 flex items-center gap-2">
+                <button class="btn btn-primary h-7 text-[12px]" disabled={tryBusy} onclick={sendTry}>
+                  {tryBusy ? "Sending…" : "Send"}
+                </button>
+                <span class="text-[11px] text-faint">
+                  Sent by krabby using the service's configured credentials.
+                </span>
+              </div>
+
+              {#if tryRes}
+                <div class="mt-3 border-t border-line pt-2">
+                  <div class="flex items-center gap-3 text-[12.5px]">
+                    <span class="font-mono font-medium {tryRes.ok ? 'text-ok' : 'text-err'}">{tryRes.status_text}</span>
+                    {#if tryRes.duration_ms != null}<span class="text-faint">{tryRes.duration_ms} ms</span>{/if}
+                    {#if tryRes.body_bytes}<span class="text-faint">{tryRes.body_bytes} B</span>{/if}
+                    {#if tryRes.message_count}<span class="text-faint">{tryRes.message_count} message{tryRes.message_count > 1 ? "s" : ""}</span>{/if}
+                  </div>
+                  {#if tryRes.error}
+                    <div class="mt-1 text-[12px] text-err">{tryRes.error}</div>
+                  {/if}
+                  {#if tryRes.truncated}
+                    <div class="mt-1 text-[12px] text-warn">The response was truncated.</div>
+                  {/if}
+                  {#if tryRes.notes?.length}
+                    {#each tryRes.notes as note (note)}
+                      <div class="mt-1 text-[12px] text-faint">{note}</div>
+                    {/each}
+                  {/if}
+                  {#if tryRes.body}
+                    <pre class="mt-2 max-h-80 overflow-auto rounded-md bg-surface-2 p-3 font-mono text-[11.5px]">{prettyBody(tryRes)}</pre>
+                  {/if}
+                </div>
+              {/if}
+            </div>
+          {/if}
+        </div>
 
         {#if d.parameters?.length}
           <h3 class="mb-1 text-[13px] font-medium">Parameters</h3>

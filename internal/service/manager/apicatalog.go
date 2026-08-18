@@ -379,6 +379,73 @@ func (m *Manager) TestAPIServiceConfig(ctx context.Context, name, kind string, c
 	return previewer.Preview(ctx, merged, patch)
 }
 
+// CallAPIOperation invokes one catalogued operation against the live service
+// and returns what came back.
+//
+// This is the one place in the API catalog that has an effect outside krabby,
+// so the boundary is drawn tightly: the operation must already be in the
+// catalog, and the caller supplies only parameter values, headers and a body.
+// Method, host and path shape come from the stored record and the service's
+// provider config. A caller that can reach this cannot choose *what* to call,
+// only which of the operations an operator already catalogued — which is what
+// makes it reasonable to expose to an MCP client.
+//
+// Required parameters are checked here rather than left to the peer. The
+// endpoint's own 400 is a worse answer: it arrives after a real request was
+// sent, and it describes the failure in the API's vocabulary rather than in
+// terms of the catalog the caller is holding.
+func (m *Manager) CallAPIOperation(
+	ctx context.Context,
+	service, handle string,
+	req apicatalog.CallRequest,
+) (apicatalog.CallResponse, error) {
+	var out apicatalog.CallResponse
+
+	if m.apiStore == nil {
+		return out, ErrNoAPICatalog
+	}
+
+	svc, err := m.apiStore.GetService(ctx, service)
+	if err != nil {
+		return out, err
+	}
+	if svc == nil {
+		return out, fmt.Errorf("api service %s not found", service)
+	}
+
+	provider, ok := m.apiProviders[svc.Kind]
+	if !ok {
+		return out, fmt.Errorf("no provider for api service kind %q", svc.Kind)
+	}
+
+	caller, ok := provider.(apicatalog.Caller)
+	if !ok {
+		return out, fmt.Errorf("api service kind %q does not support sending requests", svc.Kind)
+	}
+
+	op, err := m.apiStore.FindOperation(ctx, service, handle)
+	if err != nil {
+		return out, err
+	}
+	if op == nil {
+		return out, fmt.Errorf("operation %s not found in api service %s", handle, service)
+	}
+	if len(op.Detail) == 0 {
+		return out, fmt.Errorf("operation %s has no stored detail; refresh the service", handle)
+	}
+
+	var detail apicatalog.Detail
+	if err := json.Unmarshal(op.Detail, &detail); err != nil {
+		return out, fmt.Errorf("decode detail of %s; %w", op.ID, err)
+	}
+
+	if missing := apicatalog.MissingRequired(&detail, req); len(missing) > 0 {
+		return out, fmt.Errorf("missing required parameter(s): %s", strings.Join(missing, ", "))
+	}
+
+	return caller.Call(ctx, svc, &detail, req)
+}
+
 // ---- scheduling ------------------------------------------------------------
 
 // TriggerAPIRefresh queues a background sync of one service on the central work

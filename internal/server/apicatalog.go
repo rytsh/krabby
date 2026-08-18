@@ -318,6 +318,54 @@ func getAPIOperation(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
+// apiCallRequest is one "send this endpoint" request from the UI or a script.
+//
+// Timeout is seconds rather than a Go duration string because this shape is
+// typed by a browser, and a number needs no parser on either side.
+type apiCallRequest struct {
+	Endpoint   string            `json:"endpoint"`
+	PathParams map[string]string `json:"path_params,omitempty"`
+	Query      map[string]string `json:"query,omitempty"`
+	Headers    map[string]string `json:"headers,omitempty"`
+	Body       json.RawMessage   `json:"body,omitempty"`
+	TimeoutSec int               `json:"timeout_sec,omitempty"`
+}
+
+// callAPIOperation sends a real request to a catalogued endpoint and returns
+// the response.
+//
+// A failed call still answers 200: the status the peer returned, including 500,
+// is the result the caller asked for. Only a request that could not be
+// assembled — an unknown endpoint, a missing path parameter, a service whose
+// kind cannot call — is a 400, because that is a mistake in the request to
+// krabby rather than an answer from the API.
+func callAPIOperation(mgr *manager.Manager) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		name := c.Request.PathValue("name")
+
+		var req apiCallRequest
+		if err := c.Bind(&req); err != nil {
+			return c.SetStatus(http.StatusBadRequest).Err(err)
+		}
+		if strings.TrimSpace(req.Endpoint) == "" {
+			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": "endpoint is required"})
+		}
+
+		res, err := mgr.CallAPIOperation(c.Request.Context(), name, req.Endpoint, apicatalog.CallRequest{
+			PathParams: req.PathParams,
+			Query:      req.Query,
+			Headers:    req.Headers,
+			Body:       req.Body,
+			Timeout:    time.Duration(req.TimeoutSec) * time.Second,
+		})
+		if err != nil {
+			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+		}
+
+		return c.SendJSON(res)
+	}
+}
+
 func updateAPIService(mgr *manager.Manager) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req apiServiceUpdateRequest

@@ -279,10 +279,11 @@ func run(ctx context.Context) error {
 	}()
 
 	mcpServer := mcptools.New(mgr, version, cfg.MCP.WaitTimeout, mcptools.ToolProfileStandard)
+	mcpCallerServer := mcptools.New(mgr, version, cfg.MCP.WaitTimeout, mcptools.ToolProfileCaller)
 	mcpFullServer := mcptools.New(mgr, version, cfg.MCP.WaitTimeout, mcptools.ToolProfileFull)
 
 	// Server blocks until ctx is cancelled, then shuts down.
-	if err := server.Start(ctx, cfg, mgr, mcpServer, mcpFullServer); err != nil {
+	if err := server.Start(ctx, cfg, mgr, mcpServer, mcpCallerServer, mcpFullServer); err != nil {
 		return fmt.Errorf("start server; %w", err)
 	}
 

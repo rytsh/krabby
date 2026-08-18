@@ -42,7 +42,7 @@ import (
 const MCPToolProfileHeader = "X-Krabby-Tool-Profile"
 
 // Start runs the HTTP server until ctx is cancelled.
-func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpServer, mcpFullServer *mcp.Server) error {
+func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpServer, mcpCallerServer, mcpFullServer *mcp.Server) error {
 	server := ada.New()
 	server.Use(
 		mrecover.Middleware(),
@@ -83,9 +83,10 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	})
 
 	// The profile is selected when the client connects. Omitting the header keeps
-	// the smaller standard catalog; full exposes administration tools as well.
+	// the smaller standard catalog; caller adds call_api_endpoint; full exposes
+	// administration tools as well.
 	mcpHandler := mcp.NewStreamableHTTPHandler(
-		func(r *http.Request) *mcp.Server { return mcpServerForRequest(r, mcpServer, mcpFullServer) },
+		func(r *http.Request) *mcp.Server { return mcpServerForRequest(r, mcpServer, mcpCallerServer, mcpFullServer) },
 		&mcp.StreamableHTTPOptions{},
 	)
 	// The MCP key can be overridden at runtime from the UI; resolve it per
@@ -188,6 +189,7 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	api.POST("/apis/services/{name}/refresh", server.Wrap(refreshAPIService(mgr)))
 	api.POST("/apis/services/{name}/cancel", server.Wrap(cancelAPIService(mgr)))
 	api.GET("/apis/services/{name}/operation", server.Wrap(getAPIOperation(mgr)))
+	api.POST("/apis/services/{name}/operation/call", server.Wrap(callAPIOperation(mgr)))
 
 	api.GET("/docs/search", server.Wrap(searchDocs(mgr)))
 	api.GET("/code/search", server.Wrap(searchCode(mgr)))
@@ -229,12 +231,18 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 
 // ---- middleware -------------------------------------------------------------
 
-func mcpServerForRequest(r *http.Request, standard, full *mcp.Server) *mcp.Server {
-	if strings.EqualFold(strings.TrimSpace(r.Header.Get(MCPToolProfileHeader)), "full") {
+func mcpServerForRequest(r *http.Request, standard, caller, full *mcp.Server) *mcp.Server {
+	switch strings.ToLower(strings.TrimSpace(r.Header.Get(MCPToolProfileHeader))) {
+	case "full":
 		return full
+	case "caller":
+		return caller
+	default:
+		// An unknown profile name degrades to standard rather than erroring:
+		// the header is advisory capability selection, not authentication, and
+		// the safe default is the smallest catalog.
+		return standard
 	}
-
-	return standard
 }
 
 // apiKeyMiddleware guards a handler with an API key resolved per request, so

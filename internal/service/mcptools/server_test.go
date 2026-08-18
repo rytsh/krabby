@@ -51,10 +51,15 @@ func TestToolProfiles(t *testing.T) {
 	tests := []struct {
 		profile string
 		count   int
+		call    bool
 		admin   bool
 	}{
 		{profile: ToolProfileStandard, count: 38},
-		{profile: ToolProfileFull, count: 64, admin: true},
+		// Caller is standard plus exactly one tool. If this diff ever grows
+		// past call_api_endpoint, the profile has drifted from its reason to
+		// exist: "may exercise catalogued APIs" without "may rewire krabby".
+		{profile: ToolProfileCaller, count: 39, call: true},
+		{profile: ToolProfileFull, count: 65, call: true, admin: true},
 	}
 
 	for _, tt := range tests {
@@ -146,6 +151,9 @@ func TestToolProfiles(t *testing.T) {
 				if names[name] != tt.admin {
 					t.Errorf("admin tool %q present=%t, want %t", name, names[name], tt.admin)
 				}
+			}
+			if names["call_api_endpoint"] != tt.call {
+				t.Errorf("call_api_endpoint present=%t, want %t", names["call_api_endpoint"], tt.call)
 			}
 			for _, name := range []string{"lock_repo", "unlock_repo"} {
 				if names[name] {

@@ -15,6 +15,7 @@
 package openapi
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -338,7 +339,7 @@ func (p *Provider) Preview(ctx context.Context, raw json.RawMessage, patch json.
 func (p *Provider) walk(svc *apicatalog.Service, doc json.RawMessage, emit apicatalog.Emit) (apicatalog.ServiceInfo, error) {
 	document, err := libopenapi.NewDocument(doc)
 	if err != nil {
-		return apicatalog.ServiceInfo{}, fmt.Errorf("parse api document; %w", err)
+		return apicatalog.ServiceInfo{}, fmt.Errorf("parse api document; %w%s", err, describe(doc))
 	}
 	defer document.Release()
 
@@ -462,6 +463,29 @@ func (p *Provider) clientFor(cfg resolvedConfig) *http.Client {
 	clone.TLSClientConfig.InsecureSkipVerify = true
 
 	return &http.Client{Timeout: fetchTimeout, Transport: clone}
+}
+
+// describe says what was actually fetched when a document fails to parse.
+//
+// libopenapi's rejection is accurate but blind: "spec type not supported by
+// libopenapi, sorry" only means the root object carries no swagger, openapi or
+// asyncapi key. That is what a login page, a Swagger UI shell, an error
+// envelope and a genuinely malformed spec all look like from the inside, and
+// without a glimpse of the bytes an operator has no way to tell which one they
+// pointed the URL at. The returned string is appended to the parse error, so it
+// leads with a space and stays short enough to sit in a status field.
+func describe(doc []byte) string {
+	trimmed := bytes.TrimSpace(doc)
+	if len(trimmed) == 0 {
+		return ""
+	}
+
+	head := string(trimmed[:min(len(trimmed), 512)])
+	if lower := strings.ToLower(head); strings.HasPrefix(lower, "<!doctype") || strings.HasPrefix(lower, "<html") {
+		return " (the url returned an HTML page, not a specification: point it at the raw document, e.g. /swagger.json, /v2/api-docs or /openapi.yaml)"
+	}
+
+	return " (document begins: " + truncate(head, 200) + ")"
 }
 
 func truncate(s string, n int) string {

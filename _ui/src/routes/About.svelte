@@ -13,11 +13,11 @@
   let configHeaders = $derived.by(() => {
     const headers = [];
     if (apiKeySet) headers.push(`"X-Api-Key": "<your-api-key>"`);
-    if (mcpProfile === "full") headers.push(`"X-Krabby-Tool-Profile": "full"`);
+    if (mcpProfile !== "standard") headers.push(`"X-Krabby-Tool-Profile": "${mcpProfile}"`);
     return headers.length ? `,\n      "headers": { ${headers.join(", ")} }` : "";
   });
   let cliHeaders = $derived(
-    `${apiKeySet ? ' --header "X-Api-Key: <your-api-key>"' : ""}${mcpProfile === "full" ? ' --header "X-Krabby-Tool-Profile: full"' : ""}`,
+    `${apiKeySet ? ' --header "X-Api-Key: <your-api-key>"' : ""}${mcpProfile !== "standard" ? ` --header "X-Krabby-Tool-Profile: ${mcpProfile}"` : ""}`,
   );
 
   let copied = $state("");
@@ -57,7 +57,7 @@
 Server name: krabby
 Transport: streamable HTTP
 URL: ${mcpUrl}
-Tool profile: ${mcpProfile}${mcpProfile === "full" ? " (send X-Krabby-Tool-Profile: full on every request)" : " (default; no profile header)"}
+Tool profile: ${mcpProfile}${mcpProfile !== "standard" ? ` (send X-Krabby-Tool-Profile: ${mcpProfile} on every request)` : " (default; no profile header)"}
 ${apiKeySet ? "Authentication: send the API key in the X-Api-Key header. Ask me for the key before editing the configuration." : "Authentication: none"}
 
 Detect this client's MCP configuration format and update the appropriate project or user configuration. Preserve all existing settings and other MCP servers. After configuring it, verify the connection and confirm that the Krabby tools are available.`);
@@ -73,6 +73,10 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
   -H "Content-Type: application/json" \\
   -d '{"url": "https://github.com/owner/repo", "branch": ""}'`);
 
+  // The complete tool inventory, kept in sync with the registrations in
+  // internal/service/mcptools (TestToolProfiles pins the counts: 38 standard,
+  // 39 caller, 65 full). A tool's third element gates it by profile: absent =
+  // every profile, "caller" = caller and full, true = full only.
   const toolGroups = [
     {
       name: "Repositories",
@@ -83,6 +87,17 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
         ["refresh_repo", "Pull the latest commits and rebuild the knowledge graph."],
         ["repo_status", "Get build state, last commit and last error of a repository."],
         ["cancel_repo_job", "Cancel the refresh or generation job currently running for a repository."],
+        ["set_repo_namespace", "Move a repository into a namespace."],
+        ["set_repo_overrides", "Set per-repository indexing overrides (include/exclude patterns)."],
+        ["list_refs", "List a repository's branches and tags."],
+      ],
+    },
+    {
+      name: "Namespaces",
+      tools: [
+        ["list_namespaces", "Discover repository groups, counts, and descriptions before broad search."],
+        ["set_namespace_description", "Describe a namespace so a model can pick the right group."],
+        ["delete_namespace", "Delete a namespace description; repositories keep their tag."],
       ],
     },
     {
@@ -98,20 +113,66 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
       ],
     },
     {
-      name: "Files",
+      name: "Files & history",
       tools: [
         ["list_files", "Inspect a bounded page of files and directories in a tracked clone."],
         ["read_file", "Read a bounded page of a known source file."],
+        ["git_log", "Commit history of a repository, a ref range, or one file."],
+        ["git_diff", "Diff between two refs or commits."],
+        ["git_blame", "Line-by-line authorship of a file region."],
       ],
     },
     {
       name: "Docs & search",
       tools: [
+        ["search_code", "First choice for symbols, paths, definitions, usages, and implementation locations."],
+        ["search_docs", "Search repo docs and web sources with hybrid, semantic, or lexical retrieval."],
         ["list_docs", "Page through generated documentation metadata for a repository."],
         ["get_doc", "Read a bounded page of a known generated document."],
-        ["search_docs", "Search repo docs and web sources with hybrid, semantic, or lexical retrieval."],
         ["list_sources", "List Custom web, Confluence, and Jira collections and their web:<name> search keys."],
-        ["search_code", "First choice for symbols, paths, definitions, usages, and implementation locations."],
+        ["get_source", "Inspect one web collection with a bounded sample of its items."],
+      ],
+    },
+    {
+      name: "API catalog",
+      tools: [
+        ["list_api_groups", "List API groups with descriptions — the entry point for 'how do I call this'."],
+        ["list_api_services", "List catalogued API services with title, base URL and endpoint count."],
+        ["list_api_endpoints", "Page through one service's endpoints, narrowed by search, tag, or method."],
+        ["get_api_endpoint", "Full detail of one endpoint: parameters, schemas, auth, and a ready-to-run command."],
+        ["call_api_endpoint", "Send a real request to a catalogued endpoint and return the response.", "caller"],
+        ["api_service_kinds", "List the service kinds add_api_service accepts.", true],
+        ["add_api_service", "Catalogue an OpenAPI document or gRPC server and index its endpoints.", true],
+        ["update_api_service", "Update a catalogued service's config, overrides, or schedule.", true],
+        ["delete_api_service", "Remove a service and its indexed endpoints.", true],
+        ["refresh_api_service", "Queue a re-sync of a catalogued service.", true],
+        ["get_api_service_config", "Inspect a service's redacted provider config and overrides.", true],
+        ["set_api_group_description", "Create or describe an API group.", true],
+        ["delete_api_group", "Delete an API group's description; services keep their tag.", true],
+      ],
+    },
+    {
+      name: "Queue",
+      tools: [
+        ["queue_status", "Inspect the background work queue and running tasks."],
+        ["bump_task", "Move a queued task to the front."],
+        ["cancel_task", "Cancel a queued or running task."],
+        ["set_task_concurrency", "Adjust how many background tasks run in parallel."],
+      ],
+    },
+    {
+      name: "Web sources",
+      tools: [
+        ["source_types", "List the web source kinds add_source accepts.", true],
+        ["add_source", "Add a Custom web, Confluence, or Jira collection.", true],
+        ["update_source", "Update a collection's config or schedule.", true],
+        ["delete_source", "Remove a collection and its indexed items.", true],
+        ["refresh_source", "Queue a re-sync of a collection.", true],
+        ["get_source_config", "Inspect a collection's redacted config.", true],
+        ["register_source_page", "Register one page URL in a pages collection.", true],
+        ["import_source_pages", "Bulk-register page URLs into a pages collection.", true],
+        ["import_source_sitemap", "Import page URLs from a sitemap.", true],
+        ["delete_source_page", "Remove one page from a pages collection.", true],
       ],
     },
     {
@@ -122,6 +183,11 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
         ["test_llm", "Test the chat LLM connection without saving.", true],
         ["test_embedder", "Test the embeddings connection without saving.", true],
         ["test_code_embedder", "Test the dedicated code embeddings connection without saving.", true],
+      ],
+    },
+    {
+      name: "Credentials",
+      tools: [
         ["set_credential", "Store a git credential (SSH key or token) for a host or host/path prefix.", true],
         ["list_credentials", "List stored git credential patterns (secrets never returned).", true],
         ["remove_credential", "Remove a stored git credential by its pattern.", true],
@@ -130,7 +196,12 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
   ];
   let visibleToolGroups = $derived(
     toolGroups
-      .map((group) => ({ ...group, tools: group.tools.filter(([, , fullOnly]) => !fullOnly || mcpProfile === "full") }))
+      .map((group) => ({
+        ...group,
+        tools: group.tools.filter(
+          ([, , gate]) => !gate || (gate === "caller" ? mcpProfile !== "standard" : mcpProfile === "full"),
+        ),
+      }))
       .filter((group) => group.tools.length > 0),
   );
 
@@ -159,14 +230,18 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
     <code class="rounded-md border border-line bg-bg px-3 py-2 font-mono text-[13px]">{mcpUrl}</code>
     <button class="btn btn-sm" onclick={() => copy(mcpUrl, "url")}>{copied === "url" ? "Copied" : "Copy"}</button>
   </div>
-  <div class="mt-3 grid gap-2 sm:grid-cols-2">
+  <div class="mt-3 grid gap-2 sm:grid-cols-3">
     <div class="rounded-md border border-accent/40 bg-accent/5 p-3">
       <div class="text-[13px] font-medium">Standard profile</div>
-      <div class="mt-1 text-[12px] text-dim">Default when no profile header is sent. Exposes 28 repo, query, search, and read tools.</div>
+      <div class="mt-1 text-[12px] text-dim">Default when no profile header is sent. Read-only repo, query, search, and catalog tools.</div>
+    </div>
+    <div class="rounded-md border border-line p-3">
+      <div class="text-[13px] font-medium">Caller profile</div>
+      <div class="mt-1 text-[12px] text-dim">Same URL with <code class="font-mono">X-Krabby-Tool-Profile: caller</code>. Standard plus <code class="font-mono">call_api_endpoint</code> — sends real requests to catalogued APIs.</div>
     </div>
     <div class="rounded-md border border-line p-3">
       <div class="text-[13px] font-medium">Full profile</div>
-      <div class="mt-1 text-[12px] text-dim">Uses the same URL with <code class="font-mono">X-Krabby-Tool-Profile: full</code>. Adds credential and docs/RAG administration tools.</div>
+      <div class="mt-1 text-[12px] text-dim">Same URL with <code class="font-mono">X-Krabby-Tool-Profile: full</code>. Everything: caller plus credential, docs/RAG and catalog administration.</div>
     </div>
   </div>
   {#if apiKeySet}
@@ -209,6 +284,13 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
         >Standard</button>
         <button
           class="rounded px-2.5 py-1 text-[11px] text-dim transition-colors hover:text-fg"
+          class:!bg-surface-2={mcpProfile === "caller"}
+          class:!text-fg={mcpProfile === "caller"}
+          aria-pressed={mcpProfile === "caller"}
+          onclick={() => (mcpProfile = "caller")}
+        >Caller</button>
+        <button
+          class="rounded px-2.5 py-1 text-[11px] text-dim transition-colors hover:text-fg"
           class:!bg-surface-2={mcpProfile === "full"}
           class:!text-fg={mcpProfile === "full"}
           aria-pressed={mcpProfile === "full"}
@@ -220,9 +302,11 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
     <pre class="m-0 overflow-x-auto rounded-md border border-line bg-bg p-3 font-mono text-[12.5px] leading-relaxed">{opencodeConfig}</pre>
     <p class="mb-0 mt-1.5 text-[11px] text-faint">
       {#if mcpProfile === "full"}
-        Full adds <code class="font-mono">X-Krabby-Tool-Profile: full</code> under <code class="font-mono">headers</code> and exposes all 42 tools.
+        Full adds <code class="font-mono">X-Krabby-Tool-Profile: full</code> under <code class="font-mono">headers</code> and exposes the complete catalog, administration included.
+      {:else if mcpProfile === "caller"}
+        Caller adds <code class="font-mono">X-Krabby-Tool-Profile: caller</code> under <code class="font-mono">headers</code>: the standard catalog plus <code class="font-mono">call_api_endpoint</code>.
       {:else}
-        Standard omits the profile header and exposes the smaller 28-tool catalog.
+        Standard omits the profile header and exposes the smaller read-only catalog.
       {/if}
       Add this to project or user <code class="font-mono">opencode.json</code>, restart the client, then verify with <code class="font-mono">opencode mcp list</code>.
     </p>

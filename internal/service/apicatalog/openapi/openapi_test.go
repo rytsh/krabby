@@ -379,6 +379,73 @@ func TestFetchV2(t *testing.T) {
 	}
 }
 
+// TestFetchV2YAML guards the plain YAML form of a swagger document: the fetch
+// path hands the bytes to libopenapi untouched when there is no spec patch, so
+// a YAML-only regression would never show up in the JSON fixtures above.
+func TestFetchV2YAML(t *testing.T) {
+	const spec = `swagger: "2.0"
+info:
+  title: Legacy API
+  version: "1.0.0"
+host: legacy.example.com
+basePath: /v1
+schemes: [https]
+paths:
+  /ping:
+    get:
+      operationId: ping
+      responses:
+        "200":
+          description: ok
+`
+
+	server := newSpecServer(t, spec)
+	svc := serviceFor("legacy-yaml", server.URL)
+
+	ops, res := collect(t, New(), svc)
+
+	if res.Info.Title != "Legacy API" {
+		t.Fatalf("Title = %q, want the swagger 2.0 YAML document to parse", res.Info.Title)
+	}
+	if _, ok := ops["ping"]; !ok {
+		t.Fatalf("ping not emitted; got %v", keys(ops))
+	}
+}
+
+// TestFetchUnrecognisedDocument covers the failure operators actually hit: a URL
+// that answers with something that is not a specification. libopenapi's own
+// message names no cause, so the error must carry a glimpse of the payload.
+func TestFetchUnrecognisedDocument(t *testing.T) {
+	tests := map[string]struct {
+		body string
+		want string
+	}{
+		"html login page": {
+			body: "<!DOCTYPE html>\n<html><head><title>Sign in</title></head></html>",
+			want: "returned an HTML page",
+		},
+		"wrapped envelope": {
+			body: `{"status":"ok","data":{"swagger":"2.0","info":{"title":"t","version":"1"},"paths":{}}}`,
+			want: `document begins: {"status":"ok"`,
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			server := newSpecServer(t, tt.body)
+			svc := serviceFor("broken", server.URL)
+
+			_, err := New().Fetch(context.Background(), svc, nil, func(apicatalog.RemoteOperation) error { return nil })
+			if err == nil {
+				t.Fatalf("Fetch() error = nil, want a parse failure")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %q, want it to mention %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestFetchCyclicSchemaTerminates(t *testing.T) {
 	server := newSpecServer(t, specCyclic)
 	svc := serviceFor("tree", server.URL)
