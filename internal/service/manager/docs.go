@@ -18,6 +18,7 @@ import (
 	"github.com/rytsh/krabby/internal/config"
 	"github.com/rytsh/krabby/internal/memlimit"
 	"github.com/rytsh/krabby/internal/observability/langfuse"
+	"github.com/rytsh/krabby/internal/service/apicatalog"
 	"github.com/rytsh/krabby/internal/service/coderag"
 	"github.com/rytsh/krabby/internal/service/docgen"
 	"github.com/rytsh/krabby/internal/service/embedder"
@@ -1124,6 +1125,14 @@ func (m *Manager) ensureDocsTextForSearch(ctx context.Context, scope, key, names
 			return m.ensureDocsTextKey(ctx, key, m.sourcesDir(name))
 		}
 
+		if name := apicatalog.ServiceName(key); name != "" {
+			if m.apisRootDir == "" {
+				return nil
+			}
+
+			return m.ensureDocsTextKey(ctx, key, m.apisDir(name))
+		}
+
 		repo, err := m.reg.Get(ctx, key)
 		if err != nil || repo == nil {
 			return err
@@ -1165,6 +1174,20 @@ func (m *Manager) ensureDocsTextForSearch(ctx context.Context, scope, key, names
 			for _, collection := range collections {
 				key := websource.ScopeKey(collection.Name)
 				if err := m.ensureDocsTextKey(ctx, key, m.sourcesDir(collection.Name)); err != nil {
+					errs = append(errs, fmt.Errorf("warm docs text for %s; %w", key, err))
+				}
+			}
+		}
+	}
+
+	if (scope == "" || scope == ScopeAll || scope == ScopeAPIs) && m.apiStore != nil && m.apisRootDir != "" {
+		services, err := m.apiStore.ListServices(ctx)
+		if err != nil {
+			errs = append(errs, err)
+		} else {
+			for _, svc := range services {
+				key := apicatalog.ScopeKey(svc.Name)
+				if err := m.ensureDocsTextKey(ctx, key, m.apisDir(svc.Name)); err != nil {
 					errs = append(errs, fmt.Errorf("warm docs text for %s; %w", key, err))
 				}
 			}
@@ -1366,6 +1389,20 @@ func (m *Manager) validateDocsKey(ctx context.Context, key string) error {
 		}
 		return nil
 	}
+	if strings.HasPrefix(key, apicatalog.ScopePrefix) {
+		name := apicatalog.ServiceName(key)
+		if name == "" || m.apiStore == nil {
+			return fmt.Errorf("unknown api scope %q; use list_api_services and pass api:<name>", key)
+		}
+		svc, err := m.apiStore.GetService(ctx, name)
+		if err != nil {
+			return err
+		}
+		if svc == nil {
+			return fmt.Errorf("unknown api scope %q; use list_api_services and pass api:<name>", key)
+		}
+		return nil
+	}
 	if m.reg == nil {
 		return fmt.Errorf("unknown repository scope %q; use list_repos and pass its exact id", key)
 	}
@@ -1380,10 +1417,15 @@ func (m *Manager) validateDocsKey(ctx context.Context, key string) error {
 }
 
 // docsNamespaceFilter resolves a repository namespace before retrieval. Web
-// sources remain eligible for scope=all, but out-of-namespace repositories are
-// never allowed to consume the bounded candidate window.
+// sources and catalogued APIs remain eligible for scope=all, but
+// out-of-namespace repositories are never allowed to consume the bounded
+// candidate window.
 func (m *Manager) docsNamespaceFilter(ctx context.Context, scope, key, namespace string, filter vectorstore.Filter) (vectorstore.Filter, bool, error) {
-	if key != "" || strings.EqualFold(strings.TrimSpace(namespace), registry.NamespaceAll) || scope == ScopeSources {
+	// Scopes that select no repository at all have nothing for a repository
+	// namespace to narrow, so the filter passes through untouched. Building a
+	// key allow-list for them would instead exclude everything they target.
+	if key != "" || strings.EqualFold(strings.TrimSpace(namespace), registry.NamespaceAll) ||
+		scope == ScopeSources || scope == ScopeAPIs {
 		return filter, false, nil
 	}
 	repos, err := m.reg.ListNamespace(ctx, namespace)
@@ -1402,6 +1444,17 @@ func (m *Manager) docsNamespaceFilter(ctx context.Context, scope, key, namespace
 			}
 			for _, col := range collections {
 				keys = append(keys, websource.ScopeKey(col.Name))
+			}
+		}
+		// Without this the allow-list silently excludes every catalogued API,
+		// so a default scope=all search can never return an endpoint document.
+		if m.apiStore != nil {
+			services, err := m.apiStore.ListServices(ctx)
+			if err != nil {
+				return vectorstore.Filter{}, false, err
+			}
+			for _, svc := range services {
+				keys = append(keys, apicatalog.ScopeKey(svc.Name))
 			}
 		}
 	}
@@ -1688,9 +1741,10 @@ func fuseDocs(lexical, semantic []rag.Doc, topDocs int, p fuseParams) []rag.Doc 
 	return docs
 }
 
-// filterDocsByNamespace keeps web-source docs (which are never namespaced) and
-// repo docs whose repo is in the namespace, then trims to topDocs. It resolves
-// the namespace's repo set once and matches doc.Repo against it.
+// filterDocsByNamespace keeps web-source and API-catalog docs (neither is
+// namespaced) and repo docs whose repo is in the namespace, then trims to
+// topDocs. It resolves the namespace's repo set once and matches doc.Repo
+// against it.
 func (m *Manager) filterDocsByNamespace(ctx context.Context, docs []rag.Doc, namespace string, topDocs int) ([]rag.Doc, error) {
 	repos, err := m.reg.List(ctx)
 	if err != nil {
@@ -1706,8 +1760,11 @@ func (m *Manager) filterDocsByNamespace(ctx context.Context, docs []rag.Doc, nam
 
 	out := docs[:0]
 	for _, doc := range docs {
-		if strings.HasPrefix(doc.Repo, websource.ScopePrefix) {
-			out = append(out, doc) // web source: always kept
+		// Web sources and catalogued APIs belong to no namespace, so a
+		// namespace filter must pass them through rather than drop them for
+		// failing a repo-set lookup they can never satisfy.
+		if strings.HasPrefix(doc.Repo, websource.ScopePrefix) || strings.HasPrefix(doc.Repo, apicatalog.ScopePrefix) {
+			out = append(out, doc)
 			continue
 		}
 		if _, ok := inNamespace[doc.Repo]; ok {
@@ -1723,11 +1780,20 @@ func (m *Manager) filterDocsByNamespace(ctx context.Context, docs []rag.Doc, nam
 }
 
 // enrichDocSources makes every broad-search result identify its exact scope and
-// source kind. Web hits additionally carry collection metadata and item links.
+// source kind. Web hits additionally carry collection metadata and item links,
+// and API hits the service they belong to.
 func (m *Manager) enrichDocSources(ctx context.Context, docs []rag.Doc) {
 	collections := map[string]*websource.Collection{}
+	services := map[string]*apicatalog.Service{}
 	for i := range docs {
 		docs[i].ScopeKey = docs[i].Repo
+
+		if service := apicatalog.ServiceName(docs[i].Repo); service != "" {
+			m.enrichAPIDoc(ctx, &docs[i], service, services)
+
+			continue
+		}
+
 		name := websource.CollectionName(docs[i].Repo)
 		if name == "" {
 			docs[i].SourceKind = "repository"
@@ -1765,6 +1831,35 @@ func (m *Manager) enrichDocSources(ctx context.Context, docs []rag.Doc) {
 
 		docs[i].URL = page.URL
 		docs[i].Teams = page.Teams
+	}
+}
+
+// enrichAPIDoc annotates one API-catalog hit with the service it belongs to.
+// The cache is per search, so a result set concentrated in one service reads
+// the record once rather than per endpoint.
+func (m *Manager) enrichAPIDoc(ctx context.Context, doc *rag.Doc, service string, cache map[string]*apicatalog.Service) {
+	doc.SourceKind = "api"
+	doc.ServiceName = service
+
+	if m.apiStore == nil {
+		return
+	}
+
+	svc, seen := cache[service]
+	if !seen {
+		svc, _ = m.apiStore.GetService(ctx, service)
+		cache[service] = svc
+	}
+	if svc == nil {
+		return
+	}
+
+	doc.ServiceGroup = svc.Group
+	doc.ServiceBaseURL = svc.ResolvedBaseURL
+	// The human override wins over the specification's own summary, exactly as
+	// it does everywhere else the service is described.
+	if doc.ServiceDescription = svc.Description; doc.ServiceDescription == "" {
+		doc.ServiceDescription = svc.SpecSummary
 	}
 }
 
@@ -2056,10 +2151,30 @@ func (m *Manager) GetDoc(ctx context.Context, repoID, docPath string, offset int
 }
 
 // repoDocsDir resolves a docs key to its markdown directory: "web:<name>"
-// keys map to the collection's synced content, repo ids to the repo's
-// external docs directory (verifying the repo is tracked and cloned and
-// migrating legacy in-clone docs when needed).
+// keys map to the collection's synced content, "api:<name>" keys to the
+// service's endpoint projections, repo ids to the repo's external docs
+// directory (verifying the repo is tracked and cloned and migrating legacy
+// in-clone docs when needed).
 func (m *Manager) repoDocsDir(ctx context.Context, repoID string) (string, error) {
+	if strings.HasPrefix(repoID, apicatalog.ScopePrefix) {
+		name := apicatalog.ServiceName(repoID)
+		if !apicatalog.ValidName(name) {
+			return "", fmt.Errorf("invalid api scope %q", repoID)
+		}
+		if m.apisRootDir == "" || m.apiStore == nil {
+			return "", ErrNoAPICatalog
+		}
+		svc, err := m.apiStore.GetService(ctx, name)
+		if err != nil {
+			return "", err
+		}
+		if svc == nil {
+			return "", fmt.Errorf("api service %s not found", name)
+		}
+
+		return m.apisDir(name), nil
+	}
+
 	if strings.HasPrefix(repoID, websource.ScopePrefix) {
 		name := websource.CollectionName(repoID)
 		if !websource.ValidName(name) {

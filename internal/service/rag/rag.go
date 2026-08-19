@@ -42,7 +42,7 @@ const (
 type Doc struct {
 	Repo       string  `json:"repo"`
 	ScopeKey   string  `json:"scope_key"`
-	SourceKind string  `json:"source_kind"` // "repository" or "web"
+	SourceKind string  `json:"source_kind"` // "repository", "web" or "api"
 	Path       string  `json:"path"`        // path relative to the repo's docs directory
 	Title      string  `json:"title"`
 	Score      float32 `json:"score"` // mode-specific score used for ranking
@@ -64,6 +64,14 @@ type Doc struct {
 	CollectionName        string `json:"collection_name,omitempty"`
 	CollectionType        string `json:"collection_type,omitempty"`
 	CollectionDescription string `json:"collection_description,omitempty"`
+
+	// API metadata is populated only for API-catalog hits, so a client that
+	// matched an endpoint document knows which service to call without
+	// parsing the scope key back apart.
+	ServiceName        string `json:"service_name,omitempty"`
+	ServiceGroup       string `json:"service_group,omitempty"`
+	ServiceDescription string `json:"service_description,omitempty"`
+	ServiceBaseURL     string `json:"service_base_url,omitempty"`
 }
 
 // Service indexes generated docs and retrieves bounded excerpts for a question.

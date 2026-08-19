@@ -10,11 +10,20 @@
   import { onMount } from "svelte";
   import { api } from "../lib/api.js";
   import { successToast } from "../lib/toast.js";
-  import { navigate } from "../lib/router.js";
+  import { navigate, path as routePath } from "../lib/router.js";
   import Icon from "../lib/Icon.svelte";
   import Status from "../lib/Status.svelte";
 
   let { apiName = "" } = $props();
+
+  // docParam carries a deep link from docs search: /apis/<name>?doc=<slug>.md.
+  // The markdown projection is generated per endpoint and named after its
+  // slug, which is also a handle the catalog can resolve, so a search hit
+  // opens the endpoint's own detail view instead of the raw file.
+  let docParam = $derived.by(() => {
+    const params = new URLSearchParams($routePath.split("?")[1] || "");
+    return params.get("doc") || "";
+  });
 
   let groups = $state([]);
   let services = $state([]);
@@ -87,6 +96,17 @@
   // Deep link: /apis/<name> opens that service expanded.
   $effect(() => {
     if (apiName && !expanded[apiName]) toggle(apiName);
+  });
+
+  // ...and ?doc=<slug>.md additionally opens that endpoint. Tracked by link so
+  // navigating between two hits in the same service re-opens the detail rather
+  // than leaving the first one on screen.
+  let openedDoc = "";
+  $effect(() => {
+    const link = `${apiName}\u0000${docParam}`;
+    if (!apiName || !docParam || openedDoc === link) return;
+    openedDoc = link;
+    openDetail(apiName, docParam.replace(/\.md$/, ""));
   });
 
   const grouped = $derived.by(() => {

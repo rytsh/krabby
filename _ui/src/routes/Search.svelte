@@ -14,6 +14,9 @@
   let repoOptionsTruncated = $state(false);
   // Web-source collections for docs-search scoping (searched as "web:<name>").
   let sourceOptions = $state([]);
+  // Catalogued API services, searched as "api:<name>": their endpoint
+  // documents live in the same docs index as repo and web docs.
+  let apiOptions = $state([]);
   // Namespaces for the namespace filter: [{ namespace, count, description }].
   let namespaceOptions = $state([]);
 
@@ -29,6 +32,11 @@
       sourceOptions = ((await api.sources()) || []).map((s) => s.name);
     } catch {
       sourceOptions = [];
+    }
+    try {
+      apiOptions = ((await api.apiServices())?.services || []).map((s) => s.name);
+    } catch {
+      apiOptions = [];
     }
     try {
       namespaceOptions = (await api.namespaces()) || [];
@@ -101,11 +109,12 @@
     loading = true;
     error = "";
     try {
-      // Map the where-selector onto the API params: the "repos"/"sources"
-      // values become the docs scope param, everything else (repo id or
-      // web:<name>) is a key. namespaceFilter is an orthogonal filter passed
-      // through to both search kinds ("" = every namespace).
-      const docsScope = repoFilter === "repos" || repoFilter === "sources" ? repoFilter : "";
+      // Map the where-selector onto the API params: the
+      // "repos"/"sources"/"apis" values become the docs scope param,
+      // everything else (repo id, web:<name> or api:<name>) is a key.
+      // namespaceFilter is an orthogonal filter passed through to both search
+      // kinds ("" = every namespace).
+      const docsScope = ["repos", "sources", "apis"].includes(repoFilter) ? repoFilter : "";
       const key = docsScope ? "" : repoFilter;
       const opts = { signal: controller.signal };
       const response =
@@ -145,6 +154,12 @@
       // Web-source hits open the synced markdown on the Sources page.
       if (r.repo.startsWith("web:")) {
         return `#/sources/${r.repo.slice(4)}?doc=${encodeURIComponent(r.path)}`;
+      }
+      // API hits open the catalog's own endpoint view rather than the raw
+      // markdown: the projection is generated from the endpoint, and the
+      // catalog shows it with its schemas and a runnable request.
+      if (r.repo.startsWith("api:")) {
+        return `#/apis/${r.repo.slice(4)}?doc=${encodeURIComponent(r.path)}`;
       }
       return `#/repos/${r.repo}?doc=${encodeURIComponent(r.path)}`;
     }
@@ -231,7 +246,13 @@
       onclick={() => {
         scope = "code";
         // Code search only understands repo ids; drop docs-only selections.
-        if (repoFilter === "repos" || repoFilter === "sources" || repoFilter.startsWith("web:")) repoFilter = "";
+        if (
+          ["repos", "sources", "apis"].includes(repoFilter) ||
+          repoFilter.startsWith("web:") ||
+          repoFilter.startsWith("api:")
+        ) {
+          repoFilter = "";
+        }
         resetResults();
       }}>Code</button
     >
@@ -249,10 +270,20 @@
       <option value="">everywhere</option>
       <option value="repos">all repositories</option>
       <option value="sources">all web sources</option>
+      {#if apiOptions.length > 0}
+        <option value="apis">all API endpoints</option>
+      {/if}
       {#if sourceOptions.length > 0}
         <optgroup label="Web sources">
           {#each sourceOptions as name (name)}
             <option value={`web:${name}`}>web:{name}</option>
+          {/each}
+        </optgroup>
+      {/if}
+      {#if apiOptions.length > 0}
+        <optgroup label="API services">
+          {#each apiOptions as name (name)}
+            <option value={`api:${name}`}>api:{name}</option>
           {/each}
         </optgroup>
       {/if}

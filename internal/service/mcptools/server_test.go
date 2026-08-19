@@ -113,7 +113,7 @@ func TestToolProfiles(t *testing.T) {
 				schemaText := string(rawSchema)
 				switch tool.Name {
 				case "search_docs":
-					for _, field := range []string{"source_kind", "scope_key", "namespace", "collection_name"} {
+					for _, field := range []string{"source_kind", "scope_key", "namespace", "collection_name", "service_name"} {
 						if !strings.Contains(schemaText, field) {
 							t.Errorf("search_docs output schema missing %q", field)
 						}

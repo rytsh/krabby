@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/rytsh/krabby/internal/service/apicatalog"
 	"github.com/rytsh/krabby/internal/service/registry"
 	"github.com/rytsh/krabby/internal/service/websource"
 	"github.com/rytsh/krabby/internal/storage"
@@ -29,7 +30,12 @@ func newNamespaceManager(t *testing.T) (*Manager, *registry.Registry) {
 		t.Fatal(err)
 	}
 
-	return &Manager{reg: reg, webStore: webStore}, reg
+	apiStore, err := apicatalog.New(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return &Manager{reg: reg, webStore: webStore, apiStore: apiStore}, reg
 }
 
 func TestRepoInNamespace(t *testing.T) {

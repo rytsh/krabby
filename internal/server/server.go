@@ -1072,8 +1072,9 @@ func searchDocs(mgr *manager.Manager) ada.HandlerFunc {
 			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": "q query param is required"})
 		}
 
-		// repo may be a repository id or a web-source key ("web:<name>") and
-		// wins over scope; scope selects all/repos/sources when repo is empty.
+		// repo may be a repository id, a web-source key ("web:<name>") or an
+		// API-catalog key ("api:<name>") and wins over scope; scope selects
+		// all/repos/sources/apis when repo is empty.
 		repo := c.Request.URL.Query().Get("repo")
 		scope := c.Request.URL.Query().Get("scope")
 		namespace := namespaceParam(c.Request)
