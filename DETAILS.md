@@ -89,11 +89,13 @@ curl localhost:8080/api/v1/repos
 
 MCP endpoint for agents (opencode, Claude Desktop, etc.): `http://localhost:8080/mcp`
 (streamable HTTP; set `mcp.api_key` to require `X-Api-Key` / `Authorization: Bearer`).
-Without a profile header it exposes the read-only standard catalog. Send
-`X-Krabby-Tool-Profile: caller` to additionally expose `call_api_endpoint`
-(send real requests to catalogued APIs), or `X-Krabby-Tool-Profile: full` to
-expose everything: caller plus credentials, docs/RAG configuration, and
-endpoint probes. The profiles are strictly nested (standard ⊂ caller ⊂ full).
+Without a profile header it exposes the read-only standard catalog: repositories,
+graph, files, history and documentation. Send `X-Krabby-Tool-Profile: api` to
+additionally expose the whole API catalog (`list_api_*`, `get_api_endpoint` and
+`call_api_endpoint`, which sends real requests to catalogued APIs), or
+`X-Krabby-Tool-Profile: full` to expose everything: the api profile plus
+credentials, docs/RAG configuration, catalog administration and endpoint probes.
+The profiles are strictly nested (standard ⊂ api ⊂ full).
 
 Example OpenCode config using the full profile:
 
@@ -128,8 +130,8 @@ Example OpenCode config using the full profile:
 | `list_namespaces` | Discover repository groups, counts, and human descriptions before broad search |
 | `list_sources` / `get_source` | Discover web collections and their exact `web:<name>` scope keys; inspect bounded item-title samples |
 | `register_source_page` / `import_source_pages` / `import_source_sitemap` / `delete_source_page` | Full-profile management of individual `pages` source items |
-| `list_api_groups` / `list_api_services` / `list_api_endpoints` / `get_api_endpoint` | Walk the API catalog from domain to service to endpoint to its full request shape |
-| `call_api_endpoint` | Caller/full-profile: send a real request to a catalogued endpoint (HTTP or gRPC) and return the response |
+| `list_api_groups` / `list_api_services` / `list_api_endpoints` / `get_api_endpoint` | Api/full-profile: walk the API catalog from domain to service to endpoint to its full request shape |
+| `call_api_endpoint` | Api/full-profile: send a real request to a catalogued endpoint (HTTP or gRPC) and return the response |
 | `api_service_kinds` / `add_api_service` / `update_api_service` / `delete_api_service` / `refresh_api_service` / `get_api_service_config` | Full-profile management of catalogued APIs |
 | `set_api_group_description` / `delete_api_group` | Full-profile management of API group descriptions |
 | `get_docs_config` / `set_docs_config` | Read or live-update docs and code RAG settings |
@@ -154,10 +156,12 @@ reaped, replaying its token transparently falls back to the current active
 snapshot and returns the new token — it never errors or wedges a client, so a
 consumer that keeps replaying an old token simply advances to the latest.
 
-The `standard` profile omits the credential and docs/RAG administration
-rows above and `call_api_endpoint`. Configure `X-Krabby-Tool-Profile: caller`
-when an MCP client should exercise catalogued APIs without administering
-krabby, and `X-Krabby-Tool-Profile: full` when it must administer them.
+The `standard` profile omits the credential and docs/RAG administration rows
+above and the entire API catalog, so an agent that only reads code and docs is
+not charged for those tool descriptions in every `tools/list`. Configure
+`X-Krabby-Tool-Profile: api` when an MCP client should discover and exercise
+catalogued APIs without administering krabby, and `X-Krabby-Tool-Profile: full`
+when it must administer them.
 
 ## REST API
 

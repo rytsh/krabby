@@ -60,6 +60,116 @@ func TestSanitizeSchemaCollapsesSliceUnions(t *testing.T) {
 	}
 }
 
+// TestRawMessageArgsAcceptJSONValues guards the call_api_endpoint fix.
+//
+// json.RawMessage is a []byte, so the inferrer describes it as an array of
+// byte-sized integers. A validating client then refuses the only correct call —
+// body {"query":"limit=1"} has type "object", want "array" — and the endpoint
+// becomes uncallable. forOptions must map the type to an unconstrained schema
+// so every JSON shape a body can legitimately take is accepted.
+func TestRawMessageArgsAcceptJSONValues(t *testing.T) {
+	t.Parallel()
+
+	// Sanity check: the default inference really does produce the byte-array
+	// schema this fix exists to replace.
+	def, err := jsonschema.For[callAPIEndpointArgs](nil)
+	if err != nil {
+		t.Fatalf("build default schema: %v", err)
+	}
+	if body := def.Properties["body"]; body == nil || firstNonNull(body.Types) != "array" {
+		t.Fatalf("expected the unconfigured inferrer to type body as an array, got %+v", body)
+	}
+
+	schema, err := jsonschema.For[callAPIEndpointArgs](forOptions)
+	if err != nil {
+		t.Fatalf("build schema: %v", err)
+	}
+	sanitizeSchema(schema)
+
+	body := schema.Properties["body"]
+	if body == nil {
+		t.Fatal("body property missing from call_api_endpoint schema")
+	}
+	if body.Type != "" || len(body.Types) != 0 || body.Items != nil {
+		t.Fatalf("body must not constrain its type, got Type=%q Types=%v Items=%+v", body.Type, body.Types, body.Items)
+	}
+
+	// The per-field jsonschema tag must still win over the type mapping, or
+	// the argument loses its documentation.
+	if !strings.Contains(body.Description, "protojson") {
+		t.Errorf("body lost its field description, got %q", body.Description)
+	}
+
+	resolved, err := schema.Resolve(nil)
+	if err != nil {
+		t.Fatalf("resolve schema: %v", err)
+	}
+
+	// Every shape a real body takes must validate: a unary gRPC message, a
+	// client-streaming sequence, an HTTP scalar and an absent body.
+	bodies := []string{
+		`{"query":"limit=1"}`,
+		`[{"query":"a"},{"query":"b"}]`,
+		`"raw text"`,
+		`null`,
+	}
+	for _, b := range bodies {
+		var args any
+		payload := `{"service":"transaction","endpoint":"/v1.S/M","body":` + b + `}`
+		if err := json.Unmarshal([]byte(payload), &args); err != nil {
+			t.Fatalf("unmarshal %s: %v", payload, err)
+		}
+		if err := resolved.Validate(args); err != nil {
+			t.Errorf("body %s rejected by the advertised schema: %v", b, err)
+		}
+	}
+}
+
+// TestRawMessageArgsAreUnconstrainedEverywhere extends the guarantee to the
+// other RawMessage arguments, so a service config or spec patch cannot regress
+// into the same byte-array shape.
+func TestRawMessageArgsAreUnconstrainedEverywhere(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		build  func(*jsonschema.ForOptions) (*jsonschema.Schema, error)
+		fields []string
+	}{
+		{"call_api_endpoint", jsonschema.For[callAPIEndpointArgs], []string{"body"}},
+		{"add_api_service", jsonschema.For[addAPIServiceArgs], []string{"config", "spec_patch"}},
+		{"update_api_service", jsonschema.For[updateAPIServiceArgs], []string{"config", "spec_patch"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			schema, err := tt.build(forOptions)
+			if err != nil {
+				t.Fatalf("build schema: %v", err)
+			}
+			sanitizeSchema(schema)
+
+			for _, name := range tt.fields {
+				field := schema.Properties[name]
+				if field == nil {
+					t.Fatalf("property %q missing", name)
+				}
+				if field.Type != "" || len(field.Types) != 0 {
+					t.Errorf("property %q constrains its type: Type=%q Types=%v", name, field.Type, field.Types)
+				}
+				if field.Items != nil {
+					t.Errorf("property %q still describes byte items: %+v", name, field.Items)
+				}
+				if field.Description == "" {
+					t.Errorf("property %q has no description", name)
+				}
+			}
+		})
+	}
+}
+
 // assertNoTypeUnions fails if any schema node in the tree still carries a
 // multi-valued "type" (the shape Gemini rejects).
 func assertNoTypeUnions(t *testing.T, s *jsonschema.Schema) {

@@ -722,6 +722,48 @@ func TestPreview(t *testing.T) {
 	}
 }
 
+// TestPreviewWithEmptySpecPatch covers what the UI actually sends.
+//
+// The "Test & preview" form serialises an empty spec-patch box as JSON null,
+// not as an omitted field. TestPreview above passes a nil patch, which is a
+// different value and left this path unguarded: null reached the merge patch,
+// RFC 7386 replaced the whole document with it, and the operator was told
+// "spec type not supported by libopenapi, sorry (document begins: null)" —
+// blaming their specification for an empty optional field.
+func TestPreviewWithEmptySpecPatch(t *testing.T) {
+	server := newSpecServer(t, specV3)
+	cfg := json.RawMessage(fmt.Sprintf(`{"url":%q}`, server.URL))
+
+	for _, patch := range []string{`null`, ``} {
+		out, err := New().Preview(context.Background(), cfg, json.RawMessage(patch))
+		if err != nil {
+			t.Fatalf("Preview() with patch %q error = %v", patch, err)
+		}
+		if out.Title != "Billing API" {
+			t.Errorf("patch %q: Title = %q, want Billing API", patch, out.Title)
+		}
+		if out.OperationCount != 2 {
+			t.Errorf("patch %q: OperationCount = %d, want 2", patch, out.OperationCount)
+		}
+	}
+}
+
+// A real patch must still apply through Preview, so the null exemption cannot
+// be mistaken for "preview ignores the patch".
+func TestPreviewAppliesSpecPatch(t *testing.T) {
+	server := newSpecServer(t, specV3)
+
+	out, err := New().Preview(context.Background(),
+		json.RawMessage(fmt.Sprintf(`{"url":%q}`, server.URL)),
+		json.RawMessage(`{"info":{"title":"Patched API"}}`))
+	if err != nil {
+		t.Fatalf("Preview() error = %v", err)
+	}
+	if out.Title != "Patched API" {
+		t.Errorf("Title = %q, want the patch to have applied", out.Title)
+	}
+}
+
 // ---- helpers ---------------------------------------------------------------
 
 func keys[V any](m map[string]V) []string {

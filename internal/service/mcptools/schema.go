@@ -1,12 +1,40 @@
 package mcptools
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// forOptions is the inference configuration every tool schema is built with.
+//
+// json.RawMessage is a []byte, and the reflection inferrer sees exactly that:
+// it emits an array-of-bytes schema,
+//
+//	{"type": ["null","array"], "items": {"type":"integer","minimum":0,"maximum":255}}
+//
+// which is a faithful description of the Go type and a completely wrong
+// description of the wire contract. Every RawMessage argument krabby exposes —
+// call_api_endpoint's body, a service's config, a spec_patch — is "some JSON
+// value", not a list of byte values. A client that validates arguments against
+// the advertised schema therefore rejects the only correct call:
+//
+//	body {"query":"limit=1"} has type "object", want "array"
+//
+// and a client that trusts the schema instead sends a byte array, which the
+// handler then fails to parse. Mapping the type to an unconstrained schema
+// states what the field actually accepts. The per-field jsonschema tag still
+// wins, so documented fields keep their own description.
+var forOptions = &jsonschema.ForOptions{
+	TypeSchemas: map[reflect.Type]*jsonschema.Schema{
+		reflect.TypeFor[json.RawMessage](): {
+			Description: "arbitrary JSON value",
+		},
+	},
+}
 
 // addTool registers a tool exactly like mcp.AddTool, but replaces the
 // reflection-inferred input schema with one sanitised for the strictest MCP
@@ -29,7 +57,7 @@ import (
 // matter how strict their schema converter is.
 func addTool[In, Out any](server *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[In, Out]) {
 	if t.InputSchema == nil {
-		schema, err := jsonschema.For[In](nil)
+		schema, err := jsonschema.For[In](forOptions)
 		if err != nil {
 			panic(fmt.Sprintf("mcptools: build input schema for tool %q: %v", t.Name, err))
 		}
@@ -38,7 +66,7 @@ func addTool[In, Out any](server *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[
 		t.InputSchema = schema
 	}
 	if t.OutputSchema == nil && reflect.TypeFor[Out]() != reflect.TypeFor[any]() {
-		schema, err := jsonschema.For[Out](nil)
+		schema, err := jsonschema.For[Out](forOptions)
 		if err != nil {
 			panic(fmt.Sprintf("mcptools: build output schema for tool %q: %v", t.Name, err))
 		}

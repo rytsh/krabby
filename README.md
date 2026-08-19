@@ -72,9 +72,11 @@ Paste this into your coding agent:
 
 The `full` profile lets your agent configure Krabby and manage credentials in
 addition to adding repositories, searching code, reading files, and querying
-repository relationships. Use `caller` instead of `full` for an agent that
-should send requests to catalogued APIs (`call_api_endpoint`) without being
-able to reconfigure Krabby; omit the header entirely for read-only access.
+repository relationships. Use `api` instead of `full` for an agent that should
+work with catalogued APIs — walking the catalog and sending real requests with
+`call_api_endpoint` — without being able to reconfigure Krabby. Omit the header
+entirely for the read-only repository and documentation tools; that profile
+does not publish the API catalog at all.
 
 For client-specific configuration examples, private repository credentials,
 REST endpoints, MCP tools, memory tuning, and development instructions, see

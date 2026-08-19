@@ -94,6 +94,21 @@ type callAPIEndpointArgs struct {
 	TimeoutSec int `json:"timeout_sec,omitempty" jsonschema:"call timeout in seconds (default 30, max 120)"`
 }
 
+// callRequest turns the tool arguments into a provider call.
+//
+// The body is normalized here rather than inline at the call site so the
+// stringified-argument rule is covered by a test that exercises the same path
+// the handler takes; see unwrapJSONArg for why the rule exists.
+func (a callAPIEndpointArgs) callRequest() apicatalog.CallRequest {
+	return apicatalog.CallRequest{
+		PathParams: a.PathParams,
+		Query:      a.Query,
+		Headers:    a.Headers,
+		Body:       unwrapJSONArg(a.Body),
+		Timeout:    time.Duration(a.TimeoutSec) * time.Second,
+	}
+}
+
 type updateAPIServiceArgs struct {
 	Name string `json:"name" jsonschema:"the api service name"`
 
@@ -186,9 +201,10 @@ type apiServiceConfigOutput struct {
 
 // ---- registration ----------------------------------------------------------
 
-// addAPITools registers the API-catalog discovery tools, plus call_api_endpoint
-// for the caller and full profiles and the administration tools for full only.
-func addAPITools(server *mcp.Server, mgr *manager.Manager, includeCall, includeAdmin bool) {
+// addAPITools registers the API-catalog surface. It is called only for the api
+// and full profiles — standard publishes no api_* tool — and includeAdmin adds
+// the catalog administration tools for full alone.
+func addAPITools(server *mcp.Server, mgr *manager.Manager, includeAdmin bool) {
 	addTool(server, &mcp.Tool{
 		Name: "list_api_groups",
 		Description: "List the API catalog's groups with their descriptions and service counts. " +
@@ -320,18 +336,17 @@ func addAPITools(server *mcp.Server, mgr *manager.Manager, includeCall, includeA
 		return jsonResult(out), nil, nil
 	})
 
-	if includeCall {
-		addAPICallTool(server, mgr)
-	}
+	addAPICallTool(server, mgr)
+
 	if includeAdmin {
 		addAPIAdminTools(server, mgr)
 	}
 }
 
-// addAPICallTool registers call_api_endpoint. Caller and full profiles: the
-// tool has real side effects on the target API, but it cannot reach anything an
-// operator did not already catalogue — which is a weaker trust requirement than
-// the admin tools, and the reason it has a profile of its own.
+// addAPICallTool registers call_api_endpoint. The tool has real side effects on
+// the target API, but it cannot reach anything an operator did not already
+// catalogue — a weaker trust requirement than the admin tools, and the reason
+// the api profile stops short of them.
 func addAPICallTool(server *mcp.Server, mgr *manager.Manager) {
 	addTool(server, &mcp.Tool{
 		Name: "call_api_endpoint",
@@ -350,13 +365,7 @@ func addAPICallTool(server *mcp.Server, mgr *manager.Manager) {
 			return nil, nil, fmt.Errorf("endpoint is required")
 		}
 
-		res, err := mgr.CallAPIOperation(ctx, service, args.Endpoint, apicatalog.CallRequest{
-			PathParams: args.PathParams,
-			Query:      args.Query,
-			Headers:    args.Headers,
-			Body:       args.Body,
-			Timeout:    time.Duration(args.TimeoutSec) * time.Second,
-		})
+		res, err := mgr.CallAPIOperation(ctx, service, args.Endpoint, args.callRequest())
 		if err != nil {
 			return nil, nil, err
 		}

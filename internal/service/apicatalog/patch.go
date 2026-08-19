@@ -17,10 +17,16 @@ import (
 // order that make it worth being YAML in the first place. Parsers accept JSON
 // wherever they accept YAML, so normalizing costs nothing downstream.
 //
-// When patch is empty the document is returned untouched, still in its original
-// form — the common case must not pay for a conversion it does not need.
+// When patch is absent the document is returned untouched, still in its
+// original form — the common case must not pay for a conversion it does not
+// need. A literal JSON null counts as absent: under RFC 7386 a non-object patch
+// replaces the target, so treating it literally would reduce the whole document
+// to null, and the caller would be told its specification is unparseable rather
+// than that it sent an empty patch. normalizeSpecPatch already maps null to "no
+// patch" on the storage path; the preview path reaches this function directly,
+// so the rule belongs here where every caller gets it.
 func ApplyMergePatch(doc, patch json.RawMessage) (json.RawMessage, error) {
-	if len(bytes.TrimSpace(patch)) == 0 {
+	if trimmed := bytes.TrimSpace(patch); len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
 		return doc, nil
 	}
 

@@ -51,15 +51,18 @@ func TestToolProfiles(t *testing.T) {
 	tests := []struct {
 		profile string
 		count   int
-		call    bool
+		api     bool
 		admin   bool
 	}{
-		{profile: ToolProfileStandard, count: 38},
-		// Caller is standard plus exactly one tool. If this diff ever grows
-		// past call_api_endpoint, the profile has drifted from its reason to
-		// exist: "may exercise catalogued APIs" without "may rewire krabby".
-		{profile: ToolProfileCaller, count: 39, call: true},
-		{profile: ToolProfileFull, count: 65, call: true, admin: true},
+		// Standard is the repository and documentation surface only: the whole
+		// API catalog lives behind the api profile, so a client that never
+		// calls an API does not pay for its tools in every tools/list.
+		{profile: ToolProfileStandard, count: 34},
+		// api is standard plus the catalog walk and call_api_endpoint. If this
+		// diff ever grows past those, the profile has drifted from its reason
+		// to exist: "may exercise catalogued APIs" without "may rewire krabby".
+		{profile: ToolProfileAPI, count: 39, api: true},
+		{profile: ToolProfileFull, count: 65, api: true, admin: true},
 	}
 
 	for _, tt := range tests {
@@ -152,8 +155,23 @@ func TestToolProfiles(t *testing.T) {
 					t.Errorf("admin tool %q present=%t, want %t", name, names[name], tt.admin)
 				}
 			}
-			if names["call_api_endpoint"] != tt.call {
-				t.Errorf("call_api_endpoint present=%t, want %t", names["call_api_endpoint"], tt.call)
+			// The catalog walk and the call tool move together: discovery
+			// without call is a dead end, and call without discovery cannot
+			// learn an endpoint's parameters.
+			for _, name := range []string{
+				"list_api_groups", "list_api_services", "list_api_endpoints", "get_api_endpoint", "call_api_endpoint",
+			} {
+				if names[name] != tt.api {
+					t.Errorf("api tool %q present=%t, want %t", name, names[name], tt.api)
+				}
+			}
+			for _, name := range []string{
+				"api_service_kinds", "add_api_service", "update_api_service", "delete_api_service",
+				"refresh_api_service", "get_api_service_config", "set_api_group_description", "delete_api_group",
+			} {
+				if names[name] != tt.admin {
+					t.Errorf("api admin tool %q present=%t, want %t", name, names[name], tt.admin)
+				}
 			}
 			for _, name := range []string{"lock_repo", "unlock_repo"} {
 				if names[name] {
@@ -161,6 +179,82 @@ func TestToolProfiles(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestPublishedCallSchemaAcceptsJSONBody checks the schema a real client
+// actually receives, not one the test built itself.
+//
+// The unit test in schema_test.go can only prove that forOptions produces the
+// right shape; it cannot prove addTool applies it. This connects a client and
+// validates a realistic request against the advertised input schema, which is
+// exactly what a strict client does before sending — and what was rejecting
+// every call_api_endpoint body as "has type object, want array".
+func TestPublishedCallSchemaAcceptsJSONBody(t *testing.T) {
+	server := New(nil, "test", 0, ToolProfileAPI)
+	ct, st := mcp.NewInMemoryTransports()
+	if _, err := server.Connect(context.Background(), st, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "test"}, nil)
+	session, err := client.Connect(context.Background(), ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	result, err := session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var tool *mcp.Tool
+	for _, candidate := range result.Tools {
+		if candidate.Name == "call_api_endpoint" {
+			tool = candidate
+
+			break
+		}
+	}
+	if tool == nil {
+		t.Fatal("call_api_endpoint not published by the api profile")
+	}
+
+	raw, err := json.Marshal(tool.InputSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The byte-array rendering is the specific regression being guarded.
+	if strings.Contains(string(raw), `"maximum":255`) {
+		t.Fatalf("body is still advertised as an array of bytes: %s", raw)
+	}
+
+	// Round-trip through the wire form, so the test validates against the same
+	// bytes a client parses rather than the in-process value.
+	var published jsonschema.Schema
+	if err := json.Unmarshal(raw, &published); err != nil {
+		t.Fatalf("parse published schema: %v", err)
+	}
+
+	resolved, err := published.Resolve(nil)
+	if err != nil {
+		t.Fatalf("resolve published schema: %v", err)
+	}
+
+	for _, body := range []string{
+		`{"query":"limit=1"}`,
+		`[{"query":"a"},{"query":"b"}]`,
+		`"raw text"`,
+	} {
+		var args any
+		payload := `{"service":"transaction","endpoint":"/v1.TransactionService/GetTransactions","body":` + body + `}`
+		if err := json.Unmarshal([]byte(payload), &args); err != nil {
+			t.Fatal(err)
+		}
+		if err := resolved.Validate(args); err != nil {
+			t.Errorf("published schema rejects body %s: %v", body, err)
+		}
 	}
 }
 
@@ -182,11 +276,16 @@ func TestModelGuidanceIsSearchFirstAndBounded(t *testing.T) {
 			t.Errorf("instructions missing %q", phrase)
 		}
 	}
-	// The catalog chain has to be named here rather than left to the tool
+	// The catalog chain has to be named rather than left to the tool
 	// descriptions: a model that never calls list_api_groups never reads them,
-	// and answers "how do I call X" out of prose it found with search_docs.
-	if !strings.Contains(serverInstructions, "list_api_groups -> list_api_services -> list_api_endpoints -> get_api_endpoint") {
-		t.Error("instructions do not describe the API-catalog drill-down order")
+	// and answers "how do I call X" out of prose it found with search_docs. It
+	// belongs in apiInstructions, not the base text, because the standard
+	// profile publishes none of those tools.
+	if !strings.Contains(apiInstructions, "list_api_groups -> list_api_services -> list_api_endpoints -> get_api_endpoint") {
+		t.Error("api instructions do not describe the API-catalog drill-down order")
+	}
+	if strings.Contains(serverInstructions, "list_api_groups") {
+		t.Error("base instructions describe API tools the standard profile does not publish")
 	}
 	if !strings.Contains(serverInstructions, "Semantic is the default when configured") {
 		t.Fatal("instructions do not describe the effective docs-search default")

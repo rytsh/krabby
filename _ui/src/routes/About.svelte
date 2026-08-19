@@ -74,9 +74,9 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
   -d '{"url": "https://github.com/owner/repo", "branch": ""}'`);
 
   // The complete tool inventory, kept in sync with the registrations in
-  // internal/service/mcptools (TestToolProfiles pins the counts: 38 standard,
-  // 39 caller, 65 full). A tool's third element gates it by profile: absent =
-  // every profile, "caller" = caller and full, true = full only.
+  // internal/service/mcptools (TestToolProfiles pins the counts: 34 standard,
+  // 39 api, 65 full). A tool's third element gates it by profile: absent =
+  // every profile, "api" = api and full, true = full only.
   const toolGroups = [
     {
       name: "Repositories",
@@ -136,11 +136,11 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
     {
       name: "API catalog",
       tools: [
-        ["list_api_groups", "List API groups with descriptions — the entry point for 'how do I call this'."],
-        ["list_api_services", "List catalogued API services with title, base URL and endpoint count."],
-        ["list_api_endpoints", "Page through one service's endpoints, narrowed by search, tag, or method."],
-        ["get_api_endpoint", "Full detail of one endpoint: parameters, schemas, auth, and a ready-to-run command."],
-        ["call_api_endpoint", "Send a real request to a catalogued endpoint and return the response.", "caller"],
+        ["list_api_groups", "List API groups with descriptions — the entry point for 'how do I call this'.", "api"],
+        ["list_api_services", "List catalogued API services with title, base URL and endpoint count.", "api"],
+        ["list_api_endpoints", "Page through one service's endpoints, narrowed by search, tag, or method.", "api"],
+        ["get_api_endpoint", "Full detail of one endpoint: parameters, schemas, auth, and a ready-to-run command.", "api"],
+        ["call_api_endpoint", "Send a real request to a catalogued endpoint and return the response.", "api"],
         ["api_service_kinds", "List the service kinds add_api_service accepts.", true],
         ["add_api_service", "Catalogue an OpenAPI document or gRPC server and index its endpoints.", true],
         ["update_api_service", "Update a catalogued service's config, overrides, or schedule.", true],
@@ -199,7 +199,7 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
       .map((group) => ({
         ...group,
         tools: group.tools.filter(
-          ([, , gate]) => !gate || (gate === "caller" ? mcpProfile !== "standard" : mcpProfile === "full"),
+          ([, , gate]) => !gate || (gate === "api" ? mcpProfile !== "standard" : mcpProfile === "full"),
         ),
       }))
       .filter((group) => group.tools.length > 0),
@@ -233,15 +233,15 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
   <div class="mt-3 grid gap-2 sm:grid-cols-3">
     <div class="rounded-md border border-accent/40 bg-accent/5 p-3">
       <div class="text-[13px] font-medium">Standard profile</div>
-      <div class="mt-1 text-[12px] text-dim">Default when no profile header is sent. Read-only repo, query, search, and catalog tools.</div>
+      <div class="mt-1 text-[12px] text-dim">Default when no profile header is sent. Read-only repository, graph, file, and documentation tools.</div>
     </div>
     <div class="rounded-md border border-line p-3">
-      <div class="text-[13px] font-medium">Caller profile</div>
-      <div class="mt-1 text-[12px] text-dim">Same URL with <code class="font-mono">X-Krabby-Tool-Profile: caller</code>. Standard plus <code class="font-mono">call_api_endpoint</code> — sends real requests to catalogued APIs.</div>
+      <div class="text-[13px] font-medium">API profile</div>
+      <div class="mt-1 text-[12px] text-dim">Same URL with <code class="font-mono">X-Krabby-Tool-Profile: api</code>. Standard plus the whole API catalog, including <code class="font-mono">call_api_endpoint</code> — sends real requests to catalogued APIs.</div>
     </div>
     <div class="rounded-md border border-line p-3">
       <div class="text-[13px] font-medium">Full profile</div>
-      <div class="mt-1 text-[12px] text-dim">Same URL with <code class="font-mono">X-Krabby-Tool-Profile: full</code>. Everything: caller plus credential, docs/RAG and catalog administration.</div>
+      <div class="mt-1 text-[12px] text-dim">Same URL with <code class="font-mono">X-Krabby-Tool-Profile: full</code>. Everything: the API profile plus credential, docs/RAG and catalog administration.</div>
     </div>
   </div>
   {#if apiKeySet}
@@ -284,11 +284,11 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
         >Standard</button>
         <button
           class="rounded px-2.5 py-1 text-[11px] text-dim transition-colors hover:text-fg"
-          class:!bg-surface-2={mcpProfile === "caller"}
-          class:!text-fg={mcpProfile === "caller"}
-          aria-pressed={mcpProfile === "caller"}
-          onclick={() => (mcpProfile = "caller")}
-        >Caller</button>
+          class:!bg-surface-2={mcpProfile === "api"}
+          class:!text-fg={mcpProfile === "api"}
+          aria-pressed={mcpProfile === "api"}
+          onclick={() => (mcpProfile = "api")}
+        >API</button>
         <button
           class="rounded px-2.5 py-1 text-[11px] text-dim transition-colors hover:text-fg"
           class:!bg-surface-2={mcpProfile === "full"}
@@ -303,8 +303,8 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
     <p class="mb-0 mt-1.5 text-[11px] text-faint">
       {#if mcpProfile === "full"}
         Full adds <code class="font-mono">X-Krabby-Tool-Profile: full</code> under <code class="font-mono">headers</code> and exposes the complete catalog, administration included.
-      {:else if mcpProfile === "caller"}
-        Caller adds <code class="font-mono">X-Krabby-Tool-Profile: caller</code> under <code class="font-mono">headers</code>: the standard catalog plus <code class="font-mono">call_api_endpoint</code>.
+      {:else if mcpProfile === "api"}
+        API adds <code class="font-mono">X-Krabby-Tool-Profile: api</code> under <code class="font-mono">headers</code>: the standard catalog plus the API catalog and <code class="font-mono">call_api_endpoint</code>.
       {:else}
         Standard omits the profile header and exposes the smaller read-only catalog.
       {/if}

@@ -365,7 +365,7 @@
       ["Data dir", s.data_dir],
       ["Listen", `${s.server.host || "0.0.0.0"}:${s.server.port}`],
       ["MCP path", s.mcp.path],
-      ["MCP profiles", "standard (default), caller, full (X-Krabby-Tool-Profile: caller|full)"],
+      ["MCP profiles", "standard (default), api, full (X-Krabby-Tool-Profile: api|full)"],
       ["MCP API key", s.mcp.api_key_set ? "set" : "not set", s.mcp.api_key_set],
       ["Graphify bin", s.graphify.bin],
       ["Graphify version", s.graphify.version || "unknown"],

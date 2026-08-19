@@ -29,7 +29,6 @@ Tool selection (roughly what to reach for, in order):
 - Use git_blame to attribute lines to a commit (start_line/end_line blames a range), then git_diff with that sha to see what it changed.
 - Use git_log with from/to to compare releases or follow one file; list_refs gives tag names.
 - Use search_docs for documentation and knowledge; it covers generated repo docs, web sources (Confluence, Jira, pages) and catalogued API endpoints. Semantic is the default when configured, otherwise lexical; request hybrid explicitly for fused retrieval. Use lexical for exact keys/titles/identifiers and semantic for conceptual questions. Pass the user's full question. Scope a web source with the exact scope_key returned by list_sources.
-- To call an API, walk the catalog: list_api_groups -> list_api_services -> list_api_endpoints -> get_api_endpoint. Only the last returns schemas; narrow with search/tag rather than listing every endpoint.
 - Use list_* only when an identifier is unknown or the user explicitly requests an inventory. Do not exhaust pages or request a recursive file tree without a clear need.
 - Use get_* tools only after a search/query identifies the target.
 - If a graph tool returns "Repository selection required", retry it with one of the provided repo ids instead of treating the result as a failure.
@@ -40,17 +39,25 @@ Repos are grouped into namespaces. When the repo is unknown a search covers only
 
 add_repo and refresh_repo run in the background by default. Poll repo_status until ready or error before querying.`
 
-// The three profiles are strictly nested: standard ⊂ caller ⊂ full.
+// apiInstructions is appended for the profiles that publish the API catalog.
+// Standard never sees those tools, so telling it how to walk the catalog would
+// only describe tools it cannot call.
+const apiInstructions = `
+
+This connection also carries the API catalog. To call an API, walk it: list_api_groups -> list_api_services -> list_api_endpoints -> get_api_endpoint. Only the last returns schemas; narrow with search/tag rather than listing every endpoint. call_api_endpoint then sends a real request to the target service, so call mutating endpoints only when explicitly requested.`
+
+// The three profiles are strictly nested: standard ⊂ api ⊂ full.
 //
-// Caller exists because "may send requests to catalogued APIs" and "may rewire
+// The api profile exists because "may reach catalogued APIs" and "may rewire
 // krabby itself" are different trust decisions. An agent that helps someone
 // exercise an internal API needs the first and has no business with the second
-// — handing it credentials administration just to unlock call_api_endpoint
-// would make the full profile the default in practice, which is exactly what a
-// smaller standard catalog exists to avoid.
+// — handing it credentials administration just to unlock the API catalog would
+// make the full profile the default in practice, which is exactly what a
+// smaller standard catalog exists to avoid. Standard is therefore purely the
+// repository/documentation surface: it publishes no api_* tool at all.
 const (
 	ToolProfileStandard = "standard"
-	ToolProfileCaller   = "caller"
+	ToolProfileAPI      = "api"
 	ToolProfileFull     = "full"
 )
 
@@ -60,17 +67,21 @@ const (
 // cap.
 func New(mgr *manager.Manager, version string, waitTimeout time.Duration, profile string) *mcp.Server {
 	full := profile == ToolProfileFull
-	canCall := full || profile == ToolProfileCaller
+	withAPI := full || profile == ToolProfileAPI
 
 	title := "Krabby codebase search and knowledge"
 	instructions := serverInstructions
+	if withAPI {
+		instructions += apiInstructions
+	}
+
 	switch {
 	case full:
 		title += " (full administration)"
-		instructions += "\n\nThis connection uses the full profile and can mutate credentials, runtime configuration, web sources and the API catalog. Collections use add/update/refresh/delete_source and get_source_config; pages-source items use register_source_page, import_source_pages, import_source_sitemap and delete_source_page. API services use add/update/refresh/delete_api_service and get_api_service_config. call_api_endpoint sends a real request to a catalogued API. Use mutation tools — and call_api_endpoint against mutating endpoints — only when explicitly requested."
-	case canCall:
-		title += " (api caller)"
-		instructions += "\n\nThis connection uses the caller profile: in addition to the standard read-only tools it can send real requests to catalogued APIs with call_api_endpoint. Walk the catalog first (list_api_endpoints, get_api_endpoint) to learn the parameters, and call mutating endpoints only when explicitly requested."
+		instructions += "\n\nThis connection uses the full profile and can mutate credentials, runtime configuration, web sources and the API catalog. Collections use add/update/refresh/delete_source and get_source_config; pages-source items use register_source_page, import_source_pages, import_source_sitemap and delete_source_page. API services use add/update/refresh/delete_api_service and get_api_service_config. Use mutation tools — and call_api_endpoint against mutating endpoints — only when explicitly requested."
+	case withAPI:
+		title += " (api)"
+		instructions += "\n\nThis connection uses the api profile: the standard read-only tools plus the API catalog and call_api_endpoint. It cannot administer krabby itself — catalogue changes need the full profile."
 	}
 
 	server := mcp.NewServer(&mcp.Implementation{
@@ -90,7 +101,9 @@ func New(mgr *manager.Manager, version string, waitTimeout time.Duration, profil
 	addFileTools(server, mgr)
 	addHistoryTools(server, mgr)
 	addDocTools(server, mgr, full)
-	addAPITools(server, mgr, canCall, full)
+	if withAPI {
+		addAPITools(server, mgr, full)
+	}
 	if full {
 		addCredentialTools(server, mgr)
 	}

@@ -42,7 +42,7 @@ import (
 const MCPToolProfileHeader = "X-Krabby-Tool-Profile"
 
 // Start runs the HTTP server until ctx is cancelled.
-func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpServer, mcpCallerServer, mcpFullServer *mcp.Server) error {
+func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpServer, mcpAPIServer, mcpFullServer *mcp.Server) error {
 	server := ada.New()
 	server.Use(
 		mrecover.Middleware(),
@@ -83,10 +83,11 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	})
 
 	// The profile is selected when the client connects. Omitting the header keeps
-	// the smaller standard catalog; caller adds call_api_endpoint; full exposes
+	// the smaller standard catalog (repositories and documentation only); api
+	// adds the whole API catalog including call_api_endpoint; full exposes
 	// administration tools as well.
 	mcpHandler := mcp.NewStreamableHTTPHandler(
-		func(r *http.Request) *mcp.Server { return mcpServerForRequest(r, mcpServer, mcpCallerServer, mcpFullServer) },
+		func(r *http.Request) *mcp.Server { return mcpServerForRequest(r, mcpServer, mcpAPIServer, mcpFullServer) },
 		&mcp.StreamableHTTPOptions{},
 	)
 	// The MCP key can be overridden at runtime from the UI; resolve it per
@@ -231,12 +232,12 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 
 // ---- middleware -------------------------------------------------------------
 
-func mcpServerForRequest(r *http.Request, standard, caller, full *mcp.Server) *mcp.Server {
+func mcpServerForRequest(r *http.Request, standard, api, full *mcp.Server) *mcp.Server {
 	switch strings.ToLower(strings.TrimSpace(r.Header.Get(MCPToolProfileHeader))) {
 	case "full":
 		return full
-	case "caller":
-		return caller
+	case "api":
+		return api
 	default:
 		// An unknown profile name degrades to standard rather than erroring:
 		// the header is advisory capability selection, not authentication, and

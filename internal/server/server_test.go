@@ -126,7 +126,7 @@ func TestAPIKeyMiddleware(t *testing.T) {
 
 func TestMCPServerForRequest(t *testing.T) {
 	standard := mcp.NewServer(&mcp.Implementation{Name: "standard", Version: "test"}, nil)
-	caller := mcp.NewServer(&mcp.Implementation{Name: "caller", Version: "test"}, nil)
+	apiSrv := mcp.NewServer(&mcp.Implementation{Name: "api", Version: "test"}, nil)
 	full := mcp.NewServer(&mcp.Implementation{Name: "full", Version: "test"}, nil)
 
 	tests := []struct {
@@ -137,8 +137,10 @@ func TestMCPServerForRequest(t *testing.T) {
 		{name: "default", want: standard},
 		{name: "standard", header: "standard", want: standard},
 		{name: "unknown", header: "other", want: standard},
-		{name: "caller", header: "caller", want: caller},
-		{name: "caller case insensitive", header: " Caller ", want: caller},
+		{name: "api", header: "api", want: apiSrv},
+		{name: "api case insensitive", header: " API ", want: apiSrv},
+		// The retired name must not keep unlocking the catalog silently.
+		{name: "retired caller", header: "caller", want: standard},
 		{name: "full", header: "full", want: full},
 		{name: "full case insensitive", header: " FULL ", want: full},
 	}
@@ -147,7 +149,7 @@ func TestMCPServerForRequest(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
 			req.Header.Set(MCPToolProfileHeader, tt.header)
-			if got := mcpServerForRequest(req, standard, caller, full); got != tt.want {
+			if got := mcpServerForRequest(req, standard, apiSrv, full); got != tt.want {
 				t.Fatalf("selected server %p, want %p", got, tt.want)
 			}
 		})
