@@ -39,7 +39,6 @@ import (
 	"google.golang.org/protobuf/reflect/protoregistry"
 	"google.golang.org/protobuf/types/descriptorpb"
 
-	"github.com/rytsh/krabby/internal/nullx"
 	"github.com/rytsh/krabby/internal/service/apicatalog"
 )
 
@@ -178,12 +177,12 @@ func (p *Provider) MergeConfig(current, update json.RawMessage) (json.RawMessage
 			return nil, err
 		}
 
-		next.Target = nullx.Merge(next.Target, prev.Target)
-		next.Plaintext = nullx.Merge(next.Plaintext, prev.Plaintext)
-		next.InsecureSkipVerify = nullx.Merge(next.InsecureSkipVerify, prev.InsecureSkipVerify)
-		next.ServerName = nullx.Merge(next.ServerName, prev.ServerName)
-		next.Metadata = nullx.Merge(next.Metadata, prev.Metadata)
-		next.Services = nullx.Merge(next.Services, prev.Services)
+		next.Target.Merge(prev.Target)
+		next.Plaintext.Merge(prev.Plaintext)
+		next.InsecureSkipVerify.Merge(prev.InsecureSkipVerify)
+		next.ServerName.Merge(prev.ServerName)
+		next.Metadata.Merge(prev.Metadata)
+		next.Services.Merge(prev.Services)
 
 		// Tokens are write-only: an absent or blank incoming token keeps the
 		// stored one.

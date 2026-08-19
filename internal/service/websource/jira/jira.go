@@ -216,17 +216,17 @@ func (f *Fetcher) MergeConfig(current, update json.RawMessage) (json.RawMessage,
 			return nil, err
 		}
 
-		next.BaseURL = websource.MergeNull(next.BaseURL, prev.BaseURL)
-		next.User = websource.MergeNull(next.User, prev.User)
-		next.Project = websource.MergeNull(next.Project, prev.Project)
-		next.JQL = websource.MergeNull(next.JQL, prev.JQL)
-		next.IncludeLabels = websource.MergeNull(next.IncludeLabels, prev.IncludeLabels)
-		next.ExcludeLabels = websource.MergeNull(next.ExcludeLabels, prev.ExcludeLabels)
-		next.IncludeSubtasks = websource.MergeNull(next.IncludeSubtasks, prev.IncludeSubtasks)
-		next.TeamFields = websource.MergeNull(next.TeamFields, prev.TeamFields)
-		next.MaxIssues = websource.MergeNull(next.MaxIssues, prev.MaxIssues)
-		next.FullResyncSchedule = websource.MergeNull(next.FullResyncSchedule, prev.FullResyncSchedule)
-		next.FullResyncEvery = websource.MergeNull(next.FullResyncEvery, prev.FullResyncEvery)
+		next.BaseURL.Merge(prev.BaseURL)
+		next.User.Merge(prev.User)
+		next.Project.Merge(prev.Project)
+		next.JQL.Merge(prev.JQL)
+		next.IncludeLabels.Merge(prev.IncludeLabels)
+		next.ExcludeLabels.Merge(prev.ExcludeLabels)
+		next.IncludeSubtasks.Merge(prev.IncludeSubtasks)
+		next.TeamFields.Merge(prev.TeamFields)
+		next.MaxIssues.Merge(prev.MaxIssues)
+		next.FullResyncSchedule.Merge(prev.FullResyncSchedule)
+		next.FullResyncEvery.Merge(prev.FullResyncEvery)
 
 		if next.APIToken.ValueOrZero() == "" {
 			next.APIToken = prev.APIToken

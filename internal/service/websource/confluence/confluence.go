@@ -217,16 +217,16 @@ func (f *Fetcher) MergeConfig(current, update json.RawMessage) (json.RawMessage,
 			return nil, err
 		}
 
-		next.BaseURL = websource.MergeNull(next.BaseURL, prev.BaseURL)
-		next.Space = websource.MergeNull(next.Space, prev.Space)
-		next.User = websource.MergeNull(next.User, prev.User)
-		next.RootPage = websource.MergeNull(next.RootPage, prev.RootPage)
-		next.IncludeRoot = websource.MergeNull(next.IncludeRoot, prev.IncludeRoot)
-		next.IncludeLabels = websource.MergeNull(next.IncludeLabels, prev.IncludeLabels)
-		next.ExcludeLabels = websource.MergeNull(next.ExcludeLabels, prev.ExcludeLabels)
-		next.FullResyncSchedule = websource.MergeNull(next.FullResyncSchedule, prev.FullResyncSchedule)
-		next.FullResyncEvery = websource.MergeNull(next.FullResyncEvery, prev.FullResyncEvery)
-		next.MaxPages = websource.MergeNull(next.MaxPages, prev.MaxPages)
+		next.BaseURL.Merge(prev.BaseURL)
+		next.Space.Merge(prev.Space)
+		next.User.Merge(prev.User)
+		next.RootPage.Merge(prev.RootPage)
+		next.IncludeRoot.Merge(prev.IncludeRoot)
+		next.IncludeLabels.Merge(prev.IncludeLabels)
+		next.ExcludeLabels.Merge(prev.ExcludeLabels)
+		next.FullResyncSchedule.Merge(prev.FullResyncSchedule)
+		next.FullResyncEvery.Merge(prev.FullResyncEvery)
+		next.MaxPages.Merge(prev.MaxPages)
 
 		// Tokens are write-only: an absent or blank incoming token keeps the
 		// stored one; only a non-empty value replaces it.

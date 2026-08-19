@@ -6,27 +6,7 @@ import (
 	"time"
 
 	"github.com/worldline-go/types"
-
-	"github.com/rytsh/krabby/internal/nullx"
 )
-
-// MergeNull returns the update value when the field was present in the update
-// JSON (set to a value OR explicitly null), otherwise the stored value.
-//
-// It implements krabby's partial-update rule — absent = keep, null = clear,
-// value = override. The rule itself lives in internal/nullx because the
-// API-catalog envelope and provider configs merge the same way; these two
-// wrappers stay so web-source code reads without reaching across packages.
-func MergeNull[T any](update, stored types.Null[T]) types.Null[T] {
-	return nullx.Merge(update, stored)
-}
-
-// Present reports whether the field was in the update JSON at all, with either
-// a value or an explicit null. Use it when a merge is not a straight
-// replacement — a secret that is kept unless explicitly cleared, say.
-func Present[T any](n types.Null[T]) bool {
-	return nullx.Present(n)
-}
 
 // CollectionUpdate is a partial update of a collection's mutable envelope: the
 // fields that live on the record itself rather than in the provider-owned
@@ -58,14 +38,14 @@ type CollectionUpdate struct {
 // did not mention untouched. The provider config is merged separately by the
 // fetcher, which owns its shape.
 func (u CollectionUpdate) Apply(col *Collection) error {
-	if Present(u.Description) {
+	if u.Description.Present() {
 		col.Description = strings.TrimSpace(u.Description.ValueOrZero())
 	}
-	if Present(u.AnalyzeImages) {
+	if u.AnalyzeImages.Present() {
 		col.AnalyzeImages = u.AnalyzeImages.ValueOrZero()
 	}
 
-	if Present(u.Specs) {
+	if u.Specs.Present() {
 		specs := make([]string, 0, len(u.Specs.ValueOrZero()))
 		for _, spec := range u.Specs.ValueOrZero() {
 			if spec = strings.TrimSpace(spec); spec != "" {
@@ -75,7 +55,7 @@ func (u CollectionUpdate) Apply(col *Collection) error {
 		col.Specs = specs
 	}
 
-	if Present(u.RefreshInterval) {
+	if u.RefreshInterval.Present() {
 		raw := strings.TrimSpace(u.RefreshInterval.ValueOrZero())
 		switch raw {
 		case "", "manual":

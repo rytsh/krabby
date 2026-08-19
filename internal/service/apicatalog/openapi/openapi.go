@@ -29,7 +29,6 @@ import (
 	"github.com/pb33f/libopenapi"
 	"github.com/worldline-go/types"
 
-	"github.com/rytsh/krabby/internal/nullx"
 	"github.com/rytsh/krabby/internal/service/apicatalog"
 )
 
@@ -166,10 +165,10 @@ func (p *Provider) MergeConfig(current, update json.RawMessage) (json.RawMessage
 			return nil, err
 		}
 
-		next.URL = nullx.Merge(next.URL, prev.URL)
-		next.User = nullx.Merge(next.User, prev.User)
-		next.Headers = nullx.Merge(next.Headers, prev.Headers)
-		next.InsecureSkipVerify = nullx.Merge(next.InsecureSkipVerify, prev.InsecureSkipVerify)
+		next.URL.Merge(prev.URL)
+		next.User.Merge(prev.User)
+		next.Headers.Merge(prev.Headers)
+		next.InsecureSkipVerify.Merge(prev.InsecureSkipVerify)
 
 		// Tokens are write-only: an absent or blank incoming token keeps the
 		// stored one; only a non-empty value replaces it.

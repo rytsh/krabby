@@ -7,8 +7,6 @@ import (
 	"time"
 
 	"github.com/worldline-go/types"
-
-	"github.com/rytsh/krabby/internal/nullx"
 )
 
 // maxSpecPatchBytes bounds a stored merge patch. A patch is hand-written
@@ -68,18 +66,18 @@ type ServiceUpdate struct {
 // so the caller must force a full re-sync rather than wait for the watermark to
 // move — the document itself has not changed, only our reading of it.
 func (u ServiceUpdate) Apply(svc *Service) (rerender bool, err error) {
-	if nullx.Present(u.Group) {
+	if u.Group.Present() {
 		group := NormalizeGroup(u.Group.ValueOrZero())
 		if group != "" && !ValidName(group) {
 			return false, fmt.Errorf("invalid group name %q (want lowercase [a-z0-9._-])", group)
 		}
 		svc.Group = group
 	}
-	if nullx.Present(u.Description) {
+	if u.Description.Present() {
 		svc.Description = strings.TrimSpace(u.Description.ValueOrZero())
 	}
 
-	if nullx.Present(u.BaseURL) {
+	if u.BaseURL.Present() {
 		base := strings.TrimRight(strings.TrimSpace(u.BaseURL.ValueOrZero()), "/")
 		if base != "" && !strings.HasPrefix(base, "http://") && !strings.HasPrefix(base, "https://") {
 			return false, fmt.Errorf("base_url must be an http(s) URL")
@@ -90,7 +88,7 @@ func (u ServiceUpdate) Apply(svc *Service) (rerender bool, err error) {
 		svc.BaseURL = base
 	}
 
-	if nullx.Present(u.SpecPatch) {
+	if u.SpecPatch.Present() {
 		patch, err := normalizeSpecPatch(u.SpecPatch.ValueOrZero())
 		if err != nil {
 			return false, err
@@ -101,7 +99,7 @@ func (u ServiceUpdate) Apply(svc *Service) (rerender bool, err error) {
 		svc.SpecPatch = patch
 	}
 
-	if nullx.Present(u.Operations) {
+	if u.Operations.Present() {
 		overrides, err := normalizeOverrides(u.Operations.ValueOrZero())
 		if err != nil {
 			return false, err
@@ -110,7 +108,7 @@ func (u ServiceUpdate) Apply(svc *Service) (rerender bool, err error) {
 		svc.Operations = overrides
 	}
 
-	if nullx.Present(u.Specs) {
+	if u.Specs.Present() {
 		specs := make([]string, 0, len(u.Specs.ValueOrZero()))
 		for _, spec := range u.Specs.ValueOrZero() {
 			if spec = strings.TrimSpace(spec); spec != "" {
@@ -120,7 +118,7 @@ func (u ServiceUpdate) Apply(svc *Service) (rerender bool, err error) {
 		svc.Specs = specs
 	}
 
-	if nullx.Present(u.RefreshInterval) {
+	if u.RefreshInterval.Present() {
 		raw := strings.TrimSpace(u.RefreshInterval.ValueOrZero())
 		switch raw {
 		case "", "manual":

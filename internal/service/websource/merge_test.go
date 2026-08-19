@@ -5,30 +5,7 @@ import (
 	"slices"
 	"testing"
 	"time"
-
-	"github.com/worldline-go/types"
 )
-
-// TestMergeNull covers the rule every partial-update surface shares.
-func TestMergeNull(t *testing.T) {
-	t.Parallel()
-
-	stored := types.NewNull("stored")
-
-	var absent types.Null[string]
-	if got := MergeNull(absent, stored); got.ValueOrZero() != "stored" {
-		t.Fatalf("absent update did not keep the stored value: %#v", got)
-	}
-
-	explicitNull := types.Null[string]{ParsedNull: true}
-	if got := MergeNull(explicitNull, stored); got.Valid || got.ValueOrZero() != "" {
-		t.Fatalf("explicit null did not clear: %#v", got)
-	}
-
-	if got := MergeNull(types.NewNull("new"), stored); got.ValueOrZero() != "new" {
-		t.Fatalf("value did not override: %#v", got)
-	}
-}
 
 // TestCollectionUpdateApply is the regression test for the destructive update:
 // a request that only changed the description used to wipe the schedule and
