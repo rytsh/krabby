@@ -71,9 +71,9 @@ type addAPIServiceArgs struct {
 	Description string `json:"description,omitempty" jsonschema:"human summary; overrides the specification's own description"`
 	BaseURL     string `json:"base_url,omitempty"    jsonschema:"override the servers the document declares, e.g. the internal deployment URL"`
 
-	Config json.RawMessage `json:"config,omitempty" jsonschema:"provider config; for openapi set url (where the document is served) and optionally user/token/headers"`
+	Config jsonObject `json:"config,omitempty" jsonschema:"provider config; for openapi set url (where the document is served) and optionally user/token/headers"`
 
-	SpecPatch json.RawMessage `json:"spec_patch,omitempty" jsonschema:"RFC 7386 JSON Merge Patch applied to the raw document before parsing; use it to correct schemas or metadata, null deletes a key"`
+	SpecPatch jsonObject `json:"spec_patch,omitempty" jsonschema:"RFC 7386 JSON Merge Patch applied to the raw document before parsing; use it to correct schemas or metadata, null deletes a key"`
 
 	Operations map[string]apicatalog.OperationOverride `json:"operations,omitempty" jsonschema:"per-operation overrides keyed by operation id or 'METHOD /path'; set hidden to drop an endpoint from the catalog"`
 
@@ -116,8 +116,8 @@ type updateAPIServiceArgs struct {
 	Description *string `json:"description,omitempty"`
 	BaseURL     *string `json:"base_url,omitempty"`
 
-	Config    json.RawMessage `json:"config,omitempty"     jsonschema:"provider config changes; blank write-only secrets keep the stored value"`
-	SpecPatch json.RawMessage `json:"spec_patch,omitempty" jsonschema:"replace the JSON Merge Patch applied to the raw document"`
+	Config    jsonObject `json:"config,omitempty"     jsonschema:"provider config changes; blank write-only secrets keep the stored value"`
+	SpecPatch jsonObject `json:"spec_patch,omitempty" jsonschema:"replace the JSON Merge Patch applied to the raw document"`
 
 	Operations map[string]apicatalog.OperationOverride `json:"operations,omitempty" jsonschema:"replace the per-operation override map wholesale"`
 
@@ -192,10 +192,10 @@ type apiEndpointOutput struct {
 type apiServiceConfigOutput struct {
 	apiServiceSummary
 
-	SpecPatch  json.RawMessage                         `json:"spec_patch,omitempty"`
+	SpecPatch  jsonObject                              `json:"spec_patch,omitempty"`
 	Operations map[string]apicatalog.OperationOverride `json:"operations,omitempty"`
 	Specs      []string                                `json:"specs,omitempty"`
-	Config     any                                     `json:"config,omitempty"`
+	Config     jsonObject                              `json:"config,omitempty"`
 	Running    string                                  `json:"running,omitempty"`
 }
 
@@ -414,7 +414,7 @@ func addAPIAdminTools(server *mcp.Server, mgr *manager.Manager) {
 			Group:       args.Group,
 			Description: strings.TrimSpace(args.Description),
 			BaseURL:     strings.TrimRight(strings.TrimSpace(args.BaseURL), "/"),
-			Config:      args.Config,
+			Config:      json.RawMessage(args.Config),
 			Specs:       args.Specs,
 		}
 
@@ -460,7 +460,7 @@ func addAPIAdminTools(server *mcp.Server, mgr *manager.Manager) {
 			return nil, nil, fmt.Errorf("decode update; %w", err)
 		}
 
-		if err := mgr.UpdateAPIService(ctx, name, update, args.Config); err != nil {
+		if err := mgr.UpdateAPIService(ctx, name, update, json.RawMessage(args.Config)); err != nil {
 			return nil, nil, err
 		}
 
@@ -515,10 +515,10 @@ func addAPIAdminTools(server *mcp.Server, mgr *manager.Manager) {
 
 		out := apiServiceConfigOutput{
 			apiServiceSummary: summarizeAPIService(svc),
-			SpecPatch:         svc.SpecPatch,
+			SpecPatch:         jsonObject(svc.SpecPatch),
 			Operations:        svc.Operations,
 			Specs:             svc.Specs,
-			Config:            mgr.APIServiceConfigView(svc),
+			Config:            jsonObjectFrom(mgr.APIServiceConfigView(svc)),
 			Running:           mgr.Activity(apicatalog.ScopeKey(name)),
 		}
 

@@ -234,7 +234,7 @@ func (a addSourceArgs) collection() (*websource.Collection, error) {
 type sourceResult struct {
 	*websource.Collection
 	RefreshInterval string             `json:"refresh_interval"`
-	Config          any                `json:"config,omitempty"`
+	Config          jsonObject         `json:"config,omitempty"`
 	ScopeKey        string             `json:"scope_key"`
 	Running         string             `json:"running,omitempty"`
 	Progress        []manager.Progress `json:"progress,omitempty"`
@@ -328,7 +328,7 @@ func viewSourceMCP(mgr *manager.Manager, col *websource.Collection) sourceResult
 	return sourceResult{
 		Collection:      col,
 		RefreshInterval: interval,
-		Config:          mgr.WebSourceConfigView(col),
+		Config:          jsonObjectFrom(mgr.WebSourceConfigView(col)),
 		ScopeKey:        scope,
 		Running:         mgr.Activity(scope),
 		Progress:        progress,

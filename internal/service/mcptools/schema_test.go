@@ -125,9 +125,9 @@ func TestRawMessageArgsAcceptJSONValues(t *testing.T) {
 	}
 }
 
-// TestRawMessageArgsAreUnconstrainedEverywhere extends the guarantee to the
-// other RawMessage arguments, so a service config or spec patch cannot regress
-// into the same byte-array shape.
+// TestRawMessageArgsAreUnconstrainedEverywhere guards arbitrary request bodies.
+// Admin config and merge-patch fields use jsonObject instead because strict MCP
+// clients require a concrete type for every property.
 func TestRawMessageArgsAreUnconstrainedEverywhere(t *testing.T) {
 	t.Parallel()
 
@@ -137,8 +137,6 @@ func TestRawMessageArgsAreUnconstrainedEverywhere(t *testing.T) {
 		fields []string
 	}{
 		{"call_api_endpoint", jsonschema.For[callAPIEndpointArgs], []string{"body"}},
-		{"add_api_service", jsonschema.For[addAPIServiceArgs], []string{"config", "spec_patch"}},
-		{"update_api_service", jsonschema.For[updateAPIServiceArgs], []string{"config", "spec_patch"}},
 	}
 
 	for _, tt := range tests {
@@ -167,6 +165,28 @@ func TestRawMessageArgsAreUnconstrainedEverywhere(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestJSONObjectAcceptsOnlyObjects(t *testing.T) {
+	t.Parallel()
+
+	var object jsonObject
+	if err := json.Unmarshal([]byte(`{"url":"https://example.test/openapi.json"}`), &object); err != nil {
+		t.Fatalf("object rejected: %v", err)
+	}
+	if got := string(object); got != `{"url":"https://example.test/openapi.json"}` {
+		t.Fatalf("stored object = %s", got)
+	}
+
+	for _, input := range []string{`[]`, `"object"`, `1`, `true`} {
+		if err := json.Unmarshal([]byte(input), &object); err == nil {
+			t.Errorf("non-object %s was accepted", input)
+		}
+	}
+
+	if err := json.Unmarshal([]byte(`null`), &object); err != nil || object != nil {
+		t.Fatalf("null did not clear the object: value=%s err=%v", object, err)
 	}
 }
 

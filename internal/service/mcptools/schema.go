@@ -1,6 +1,7 @@
 package mcptools
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -8,6 +9,49 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// jsonObject keeps provider-owned JSON as raw bytes while advertising the
+// concrete object shape expected by config and merge-patch fields. An
+// unconstrained schema is valid JSON Schema but some MCP clients (including
+// Claude Code) reject it while translating tools to their provider format.
+type jsonObject json.RawMessage
+
+func (o *jsonObject) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if bytes.Equal(trimmed, []byte("null")) {
+		*o = nil
+
+		return nil
+	}
+	if len(trimmed) == 0 || trimmed[0] != '{' || !json.Valid(trimmed) {
+		return fmt.Errorf("must be a JSON object")
+	}
+
+	*o = append((*o)[:0], trimmed...)
+
+	return nil
+}
+
+func (o jsonObject) MarshalJSON() ([]byte, error) {
+	if len(o) == 0 {
+		return []byte("null"), nil
+	}
+
+	return o, nil
+}
+
+func jsonObjectFrom(v any) jsonObject {
+	if v == nil {
+		return nil
+	}
+
+	raw, err := json.Marshal(v)
+	if err != nil || len(bytes.TrimSpace(raw)) == 0 || bytes.TrimSpace(raw)[0] != '{' {
+		return nil
+	}
+
+	return jsonObject(raw)
+}
 
 // forOptions is the inference configuration every tool schema is built with.
 //
@@ -32,6 +76,9 @@ var forOptions = &jsonschema.ForOptions{
 	TypeSchemas: map[reflect.Type]*jsonschema.Schema{
 		reflect.TypeFor[json.RawMessage](): {
 			Description: "arbitrary JSON value",
+		},
+		reflect.TypeFor[jsonObject](): {
+			Type: "object",
 		},
 	},
 }

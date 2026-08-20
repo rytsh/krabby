@@ -31,17 +31,17 @@
 
 {#each nodes as node (node.key)}
   <button
-    class="flex w-full cursor-pointer items-center gap-1.5 rounded-md py-1.5 pr-2.5 text-left text-[13px] text-dim transition-colors hover:bg-surface-2 hover:text-fg"
+    class="flex w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-md py-1.5 pr-2.5 text-left text-[13px] text-dim transition-colors hover:bg-surface-2 hover:text-fg"
     style={`padding-left:${pad}px`}
     onclick={() => onToggle(node)}
     aria-expanded={!!expanded[node.key]}
     title={node.owner || node.key}
   >
-    <Icon name={expanded[node.key] ? "chevron-down" : "chevron-right"} size={13} />
-    <Icon name="folder" size={13} />
-    <span class="truncate font-mono">{node.label}</span>
+    <span class="inline-flex shrink-0"><Icon name={expanded[node.key] ? "chevron-down" : "chevron-right"} size={13} /></span>
+    <span class="inline-flex shrink-0"><Icon name="folder" size={13} /></span>
+    <span class="min-w-0 flex-1 truncate font-mono">{node.label}</span>
     {#if node.count > 0}
-      <span class="ml-auto text-[11px] text-faint">{node.count}</span>
+      <span class="ml-auto shrink-0 text-[11px] text-faint">{node.count}</span>
     {/if}
   </button>
 
@@ -69,13 +69,13 @@
             href={`/repos/${r.id}`}
             use:link
             title={r.id}
-            class="flex items-center gap-2 rounded-md py-1.5 pr-2.5 text-[13px] text-dim transition-colors hover:bg-surface-2 hover:text-fg"
+            class="flex min-w-0 items-center gap-2 rounded-md py-1.5 pr-2.5 text-[13px] text-dim transition-colors hover:bg-surface-2 hover:text-fg"
             style={`padding-left:${pad + step + 20}px`}
             class:!bg-surface-2={view === "repo" && repoId === r.id}
             class:!text-fg={view === "repo" && repoId === r.id}
           >
             <Status status={r.status} dot />
-            <span class="truncate font-mono">{nameOf(r.id)}</span>
+            <span class="min-w-0 flex-1 truncate font-mono">{nameOf(r.id)}</span>
           </a>
         {/each}
       {/if}

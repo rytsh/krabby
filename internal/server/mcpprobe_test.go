@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/rytsh/krabby/internal/service/mcptools"
 )
 
 // The guard sits in front of the real transport, so the test that matters most
@@ -54,6 +56,51 @@ func TestMCPProbeDoesNotBreakRealSession(t *testing.T) {
 	txt, ok := out.Content[0].(*mcp.TextContent)
 	if !ok || txt.Text != "pong" {
 		t.Fatalf("result = %+v", out.Content)
+	}
+}
+
+// The admin catalog has its own route and a substantially larger tool payload.
+// Exercise that exact endpoint so route wiring, health probes and tools/list
+// compatibility cannot pass only against the small synthetic server above.
+func TestMCPAdminEndpointHealthAndSession(t *testing.T) {
+	admin := mcptools.NewAdmin(nil, "test", 0)
+	sdk := mcp.NewStreamableHTTPHandler(
+		func(*http.Request) *mcp.Server { return admin },
+		&mcp.StreamableHTTPOptions{},
+	)
+	mux := http.NewServeMux()
+	mux.Handle("/mcp/admin", mcpProbe(sdk))
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		req, err := http.NewRequest(method, ts.URL+"/mcp/admin", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s health probe: %v", method, err)
+		}
+		_ = res.Body.Close()
+		if res.StatusCode != http.StatusOK {
+			t.Errorf("%s health status = %d, want 200", method, res.StatusCode)
+		}
+	}
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "admin-endpoint-test", Version: "1"}, nil)
+	sess, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{Endpoint: ts.URL + "/mcp/admin"}, nil)
+	if err != nil {
+		t.Fatalf("connect to /mcp/admin: %v", err)
+	}
+	defer sess.Close()
+
+	tools, err := sess.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("list admin tools: %v", err)
+	}
+	if len(tools.Tools) != 38 {
+		t.Fatalf("admin tool count = %d, want 38", len(tools.Tools))
 	}
 }
 

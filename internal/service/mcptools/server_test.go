@@ -246,6 +246,66 @@ func TestPublishedCallSchemaAcceptsJSONBody(t *testing.T) {
 	}
 }
 
+func TestAdminCatalogUsesTypedJSONObjects(t *testing.T) {
+	server := NewAdmin(nil, "test", 0)
+	ct, st := mcp.NewInMemoryTransports()
+	if _, err := server.Connect(context.Background(), st, nil); err != nil {
+		t.Fatal(err)
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "test"}, nil)
+	session, err := client.Connect(context.Background(), ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	result, err := session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools := make(map[string]*mcp.Tool, len(result.Tools))
+	for _, tool := range result.Tools {
+		tools[tool.Name] = tool
+	}
+
+	for _, name := range []string{"add_api_service", "update_api_service"} {
+		tool := tools[name]
+		if tool == nil {
+			t.Fatalf("tool %q is missing", name)
+		}
+		var schema jsonschema.Schema
+		raw, _ := json.Marshal(tool.InputSchema)
+		if err := json.Unmarshal(raw, &schema); err != nil {
+			t.Fatalf("decode %s input schema: %v", name, err)
+		}
+		for _, field := range []string{"config", "spec_patch"} {
+			property := schema.Properties[field]
+			if property == nil {
+				t.Errorf("%s input %s is missing", name, field)
+			} else if property.Type != "object" {
+				t.Errorf("%s input %s type = %q, want object", name, field, property.Type)
+			}
+		}
+	}
+
+	for _, name := range []string{"get_api_service_config", "get_source_config"} {
+		tool := tools[name]
+		if tool == nil || tool.OutputSchema == nil {
+			t.Fatalf("tool %q or its output schema is missing", name)
+		}
+		var schema jsonschema.Schema
+		raw, _ := json.Marshal(tool.OutputSchema)
+		if err := json.Unmarshal(raw, &schema); err != nil {
+			t.Fatalf("decode %s output schema: %v", name, err)
+		}
+		property := schema.Properties["config"]
+		if property == nil {
+			t.Errorf("%s output config is missing", name)
+		} else if property.Type != "object" {
+			t.Errorf("%s output config type = %q, want object", name, property.Type)
+		}
+	}
+}
+
 // serverInstructionsBudget bounds the server-level guidance. Every MCP session
 // pays for it in full, so it must stay a tool-selection map and never grow into
 // per-tool documentation, which belongs in each tool's Description.
