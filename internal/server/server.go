@@ -39,10 +39,8 @@ import (
 	"github.com/rytsh/krabby/internal/service/settings"
 )
 
-const MCPToolProfileHeader = "X-Krabby-Tool-Profile"
-
 // Start runs the HTTP server until ctx is cancelled.
-func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpServer, mcpAPIServer, mcpFullServer *mcp.Server) error {
+func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpServer, mcpAPIServer, mcpAdminServer *mcp.Server) error {
 	server := ada.New()
 	server.Use(
 		mrecover.Middleware(),
@@ -82,22 +80,20 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 		pprof.Handler(r.PathValue("name")).ServeHTTP(w, r)
 	})
 
-	// The profile is selected when the client connects. Omitting the header keeps
-	// the smaller standard catalog (repositories and documentation only); api
-	// adds the whole API catalog including call_api_endpoint; full exposes
-	// administration tools as well.
-	mcpHandler := mcp.NewStreamableHTTPHandler(
-		func(r *http.Request) *mcp.Server { return mcpServerForRequest(r, mcpServer, mcpAPIServer, mcpFullServer) },
-		&mcp.StreamableHTTPOptions{},
-	)
 	// The MCP key can be overridden at runtime from the UI; resolve it per
 	// request through the manager's cached value.
 	mgr.InitMCPKey(ctx, cfg.MCP.APIKey)
-	// mcpProbe wraps the handler rather than joining the middleware list so the
-	// order is unambiguous: the API key is checked first (an unauthenticated
-	// probe must still get 401), then non-MCP probes are answered, then real
-	// protocol traffic reaches the SDK.
-	base.Handle(cfg.MCP.Path, mcpProbe(mcpHandler), apiKeyMiddleware(mgr.MCPAPIKey))
+	// Each path owns a disjoint tool catalog. Clients add only the capabilities
+	// they need and can enable or disable API and administration independently.
+	for path, catalog := range mcpCatalogRoutes(cfg.MCP.Path, mcpServer, mcpAPIServer, mcpAdminServer) {
+		handler := mcp.NewStreamableHTTPHandler(
+			func(_ *http.Request) *mcp.Server { return catalog },
+			&mcp.StreamableHTTPOptions{},
+		)
+		// mcpProbe wraps the handler rather than joining the middleware list so
+		// authentication runs before probes and protocol traffic reaches the SDK.
+		base.Handle(path, mcpProbe(handler), apiKeyMiddleware(mgr.MCPAPIKey))
+	}
 
 	// The Langfuse HTTP scope is attached to the API group rather than the
 	// whole mux on purpose: /healthz, the pprof endpoints, the embedded UI
@@ -230,21 +226,15 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	return server.StartWithContext(ctx, cfg.Server.Host+":"+cfg.Server.Port)
 }
 
-// ---- middleware -------------------------------------------------------------
-
-func mcpServerForRequest(r *http.Request, standard, api, full *mcp.Server) *mcp.Server {
-	switch strings.ToLower(strings.TrimSpace(r.Header.Get(MCPToolProfileHeader))) {
-	case "full":
-		return full
-	case "api":
-		return api
-	default:
-		// An unknown profile name degrades to standard rather than erroring:
-		// the header is advisory capability selection, not authentication, and
-		// the safe default is the smallest catalog.
-		return standard
+func mcpCatalogRoutes(root string, core, api, admin *mcp.Server) map[string]*mcp.Server {
+	return map[string]*mcp.Server{
+		root:            core,
+		root + "/api":   api,
+		root + "/admin": admin,
 	}
 }
+
+// ---- middleware -------------------------------------------------------------
 
 // apiKeyMiddleware guards a handler with an API key resolved per request, so
 // runtime changes (UI-managed MCP key) apply without a restart. An empty key

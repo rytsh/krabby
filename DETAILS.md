@@ -87,27 +87,29 @@ curl -X POST localhost:8080/api/v1/repos -d '{"url":"git@git.example.com:team/se
 curl localhost:8080/api/v1/repos
 ```
 
-MCP endpoint for agents (opencode, Claude Desktop, etc.): `http://localhost:8080/mcp`
-(streamable HTTP; set `mcp.api_key` to require `X-Api-Key` / `Authorization: Bearer`).
-Without a profile header it exposes the read-only standard catalog: repositories,
-graph, files, history and documentation. Send `X-Krabby-Tool-Profile: api` to
-additionally expose the whole API catalog (`list_api_*`, `get_api_endpoint` and
-`call_api_endpoint`, which sends real requests to catalogued APIs), or
-`X-Krabby-Tool-Profile: full` to expose everything: the api profile plus
-credentials, docs/RAG configuration, catalog administration and endpoint probes.
-The profiles are strictly nested (standard ⊂ api ⊂ full).
+MCP catalogs for agents (opencode, Claude Desktop, etc.) use streamable HTTP.
+Set `mcp.api_key` to require `X-Api-Key` / `Authorization: Bearer` on all three:
 
-Example OpenCode config using the full profile:
+- `http://localhost:8080/mcp` — read-only repository, graph, file, history, and documentation tools
+- `http://localhost:8080/mcp/api` — API discovery plus `call_api_endpoint`, which sends real requests
+- `http://localhost:8080/mcp/admin` — every Krabby mutation and administrative tool
+
+The catalogs are disjoint. Add them as separate MCP servers so a client can
+enable API access or administration only for the tasks that require it.
+
+Example OpenCode config with core and admin registered separately:
 
 ```json
 {
   "mcp": {
     "krabby": {
       "type": "remote",
-      "url": "http://localhost:8080/mcp",
-      "headers": {
-        "X-Krabby-Tool-Profile": "full"
-      }
+      "url": "http://localhost:8080/mcp"
+    },
+    "krabby-admin": {
+      "type": "remote",
+      "url": "http://localhost:8080/mcp/admin",
+      "enabled": false
     }
   }
 }
@@ -117,10 +119,9 @@ Example OpenCode config using the full profile:
 
 | Tool | Purpose |
 | --- | --- |
-| `list_repos` / `add_repo` / `remove_repo` | Manage tracked repositories |
-| `refresh_repo` | Pull + rebuild graph in the background |
-| `repo_status` | Build state, last commit, last error |
-| `set_credential` / `list_credentials` / `remove_credential` | Per-host / per-org git credentials |
+| `list_repos` / `repo_status` | Core: discover tracked repositories and inspect build state |
+| `add_repo` / `remove_repo` / `refresh_repo` | Admin: manage tracked repositories and rebuilds |
+| `set_credential` / `list_credentials` / `remove_credential` | Admin: per-host / per-org git credentials |
 | `search_code` | First choice for symbols, paths, literals, definitions, usages, and implementation locations |
 | `read_file` / `list_files` | Page through a known source file or inspect a bounded directory listing |
 | `query_graph` | Architecture, dependency, call/data-flow, and cross-file relationship questions |
@@ -129,13 +130,13 @@ Example OpenCode config using the full profile:
 | `search_docs` / `list_docs` / `get_doc` | Search generated or synced Markdown with semantic (default), hybrid, or lexical retrieval |
 | `list_namespaces` | Discover repository groups, counts, and human descriptions before broad search |
 | `list_sources` / `get_source` | Discover web collections and their exact `web:<name>` scope keys; inspect bounded item-title samples |
-| `register_source_page` / `import_source_pages` / `import_source_sitemap` / `delete_source_page` | Full-profile management of individual `pages` source items |
-| `list_api_groups` / `list_api_services` / `list_api_endpoints` / `get_api_endpoint` | Api/full-profile: walk the API catalog from domain to service to endpoint to its full request shape |
-| `call_api_endpoint` | Api/full-profile: send a real request to a catalogued endpoint (HTTP or gRPC) and return the response |
-| `api_service_kinds` / `add_api_service` / `update_api_service` / `delete_api_service` / `refresh_api_service` / `get_api_service_config` | Full-profile management of catalogued APIs |
-| `set_api_group_description` / `delete_api_group` | Full-profile management of API group descriptions |
-| `get_docs_config` / `set_docs_config` | Read or live-update docs and code RAG settings |
-| `test_llm` / `test_embedder` / `test_code_embedder` | Validate model endpoints without saving |
+| `register_source_page` / `import_source_pages` / `import_source_sitemap` / `delete_source_page` | Admin: manage individual `pages` source items |
+| `list_api_groups` / `list_api_services` / `list_api_endpoints` / `get_api_endpoint` | API: walk the catalog from domain to service to endpoint to its full request shape |
+| `call_api_endpoint` | API: send a real request to a catalogued HTTP or gRPC endpoint |
+| `api_service_kinds` / `add_api_service` / `update_api_service` / `delete_api_service` / `refresh_api_service` / `get_api_service_config` | Admin: manage catalogued APIs |
+| `set_api_group_description` / `delete_api_group` | Admin: manage API group descriptions |
+| `get_docs_config` / `set_docs_config` | Admin: read or live-update docs and code RAG settings |
+| `test_llm` / `test_embedder` / `test_code_embedder` | Admin: validate model endpoints without saving |
 
 Always pass the full repo id (`host/group/.../name`) when it is known. Omit it
 only for an intentional cross-repository search or merged-graph analysis.
@@ -156,12 +157,8 @@ reaped, replaying its token transparently falls back to the current active
 snapshot and returns the new token — it never errors or wedges a client, so a
 consumer that keeps replaying an old token simply advances to the latest.
 
-The `standard` profile omits the credential and docs/RAG administration rows
-above and the entire API catalog, so an agent that only reads code and docs is
-not charged for those tool descriptions in every `tools/list`. Configure
-`X-Krabby-Tool-Profile: api` when an MCP client should discover and exercise
-catalogued APIs without administering krabby, and `X-Krabby-Tool-Profile: full`
-when it must administer them.
+Because each endpoint publishes only its own catalog, a client pays the
+`tools/list` context cost only for the capabilities currently enabled.
 
 ## REST API
 
@@ -362,7 +359,7 @@ against a static document is not re-embedded twenty-four times a day.
 
 Creating a service points krabby at a URL or a gRPC target of the operator's
 choosing, including private addresses; that is the intended use, and the
-security boundary is who holds the full MCP profile, not the network.
+security boundary is who can access the admin MCP endpoint, not the network.
 
 ## Refresh pipeline
 

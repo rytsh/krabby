@@ -337,7 +337,7 @@ func viewSourceMCP(mgr *manager.Manager, col *websource.Collection) sourceResult
 
 // addDocTools registers the documentation + RAG tools. They surface even when
 // the subsystem is disabled; calls then return a clear 'not enabled' error.
-func addDocTools(server *mcp.Server, mgr *manager.Manager, includeAdmin bool) {
+func addDocTools(server *mcp.Server, mgr *manager.Manager) {
 	addTool(server, &mcp.Tool{
 		Name:        "search_docs",
 		Description: "Search generated documentation and connected knowledge sources, including Confluence, Jira and pages. mode='semantic' (default) uses embedding retrieval and is the best general choice: its cost does not grow with how much of the collection shares the question's wording. mode='hybrid' combines semantic retrieval with local BM25 using weighted reciprocal rank fusion; it is the most thorough but waits for the BM25 arm, which on a large single-domain collection scores most of the corpus. A natural-language question is rewritten for BM25 into an OR of its words, so any shared product name or technical term contributes and the whole sentence is not required verbatim; words that look like keys, error codes, versions or paths (they contain a digit or . - _ / + @) stay required, so they still constrain the result. Semantic retrieval supplies paraphrase and conceptual recall. Use mode='lexical' for exact Jira keys, error codes, identifiers, quoted terms or page titles; it does not call an embedding model. Quote a phrase (\"gateway timeout\"), prefix a word with '-' to exclude it, or use OR/NOT explicitly to bypass the rewrite and control matching yourself. Use mode='semantic' for purely conceptual natural-language questions. Hybrid requires both indexes and does not silently fall back when semantic search is disabled. Scores are mode-specific and must not be compared across modes. Returns bounded ranked excerpts; use get_doc only when a result needs more context. Always scope with repo, web:<collection> or api:<service> when known. When repo is omitted the repo docs searched are limited to the 'default' namespace; pass namespace:'*' to search all namespaces (web sources and catalogued APIs always participate). Use list_sources only when the collection name is unknown.",
@@ -430,14 +430,9 @@ func addDocTools(server *mcp.Server, mgr *manager.Manager, includeAdmin bool) {
 		return jsonResult(page), page, nil
 	})
 	addSourceInspectTool(server, mgr)
-
-	if includeAdmin {
-		addDocConfigTools(server, mgr)
-		addSourceAdminTools(server, mgr)
-	}
 }
 
-// addSourceInspectTool is read-only and belongs in both MCP profiles: it lets a
+// addSourceInspectTool is read-only and belongs in the core MCP catalog: it lets a
 // model inspect sample titles/links after list_sources identifies a likely
 // collection, without exposing administration tools.
 func addSourceInspectTool(server *mcp.Server, mgr *manager.Manager) {
@@ -484,6 +479,11 @@ func addSourceInspectTool(server *mcp.Server, mgr *manager.Manager) {
 		}
 		return jsonResult(out), out, nil
 	})
+}
+
+func addDocAdminTools(server *mcp.Server, mgr *manager.Manager) {
+	addDocConfigTools(server, mgr)
+	addSourceAdminTools(server, mgr)
 }
 
 // addSourceAdminTools registers the web-source management tools (create,

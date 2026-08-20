@@ -18,8 +18,8 @@ server:
                          # base-path agnostic and needs no rebuild.
 
 mcp:
-  path: /mcp
-  # api_key: change-me            # require X-Api-Key / Bearer on /mcp
+  path: /mcp                      # core; API is /mcp/api, admin is /mcp/admin
+  # api_key: change-me            # require X-Api-Key / Bearer on all MCP paths
 
 graphify:
   bin: graphify              # graphify CLI (uv tool install graphifyy==0.9.26)

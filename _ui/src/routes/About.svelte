@@ -7,18 +7,17 @@
   let basePath = $derived((settings && settings.server && settings.server.base_path) || "");
   let mcpPath = $derived((settings && settings.mcp && settings.mcp.path) || "/mcp");
   let apiKeySet = $derived(!!(settings && settings.mcp && settings.mcp.api_key_set));
-  let mcpUrl = $derived(`${window.location.origin}${basePath}${mcpPath}`);
+  let mcpRoot = $derived(`${window.location.origin}${basePath}${mcpPath}`);
   let apiBase = $derived(`${window.location.origin}${basePath}/api/v1`);
-  let mcpProfile = $state("standard");
+  let mcpCatalog = $state("core");
+  let mcpUrl = $derived(`${mcpRoot}${mcpCatalog === "core" ? "" : `/${mcpCatalog}`}`);
+  let mcpName = $derived(`krabby${mcpCatalog === "core" ? "" : `-${mcpCatalog}`}`);
   let configHeaders = $derived.by(() => {
     const headers = [];
     if (apiKeySet) headers.push(`"X-Api-Key": "<your-api-key>"`);
-    if (mcpProfile !== "standard") headers.push(`"X-Krabby-Tool-Profile": "${mcpProfile}"`);
     return headers.length ? `,\n      "headers": { ${headers.join(", ")} }` : "";
   });
-  let cliHeaders = $derived(
-    `${apiKeySet ? ' --header "X-Api-Key: <your-api-key>"' : ""}${mcpProfile !== "standard" ? ` --header "X-Krabby-Tool-Profile: ${mcpProfile}"` : ""}`,
-  );
+  let cliHeaders = $derived(apiKeySet ? ' --header "X-Api-Key: <your-api-key>"' : "");
 
   let copied = $state("");
   async function copy(text, key) {
@@ -34,18 +33,18 @@
   let opencodeConfig = $derived(`{
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "krabby": {
+    "${mcpName}": {
       "type": "remote",
       "url": "${mcpUrl}"${configHeaders}
     }
   }
 }`);
 
-  let claudeCmd = $derived(`claude mcp add --transport http krabby ${mcpUrl}${cliHeaders}`);
+  let claudeCmd = $derived(`claude mcp add --transport http ${mcpName} ${mcpUrl}${cliHeaders}`);
 
   let genericConfig = $derived(`{
   "mcpServers": {
-    "krabby": {
+    "${mcpName}": {
       "type": "http",
       "url": "${mcpUrl}"${configHeaders}
     }
@@ -54,10 +53,10 @@
 
   let installPrompt = $derived(`Connect this AI client to the Krabby remote MCP server.
 
-Server name: krabby
+Server name: ${mcpName}
 Transport: streamable HTTP
 URL: ${mcpUrl}
-Tool profile: ${mcpProfile}${mcpProfile !== "standard" ? ` (send X-Krabby-Tool-Profile: ${mcpProfile} on every request)` : " (default; no profile header)"}
+Tool catalog: ${mcpCatalog} (${mcpCatalog === "core" ? "read-only code, graph, files and docs" : mcpCatalog === "api" ? "API discovery and live endpoint calls" : "Krabby administration and mutations"})
 ${apiKeySet ? "Authentication: send the API key in the X-Api-Key header. Ask me for the key before editing the configuration." : "Authentication: none"}
 
 Detect this client's MCP configuration format and update the appropriate project or user configuration. Preserve all existing settings and other MCP servers. After configuring it, verify the connection and confirm that the Krabby tools are available.`);
@@ -74,21 +73,21 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
   -d '{"url": "https://github.com/owner/repo", "branch": ""}'`);
 
   // The complete tool inventory, kept in sync with the registrations in
-  // internal/service/mcptools (TestToolProfiles pins the counts: 34 standard,
-  // 39 api, 65 full). A tool's third element gates it by profile: absent =
-  // every profile, "api" = api and full, true = full only.
+  // internal/service/mcptools (TestToolCatalogs pins the disjoint counts: 22
+  // core, 5 api, 38 admin). A tool's third element selects its catalog;
+  // absent means core.
   const toolGroups = [
     {
       name: "Repositories",
       tools: [
         ["list_repos", "List tracked repositories with build status, last commit and last build time."],
-        ["add_repo", "Track a new repository: clones it and builds its knowledge graph."],
-        ["remove_repo", "Stop tracking a repository and delete its local clone and graph."],
-        ["refresh_repo", "Pull the latest commits and rebuild the knowledge graph."],
+        ["add_repo", "Track a new repository: clones it and builds its knowledge graph.", "admin"],
+        ["remove_repo", "Stop tracking a repository and delete its local clone and graph.", "admin"],
+        ["refresh_repo", "Pull the latest commits and rebuild the knowledge graph.", "admin"],
         ["repo_status", "Get build state, last commit and last error of a repository."],
-        ["cancel_repo_job", "Cancel the refresh or generation job currently running for a repository."],
-        ["set_repo_namespace", "Move a repository into a namespace."],
-        ["set_repo_overrides", "Set per-repository indexing overrides (include/exclude patterns)."],
+        ["cancel_repo_job", "Cancel the refresh or generation job currently running for a repository.", "admin"],
+        ["set_repo_namespace", "Move a repository into a namespace.", "admin"],
+        ["set_repo_overrides", "Set per-repository indexing overrides (include/exclude patterns).", "admin"],
         ["list_refs", "List a repository's branches and tags."],
       ],
     },
@@ -96,8 +95,8 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
       name: "Namespaces",
       tools: [
         ["list_namespaces", "Discover repository groups, counts, and descriptions before broad search."],
-        ["set_namespace_description", "Describe a namespace so a model can pick the right group."],
-        ["delete_namespace", "Delete a namespace description; repositories keep their tag."],
+        ["set_namespace_description", "Describe a namespace so a model can pick the right group.", "admin"],
+        ["delete_namespace", "Delete a namespace description; repositories keep their tag.", "admin"],
       ],
     },
     {
@@ -141,56 +140,56 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
         ["list_api_endpoints", "Page through one service's endpoints, narrowed by search, tag, or method.", "api"],
         ["get_api_endpoint", "Full detail of one endpoint: parameters, schemas, auth, and a ready-to-run command.", "api"],
         ["call_api_endpoint", "Send a real request to a catalogued endpoint and return the response.", "api"],
-        ["api_service_kinds", "List the service kinds add_api_service accepts.", true],
-        ["add_api_service", "Catalogue an OpenAPI document or gRPC server and index its endpoints.", true],
-        ["update_api_service", "Update a catalogued service's config, overrides, or schedule.", true],
-        ["delete_api_service", "Remove a service and its indexed endpoints.", true],
-        ["refresh_api_service", "Queue a re-sync of a catalogued service.", true],
-        ["get_api_service_config", "Inspect a service's redacted provider config and overrides.", true],
-        ["set_api_group_description", "Create or describe an API group.", true],
-        ["delete_api_group", "Delete an API group's description; services keep their tag.", true],
+        ["api_service_kinds", "List the service kinds add_api_service accepts.", "admin"],
+        ["add_api_service", "Catalogue an OpenAPI document or gRPC server and index its endpoints.", "admin"],
+        ["update_api_service", "Update a catalogued service's config, overrides, or schedule.", "admin"],
+        ["delete_api_service", "Remove a service and its indexed endpoints.", "admin"],
+        ["refresh_api_service", "Queue a re-sync of a catalogued service.", "admin"],
+        ["get_api_service_config", "Inspect a service's redacted provider config and overrides.", "admin"],
+        ["set_api_group_description", "Create or describe an API group.", "admin"],
+        ["delete_api_group", "Delete an API group's description; services keep their tag.", "admin"],
       ],
     },
     {
       name: "Queue",
       tools: [
-        ["queue_status", "Inspect the background work queue and running tasks."],
-        ["bump_task", "Move a queued task to the front."],
-        ["cancel_task", "Cancel a queued or running task."],
-        ["set_task_concurrency", "Adjust how many background tasks run in parallel."],
+        ["queue_status", "Inspect the background work queue and running tasks.", "admin"],
+        ["bump_task", "Move a queued task to the front.", "admin"],
+        ["cancel_task", "Cancel a queued or running task.", "admin"],
+        ["set_task_concurrency", "Adjust how many background tasks run in parallel.", "admin"],
       ],
     },
     {
       name: "Web sources",
       tools: [
-        ["source_types", "List the web source kinds add_source accepts.", true],
-        ["add_source", "Add a Custom web, Confluence, or Jira collection.", true],
-        ["update_source", "Update a collection's config or schedule.", true],
-        ["delete_source", "Remove a collection and its indexed items.", true],
-        ["refresh_source", "Queue a re-sync of a collection.", true],
-        ["get_source_config", "Inspect a collection's redacted config.", true],
-        ["register_source_page", "Register one page URL in a pages collection.", true],
-        ["import_source_pages", "Bulk-register page URLs into a pages collection.", true],
-        ["import_source_sitemap", "Import page URLs from a sitemap.", true],
-        ["delete_source_page", "Remove one page from a pages collection.", true],
+        ["source_types", "List the web source kinds add_source accepts.", "admin"],
+        ["add_source", "Add a Custom web, Confluence, or Jira collection.", "admin"],
+        ["update_source", "Update a collection's config or schedule.", "admin"],
+        ["delete_source", "Remove a collection and its indexed items.", "admin"],
+        ["refresh_source", "Queue a re-sync of a collection.", "admin"],
+        ["get_source_config", "Inspect a collection's redacted config.", "admin"],
+        ["register_source_page", "Register one page URL in a pages collection.", "admin"],
+        ["import_source_pages", "Bulk-register page URLs into a pages collection.", "admin"],
+        ["import_source_sitemap", "Import page URLs from a sitemap.", "admin"],
+        ["delete_source_page", "Remove one page from a pages collection.", "admin"],
       ],
     },
     {
       name: "Configuration",
       tools: [
-        ["get_docs_config", "Return the current docs/RAG configuration (secrets redacted).", true],
-        ["set_docs_config", "Update the docs/RAG configuration and rebuild the clients live.", true],
-        ["test_llm", "Test the chat LLM connection without saving.", true],
-        ["test_embedder", "Test the embeddings connection without saving.", true],
-        ["test_code_embedder", "Test the dedicated code embeddings connection without saving.", true],
+        ["get_docs_config", "Return the current docs/RAG configuration (secrets redacted).", "admin"],
+        ["set_docs_config", "Update the docs/RAG configuration and rebuild the clients live.", "admin"],
+        ["test_llm", "Test the chat LLM connection without saving.", "admin"],
+        ["test_embedder", "Test the embeddings connection without saving.", "admin"],
+        ["test_code_embedder", "Test the dedicated code embeddings connection without saving.", "admin"],
       ],
     },
     {
       name: "Credentials",
       tools: [
-        ["set_credential", "Store a git credential (SSH key or token) for a host or host/path prefix.", true],
-        ["list_credentials", "List stored git credential patterns (secrets never returned).", true],
-        ["remove_credential", "Remove a stored git credential by its pattern.", true],
+        ["set_credential", "Store a git credential (SSH key or token) for a host or host/path prefix.", "admin"],
+        ["list_credentials", "List stored git credential patterns (secrets never returned).", "admin"],
+        ["remove_credential", "Remove a stored git credential by its pattern.", "admin"],
       ],
     },
   ];
@@ -198,9 +197,7 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
     toolGroups
       .map((group) => ({
         ...group,
-        tools: group.tools.filter(
-          ([, , gate]) => !gate || (gate === "api" ? mcpProfile !== "standard" : mcpProfile === "full"),
-        ),
+        tools: group.tools.filter(([, , catalog]) => (catalog || "core") === mcpCatalog),
       }))
       .filter((group) => group.tools.length > 0),
   );
@@ -216,33 +213,50 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
 
 <p class="max-w-[720px] text-dim">
   krabby tracks git repositories, builds a knowledge graph for each one and generates docs and semantic
-  indexes on top. Everything you see in this UI is also available to AI agents through the
-  <span class="text-fg">Model Context Protocol</span> — point your agent at the endpoint below and it can
-  query graphs, read files and search docs across every tracked repo.
+  indexes on top. Its tools are available to AI agents through three independent
+  <span class="text-fg">Model Context Protocol</span> catalogs, split by capability so each client sees
+  only what it needs.
 </p>
 
 <div class="card my-4 p-4">
   <div class="mb-2 flex items-center gap-2">
-    <h2 class="text-[15px] font-semibold">MCP endpoint</h2>
+    <h2 class="text-[15px] font-semibold">MCP endpoints</h2>
     <span class="rounded border border-line px-1.5 py-0.5 text-[11px] text-faint">streamable HTTP</span>
   </div>
-  <div class="flex items-center gap-2">
-    <code class="rounded-md border border-line bg-bg px-3 py-2 font-mono text-[13px]">{mcpUrl}</code>
-    <button class="btn btn-sm" onclick={() => copy(mcpUrl, "url")}>{copied === "url" ? "Copied" : "Copy"}</button>
-  </div>
+  <p class="mt-0 text-[13px] text-faint">
+    Add only the catalogs this client needs. Each is a separate MCP server, so API access and administration can be enabled or disabled independently.
+  </p>
   <div class="mt-3 grid gap-2 sm:grid-cols-3">
-    <div class="rounded-md border border-accent/40 bg-accent/5 p-3">
-      <div class="text-[13px] font-medium">Standard profile</div>
-      <div class="mt-1 text-[12px] text-dim">Default when no profile header is sent. Read-only repository, graph, file, and documentation tools.</div>
-    </div>
-    <div class="rounded-md border border-line p-3">
-      <div class="text-[13px] font-medium">API profile</div>
-      <div class="mt-1 text-[12px] text-dim">Same URL with <code class="font-mono">X-Krabby-Tool-Profile: api</code>. Standard plus the whole API catalog, including <code class="font-mono">call_api_endpoint</code> — sends real requests to catalogued APIs.</div>
-    </div>
-    <div class="rounded-md border border-line p-3">
-      <div class="text-[13px] font-medium">Full profile</div>
-      <div class="mt-1 text-[12px] text-dim">Same URL with <code class="font-mono">X-Krabby-Tool-Profile: full</code>. Everything: the API profile plus credential, docs/RAG and catalog administration.</div>
-    </div>
+    <button
+      class={`rounded-md border p-3 text-left transition-colors hover:border-accent/60 ${mcpCatalog === "core" ? "border-accent bg-accent/5" : "border-line"}`}
+      aria-pressed={mcpCatalog === "core"}
+      onclick={() => (mcpCatalog = "core")}
+    >
+      <div class="text-[13px] font-medium">Core</div>
+      <code class="mt-1 block break-all font-mono text-[11px] text-fg">{mcpRoot}</code>
+      <div class="mt-1 text-[12px] text-dim">Read-only repository, graph, file, history, and documentation tools.</div>
+      <div class="mt-2 text-[11px] font-medium text-accent">22 tools · view below</div>
+    </button>
+    <button
+      class={`rounded-md border p-3 text-left transition-colors hover:border-accent/60 ${mcpCatalog === "api" ? "border-accent bg-accent/5" : "border-line"}`}
+      aria-pressed={mcpCatalog === "api"}
+      onclick={() => (mcpCatalog = "api")}
+    >
+      <div class="text-[13px] font-medium">API</div>
+      <code class="mt-1 block break-all font-mono text-[11px] text-fg">{mcpRoot}/api</code>
+      <div class="mt-1 text-[12px] text-dim">API catalog discovery plus <code class="font-mono">call_api_endpoint</code>, which sends real requests.</div>
+      <div class="mt-2 text-[11px] font-medium text-accent">5 tools · view below</div>
+    </button>
+    <button
+      class={`rounded-md border p-3 text-left transition-colors hover:border-accent/60 ${mcpCatalog === "admin" ? "border-accent bg-accent/5" : "border-line"}`}
+      aria-pressed={mcpCatalog === "admin"}
+      onclick={() => (mcpCatalog = "admin")}
+    >
+      <div class="text-[13px] font-medium">Admin</div>
+      <code class="mt-1 block break-all font-mono text-[11px] text-fg">{mcpRoot}/admin</code>
+      <div class="mt-1 text-[12px] text-dim">All create, update, refresh, cancel, delete, credential, queue, and configuration tools.</div>
+      <div class="mt-2 text-[11px] font-medium text-accent">38 tools · view below</div>
+    </button>
   </div>
   {#if apiKeySet}
     <p class="mb-0 mt-2 text-[13px] text-warn">
@@ -250,7 +264,7 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
     </p>
   {:else}
     <p class="mb-0 mt-2 text-[13px] text-faint">
-      No API key configured — the endpoint is open. Set <code class="font-mono">KRABBY_MCP_API_KEY</code> to protect it.
+      No API key configured — all MCP endpoints are open. Set <code class="font-mono">KRABBY_MCP_API_KEY</code> to protect them.
     </p>
   {/if}
 </div>
@@ -274,39 +288,39 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
   <div class="mb-4">
     <div class="mb-1.5 flex flex-wrap items-center gap-2">
       <span class="text-[13px] text-dim">opencode — <code class="font-mono text-[12px]">opencode.json</code></span>
-      <div class="ml-auto flex items-center rounded-md border border-line bg-bg p-0.5" aria-label="OpenCode MCP tool profile">
+      <div class="ml-auto flex items-center rounded-md border border-line bg-bg p-0.5" aria-label="OpenCode MCP catalog">
         <button
           class="rounded px-2.5 py-1 text-[11px] text-dim transition-colors hover:text-fg"
-          class:!bg-surface-2={mcpProfile === "standard"}
-          class:!text-fg={mcpProfile === "standard"}
-          aria-pressed={mcpProfile === "standard"}
-          onclick={() => (mcpProfile = "standard")}
-        >Standard</button>
+          class:!bg-surface-2={mcpCatalog === "core"}
+          class:!text-fg={mcpCatalog === "core"}
+          aria-pressed={mcpCatalog === "core"}
+          onclick={() => (mcpCatalog = "core")}
+        >Core</button>
         <button
           class="rounded px-2.5 py-1 text-[11px] text-dim transition-colors hover:text-fg"
-          class:!bg-surface-2={mcpProfile === "api"}
-          class:!text-fg={mcpProfile === "api"}
-          aria-pressed={mcpProfile === "api"}
-          onclick={() => (mcpProfile = "api")}
+          class:!bg-surface-2={mcpCatalog === "api"}
+          class:!text-fg={mcpCatalog === "api"}
+          aria-pressed={mcpCatalog === "api"}
+          onclick={() => (mcpCatalog = "api")}
         >API</button>
         <button
           class="rounded px-2.5 py-1 text-[11px] text-dim transition-colors hover:text-fg"
-          class:!bg-surface-2={mcpProfile === "full"}
-          class:!text-fg={mcpProfile === "full"}
-          aria-pressed={mcpProfile === "full"}
-          onclick={() => (mcpProfile = "full")}
-        >Full</button>
+          class:!bg-surface-2={mcpCatalog === "admin"}
+          class:!text-fg={mcpCatalog === "admin"}
+          aria-pressed={mcpCatalog === "admin"}
+          onclick={() => (mcpCatalog = "admin")}
+        >Admin</button>
       </div>
       <button class="btn btn-sm" onclick={() => copy(opencodeConfig, "oc")}>{copied === "oc" ? "Copied" : "Copy"}</button>
     </div>
     <pre class="m-0 overflow-x-auto rounded-md border border-line bg-bg p-3 font-mono text-[12.5px] leading-relaxed">{opencodeConfig}</pre>
     <p class="mb-0 mt-1.5 text-[11px] text-faint">
-      {#if mcpProfile === "full"}
-        Full adds <code class="font-mono">X-Krabby-Tool-Profile: full</code> under <code class="font-mono">headers</code> and exposes the complete catalog, administration included.
-      {:else if mcpProfile === "api"}
-        API adds <code class="font-mono">X-Krabby-Tool-Profile: api</code> under <code class="font-mono">headers</code>: the standard catalog plus the API catalog and <code class="font-mono">call_api_endpoint</code>.
+      {#if mcpCatalog === "admin"}
+        Admin uses <code class="font-mono">{mcpPath}/admin</code> and exposes only mutation and configuration tools. Add Core or API separately when the same client also needs their read tools.
+      {:else if mcpCatalog === "api"}
+        API uses <code class="font-mono">{mcpPath}/api</code> and exposes only catalog discovery and <code class="font-mono">call_api_endpoint</code>.
       {:else}
-        Standard omits the profile header and exposes the smaller read-only catalog.
+        Core uses <code class="font-mono">{mcpPath}</code> and exposes only read-only codebase and documentation tools.
       {/if}
       Add this to project or user <code class="font-mono">opencode.json</code>, restart the client, then verify with <code class="font-mono">opencode mcp list</code>.
     </p>
@@ -331,9 +345,39 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
 </div>
 
 <div class="card my-4 p-4">
+  <h2 class="mb-1 text-[15px] font-semibold">How changes are picked up</h2>
+  <p class="mt-0 text-[13px] text-faint">
+    MCP tool changes and changes inside a catalogued API follow different update paths.
+  </p>
+
+  <div class="mt-3 grid gap-3 sm:grid-cols-2">
+    <div class="rounded-md border border-line p-3">
+      <h3 class="m-0 text-[13px] font-medium">Krabby / MCP updates</h3>
+      <p class="mb-0 mt-1.5 text-[12px] text-dim">
+        Each catalog keeps a stable endpoint URL across Krabby upgrades. MCP clients usually cache
+        the tool list and its schemas for a session, so reconnect or restart the client after upgrading Krabby
+        to discover added tools or changed arguments.
+      </p>
+    </div>
+
+    <div class="rounded-md border border-line p-3">
+      <h3 class="m-0 text-[13px] font-medium">Catalogued API updates</h3>
+      <p class="mb-0 mt-1.5 text-[12px] text-dim">
+        OpenAPI and gRPC definitions are refreshed manually with
+        <code class="font-mono">refresh_api_service</code> or automatically on the service schedule. Krabby
+        detects unchanged definitions, re-renders and reindexes changed or removed endpoints, then serves the
+        current catalog through MCP immediately. Editing a base URL, spec patch, or operation override forces a
+        full re-render even when the upstream definition did not change.
+      </p>
+    </div>
+  </div>
+</div>
+
+<div class="card my-4 p-4">
   <h2 class="mb-1 text-[15px] font-semibold">Track a repository</h2>
   <p class="mt-0 text-[13px] text-faint">
-    Hand a git URL — HTTPS or SSH — to your agent and let it add the repo, or refresh it if it already exists.
+    Enable both Core and Admin, then hand a git URL — HTTPS or SSH — to your agent. Admin performs the
+    mutation; Core supplies repository discovery and build status.
   </p>
 
   <div class="mb-4 mt-3 rounded-md border border-accent/40 bg-accent/5 p-3">
@@ -386,15 +430,34 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
     <p class="mb-0 mt-2 text-[13px] text-faint">
       This is the same endpoint the "Add repo" button uses, so it's safe to call repeatedly — an existing
       repo is simply queued for a refresh. Note the MCP <code class="font-mono text-[12px]">X-Api-Key</code>
-      only guards the <code class="font-mono text-[12px]">{mcpPath}</code> endpoint, not the REST API.
+      guards all three MCP endpoints under <code class="font-mono text-[12px]">{mcpPath}</code>, not the REST API.
     </p>
   </div>
 </div>
 
 <div class="card my-4 p-4">
-  <h2 class="mb-1 text-[15px] font-semibold">Available tools</h2>
-  <p class="mt-0 text-[13px] text-faint">
-    {visibleToolGroups.reduce((n, g) => n + g.tools.length, 0)} tools in the selected {mcpProfile} profile.
+  <div class="flex flex-wrap items-start gap-3">
+    <div>
+      <h2 class="mb-1 text-[15px] font-semibold">Tool catalogs</h2>
+      <p class="m-0 text-[13px] text-faint">
+        Each tool is published by exactly one endpoint. Select a catalog to inspect its tools.
+      </p>
+    </div>
+    <div class="ml-auto flex items-center rounded-md border border-line bg-bg p-0.5" aria-label="Published MCP tool catalog">
+      {#each [["core", 22], ["api", 5], ["admin", 38]] as [catalog, count]}
+        <button
+          class="rounded px-2.5 py-1 text-[11px] capitalize text-dim transition-colors hover:text-fg"
+          class:!bg-surface-2={mcpCatalog === catalog}
+          class:!text-fg={mcpCatalog === catalog}
+          aria-pressed={mcpCatalog === catalog}
+          onclick={() => (mcpCatalog = catalog)}
+        >{catalog} · {count}</button>
+      {/each}
+    </div>
+  </div>
+
+  <p class="mb-0 mt-3 rounded-md border border-line bg-bg px-3 py-2 text-[12px] text-dim">
+    Published at <code class="font-mono text-fg">{mcpUrl}</code>
   </p>
 
   {#each visibleToolGroups as group}

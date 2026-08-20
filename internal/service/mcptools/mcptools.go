@@ -1,5 +1,5 @@
-// Package mcptools exposes krabby's MCP server: repo management tools plus
-// graph query tools proxied to per-graph graphify servers.
+// Package mcptools exposes krabby's independent core, API, and administration
+// MCP catalogs.
 package mcptools
 
 import (
@@ -18,8 +18,8 @@ import (
 
 // serverInstructions is the server-level guidance returned to clients on
 // initialize. Most MCP clients surface it to the LLM as high-level context, so
-// it explains what krabby is, the add->poll->query lifecycle, and which tool to
-// reach for first. Per-tool specifics stay in each tool's Description.
+// it explains what krabby is and which tool to reach for first. Per-tool
+// specifics stay in each tool's Description.
 const serverInstructions = `Krabby tracks git repositories and builds a searchable knowledge graph over each one, so you can locate code, read the actual source from the clone, understand how it fits together, attribute changes to commits, and search its documentation - without cloning anything yourself.
 
 Tool selection (roughly what to reach for, in order):
@@ -35,57 +35,48 @@ Tool selection (roughly what to reach for, in order):
 
 Always pass repo when it is known. Omit repo only when the user explicitly requests cross-repository analysis and merged search is intended.
 
-Repos are grouped into namespaces. When the repo is unknown a search covers only the 'default' namespace, so the answer may live elsewhere: before concluding nothing was found, check list_namespaces and pass the matching namespace, or namespace:'*' to search them all.
+Repos are grouped into namespaces. When the repo is unknown a search covers only the 'default' namespace, so the answer may live elsewhere: before concluding nothing was found, check list_namespaces and pass the matching namespace, or namespace:'*' to search them all.`
 
-add_repo and refresh_repo run in the background by default. Poll repo_status until ready or error before querying.`
+const apiInstructions = `This server contains only the API catalog. To call an API, walk it: list_api_groups -> list_api_services -> list_api_endpoints -> get_api_endpoint. Only the last returns schemas; narrow with search/tag rather than listing every endpoint. call_api_endpoint then sends a real request to the target service, so call mutating endpoints only when explicitly requested.`
 
-// apiInstructions is appended for the profiles that publish the API catalog.
-// Standard never sees those tools, so telling it how to walk the catalog would
-// only describe tools it cannot call.
-const apiInstructions = `
+const adminInstructions = `This server contains Krabby administration tools. It can add, update, refresh, cancel and delete repositories, namespaces, credentials, runtime configuration, web sources and API catalog entries. Use mutation tools only when explicitly requested. Read status and inspect results through the separate core or API MCP server.`
 
-This connection also carries the API catalog. To call an API, walk it: list_api_groups -> list_api_services -> list_api_endpoints -> get_api_endpoint. Only the last returns schemas; narrow with search/tag rather than listing every endpoint. call_api_endpoint then sends a real request to the target service, so call mutating endpoints only when explicitly requested.`
+// NewCore builds the read-only repository, graph, file, history and docs MCP
+// catalog.
+func NewCore(mgr *manager.Manager, version string) *mcp.Server {
+	server := newServer(mgr, "krabby", "Krabby codebase search and knowledge", version, serverInstructions)
+	addManagementTools(server, mgr, 0, false)
+	addQueryTools(server, mgr)
+	addFileTools(server, mgr)
+	addHistoryTools(server, mgr)
+	addDocTools(server, mgr)
 
-// The three profiles are strictly nested: standard ⊂ api ⊂ full.
-//
-// The api profile exists because "may reach catalogued APIs" and "may rewire
-// krabby itself" are different trust decisions. An agent that helps someone
-// exercise an internal API needs the first and has no business with the second
-// — handing it credentials administration just to unlock the API catalog would
-// make the full profile the default in practice, which is exactly what a
-// smaller standard catalog exists to avoid. Standard is therefore purely the
-// repository/documentation surface: it publishes no api_* tool at all.
-const (
-	ToolProfileStandard = "standard"
-	ToolProfileAPI      = "api"
-	ToolProfileFull     = "full"
-)
+	return server
+}
 
-// New builds the MCP server with all krabby tools registered. waitTimeout caps
-// how long wait=true management calls block before returning the in-progress
-// status (the build keeps running in the background); <=0 means no server-side
-// cap.
-func New(mgr *manager.Manager, version string, waitTimeout time.Duration, profile string) *mcp.Server {
-	full := profile == ToolProfileFull
-	withAPI := full || profile == ToolProfileAPI
+// NewAPI builds the API discovery and call MCP catalog.
+func NewAPI(mgr *manager.Manager, version string) *mcp.Server {
+	server := newServer(mgr, "krabby-api", "Krabby API catalog", version, apiInstructions)
+	addAPITools(server, mgr)
 
-	title := "Krabby codebase search and knowledge"
-	instructions := serverInstructions
-	if withAPI {
-		instructions += apiInstructions
-	}
+	return server
+}
 
-	switch {
-	case full:
-		title += " (full administration)"
-		instructions += "\n\nThis connection uses the full profile and can mutate credentials, runtime configuration, web sources and the API catalog. Collections use add/update/refresh/delete_source and get_source_config; pages-source items use register_source_page, import_source_pages, import_source_sitemap and delete_source_page. API services use add/update/refresh/delete_api_service and get_api_service_config. Use mutation tools — and call_api_endpoint against mutating endpoints — only when explicitly requested."
-	case withAPI:
-		title += " (api)"
-		instructions += "\n\nThis connection uses the api profile: the standard read-only tools plus the API catalog and call_api_endpoint. It cannot administer krabby itself — catalogue changes need the full profile."
-	}
+// NewAdmin builds the mutation and administration MCP catalog. waitTimeout
+// caps wait=true repository operations; <=0 means no server-side cap.
+func NewAdmin(mgr *manager.Manager, version string, waitTimeout time.Duration) *mcp.Server {
+	server := newServer(mgr, "krabby-admin", "Krabby administration", version, adminInstructions)
+	addManagementTools(server, mgr, waitTimeout, true)
+	addCredentialTools(server, mgr)
+	addDocAdminTools(server, mgr)
+	addAPIAdminTools(server, mgr)
 
+	return server
+}
+
+func newServer(mgr *manager.Manager, name, title, version, instructions string) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{
-		Name:    "krabby",
+		Name:    name,
 		Title:   title,
 		Version: version,
 	}, &mcp.ServerOptions{
@@ -95,18 +86,6 @@ func New(mgr *manager.Manager, version string, waitTimeout time.Duration, profil
 	// One receiving middleware covers every tool, so instrumentation cannot
 	// drift out of sync as tools are added.
 	server.AddReceivingMiddleware(traceMiddleware(mgr))
-
-	addManagementTools(server, mgr, waitTimeout)
-	addQueryTools(server, mgr)
-	addFileTools(server, mgr)
-	addHistoryTools(server, mgr)
-	addDocTools(server, mgr, full)
-	if withAPI {
-		addAPITools(server, mgr, full)
-	}
-	if full {
-		addCredentialTools(server, mgr)
-	}
 
 	return server
 }
@@ -273,244 +252,256 @@ func trimRepoForView(repo *registry.Repo) *registry.Repo {
 	return &trimmed
 }
 
-func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout time.Duration) {
-	addTool(server, &mcp.Tool{
-		Name:        "list_repos",
-		Description: "Discover tracked repository ids and build status when the target repo is unknown, or when the user asks for an inventory. Filter with search/owner/namespace and inspect one page; do not fetch every page routinely. Omitting namespace lists the 'default' bucket; pass namespace:'*' to list every namespace.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args listReposArgs) (*mcp.CallToolResult, any, error) {
-		opts := registry.ListOptions{
-			Page:      args.Page,
-			PerPage:   args.PerPage,
-			Search:    args.Search,
-			Owner:     args.Owner,
-			Namespace: args.Namespace,
-		}
+func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout time.Duration, admin bool) {
+	if !admin {
+		addTool(server, &mcp.Tool{
+			Name:        "list_repos",
+			Description: "Discover tracked repository ids and build status when the target repo is unknown, or when the user asks for an inventory. Filter with search/owner/namespace and inspect one page; do not fetch every page routinely. Omitting namespace lists the 'default' bucket; pass namespace:'*' to list every namespace.",
+		}, func(ctx context.Context, _ *mcp.CallToolRequest, args listReposArgs) (*mcp.CallToolResult, any, error) {
+			opts := registry.ListOptions{
+				Page:      args.Page,
+				PerPage:   args.PerPage,
+				Search:    args.Search,
+				Owner:     args.Owner,
+				Namespace: args.Namespace,
+			}
 
-		repos, total, err := mgr.Registry().ListPaged(ctx, opts)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		views := make([]repoView, 0, len(repos))
-		for _, repo := range repos {
-			views = append(views, viewRepo(mgr, repo))
-		}
-
-		page, perPage := registry.PageParams(opts)
-
-		return jsonResult(map[string]any{
-			"repos":    views,
-			"total":    total,
-			"page":     page,
-			"per_page": perPage,
-		}), nil, nil
-	})
-
-	addTool(server, &mcp.Tool{
-		Name: "add_repo",
-		Description: "Track a new repository: clones it and builds its knowledge graph. " +
-			"By default returns immediately (status 'pending'); check progress with repo_status. " +
-			"Pass wait=true to wait for the result: it returns the final status when the build finishes in time, " +
-			"otherwise the in-progress status. The build always continues in the background even if the call " +
-			"times out or is cancelled; poll repo_status until status is 'ready' or 'error'.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args addRepoArgs) (*mcp.CallToolResult, any, error) {
-		if !args.Wait {
-			repo, err := mgr.AddRepo(ctx, args.spec())
+			repos, total, err := mgr.Registry().ListPaged(ctx, opts)
 			if err != nil {
 				return nil, nil, err
 			}
 
-			return jsonResult(repo), nil, nil
-		}
-
-		wctx, cancel := waitContext(ctx, waitTimeout)
-		defer cancel()
-
-		repo, done, err := mgr.AddRepoWait(wctx, args.spec())
-		if err != nil {
-			return nil, nil, err
-		}
-
-		return waitResult(mgr, repo, done), nil, nil
-	})
-
-	addTool(server, &mcp.Tool{
-		Name:        "set_repo_namespace",
-		Description: "Move a tracked repository into a namespace (an arbitrary grouping label). Omitting or passing 'default' returns it to the default bucket; '*' is reserved. This only re-tags the repo; it does not rebuild anything.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args setRepoNamespaceArgs) (*mcp.CallToolResult, any, error) {
-		repo, err := mgr.SetRepoNamespace(ctx, args.Repo, args.Namespace)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		return jsonResult(viewRepo(mgr, repo)), nil, nil
-	})
-
-	addTool(server, &mcp.Tool{
-		Name: "set_repo_overrides",
-		Description: "Override the install-wide file selection and documentation prompt for ONE repository, for repos that do not fit the defaults: " +
-			"a deployment repo holding compose/YAML rather than source (include_extra), or one whose docs need a specific shape (docs_prompt_extra). " +
-			"The payload replaces the whole override set, so send every field you want to keep; an empty payload clears them. " +
-			"A change rebuilds that repository's index and docs in the background.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args setRepoOverridesArgs) (*mcp.CallToolResult, any, error) {
-		repo, err := mgr.SetRepoOverrides(ctx, args.Repo, args.overrides())
-		if err != nil {
-			return nil, nil, err
-		}
-
-		// The repo view strips the prompts to keep listings small, so echo the
-		// stored override set here: this is the one call whose whole purpose is
-		// to confirm what was written.
-		return jsonResult(map[string]any{
-			"repo":      viewRepo(mgr, repo),
-			"overrides": repo.Overrides,
-		}), nil, nil
-	})
-
-	addTool(server, &mcp.Tool{
-		Name:        "list_namespaces",
-		Description: "List the repository namespaces with their repo counts and descriptions. Untagged repos are reported under 'default'. Use it to discover which namespaces exist and what each holds before scoping a search with the namespace parameter; the description tells you which namespace matches the user's question.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyArgs) (*mcp.CallToolResult, namespaceListOutput, error) {
-		groups, err := mgr.Registry().Namespaces(ctx)
-		if err != nil {
-			return nil, namespaceListOutput{}, err
-		}
-
-		out := namespaceListOutput{Namespaces: groups}
-		return jsonResult(out), out, nil
-	})
-
-	addTool(server, &mcp.Tool{
-		Name:        "set_namespace_description",
-		Description: "Create or update a namespace's description (an arbitrary grouping label plus a summary of what it holds). The description is surfaced by list_namespaces to help pick the right search scope. This does not tag any repo; use add_repo or set_repo_namespace for that.",
-	}, func(ctx context.Context, req *mcp.CallToolRequest, args upsertNamespaceArgs) (*mcp.CallToolResult, any, error) {
-		// Presence comes from the raw arguments: a nullable typed field would
-		// reflect into the tool schema as a {V,Valid} object.
-		description, err := nullFromArgs(req.Params.Arguments, "description", args.Description)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		rec, err := mgr.UpsertNamespace(ctx, args.Name, description)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		return jsonResult(rec), nil, nil
-	})
-
-	addTool(server, &mcp.Tool{
-		Name:        "delete_namespace",
-		Description: "Delete a namespace's description record. Repos tagged with the namespace keep their tag; only the stored description is removed.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args namespaceNameArgs) (*mcp.CallToolResult, any, error) {
-		if err := mgr.DeleteNamespace(ctx, args.Name); err != nil {
-			return nil, nil, err
-		}
-
-		return textResult("deleted namespace description " + args.Name), nil, nil
-	})
-
-	addTool(server, &mcp.Tool{
-		Name:        "remove_repo",
-		Description: "Stop tracking a repository and delete its local clone and graph.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args repoIDArgs) (*mcp.CallToolResult, any, error) {
-		if err := mgr.RemoveRepo(ctx, args.Repo); err != nil {
-			return nil, nil, err
-		}
-
-		return textResult("removed " + args.Repo), nil, nil
-	})
-
-	addTool(server, &mcp.Tool{
-		Name: "refresh_repo",
-		Description: "Pull the latest commits and rebuild the knowledge graph for a repository. " +
-			"By default rebuilds in the background and returns immediately. " +
-			"The rebuild always continues in the background even if the call " +
-			"times out or is cancelled; poll repo_status until status is 'ready' or 'error'. " +
-			"Use when you know the repo changed. " +
-			"Pass stages to rebuild only a subset (graph, docs, docs_index, code_index) against the existing " +
-			"clone WITHOUT pulling git, or skip to run the full pull+rebuild minus some stages.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args refreshRepoArgs) (*mcp.CallToolResult, any, error) {
-		if err := args.validateSkip(); err != nil {
-			return nil, nil, err
-		}
-
-		if len(args.Stages) > 0 {
-			if err := args.validateStages(); err != nil {
-				return nil, nil, err
+			views := make([]repoView, 0, len(repos))
+			for _, repo := range repos {
+				views = append(views, viewRepo(mgr, repo))
 			}
 
-			if !args.Wait {
-				mgr.TriggerGenerate(args.Repo, args.Stages, args.Force)
+			page, perPage := registry.PageParams(opts)
 
-				return textResult(fmt.Sprintf("generate %v queued for %s", args.Stages, args.Repo)), nil, nil
+			return jsonResult(map[string]any{
+				"repos":    views,
+				"total":    total,
+				"page":     page,
+				"per_page": perPage,
+			}), nil, nil
+		})
+	}
+
+	if admin {
+		addTool(server, &mcp.Tool{
+			Name: "add_repo",
+			Description: "Track a new repository: clones it and builds its knowledge graph. " +
+				"By default returns immediately (status 'pending'); check progress with repo_status. " +
+				"Pass wait=true to wait for the result: it returns the final status when the build finishes in time, " +
+				"otherwise the in-progress status. The build always continues in the background even if the call " +
+				"times out or is cancelled; poll repo_status until status is 'ready' or 'error'.",
+		}, func(ctx context.Context, _ *mcp.CallToolRequest, args addRepoArgs) (*mcp.CallToolResult, any, error) {
+			if !args.Wait {
+				repo, err := mgr.AddRepo(ctx, args.spec())
+				if err != nil {
+					return nil, nil, err
+				}
+
+				return jsonResult(repo), nil, nil
 			}
 
 			wctx, cancel := waitContext(ctx, waitTimeout)
 			defer cancel()
 
-			repo, done, err := mgr.GenerateWait(wctx, args.Repo, args.Stages, args.Force)
+			repo, done, err := mgr.AddRepoWait(wctx, args.spec())
 			if err != nil {
 				return nil, nil, err
 			}
 
 			return waitResult(mgr, repo, done), nil, nil
-		}
+		})
 
-		if !args.Wait {
-			mgr.TriggerRefresh(args.Repo, args.Skip...)
-
-			if len(args.Skip) > 0 {
-				return textResult(fmt.Sprintf("refresh queued for %s (skipping %v)", args.Repo, args.Skip)), nil, nil
+		addTool(server, &mcp.Tool{
+			Name:        "set_repo_namespace",
+			Description: "Move a tracked repository into a namespace (an arbitrary grouping label). Omitting or passing 'default' returns it to the default bucket; '*' is reserved. This only re-tags the repo; it does not rebuild anything.",
+		}, func(ctx context.Context, _ *mcp.CallToolRequest, args setRepoNamespaceArgs) (*mcp.CallToolResult, any, error) {
+			repo, err := mgr.SetRepoNamespace(ctx, args.Repo, args.Namespace)
+			if err != nil {
+				return nil, nil, err
 			}
 
-			return textResult("refresh queued for " + args.Repo), nil, nil
-		}
+			return jsonResult(viewRepo(mgr, repo)), nil, nil
+		})
 
-		wctx, cancel := waitContext(ctx, waitTimeout)
-		defer cancel()
+		addTool(server, &mcp.Tool{
+			Name: "set_repo_overrides",
+			Description: "Override the install-wide file selection and documentation prompt for ONE repository, for repos that do not fit the defaults: " +
+				"a deployment repo holding compose/YAML rather than source (include_extra), or one whose docs need a specific shape (docs_prompt_extra). " +
+				"The payload replaces the whole override set, so send every field you want to keep; an empty payload clears them. " +
+				"A change rebuilds that repository's index and docs in the background.",
+		}, func(ctx context.Context, _ *mcp.CallToolRequest, args setRepoOverridesArgs) (*mcp.CallToolResult, any, error) {
+			repo, err := mgr.SetRepoOverrides(ctx, args.Repo, args.overrides())
+			if err != nil {
+				return nil, nil, err
+			}
 
-		repo, done, err := mgr.RefreshWait(wctx, args.Repo, args.Skip...)
-		if err != nil {
-			return nil, nil, err
-		}
+			// The repo view strips the prompts to keep listings small, so echo the
+			// stored override set here: this is the one call whose whole purpose is
+			// to confirm what was written.
+			return jsonResult(map[string]any{
+				"repo":      viewRepo(mgr, repo),
+				"overrides": repo.Overrides,
+			}), nil, nil
+		})
+	}
 
-		return waitResult(mgr, repo, done), nil, nil
-	})
+	if !admin {
+		addTool(server, &mcp.Tool{
+			Name:        "list_namespaces",
+			Description: "List the repository namespaces with their repo counts and descriptions. Untagged repos are reported under 'default'. Use it to discover which namespaces exist and what each holds before scoping a search with the namespace parameter; the description tells you which namespace matches the user's question.",
+		}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyArgs) (*mcp.CallToolResult, namespaceListOutput, error) {
+			groups, err := mgr.Registry().Namespaces(ctx)
+			if err != nil {
+				return nil, namespaceListOutput{}, err
+			}
 
-	addTool(server, &mcp.Tool{
-		Name: "repo_status",
-		Description: "Get status of a tracked repository: build state, last commit, last error if any. " +
-			"The 'running' field shows the pipeline step currently executing (e.g. 'sync', 'graph', 'docs'); " +
-			"empty means no work is in flight. While status is 'pending' or 'building', poll again until it " +
-			"becomes 'ready' or 'error'.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args repoIDArgs) (*mcp.CallToolResult, any, error) {
-		repo, err := mgr.Registry().Get(ctx, args.Repo)
-		if err != nil {
-			return nil, nil, err
-		}
+			out := namespaceListOutput{Namespaces: groups}
+			return jsonResult(out), out, nil
+		})
+	}
 
-		if repo == nil {
-			return nil, nil, fmt.Errorf("repo %s not found", args.Repo)
-		}
+	if admin {
+		addTool(server, &mcp.Tool{
+			Name:        "set_namespace_description",
+			Description: "Create or update a namespace's description (an arbitrary grouping label plus a summary of what it holds). The description is surfaced by list_namespaces to help pick the right search scope. This does not tag any repo; use add_repo or set_repo_namespace for that.",
+		}, func(ctx context.Context, req *mcp.CallToolRequest, args upsertNamespaceArgs) (*mcp.CallToolResult, any, error) {
+			// Presence comes from the raw arguments: a nullable typed field would
+			// reflect into the tool schema as a {V,Valid} object.
+			description, err := nullFromArgs(req.Params.Arguments, "description", args.Description)
+			if err != nil {
+				return nil, nil, err
+			}
 
-		return jsonResult(viewRepo(mgr, repo)), nil, nil
-	})
+			rec, err := mgr.UpsertNamespace(ctx, args.Name, description)
+			if err != nil {
+				return nil, nil, err
+			}
 
-	addTool(server, &mcp.Tool{
-		Name: "cancel_repo_job",
-		Description: "Cancel the refresh/generate job currently running for a repository. " +
-			"The in-flight step is aborted and recorded as 'cancelled by user'; the repo can be " +
-			"refreshed again later. Fails if no job is running (check the 'running' field of repo_status).",
-	}, func(_ context.Context, _ *mcp.CallToolRequest, args repoIDArgs) (*mcp.CallToolResult, any, error) {
-		if !mgr.CancelJob(args.Repo) {
-			return nil, nil, fmt.Errorf("no job running for %s", args.Repo)
-		}
+			return jsonResult(rec), nil, nil
+		})
 
-		return textResult("cancelling running job for " + args.Repo), nil, nil
-	})
+		addTool(server, &mcp.Tool{
+			Name:        "delete_namespace",
+			Description: "Delete a namespace's description record. Repos tagged with the namespace keep their tag; only the stored description is removed.",
+		}, func(ctx context.Context, _ *mcp.CallToolRequest, args namespaceNameArgs) (*mcp.CallToolResult, any, error) {
+			if err := mgr.DeleteNamespace(ctx, args.Name); err != nil {
+				return nil, nil, err
+			}
 
-	addQueueTools(server, mgr)
+			return textResult("deleted namespace description " + args.Name), nil, nil
+		})
+
+		addTool(server, &mcp.Tool{
+			Name:        "remove_repo",
+			Description: "Stop tracking a repository and delete its local clone and graph.",
+		}, func(ctx context.Context, _ *mcp.CallToolRequest, args repoIDArgs) (*mcp.CallToolResult, any, error) {
+			if err := mgr.RemoveRepo(ctx, args.Repo); err != nil {
+				return nil, nil, err
+			}
+
+			return textResult("removed " + args.Repo), nil, nil
+		})
+
+		addTool(server, &mcp.Tool{
+			Name: "refresh_repo",
+			Description: "Pull the latest commits and rebuild the knowledge graph for a repository. " +
+				"By default rebuilds in the background and returns immediately. " +
+				"The rebuild always continues in the background even if the call " +
+				"times out or is cancelled; poll repo_status until status is 'ready' or 'error'. " +
+				"Use when you know the repo changed. " +
+				"Pass stages to rebuild only a subset (graph, docs, docs_index, code_index) against the existing " +
+				"clone WITHOUT pulling git, or skip to run the full pull+rebuild minus some stages.",
+		}, func(ctx context.Context, _ *mcp.CallToolRequest, args refreshRepoArgs) (*mcp.CallToolResult, any, error) {
+			if err := args.validateSkip(); err != nil {
+				return nil, nil, err
+			}
+
+			if len(args.Stages) > 0 {
+				if err := args.validateStages(); err != nil {
+					return nil, nil, err
+				}
+
+				if !args.Wait {
+					mgr.TriggerGenerate(args.Repo, args.Stages, args.Force)
+
+					return textResult(fmt.Sprintf("generate %v queued for %s", args.Stages, args.Repo)), nil, nil
+				}
+
+				wctx, cancel := waitContext(ctx, waitTimeout)
+				defer cancel()
+
+				repo, done, err := mgr.GenerateWait(wctx, args.Repo, args.Stages, args.Force)
+				if err != nil {
+					return nil, nil, err
+				}
+
+				return waitResult(mgr, repo, done), nil, nil
+			}
+
+			if !args.Wait {
+				mgr.TriggerRefresh(args.Repo, args.Skip...)
+
+				if len(args.Skip) > 0 {
+					return textResult(fmt.Sprintf("refresh queued for %s (skipping %v)", args.Repo, args.Skip)), nil, nil
+				}
+
+				return textResult("refresh queued for " + args.Repo), nil, nil
+			}
+
+			wctx, cancel := waitContext(ctx, waitTimeout)
+			defer cancel()
+
+			repo, done, err := mgr.RefreshWait(wctx, args.Repo, args.Skip...)
+			if err != nil {
+				return nil, nil, err
+			}
+
+			return waitResult(mgr, repo, done), nil, nil
+		})
+	}
+
+	if !admin {
+		addTool(server, &mcp.Tool{
+			Name: "repo_status",
+			Description: "Get status of a tracked repository: build state, last commit, last error if any. " +
+				"The 'running' field shows the pipeline step currently executing (e.g. 'sync', 'graph', 'docs'); " +
+				"empty means no work is in flight. While status is 'pending' or 'building', poll again until it " +
+				"becomes 'ready' or 'error'.",
+		}, func(ctx context.Context, _ *mcp.CallToolRequest, args repoIDArgs) (*mcp.CallToolResult, any, error) {
+			repo, err := mgr.Registry().Get(ctx, args.Repo)
+			if err != nil {
+				return nil, nil, err
+			}
+
+			if repo == nil {
+				return nil, nil, fmt.Errorf("repo %s not found", args.Repo)
+			}
+
+			return jsonResult(viewRepo(mgr, repo)), nil, nil
+		})
+	}
+
+	if admin {
+		addTool(server, &mcp.Tool{
+			Name: "cancel_repo_job",
+			Description: "Cancel the refresh/generate job currently running for a repository. " +
+				"The in-flight step is aborted and recorded as 'cancelled by user'; the repo can be " +
+				"refreshed again later. Fails if no job is running (check the 'running' field of repo_status).",
+		}, func(_ context.Context, _ *mcp.CallToolRequest, args repoIDArgs) (*mcp.CallToolResult, any, error) {
+			if !mgr.CancelJob(args.Repo) {
+				return nil, nil, fmt.Errorf("no job running for %s", args.Repo)
+			}
+
+			return textResult("cancelling running job for " + args.Repo), nil, nil
+		})
+
+		addQueueTools(server, mgr)
+	}
 }
 
 type bumpTaskArgs struct {

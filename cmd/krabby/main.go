@@ -278,12 +278,12 @@ func run(ctx context.Context) error {
 		}
 	}()
 
-	mcpServer := mcptools.New(mgr, version, cfg.MCP.WaitTimeout, mcptools.ToolProfileStandard)
-	mcpAPIServer := mcptools.New(mgr, version, cfg.MCP.WaitTimeout, mcptools.ToolProfileAPI)
-	mcpFullServer := mcptools.New(mgr, version, cfg.MCP.WaitTimeout, mcptools.ToolProfileFull)
+	mcpServer := mcptools.NewCore(mgr, version)
+	mcpAPIServer := mcptools.NewAPI(mgr, version)
+	mcpAdminServer := mcptools.NewAdmin(mgr, version, cfg.MCP.WaitTimeout)
 
 	// Server blocks until ctx is cancelled, then shuts down.
-	if err := server.Start(ctx, cfg, mgr, mcpServer, mcpAPIServer, mcpFullServer); err != nil {
+	if err := server.Start(ctx, cfg, mgr, mcpServer, mcpAPIServer, mcpAdminServer); err != nil {
 		return fmt.Errorf("start server; %w", err)
 	}
 

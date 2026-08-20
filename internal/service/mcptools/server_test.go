@@ -12,7 +12,7 @@ import (
 	"github.com/rytsh/krabby/internal/service/coderag"
 )
 
-// toolsPayloadBudget bounds the standard profile's tools/list response. Every
+// toolsPayloadBudget bounds the core catalog's tools/list response. Every
 // MCP session receives it in full before any work starts, and it occupies the
 // model's context whether or not a tool is used — provider-side prompt caching
 // lowers the price but not the occupancy.
@@ -47,27 +47,35 @@ const (
 	bytesPerToken = 5
 )
 
-func TestToolProfiles(t *testing.T) {
+func TestToolCatalogs(t *testing.T) {
 	tests := []struct {
-		profile string
+		name    string
+		server  func() *mcp.Server
 		count   int
-		api     bool
-		admin   bool
+		present []string
+		absent  []string
 	}{
-		// Standard is the repository and documentation surface only: the whole
-		// API catalog lives behind the api profile, so a client that never
-		// calls an API does not pay for its tools in every tools/list.
-		{profile: ToolProfileStandard, count: 34},
-		// api is standard plus the catalog walk and call_api_endpoint. If this
-		// diff ever grows past those, the profile has drifted from its reason
-		// to exist: "may exercise catalogued APIs" without "may rewire krabby".
-		{profile: ToolProfileAPI, count: 39, api: true},
-		{profile: ToolProfileFull, count: 65, api: true, admin: true},
+		{
+			name: "core", server: func() *mcp.Server { return NewCore(nil, "test") }, count: 22,
+			present: []string{"list_repos", "repo_status", "search_code", "query_graph", "search_docs", "list_files", "get_source"},
+			absent:  []string{"add_repo", "remove_repo", "refresh_repo", "queue_status", "call_api_endpoint", "set_docs_config"},
+		},
+		{
+			name: "api", server: func() *mcp.Server { return NewAPI(nil, "test") }, count: 5,
+			present: []string{"list_api_groups", "list_api_services", "list_api_endpoints", "get_api_endpoint", "call_api_endpoint"},
+			absent:  []string{"search_code", "add_api_service", "set_docs_config", "add_repo"},
+		},
+		{
+			name: "admin", server: func() *mcp.Server { return NewAdmin(nil, "test", 0) }, count: 38,
+			present: []string{"add_repo", "remove_repo", "refresh_repo", "queue_status", "set_docs_config", "add_source", "add_api_service", "set_credential"},
+			absent:  []string{"list_repos", "repo_status", "search_code", "query_graph", "search_docs", "list_api_services", "call_api_endpoint"},
+		},
 	}
 
+	allNames := map[string]string{}
 	for _, tt := range tests {
-		t.Run(tt.profile, func(t *testing.T) {
-			server := New(nil, "test", 0, tt.profile)
+		t.Run(tt.name, func(t *testing.T) {
+			server := tt.server()
 			ct, st := mcp.NewInMemoryTransports()
 			if _, err := server.Connect(context.Background(), st, nil); err != nil {
 				t.Fatal(err)
@@ -87,7 +95,7 @@ func TestToolProfiles(t *testing.T) {
 			if len(result.Tools) != tt.count {
 				t.Fatalf("tool count = %d, want %d", len(result.Tools), tt.count)
 			}
-			if tt.profile == ToolProfileStandard {
+			if tt.name == "core" {
 				raw, err := json.Marshal(result.Tools)
 				if err != nil {
 					t.Fatal(err)
@@ -100,6 +108,10 @@ func TestToolProfiles(t *testing.T) {
 
 			names := map[string]bool{}
 			for _, tool := range result.Tools {
+				if owner, exists := allNames[tool.Name]; exists {
+					t.Errorf("tool %q is published by both %s and %s", tool.Name, owner, tt.name)
+				}
+				allNames[tool.Name] = tt.name
 				names[tool.Name] = true
 				if (tool.Name == "search_docs" || tool.Name == "list_sources" || tool.Name == "list_namespaces" || tool.Name == "get_source" ||
 					tool.Name == "register_source_page" || tool.Name == "import_source_pages" || tool.Name == "import_source_sitemap" || tool.Name == "delete_source_page" ||
@@ -136,41 +148,14 @@ func TestToolProfiles(t *testing.T) {
 					}
 				}
 			}
-			for _, name := range []string{"search_code", "query_graph", "search_docs", "list_files", "get_source"} {
+			for _, name := range tt.present {
 				if !names[name] {
-					t.Errorf("profile missing core tool %q", name)
+					t.Errorf("catalog missing tool %q", name)
 				}
 			}
-			// Queue-management tools are available in both profiles.
-			for _, name := range []string{"queue_status", "bump_task", "cancel_task", "set_task_concurrency"} {
-				if !names[name] {
-					t.Errorf("profile missing queue tool %q", name)
-				}
-			}
-			for _, name := range []string{
-				"set_docs_config", "test_llm", "list_credentials", "add_source", "refresh_source", "source_types", "get_source_config",
-				"register_source_page", "import_source_pages", "import_source_sitemap", "delete_source_page",
-			} {
-				if names[name] != tt.admin {
-					t.Errorf("admin tool %q present=%t, want %t", name, names[name], tt.admin)
-				}
-			}
-			// The catalog walk and the call tool move together: discovery
-			// without call is a dead end, and call without discovery cannot
-			// learn an endpoint's parameters.
-			for _, name := range []string{
-				"list_api_groups", "list_api_services", "list_api_endpoints", "get_api_endpoint", "call_api_endpoint",
-			} {
-				if names[name] != tt.api {
-					t.Errorf("api tool %q present=%t, want %t", name, names[name], tt.api)
-				}
-			}
-			for _, name := range []string{
-				"api_service_kinds", "add_api_service", "update_api_service", "delete_api_service",
-				"refresh_api_service", "get_api_service_config", "set_api_group_description", "delete_api_group",
-			} {
-				if names[name] != tt.admin {
-					t.Errorf("api admin tool %q present=%t, want %t", name, names[name], tt.admin)
+			for _, name := range tt.absent {
+				if names[name] {
+					t.Errorf("catalog unexpectedly publishes tool %q", name)
 				}
 			}
 			for _, name := range []string{"lock_repo", "unlock_repo"} {
@@ -179,6 +164,9 @@ func TestToolProfiles(t *testing.T) {
 				}
 			}
 		})
+	}
+	if len(allNames) != 65 {
+		t.Fatalf("catalog union has %d tools, want 65", len(allNames))
 	}
 }
 
@@ -191,7 +179,7 @@ func TestToolProfiles(t *testing.T) {
 // exactly what a strict client does before sending — and what was rejecting
 // every call_api_endpoint body as "has type object, want array".
 func TestPublishedCallSchemaAcceptsJSONBody(t *testing.T) {
-	server := New(nil, "test", 0, ToolProfileAPI)
+	server := NewAPI(nil, "test")
 	ct, st := mcp.NewInMemoryTransports()
 	if _, err := server.Connect(context.Background(), st, nil); err != nil {
 		t.Fatal(err)
@@ -218,7 +206,7 @@ func TestPublishedCallSchemaAcceptsJSONBody(t *testing.T) {
 		}
 	}
 	if tool == nil {
-		t.Fatal("call_api_endpoint not published by the api profile")
+		t.Fatal("call_api_endpoint not published by the api catalog")
 	}
 
 	raw, err := json.Marshal(tool.InputSchema)
@@ -279,13 +267,13 @@ func TestModelGuidanceIsSearchFirstAndBounded(t *testing.T) {
 	// The catalog chain has to be named rather than left to the tool
 	// descriptions: a model that never calls list_api_groups never reads them,
 	// and answers "how do I call X" out of prose it found with search_docs. It
-	// belongs in apiInstructions, not the base text, because the standard
-	// profile publishes none of those tools.
+	// belongs in apiInstructions, not the base text, because the core catalog
+	// publishes none of those tools.
 	if !strings.Contains(apiInstructions, "list_api_groups -> list_api_services -> list_api_endpoints -> get_api_endpoint") {
 		t.Error("api instructions do not describe the API-catalog drill-down order")
 	}
 	if strings.Contains(serverInstructions, "list_api_groups") {
-		t.Error("base instructions describe API tools the standard profile does not publish")
+		t.Error("base instructions describe API tools the core catalog does not publish")
 	}
 	if !strings.Contains(serverInstructions, "Semantic is the default when configured") {
 		t.Fatal("instructions do not describe the effective docs-search default")

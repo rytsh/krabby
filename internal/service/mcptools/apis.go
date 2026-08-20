@@ -201,10 +201,8 @@ type apiServiceConfigOutput struct {
 
 // ---- registration ----------------------------------------------------------
 
-// addAPITools registers the API-catalog surface. It is called only for the api
-// and full profiles — standard publishes no api_* tool — and includeAdmin adds
-// the catalog administration tools for full alone.
-func addAPITools(server *mcp.Server, mgr *manager.Manager, includeAdmin bool) {
+// addAPITools registers the independent API discovery and call catalog.
+func addAPITools(server *mcp.Server, mgr *manager.Manager) {
 	addTool(server, &mcp.Tool{
 		Name: "list_api_groups",
 		Description: "List the API catalog's groups with their descriptions and service counts. " +
@@ -337,16 +335,11 @@ func addAPITools(server *mcp.Server, mgr *manager.Manager, includeAdmin bool) {
 	})
 
 	addAPICallTool(server, mgr)
-
-	if includeAdmin {
-		addAPIAdminTools(server, mgr)
-	}
 }
 
 // addAPICallTool registers call_api_endpoint. The tool has real side effects on
 // the target API, but it cannot reach anything an operator did not already
-// catalogue — a weaker trust requirement than the admin tools, and the reason
-// the api profile stops short of them.
+// catalogue. Administration lives on a separate MCP endpoint.
 func addAPICallTool(server *mcp.Server, mgr *manager.Manager) {
 	addTool(server, &mcp.Tool{
 		Name: "call_api_endpoint",

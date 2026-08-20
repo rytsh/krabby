@@ -61,22 +61,24 @@ Go to **About** section in the UI and follow the instructions to add Krabby to y
 <details>
 <summary>Click for MCP configuration</summary>
 
-Krabby exposes a streamable HTTP MCP endpoint at `http://localhost:8080/mcp`.
+Krabby exposes three independent streamable HTTP MCP catalogs:
+
+- `http://localhost:8080/mcp` — read-only code, graph, files, history, and docs
+- `http://localhost:8080/mcp/api` — API catalog discovery and live endpoint calls
+- `http://localhost:8080/mcp/admin` — repository, credential, source, API, queue, and settings administration
 
 Paste this into your coding agent:
 
-> Add Krabby to my MCP client configuration as a remote streamable HTTP server.
-> Name it "krabby", use http://localhost:8080/mcp as the URL, and send the
-> X-Krabby-Tool-Profile: full header on every request. Preserve my existing MCP
-> servers and tell me if I need to restart the client.
+> Add Krabby to my MCP client configuration as three remote streamable HTTP
+> servers named "krabby", "krabby-api", and "krabby-admin", using
+> http://localhost:8080/mcp, http://localhost:8080/mcp/api, and
+> http://localhost:8080/mcp/admin. Preserve my existing MCP servers and tell me
+> how to enable only the catalogs needed for a task.
 
-The `full` profile lets your agent configure Krabby and manage credentials in
-addition to adding repositories, searching code, reading files, and querying
-repository relationships. Use `api` instead of `full` for an agent that should
-work with catalogued APIs — walking the catalog and sending real requests with
-`call_api_endpoint` — without being able to reconfigure Krabby. Omit the header
-entirely for the read-only repository and documentation tools; that profile
-does not publish the API catalog at all.
+The catalogs do not overlap. Keep `krabby` enabled for normal codebase work,
+enable `krabby-api` only when an agent should discover or call catalogued APIs,
+and enable `krabby-admin` only while it should be allowed to add, change, or
+delete Krabby-managed resources.
 
 For client-specific configuration examples, private repository credentials,
 REST endpoints, MCP tools, memory tuning, and development instructions, see

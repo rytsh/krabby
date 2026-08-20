@@ -17,6 +17,26 @@ import (
 	"github.com/rytsh/krabby/internal/service/registry"
 )
 
+func TestMCPCatalogRoutes(t *testing.T) {
+	core := mcp.NewServer(&mcp.Implementation{Name: "core", Version: "test"}, nil)
+	api := mcp.NewServer(&mcp.Implementation{Name: "api", Version: "test"}, nil)
+	admin := mcp.NewServer(&mcp.Implementation{Name: "admin", Version: "test"}, nil)
+
+	routes := mcpCatalogRoutes("/custom/mcp", core, api, admin)
+	for path, want := range map[string]*mcp.Server{
+		"/custom/mcp":       core,
+		"/custom/mcp/api":   api,
+		"/custom/mcp/admin": admin,
+	} {
+		if got := routes[path]; got != want {
+			t.Errorf("route %q = %p, want %p", path, got, want)
+		}
+	}
+	if len(routes) != 3 {
+		t.Fatalf("route count = %d, want 3", len(routes))
+	}
+}
+
 func TestVerifyGitWebhook(t *testing.T) {
 	secret := "topsecret"
 	body := []byte(`{"repository":{"full_name":"rytsh/krabby"}}`)
@@ -121,38 +141,6 @@ func TestAPIKeyMiddleware(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("rotated key should be accepted, got %d", rec.Code)
-	}
-}
-
-func TestMCPServerForRequest(t *testing.T) {
-	standard := mcp.NewServer(&mcp.Implementation{Name: "standard", Version: "test"}, nil)
-	apiSrv := mcp.NewServer(&mcp.Implementation{Name: "api", Version: "test"}, nil)
-	full := mcp.NewServer(&mcp.Implementation{Name: "full", Version: "test"}, nil)
-
-	tests := []struct {
-		name   string
-		header string
-		want   *mcp.Server
-	}{
-		{name: "default", want: standard},
-		{name: "standard", header: "standard", want: standard},
-		{name: "unknown", header: "other", want: standard},
-		{name: "api", header: "api", want: apiSrv},
-		{name: "api case insensitive", header: " API ", want: apiSrv},
-		// The retired name must not keep unlocking the catalog silently.
-		{name: "retired caller", header: "caller", want: standard},
-		{name: "full", header: "full", want: full},
-		{name: "full case insensitive", header: " FULL ", want: full},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
-			req.Header.Set(MCPToolProfileHeader, tt.header)
-			if got := mcpServerForRequest(req, standard, apiSrv, full); got != tt.want {
-				t.Fatalf("selected server %p, want %p", got, tt.want)
-			}
-		})
 	}
 }
 

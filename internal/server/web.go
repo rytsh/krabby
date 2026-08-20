@@ -62,7 +62,7 @@ func webPlaceholder() http.Handler {
 		`<h1>krabby</h1><p>The web UI has not been built yet.</p>` +
 		`<p>Build it with <code>make build-ui</code> ` +
 		`(or <code>cd _ui &amp;&amp; pnpm install &amp;&amp; pnpm build</code>), then rebuild krabby.</p>` +
-		`<p>The REST API is at <code>/api/v1</code> and the MCP endpoint at <code>/mcp</code>.</p>` +
+		`<p>The REST API is at <code>/api/v1</code>; MCP catalogs are at <code>/mcp</code>, <code>/mcp/api</code>, and <code>/mcp/admin</code>.</p>` +
 		`</body></html>`
 
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
