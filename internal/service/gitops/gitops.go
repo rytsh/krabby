@@ -105,7 +105,8 @@ func (g *Git) SetRemoteURL(ctx context.Context, dir, url string) error {
 	return err
 }
 
-// Fetch updates remote refs, including tags.
+// Fetch updates remote refs, including tags. Remote tags are authoritative:
+// moved tags replace local ones and tags deleted upstream are removed locally.
 //
 // --tags is explicit rather than left to git's default tag-following: the
 // clones are --single-branch, so the default only picks up tags reachable from
@@ -113,7 +114,7 @@ func (g *Git) SetRemoteURL(ctx context.Context, dir, url string) error {
 // version before this one", and a tag list that silently lags the remote is
 // worse than none.
 func (g *Git) Fetch(ctx context.Context, dir string, auth *credentials.Auth) error {
-	_, err := g.run(ctx, dir, auth, "fetch", "--prune", "--tags", "origin")
+	_, err := g.run(ctx, dir, auth, "fetch", "--force", "--prune", "--prune-tags", "--tags", "origin")
 
 	return err
 }

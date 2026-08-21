@@ -1,9 +1,46 @@
 package gitops
 
 import (
+	"context"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
+
+func TestFetchMirrorsRemoteTags(t *testing.T) {
+	remote := testRepo(t)
+	clone := filepath.Join(t.TempDir(), "clone")
+	g := New("")
+	ctx := context.Background()
+
+	if err := g.Clone(ctx, remote, "main", clone, nil); err != nil {
+		t.Fatal(err)
+	}
+	remoteTag, err := g.run(ctx, remote, nil, "rev-parse", "v1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.run(ctx, clone, nil, "tag", "--force", "v1.0.0", "HEAD"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.run(ctx, clone, nil, "tag", "local-only"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := g.Fetch(ctx, clone, nil); err != nil {
+		t.Fatal(err)
+	}
+	fetchedTag, err := g.run(ctx, clone, nil, "rev-parse", "v1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fetchedTag != remoteTag {
+		t.Errorf("fetched tag = %s, want remote tag %s", fetchedTag, remoteTag)
+	}
+	if _, err := g.run(ctx, clone, nil, "rev-parse", "--verify", "refs/tags/local-only"); err == nil {
+		t.Error("tag absent from remote was not pruned")
+	}
+}
 
 func TestParseBlamePorcelain(t *testing.T) {
 	// Two lines from commit aaa, one from bbb. Header groups carry a size field
