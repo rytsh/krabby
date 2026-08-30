@@ -171,11 +171,14 @@ func (m *Manager) RefreshNamespace(ctx context.Context, ns string) error {
 		return fmt.Errorf("list repos for namespace %q; %w", ns, err)
 	}
 
+	var errs []error
 	for _, repo := range repos {
-		m.TriggerRefresh(repo.ID)
+		if err := m.TriggerRefresh(repo.ID); err != nil {
+			errs = append(errs, fmt.Errorf("enqueue refresh for %s; %w", repo.ID, err))
+		}
 	}
 
-	return nil
+	return errors.Join(errs...)
 }
 
 // WebhookSecret returns the provider-neutral git webhook verification secret from the
@@ -284,11 +287,19 @@ func (m *Manager) setDocsConfig(ctx context.Context, next settings.Settings, rei
 	// Existing repositories may be unchanged, so a normal refresh would return
 	// before indexing. Rebuild derived docs/code indexes explicitly after live
 	// settings changes (model, chunking, filters, or enablement).
+	var enqueueErrs []error
 	if reindex {
-		m.TriggerReindexAll()
+		if err := m.TriggerReindexAll(); err != nil {
+			enqueueErrs = append(enqueueErrs, fmt.Errorf("settings saved but reindex enqueue failed; %w", err))
+		}
 	}
 	if imageChanged {
-		m.triggerImageSourceRefreshes(ctx)
+		if err := m.triggerImageSourceRefreshes(ctx); err != nil {
+			enqueueErrs = append(enqueueErrs, fmt.Errorf("settings saved but image refresh enqueue failed; %w", err))
+		}
+	}
+	if err := errors.Join(enqueueErrs...); err != nil {
+		return redactSettings(saved), err
 	}
 
 	return redactSettings(saved), nil
@@ -306,20 +317,24 @@ func webImageSettingsChanged(a, b settings.Settings) bool {
 		a.WebImageAllowAuthenticated != b.WebImageAllowAuthenticated
 }
 
-func (m *Manager) triggerImageSourceRefreshes(ctx context.Context) {
+func (m *Manager) triggerImageSourceRefreshes(ctx context.Context) error {
 	if m.webStore == nil {
-		return
+		return nil
 	}
 	collections, err := m.webStore.ListCollections(ctx)
 	if err != nil {
-		slog.Error("list web sources for image refresh", "error", err)
-		return
+		return fmt.Errorf("list web sources for image refresh; %w", err)
 	}
+	var errs []error
 	for _, col := range collections {
 		if col.AnalyzeImages {
-			m.TriggerWebFullRefresh(col.Name)
+			if err := m.TriggerWebFullRefresh(col.Name); err != nil {
+				errs = append(errs, fmt.Errorf("enqueue image refresh for %s; %w", col.Name, err))
+			}
 		}
 	}
+
+	return errors.Join(errs...)
 }
 
 func redactSettings(s settings.Settings) settings.Redacted {
@@ -336,9 +351,9 @@ func redactSettings(s settings.Settings) settings.Redacted {
 }
 
 // Configure builds a new docs/RAG client bundle from s and swaps it in
-// atomically. On success the previous bundle's store is closed. On failure the
-// previous (working) bundle is left in place and the error is returned so the
-// caller (UI/MCP) can surface it.
+// atomically. On success the previous bundle's resources are closed. On failure
+// the previous (working) bundle is left in place and the error is returned so
+// the caller (UI/MCP) can surface it.
 //
 // This is called once at startup with the persisted/seeded settings, and again
 // on every settings update, giving live reconfiguration without a restart.
@@ -346,6 +361,45 @@ func redactSettings(s settings.Settings) settings.Redacted {
 // that cannot be shipped in that window are dropped rather than delaying the
 // reconfiguration.
 const tracerShutdownTimeout = 5 * time.Second
+
+// closeExcept releases every resource owned by b that is not handed to keep.
+// A bundle rebuild may reuse the active tracer, so pointer identity is the
+// ownership transfer: rollback keeps borrowed resources alive, while a
+// successful swap leaves their eventual shutdown to the replacement bundle.
+func (b *docsBundle) closeExcept(keep *docsBundle) error {
+	if b == nil {
+		return nil
+	}
+
+	var errs []error
+	if b.tracer != nil && (keep == nil || b.tracer != keep.tracer) {
+		ctx, cancel := context.WithTimeout(context.Background(), tracerShutdownTimeout)
+		shutdown := b.tracerShutdown
+		if shutdown == nil {
+			shutdown = b.tracer.Shutdown
+		}
+		if err := shutdown(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("shutdown langfuse tracer; %w", err))
+		}
+		cancel()
+	}
+
+	keepsStore := func(store vectorstore.Store) bool {
+		return keep != nil && (store == keep.store || store == keep.codeStore)
+	}
+	if b.store != nil && !keepsStore(b.store) {
+		if err := b.store.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close docs vector store; %w", err))
+		}
+	}
+	if b.codeStore != nil && b.codeStore != b.store && !keepsStore(b.codeStore) {
+		if err := b.codeStore.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close code vector store; %w", err))
+		}
+	}
+
+	return errors.Join(errs...)
+}
 
 func (m *Manager) Configure(_ context.Context, s settings.Settings) error {
 	m.configureMu.Lock()
@@ -368,32 +422,8 @@ func (m *Manager) Configure(_ context.Context, s settings.Settings) error {
 	m.docs = bundle
 	m.docsMu.Unlock()
 
-	// Close the stores owned by the replaced bundle (if any and distinct).
-	if prev != nil && prev.store != nil && prev.store != bundle.store {
-		if cerr := prev.store.Close(); cerr != nil {
-			slog.Warn("close previous vector store", "error", cerr)
-		}
-	}
-
-	if prev != nil && prev.codeStore != nil && prev.codeStore != bundle.codeStore {
-		if cerr := prev.codeStore.Close(); cerr != nil {
-			slog.Warn("close previous code vector store", "error", cerr)
-		}
-	}
-
-	// The tracer is shut down only when the swap actually replaced it
-	// (tracerFor hands the live one forward whenever the configuration is
-	// unchanged). Shutdown flushes, so it is given its own bounded context
-	// rather than the caller's, which may already be cancelled.
-	if prev != nil && prev.tracer != nil && prev.tracer != bundle.tracer {
-		go func(t *langfuse.Tracer) {
-			ctx, cancel := context.WithTimeout(context.Background(), tracerShutdownTimeout)
-			defer cancel()
-
-			if cerr := t.Shutdown(ctx); cerr != nil {
-				slog.Warn("shutdown previous langfuse tracer", "error", cerr)
-			}
-		}(prev.tracer)
+	if cerr := prev.closeExcept(bundle); cerr != nil {
+		slog.Warn("close previous docs/rag bundle", "error", cerr)
 	}
 
 	slog.Info("docs/rag reconfigured",
@@ -417,22 +447,20 @@ func (m *Manager) Configure(_ context.Context, s settings.Settings) error {
 //
 // A tracer that fails to build is logged and replaced by an inert one:
 // telemetry must never be the reason a settings save fails.
-func (m *Manager) tracerFor(s settings.Settings) *langfuse.Tracer {
+func (m *Manager) tracerFor(s settings.Settings, prev *docsBundle) (*langfuse.Tracer, func(context.Context) error) {
 	cfg := langfuseConfig(s)
 
-	m.docsMu.RLock()
-	prev := m.docs
-	m.docsMu.RUnlock()
-
 	if prev != nil && prev.tracer.Same(cfg) {
-		return prev.tracer
+		return prev.tracer, prev.tracerShutdown
 	}
 
-	tracer, err := langfuse.New(cfg)
+	newTracer := m.newLangfuseTracer
+	if newTracer == nil {
+		newTracer = langfuse.New
+	}
+	tracer, err := newTracer(cfg)
 	if err != nil {
 		slog.Error("langfuse export disabled", "error", err)
-
-		return tracer // langfuse.New returns an inert tracer alongside its error
 	}
 
 	if tracer.Enabled() {
@@ -440,7 +468,15 @@ func (m *Manager) tracerFor(s settings.Settings) *langfuse.Tracer {
 			"host", cfg.Host, "environment", cfg.Environment, "capture", cfg.Capture)
 	}
 
-	return tracer
+	shutdown := func(ctx context.Context) error {
+		if m.shutdownLangfuseTracer != nil {
+			return m.shutdownLangfuseTracer(ctx, tracer)
+		}
+
+		return tracer.Shutdown(ctx)
+	}
+
+	return tracer, shutdown
 }
 
 // Tracer returns the live Langfuse tracer. It is never nil, so callers outside
@@ -469,13 +505,33 @@ func (m *Manager) Tracer() *langfuse.Tracer {
 // unconfigured capability yields a nil field rather than an error, so partial
 // configuration (e.g. docs on, rag off) is valid. Store construction failures
 // leave the previous live bundle active.
-func (m *Manager) buildBundle(s settings.Settings) (*docsBundle, error) {
-	b := &docsBundle{ragCfg: ragConfig(s), imageCfg: webImageConfig(s), tracer: m.tracerFor(s)}
+func (m *Manager) buildBundle(s settings.Settings) (_ *docsBundle, err error) {
+	m.docsMu.RLock()
+	prev := m.docs
+	m.docsMu.RUnlock()
 
-	var (
-		codeEmb   *embedder.Client
-		codeStore vectorstore.Store
-	)
+	tracer, shutdownTracer := m.tracerFor(s, prev)
+	b := &docsBundle{
+		ragCfg:         ragConfig(s),
+		imageCfg:       webImageConfig(s),
+		tracer:         tracer,
+		tracerShutdown: shutdownTracer,
+	}
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		if closeErr := b.closeExcept(prev); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("rollback docs/rag bundle; %w", closeErr))
+		}
+	}()
+
+	var codeEmb *embedder.Client
+	openStore := m.openVectorStore
+	if openStore == nil {
+		openStore = vectorstore.New
+	}
 
 	// Doc generation needs a chat LLM.
 	if s.DocsEnabled {
@@ -518,7 +574,7 @@ func (m *Manager) buildBundle(s settings.Settings) (*docsBundle, error) {
 		case err != nil:
 			return nil, fmt.Errorf("build embedder client; %w", err)
 		default:
-			store, serr := vectorstore.New(m.docsVectorsDir)
+			store, serr := openStore(m.docsVectorsDir)
 			if serr != nil {
 				return nil, fmt.Errorf("build vector store; %w", serr)
 			}
@@ -541,25 +597,21 @@ func (m *Manager) buildBundle(s settings.Settings) (*docsBundle, error) {
 		case err != nil:
 			return nil, fmt.Errorf("build code embedder client; %w", err)
 		default:
-			store, serr := vectorstore.New(m.codeVectorsDir)
+			store, serr := openStore(m.codeVectorsDir)
 			if serr != nil {
-				if b.store != nil {
-					_ = b.store.Close()
-				}
-
 				return nil, fmt.Errorf("build code vector store; %w", serr)
 			}
 
 			codeEmb = emb
-			codeStore = store
+			b.codeStore = store
 
 			logVectorCacheFit("code", s.CodeEmbedDim)
 		}
 	}
 
-	b.codeStore = codeStore
-	b.codeRag = coderag.New(codeRagConfig(s), codeEmb, codeStore, m.engine, m.codeText)
+	b.codeRag = coderag.New(codeRagConfig(s), codeEmb, b.codeStore, m.engine, m.codeText)
 
+	committed = true
 	return b, nil
 }
 
@@ -2054,7 +2106,12 @@ func (m *Manager) ensureCodeIndexForSearch(ctx context.Context, repoID string, s
 
 		repo, err := m.reg.Get(ctx, id)
 		if err != nil {
-			// Repo vanished from the registry; drop it from pending and skip.
+			errs = append(errs, fmt.Errorf("load repo %s for code index warmup: %w", id, err))
+			continue
+		}
+		if repo == nil {
+			// A repository can be removed after namespace resolution or the
+			// startup list. It no longer participates in this search.
 			m.clearCodeWarmPending(id)
 			continue
 		}

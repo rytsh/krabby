@@ -18,6 +18,9 @@ const (
 // terms ("error") get low weight and rare identifiers get high weight (mirrors
 // _compute_idf). The cache lives on the Graph and is discarded on reload.
 func (g *Graph) computeIDF(terms []string) map[string]float64 {
+	g.idfMu.Lock()
+	defer g.idfMu.Unlock()
+
 	n := g.NumNodes()
 	if n == 0 {
 		n = 1

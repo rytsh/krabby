@@ -14,7 +14,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"sort"
 	"strconv"
 	"time"
@@ -41,8 +40,9 @@ type Record struct {
 // bucket instead of failing on a fingerprint mismatch.
 const schemaVersion = 1
 
-// opTimeout bounds a single read/write against the local embedded store; it is
-// generous because a persistence stall must never block the queue itself.
+// opTimeout bounds a single read/write against the local embedded store. Queue
+// persistence calls run without its mutex, so controls remain responsive while
+// a caller waits for this bound.
 const opTimeout = 5 * time.Second
 
 // Store persists queue tasks in a bw bucket. It implements queue.Persister.
@@ -60,10 +60,11 @@ func New(db *bw.DB) (*Store, error) {
 	return &Store{bucket: bucket}, nil
 }
 
-// Save records (or replaces) a queued task. It is called by the queue when a
-// task is enqueued. Errors are logged-and-swallowed: a persistence failure must
-// never block or fail the in-memory enqueue.
-func (s *Store) Save(seq uint64, spec queue.Spec, enqueuedAt time.Time) {
+// Save records a queued task. Writes are create-only: a sequence collision is
+// returned instead of overwriting older durable work. The queue seeds its
+// allocator from List before calling Save, so a conflict indicates a bootstrap
+// or caller bug and the new task must not dispatch.
+func (s *Store) Save(seq uint64, spec queue.Spec, enqueuedAt time.Time) error {
 	params := marshalParams(spec.Params)
 
 	rec := &Record{
@@ -74,15 +75,14 @@ func (s *Store) Save(seq uint64, spec queue.Spec, enqueuedAt time.Time) {
 		EnqueuedAt: enqueuedAt,
 	}
 
-	// Insert acts as an upsert in bw; a background timeout would be unusual for
-	// a local embedded store, so a short bounded context is enough.
 	ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
 	defer cancel()
 
-	if err := s.bucket.Insert(ctx, rec); err != nil {
-		// The queue interface logs nothing itself; surface it here.
-		slog.Error("persist queued task", "seq", seq, "error", err)
+	if err := s.bucket.InsertNew(ctx, rec); err != nil {
+		return fmt.Errorf("save task %d; %w", seq, err)
 	}
+
+	return nil
 }
 
 // marshalParams encodes a spec's params map to a JSON string for storage,
@@ -102,13 +102,15 @@ func marshalParams(params map[string]string) string {
 
 // Remove drops a task's record once it reaches a terminal state. It is a no-op
 // when the record is already gone.
-func (s *Store) Remove(seq uint64) {
+func (s *Store) Remove(seq uint64) error {
 	ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
 	defer cancel()
 
 	if err := s.bucket.Delete(ctx, strconv.FormatUint(seq, 10)); err != nil && !errors.Is(err, bw.ErrNotFound) {
-		slog.Error("remove persisted task", "seq", seq, "error", err)
+		return fmt.Errorf("remove task %d; %w", seq, err)
 	}
+
+	return nil
 }
 
 // PersistedTask is one restored task: its original queue seq plus the decoded

@@ -75,8 +75,12 @@ func Run(ctx context.Context, mgr *manager.Manager) {
 		case <-ticker.C:
 			// Interval-based fallback for web sources without a cron spec
 			// (legacy RefreshInterval-only collections).
-			mgr.RefreshDueWebSources(ctx)
-			mgr.RefreshDueAPIServices(ctx)
+			if err := mgr.RefreshDueWebSources(ctx); err != nil {
+				slog.Error("enqueue due web-source refreshes", "error", err)
+			}
+			if err := mgr.RefreshDueAPIServices(ctx); err != nil {
+				slog.Error("enqueue due api-service refreshes", "error", err)
+			}
 			s.reconcile(ctx)
 			s.reconcileWeb(ctx)
 			s.reconcileAPI(ctx)
@@ -199,9 +203,7 @@ func (s *scheduler) buildWebCrons(schedules []manager.WebSourceSchedule) []hardl
 			Name:  "websource-poll:" + name,
 			Specs: sc.Specs,
 			Func: func(_ context.Context) error {
-				s.mgr.TriggerWebRefresh(name)
-
-				return nil
+				return s.mgr.TriggerWebRefresh(name)
 			},
 		})
 	}
@@ -267,9 +269,7 @@ func (s *scheduler) buildAPICrons(schedules []manager.APISchedule) []hardloop.Cr
 			Name:  "apicatalog-poll:" + name,
 			Specs: sc.Specs,
 			Func: func(_ context.Context) error {
-				s.mgr.TriggerAPIRefresh(name)
-
-				return nil
+				return s.mgr.TriggerAPIRefresh(name)
 			},
 		})
 	}

@@ -25,11 +25,14 @@ const parsedSizeFactor = 3
 // correctness is unaffected — only cold-query latency. A budget of 0 disables
 // eviction (unbounded, retaining the original behaviour).
 type Engine struct {
-	mu       sync.Mutex
-	entries  map[string]*list.Element // path -> element in lru
-	lru      *list.List               // front = most-recently-used
-	curBytes int64
-	maxBytes int64
+	mu         sync.Mutex
+	entries    map[string]*list.Element // path -> element in lru
+	lru        *list.List               // front = most-recently-used
+	flights    map[string]*loadFlight
+	generation map[string]uint64
+	curBytes   int64
+	maxBytes   int64
+	loadGraph  func(string) (*Graph, error)
 }
 
 type cacheEntry struct {
@@ -40,13 +43,23 @@ type cacheEntry struct {
 	est     int64 // estimated in-memory bytes (size * parsedSizeFactor)
 }
 
+type loadFlight struct {
+	generation uint64
+	done       chan struct{}
+	graph      *Graph
+	err        error
+}
+
 // NewEngine creates an empty engine with the given estimated-memory budget in
 // bytes. maxBytes <= 0 disables eviction (unbounded cache).
 func NewEngine(maxBytes int64) *Engine {
 	return &Engine{
-		entries:  map[string]*list.Element{},
-		lru:      list.New(),
-		maxBytes: maxBytes,
+		entries:    map[string]*list.Element{},
+		lru:        list.New(),
+		flights:    map[string]*loadFlight{},
+		generation: map[string]uint64{},
+		maxBytes:   maxBytes,
+		loadGraph:  Load,
 	}
 }
 
@@ -63,43 +76,70 @@ func (e *Engine) Graph(path string) (*Graph, error) {
 	mtimeNS, size := fi.ModTime().UnixNano(), fi.Size()
 
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
+	var observed *cacheEntry
 	if el, ok := e.entries[path]; ok {
-		ent := el.Value.(*cacheEntry)
-		if ent.mtimeNS == mtimeNS && ent.size == size {
+		observed = el.Value.(*cacheEntry)
+		if observed.mtimeNS == mtimeNS && observed.size == size {
 			e.lru.MoveToFront(el)
+			e.mu.Unlock()
 
-			return ent.graph, nil
+			return observed.graph, nil
 		}
-		// Stale: drop it before reloading so curBytes stays accurate.
-		e.removeElement(el)
 	}
 
-	g, err := Load(path)
-	if err != nil {
-		// On transient read error keep serving a previously cached graph if any.
+	generation := e.generation[path]
+	if flight, ok := e.flights[path]; ok && flight.generation == generation {
+		e.mu.Unlock()
+		<-flight.done
+
+		return flight.graph, flight.err
+	}
+
+	flight := &loadFlight{generation: generation, done: make(chan struct{})}
+	e.flights[path] = flight
+	e.mu.Unlock()
+
+	// Parsing stays outside the engine lock so different paths load concurrently.
+	// The observed entry remains available as a fallback if a stale reload fails.
+	g, loadErr := e.loadGraph(path)
+
+	e.mu.Lock()
+	current := e.generation[path] == generation && e.flights[path] == flight
+	resultGraph, resultErr := g, loadErr
+	if loadErr != nil {
 		if el, ok := e.entries[path]; ok {
-			return el.Value.(*cacheEntry).graph, nil
+			e.lru.MoveToFront(el)
+			resultGraph = el.Value.(*cacheEntry).graph
+			resultErr = nil
+		} else if observed != nil {
+			resultGraph = observed.graph
+			resultErr = nil
 		}
-
-		return nil, err
+	} else if current {
+		if el, ok := e.entries[path]; ok {
+			e.removeElement(el)
+		}
+		ent := &cacheEntry{
+			path:    path,
+			graph:   g,
+			mtimeNS: mtimeNS,
+			size:    size,
+			est:     size * parsedSizeFactor,
+		}
+		e.entries[path] = e.lru.PushFront(ent)
+		e.curBytes += ent.est
+		e.evictLocked()
 	}
 
-	ent := &cacheEntry{
-		path:    path,
-		graph:   g,
-		mtimeNS: mtimeNS,
-		size:    size,
-		est:     size * parsedSizeFactor,
+	flight.graph = resultGraph
+	flight.err = resultErr
+	if e.flights[path] == flight {
+		delete(e.flights, path)
 	}
-	el := e.lru.PushFront(ent)
-	e.entries[path] = el
-	e.curBytes += ent.est
+	close(flight.done)
+	e.mu.Unlock()
 
-	e.evictLocked()
-
-	return g, nil
+	return resultGraph, resultErr
 }
 
 // evictLocked drops least-recently-used entries until the cache fits the budget.
@@ -130,6 +170,8 @@ func (e *Engine) Invalidate(path string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	e.generation[path]++
+	delete(e.flights, path)
 	if el, ok := e.entries[path]; ok {
 		e.removeElement(el)
 	}

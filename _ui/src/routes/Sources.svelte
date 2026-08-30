@@ -3,16 +3,20 @@
   // pages are synced to markdown and indexed into the docs RAG. Each
   // collection is searchable on the Search page as "web:<name>".
   import { onMount } from "svelte";
+  import { SvelteMap } from "svelte/reactivity";
   import { api } from "../lib/api.js";
+  import { createLatestRequest, createPoller } from "../lib/async.js";
   import { path as routePath, navigate, link } from "../lib/router.js";
   import { fmtDate, fmtEta } from "../lib/format.js";
   import Icon from "../lib/Icon.svelte";
   import Status from "../lib/Status.svelte";
   import MarkdownView from "../lib/MarkdownView.svelte";
   import { successToast } from "../lib/toast.js";
+  import { createBrowserImportController } from "../lib/source-browser-import.js";
 
   // selected/doc come from the route: /sources/<name>?doc=<path>.
   let { sourceName = "" } = $props();
+  const manualPagePlaceholder = "## Overview\n\nWrite or paste Markdown here...";
   let docParam = $derived.by(() => {
     const params = new URLSearchParams($routePath.split("?")[1] || "");
     return params.get("doc") || "";
@@ -26,6 +30,8 @@
   let selectedSource = $derived(sources.find((source) => source.name === sourceName));
   let loaded = $state(false);
   let error = $state("");
+  const sourceRequests = createLatestRequest();
+  const docRequests = createLatestRequest();
 
   // Per-collection page lists, loaded lazily when expanded.
   let pages = $state({});
@@ -35,7 +41,12 @@
   let teamFilter = $state({});
   let titleFilter = $state({});
   const titleSearchTimers = {};
-  const pageLoadSeq = {};
+  const pageRequests = new SvelteMap();
+
+  function pageRequest(name) {
+    if (!pageRequests.has(name)) pageRequests.set(name, createLatestRequest());
+    return pageRequests.get(name);
+  }
   // Per-collection pagination: current page (1-based), total matching items and
   // whether more pages exist. The server pages the item list so large sources
   // (thousands of pages) are never loaded whole.
@@ -92,33 +103,32 @@
   }
 
   async function load() {
+    const isLatest = sourceRequests.next();
     try {
-      sources = (await api.sources()) || [];
+      const next = (await api.sources()) || [];
+      if (!isLatest()) return;
+      sources = next;
       error = "";
     } catch (e) {
-      error = e.message;
+      if (isLatest()) error = e.message;
     } finally {
-      loaded = true;
+      if (isLatest()) loaded = true;
     }
   }
 
   // Poll the source list while any source is actively syncing/indexing, so the
   // progress bar and page counts update live without a manual refresh.
-  let pollTimer = null;
+  const sourcePoller = createPoller(load);
   function anyRunning() {
     return sources.some((s) => s.task_state || s.running || s.status === "fetching" || s.progress?.length);
   }
   $effect(() => {
-    if (anyRunning() && !pollTimer) {
-      pollTimer = setInterval(load, 2000);
-    } else if (!anyRunning() && pollTimer) {
-      clearInterval(pollTimer);
-      pollTimer = null;
+    if (!anyRunning()) {
+      sourcePoller.stop();
+      return;
     }
-  });
-  onMount(() => () => {
-    if (pollTimer) clearInterval(pollTimer);
-    for (const timer of Object.values(titleSearchTimers)) clearTimeout(timer);
+    sourcePoller.start(2000);
+    return () => sourcePoller.stop();
   });
 
   // A sync runs one phase at a time, but the API reports a list (a repository
@@ -148,12 +158,11 @@
   }
 
   async function loadPages(name, page = pageNum[name] || 1) {
-    const seq = (pageLoadSeq[name] || 0) + 1;
-    pageLoadSeq[name] = seq;
+    const isLatest = pageRequest(name).next();
     pageLoading = { ...pageLoading, [name]: true };
     try {
       const res = await api.source(name, teamFilter[name] || "", page, PER_PAGE, titleFilter[name] || "");
-      if (pageLoadSeq[name] !== seq) return;
+      if (!isLatest()) return;
       pages = { ...pages, [name]: res?.pages || [] };
       pageNum = { ...pageNum, [name]: res?.page || page };
       pageTotal = { ...pageTotal, [name]: res?.total ?? (res?.pages?.length || 0) };
@@ -161,10 +170,10 @@
       // teams is the full distinct set across the collection (server-provided).
       if (res?.teams) teams = { ...teams, [name]: res.teams };
     } catch (e) {
-      if (pageLoadSeq[name] !== seq) return;
+      if (!isLatest()) return;
       error = e.message;
     } finally {
-      if (pageLoadSeq[name] === seq) pageLoading = { ...pageLoading, [name]: false };
+      if (isLatest()) pageLoading = { ...pageLoading, [name]: false };
     }
   }
 
@@ -198,6 +207,7 @@
 
   function toggle(name) {
     expanded = { ...expanded, [name]: !expanded[name] };
+    if (!expanded[name]) pageRequest(name).invalidate();
     if (expanded[name] && !pages[name]) loadPages(name, pageNum[name] || 1);
   }
 
@@ -411,144 +421,32 @@
   let extensionAvailable = $state(false);
   let extensionVersion = $state("");
   let appVersion = $state("");
+  let isMounted = true;
   let extensionOutdated = $derived(
     extensionAvailable && !!appVersion && !!extensionVersion && extensionVersion !== appVersion,
   );
-  const extensionRequests = new Map();
-
-  function handleExtensionMessage(event) {
-    if (event.source !== window || event.origin !== location.origin) return;
-    if (event.data?.type === "KRABBY_EXTENSION_READY") {
-      extensionAvailable = true;
-      extensionVersion = event.data.version || "unknown";
-      return;
-    }
-    if (event.data?.type !== "KRABBY_EXTENSION_RESPONSE") return;
-    const pending = extensionRequests.get(event.data.requestId);
-    if (!pending) return;
-    extensionRequests.delete(event.data.requestId);
-    clearTimeout(pending.timer);
-    if (event.data.error) pending.reject(new Error(event.data.error));
-    else pending.resolve(event.data.result);
-  }
-
-  function extensionRequest(action, url) {
-    if (!extensionAvailable) return Promise.reject(new Error("Krabby browser extension is not connected"));
-    const requestId = crypto.randomUUID();
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        extensionRequests.delete(requestId);
-        reject(new Error(`Browser extension timed out while processing ${url}`));
-      }, 60000);
-      extensionRequests.set(requestId, { resolve, reject, timer });
-      window.postMessage({ type: "KRABBY_EXTENSION_REQUEST", requestId, action, url }, location.origin);
-    });
-  }
+  const browserImporter = createBrowserImportController({
+    importPages: (name, importedPages, options) => api.importSourcePages(name, importedPages, options),
+    getExtensionAvailable: () => extensionAvailable,
+    getRelay: () => corsRelay,
+    onExtension: (available, version) => {
+      extensionAvailable = available;
+      extensionVersion = version;
+    },
+    onImporting: (name, importing) => {
+      browserImporting = { ...browserImporting, [name]: importing };
+    },
+    onProgress: (name, progress) => {
+      browserProgress = { ...browserProgress, [name]: progress };
+    },
+    confirmImport: (count) => confirm(`Fetch and import ${count} pages through this browser?`),
+  });
 
   function saveCorsRelay(value) {
     corsRelay = value;
     localStorage.setItem("krabby-cors-relay", value);
   }
 
-  function relayURL(target) {
-    const relay = corsRelay.trim();
-    if (!relay) return "";
-    if (relay.includes("{rawUrl}")) return relay.replaceAll("{rawUrl}", target);
-    if (relay.includes("{url}")) return relay.replaceAll("{url}", encodeURIComponent(target));
-    return relay + encodeURIComponent(target);
-  }
-
-  // Browser imports first try the original URL. Sites that do not opt into
-  // CORS can be reached through a relay the user controls; no page content is
-  // silently sent through a hard-coded third-party service.
-  async function browserFetchText(url) {
-    let directError;
-    try {
-      const response = await fetch(url, { credentials: "omit" });
-      if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
-      return await response.text();
-    } catch (e) {
-      directError = e;
-    }
-
-    if (extensionAvailable) {
-      try {
-        return await extensionRequest("fetch", url);
-      } catch (e) {
-        directError = e;
-      }
-    }
-
-    const proxied = relayURL(url);
-    if (!proxied) {
-      throw new Error(
-        `Browser could not read ${url} (${directError?.message || "CORS blocked"}). Configure a CORS relay below and retry.`,
-      );
-    }
-    const response = await fetch(proxied);
-    if (!response.ok) throw new Error(`CORS relay returned ${response.status} ${response.statusText} for ${url}`);
-    return await response.text();
-  }
-
-  async function browserFetchPage(url) {
-    if (extensionAvailable) return await extensionRequest("render", url);
-    return await browserFetchText(url);
-  }
-
-  function prepareBrowserHTML(html, url) {
-    const doc = new DOMParser().parseFromString(html, "text/html");
-    const appShell = !!doc.querySelector("#app:empty, #root:empty, #__next:empty, [data-reactroot]:empty");
-    doc.querySelectorAll("script, style, noscript, template, svg, canvas, iframe").forEach((node) => node.remove());
-
-    const contentRoot = doc.querySelector("main, article, [role='main']") || doc.body;
-    const visibleText = (contentRoot?.textContent || "").replace(/\s+/g, " ").trim();
-    if (visibleText.length < 200 || (appShell && visibleText.length < 1000)) {
-      throw new Error(
-        `${url} appears to be an unrendered JavaScript page (${visibleText.length} visible characters). Use a rendering relay or browser extension.`,
-      );
-    }
-
-    const compact = document.implementation.createHTMLDocument(doc.title || "");
-    compact.body.append(contentRoot.cloneNode(true));
-    return compact.documentElement.outerHTML;
-  }
-
-  function parseSitemap(xml, url) {
-    const doc = new DOMParser().parseFromString(xml, "application/xml");
-    const parseError = doc.querySelector("parsererror");
-    if (parseError) throw new Error(`Invalid sitemap XML at ${url}: ${parseError.textContent.trim()}`);
-    const root = doc.documentElement?.localName;
-    if (root !== "urlset" && root !== "sitemapindex") {
-      throw new Error(`Unsupported sitemap root "${root || "unknown"}" at ${url}`);
-    }
-    const locations = [...doc.getElementsByTagNameNS("*", "loc")]
-      .map((node) => node.textContent.trim())
-      .filter(Boolean)
-      .map((location) => new URL(location, url).href);
-    return { root, locations };
-  }
-
-  async function browserSitemapURLs(rootURL) {
-    const pending = [rootURL];
-    const seenSitemaps = new Set();
-    const seenPages = new Set();
-    while (pending.length) {
-      const current = pending.shift();
-      if (seenSitemaps.has(current)) continue;
-      if (seenSitemaps.size >= 100) throw new Error("Sitemap index exceeds 100 files");
-      seenSitemaps.add(current);
-      const parsed = parseSitemap(await browserFetchText(current), current);
-      if (parsed.root === "sitemapindex") {
-        pending.push(...parsed.locations.filter((url) => !seenSitemaps.has(url)));
-      } else {
-        for (const url of parsed.locations) {
-          if (seenPages.size >= 50000) throw new Error("Sitemap exceeds 50,000 page URLs");
-          seenPages.add(url);
-        }
-      }
-    }
-    return [...seenPages];
-  }
 
   async function addPage(name) {
     const url = (pageUrl[name] || "").trim();
@@ -586,22 +484,18 @@
   async function importPageInBrowser(name) {
     const url = (pageUrl[name] || "").trim();
     if (!url) return;
-    browserImporting = { ...browserImporting, [name]: true };
-    browserProgress = { ...browserProgress, [name]: "Fetching page in browser..." };
     try {
-      const content = prepareBrowserHTML(await browserFetchPage(url), url);
-      browserProgress = { ...browserProgress, [name]: "Converting and indexing..." };
-      await api.importSourcePages(name, [{ url, content_type: "text/html", content }]);
+      const result = await browserImporter.importPage(name, url);
+      if (result.canceled) return;
+      browserImporting = { ...browserImporting, [name]: true };
       pageUrl = { ...pageUrl, [name]: "" };
-      browserProgress = { ...browserProgress, [name]: "" };
       successToast("Browser-fetched page imported");
       await loadPages(name, 1);
       await load();
     } catch (e) {
-      error = e.message;
-      browserProgress = { ...browserProgress, [name]: "" };
+      if (isMounted) error = e.message;
     } finally {
-      browserImporting = { ...browserImporting, [name]: false };
+      if (isMounted) browserImporting = { ...browserImporting, [name]: false };
     }
   }
 
@@ -626,88 +520,25 @@
     const url = (sitemapUrl[name] || "").trim();
     if (!url) return;
     error = "";
-    browserImporting = { ...browserImporting, [name]: true };
-    browserProgress = { ...browserProgress, [name]: "Reading sitemap in browser..." };
     try {
-      const urls = await browserSitemapURLs(url);
-      if (!urls.length) throw new Error("Sitemap contains no page URLs");
-      if (urls.length > 200 && !confirm(`Fetch and import ${urls.length} pages through this browser?`)) {
-        browserProgress = { ...browserProgress, [name]: "" };
-        return;
-      }
-
-      let imported = 0;
-      let emptyBatches = 0;
-      const failures = [];
-      const batchSize = 5;
-      for (let offset = 0; offset < urls.length; offset += batchSize) {
-        const batchURLs = urls.slice(offset, offset + batchSize);
-        browserProgress = {
-          ...browserProgress,
-          [name]: `Fetching pages ${offset + 1}-${Math.min(offset + batchURLs.length, urls.length)} of ${urls.length}...`,
-        };
-        const fetched = await Promise.allSettled(
-          batchURLs.map(async (pageURL) => ({
-            url: pageURL,
-            content_type: "text/html",
-            content: prepareBrowserHTML(await browserFetchPage(pageURL), pageURL),
-          })),
-        );
-        const pagesToImport = [];
-        fetched.forEach((item, index) => {
-          if (item.status === "fulfilled") pagesToImport.push(item.value);
-          else failures.push(`${batchURLs[index]}: ${item.reason?.message || "fetch failed"}`);
-        });
-
-        let batchImported = 0;
-        if (pagesToImport.length) {
-          browserProgress = {
-            ...browserProgress,
-            [name]: `Indexing ${imported + 1}-${imported + pagesToImport.length} of ${urls.length}...`,
-          };
-          try {
-            const result = await api.importSourcePages(name, pagesToImport);
-            batchImported = result?.imported || pagesToImport.length;
-          } catch {
-            // A malformed page makes the backend reject its whole atomic batch.
-            // Retry individually so one bad URL does not discard its neighbors.
-            for (const page of pagesToImport) {
-              try {
-                const result = await api.importSourcePages(name, [page]);
-                batchImported += result?.imported || 1;
-              } catch (pageError) {
-                failures.push(`${page.url}: ${pageError.message}`);
-              }
-            }
-          }
-        }
-
-        imported += batchImported;
-        if (batchImported > 0) {
-          emptyBatches = 0;
-        } else {
-          emptyBatches++;
-          const detail = failures.slice(-3).join("; ");
-          if (imported === 0 || emptyBatches >= 3) {
-            throw new Error(`No pages could be imported; stopped early. ${detail}`);
-          }
-        }
-      }
-
+      const result = await browserImporter.importSitemap(name, url);
+      if (result.declined || !isMounted) return;
+      browserImporting = { ...browserImporting, [name]: true };
+      await loadPages(name, 1);
+      await load();
+      if (result.canceled) return;
       sitemapUrl = { ...sitemapUrl, [name]: "" };
-      browserProgress = { ...browserProgress, [name]: "" };
-      await loadPages(name, 1);
-      await load();
-      const summary = `Browser imported ${imported} pages${failures.length ? `; ${failures.length} failed` : ""}`;
+      const summary = `Browser imported ${result.imported} pages${result.failures.length ? `; ${result.failures.length} failed` : ""}`;
       successToast(summary);
-      error = failures.length ? `${summary}. ${failures.slice(0, 3).join("; ")}` : "";
+      error = result.failures.length ? `${summary}. ${result.failures.slice(0, 3).join("; ")}` : "";
     } catch (e) {
-      browserProgress = { ...browserProgress, [name]: "" };
-      await loadPages(name, 1);
-      await load();
-      error = e.message;
+      if (isMounted) {
+        await loadPages(name, 1);
+        await load();
+        error = e.message;
+      }
     } finally {
-      browserImporting = { ...browserImporting, [name]: false };
+      if (isMounted) browserImporting = { ...browserImporting, [name]: false };
     }
   }
 
@@ -741,6 +572,7 @@
   $effect(() => {
     const name = sourceName;
     const doc = docParam;
+    const isLatest = docRequests.next();
     if (!name || !doc) {
       docContent = "";
       docURL = "";
@@ -753,27 +585,34 @@
     api
       .sourceDoc(name, doc)
       .then((res) => {
+        if (!isLatest()) return;
         docContent = res?.content || "";
         docURL = res?.url || "";
       })
-      .catch((e) => (docError = e.message));
+      .catch((e) => {
+        if (isLatest()) docError = e.message;
+      });
+    return () => docRequests.invalidate();
   });
 
   onMount(() => {
     corsRelay = localStorage.getItem("krabby-cors-relay") || "";
-    load();
-    api.settings().then((settings) => (appVersion = settings?.version || "")).catch(() => {});
-  });
-  onMount(() => {
-    window.addEventListener("message", handleExtensionMessage);
-    window.postMessage({ type: "KRABBY_EXTENSION_PING" }, location.origin);
+    void sourcePoller.run();
+    api
+      .settings()
+      .then((settings) => {
+        if (isMounted) appVersion = settings?.version || "";
+      })
+      .catch(() => {});
+    browserImporter.start();
     return () => {
-      window.removeEventListener("message", handleExtensionMessage);
-      for (const pending of extensionRequests.values()) {
-        clearTimeout(pending.timer);
-        pending.reject(new Error("Page closed"));
-      }
-      extensionRequests.clear();
+      isMounted = false;
+      sourcePoller.stop();
+      sourceRequests.invalidate();
+      docRequests.invalidate();
+      for (const request of pageRequests.values()) request.invalidate();
+      for (const timer of Object.values(titleSearchTimers)) clearTimeout(timer);
+      browserImporter.stop();
     };
   });
 </script>
@@ -845,7 +684,7 @@
             Markdown
             <textarea
               class="input min-h-64 resize-y font-mono text-[13px] leading-5"
-              placeholder={"## Overview\n\nWrite or paste Markdown here..."}
+               placeholder={manualPagePlaceholder}
               bind:value={manualMarkdown}
               spellcheck="true"
             ></textarea>
@@ -949,8 +788,11 @@
         </label>
 
         {#if browserProgress[sourceName]}
-          <div class="rounded border border-line bg-surface-2 px-3 py-2 text-[12px] text-busy">
-            {browserProgress[sourceName]}
+          <div class="flex items-center gap-3 rounded border border-line bg-surface-2 px-3 py-2 text-[12px] text-busy">
+            <span class="min-w-0 flex-1">{browserProgress[sourceName]}</span>
+            {#if browserImporting[sourceName]}
+              <button class="btn btn-sm shrink-0" onclick={() => browserImporter.cancel(sourceName)}>Cancel</button>
+            {/if}
           </div>
         {/if}
       </div>
@@ -1356,7 +1198,7 @@
                     onchange={(e) => setTeamFilter(s.name, e.target.value)}
                   >
                     <option value="">all teams</option>
-                    {#each teams[s.name] as t}
+                    {#each teams[s.name] as t (t)}
                       <option value={t}>{t}</option>
                     {/each}
                   </select>

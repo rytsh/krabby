@@ -270,7 +270,7 @@
     </div>
 
     <nav class="flex flex-col gap-0.5">
-      {#each nav as item}
+      {#each nav as item (item.href)}
         <a
           href={item.href}
           use:link

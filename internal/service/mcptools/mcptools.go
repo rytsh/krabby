@@ -45,11 +45,11 @@ const adminInstructions = `This server contains Krabby administration tools. It 
 // catalog.
 func NewCore(mgr *manager.Manager, version string) *mcp.Server {
 	server := newServer(mgr, "krabby", "Krabby codebase search and knowledge", version, serverInstructions)
-	addManagementTools(server, mgr, 0, false)
+	addManagementTools(server, mgr, mgr, mgr, 0, false)
 	addQueryTools(server, mgr)
 	addFileTools(server, mgr)
 	addHistoryTools(server, mgr)
-	addDocTools(server, mgr)
+	addDocTools(server, mgr, mgr)
 
 	return server
 }
@@ -66,15 +66,15 @@ func NewAPI(mgr *manager.Manager, version string) *mcp.Server {
 // caps wait=true repository operations; <=0 means no server-side cap.
 func NewAdmin(mgr *manager.Manager, version string, waitTimeout time.Duration) *mcp.Server {
 	server := newServer(mgr, "krabby-admin", "Krabby administration", version, adminInstructions)
-	addManagementTools(server, mgr, waitTimeout, true)
+	addManagementTools(server, mgr, mgr, mgr, waitTimeout, true)
 	addCredentialTools(server, mgr)
-	addDocAdminTools(server, mgr)
+	addDocAdminTools(server, mgr, mgr)
 	addAPIAdminTools(server, mgr)
 
 	return server
 }
 
-func newServer(mgr *manager.Manager, name, title, version, instructions string) *mcp.Server {
+func newServer(mgr tracingService, name, title, version, instructions string) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    name,
 		Title:   title,
@@ -226,7 +226,7 @@ type repoView struct {
 	Running string `json:"running,omitempty"`
 }
 
-func viewRepo(mgr *manager.Manager, repo *registry.Repo) repoView {
+func viewRepo(mgr activityService, repo *registry.Repo) repoView {
 	if repo == nil {
 		return repoView{}
 	}
@@ -252,7 +252,14 @@ func trimRepoForView(repo *registry.Repo) *registry.Repo {
 	return &trimmed
 }
 
-func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout time.Duration, admin bool) {
+func addManagementTools(
+	server *mcp.Server,
+	reader repoReadService,
+	adminService repoAdminService,
+	tasks queueService,
+	waitTimeout time.Duration,
+	admin bool,
+) {
 	if !admin {
 		addTool(server, &mcp.Tool{
 			Name:        "list_repos",
@@ -266,14 +273,14 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 				Namespace: args.Namespace,
 			}
 
-			repos, total, err := mgr.Registry().ListPaged(ctx, opts)
+			repos, total, err := reader.ListRepos(ctx, opts)
 			if err != nil {
 				return nil, nil, err
 			}
 
 			views := make([]repoView, 0, len(repos))
 			for _, repo := range repos {
-				views = append(views, viewRepo(mgr, repo))
+				views = append(views, viewRepo(reader, repo))
 			}
 
 			page, perPage := registry.PageParams(opts)
@@ -297,7 +304,7 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 				"times out or is cancelled; poll repo_status until status is 'ready' or 'error'.",
 		}, func(ctx context.Context, _ *mcp.CallToolRequest, args addRepoArgs) (*mcp.CallToolResult, any, error) {
 			if !args.Wait {
-				repo, err := mgr.AddRepo(ctx, args.spec())
+				repo, err := adminService.AddRepo(ctx, args.spec())
 				if err != nil {
 					return nil, nil, err
 				}
@@ -308,24 +315,24 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 			wctx, cancel := waitContext(ctx, waitTimeout)
 			defer cancel()
 
-			repo, done, err := mgr.AddRepoWait(wctx, args.spec())
+			repo, done, err := adminService.AddRepoWait(wctx, args.spec())
 			if err != nil {
 				return nil, nil, err
 			}
 
-			return waitResult(mgr, repo, done), nil, nil
+			return waitResult(adminService, repo, done), nil, nil
 		})
 
 		addTool(server, &mcp.Tool{
 			Name:        "set_repo_namespace",
 			Description: "Move a tracked repository into a namespace (an arbitrary grouping label). Omitting or passing 'default' returns it to the default bucket; '*' is reserved. This only re-tags the repo; it does not rebuild anything.",
 		}, func(ctx context.Context, _ *mcp.CallToolRequest, args setRepoNamespaceArgs) (*mcp.CallToolResult, any, error) {
-			repo, err := mgr.SetRepoNamespace(ctx, args.Repo, args.Namespace)
+			repo, err := adminService.SetRepoNamespace(ctx, args.Repo, args.Namespace)
 			if err != nil {
 				return nil, nil, err
 			}
 
-			return jsonResult(viewRepo(mgr, repo)), nil, nil
+			return jsonResult(viewRepo(adminService, repo)), nil, nil
 		})
 
 		addTool(server, &mcp.Tool{
@@ -335,7 +342,7 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 				"The payload replaces the whole override set, so send every field you want to keep; an empty payload clears them. " +
 				"A change rebuilds that repository's index and docs in the background.",
 		}, func(ctx context.Context, _ *mcp.CallToolRequest, args setRepoOverridesArgs) (*mcp.CallToolResult, any, error) {
-			repo, err := mgr.SetRepoOverrides(ctx, args.Repo, args.overrides())
+			repo, err := adminService.SetRepoOverrides(ctx, args.Repo, args.overrides())
 			if err != nil {
 				return nil, nil, err
 			}
@@ -344,7 +351,7 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 			// stored override set here: this is the one call whose whole purpose is
 			// to confirm what was written.
 			return jsonResult(map[string]any{
-				"repo":      viewRepo(mgr, repo),
+				"repo":      viewRepo(adminService, repo),
 				"overrides": repo.Overrides,
 			}), nil, nil
 		})
@@ -355,7 +362,7 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 			Name:        "list_namespaces",
 			Description: "List the repository namespaces with their repo counts and descriptions. Untagged repos are reported under 'default'. Use it to discover which namespaces exist and what each holds before scoping a search with the namespace parameter; the description tells you which namespace matches the user's question.",
 		}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyArgs) (*mcp.CallToolResult, namespaceListOutput, error) {
-			groups, err := mgr.Registry().Namespaces(ctx)
+			groups, err := reader.RepoNamespaces(ctx)
 			if err != nil {
 				return nil, namespaceListOutput{}, err
 			}
@@ -377,7 +384,7 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 				return nil, nil, err
 			}
 
-			rec, err := mgr.UpsertNamespace(ctx, args.Name, description)
+			rec, err := adminService.UpsertNamespace(ctx, args.Name, description)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -389,7 +396,7 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 			Name:        "delete_namespace",
 			Description: "Delete a namespace's description record. Repos tagged with the namespace keep their tag; only the stored description is removed.",
 		}, func(ctx context.Context, _ *mcp.CallToolRequest, args namespaceNameArgs) (*mcp.CallToolResult, any, error) {
-			if err := mgr.DeleteNamespace(ctx, args.Name); err != nil {
+			if err := adminService.DeleteNamespace(ctx, args.Name); err != nil {
 				return nil, nil, err
 			}
 
@@ -400,7 +407,7 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 			Name:        "remove_repo",
 			Description: "Stop tracking a repository and delete its local clone and graph.",
 		}, func(ctx context.Context, _ *mcp.CallToolRequest, args repoIDArgs) (*mcp.CallToolResult, any, error) {
-			if err := mgr.RemoveRepo(ctx, args.Repo); err != nil {
+			if err := adminService.RemoveRepo(ctx, args.Repo); err != nil {
 				return nil, nil, err
 			}
 
@@ -427,7 +434,9 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 				}
 
 				if !args.Wait {
-					mgr.TriggerGenerate(args.Repo, args.Stages, args.Force)
+					if err := adminService.TriggerGenerate(args.Repo, args.Stages, args.Force); err != nil {
+						return nil, nil, err
+					}
 
 					return textResult(fmt.Sprintf("generate %v queued for %s", args.Stages, args.Repo)), nil, nil
 				}
@@ -435,16 +444,18 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 				wctx, cancel := waitContext(ctx, waitTimeout)
 				defer cancel()
 
-				repo, done, err := mgr.GenerateWait(wctx, args.Repo, args.Stages, args.Force)
+				repo, done, err := adminService.GenerateWait(wctx, args.Repo, args.Stages, args.Force)
 				if err != nil {
 					return nil, nil, err
 				}
 
-				return waitResult(mgr, repo, done), nil, nil
+				return waitResult(adminService, repo, done), nil, nil
 			}
 
 			if !args.Wait {
-				mgr.TriggerRefresh(args.Repo, args.Skip...)
+				if err := adminService.TriggerRefresh(args.Repo, args.Skip...); err != nil {
+					return nil, nil, err
+				}
 
 				if len(args.Skip) > 0 {
 					return textResult(fmt.Sprintf("refresh queued for %s (skipping %v)", args.Repo, args.Skip)), nil, nil
@@ -456,12 +467,12 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 			wctx, cancel := waitContext(ctx, waitTimeout)
 			defer cancel()
 
-			repo, done, err := mgr.RefreshWait(wctx, args.Repo, args.Skip...)
+			repo, done, err := adminService.RefreshWait(wctx, args.Repo, args.Skip...)
 			if err != nil {
 				return nil, nil, err
 			}
 
-			return waitResult(mgr, repo, done), nil, nil
+			return waitResult(adminService, repo, done), nil, nil
 		})
 	}
 
@@ -473,7 +484,7 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 				"empty means no work is in flight. While status is 'pending' or 'building', poll again until it " +
 				"becomes 'ready' or 'error'.",
 		}, func(ctx context.Context, _ *mcp.CallToolRequest, args repoIDArgs) (*mcp.CallToolResult, any, error) {
-			repo, err := mgr.Registry().Get(ctx, args.Repo)
+			repo, err := reader.Repo(ctx, args.Repo)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -482,7 +493,7 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 				return nil, nil, fmt.Errorf("repo %s not found", args.Repo)
 			}
 
-			return jsonResult(viewRepo(mgr, repo)), nil, nil
+			return jsonResult(viewRepo(reader, repo)), nil, nil
 		})
 	}
 
@@ -493,14 +504,14 @@ func addManagementTools(server *mcp.Server, mgr *manager.Manager, waitTimeout ti
 				"The in-flight step is aborted and recorded as 'cancelled by user'; the repo can be " +
 				"refreshed again later. Fails if no job is running (check the 'running' field of repo_status).",
 		}, func(_ context.Context, _ *mcp.CallToolRequest, args repoIDArgs) (*mcp.CallToolResult, any, error) {
-			if !mgr.CancelJob(args.Repo) {
+			if !adminService.CancelJob(args.Repo) {
 				return nil, nil, fmt.Errorf("no job running for %s", args.Repo)
 			}
 
 			return textResult("cancelling running job for " + args.Repo), nil, nil
 		})
 
-		addQueueTools(server, mgr)
+		addQueueTools(server, tasks)
 	}
 }
 
@@ -521,7 +532,7 @@ type setTaskConcurrencyArgs struct {
 // funnels all background work (clone/refresh, docs, code_index, reindex,
 // web-sync) through one bounded FIFO; these tools let a caller inspect it,
 // reprioritize a waiting task, drop unwanted ones and retune concurrency live.
-func addQueueTools(server *mcp.Server, mgr *manager.Manager) {
+func addQueueTools(server *mcp.Server, mgr queueService) {
 	addTool(server, &mcp.Tool{
 		Name: "queue_status",
 		Description: "Inspect the background work queue: the concurrency limit, how many tasks are " +
@@ -594,7 +605,7 @@ func waitContext(ctx context.Context, timeout time.Duration) (context.Context, c
 // waitResult renders the outcome of a wait=true call. When the build did not
 // finish within the wait, a note explains that it keeps running in the
 // background and how to follow up.
-func waitResult(mgr *manager.Manager, repo *registry.Repo, done bool) *mcp.CallToolResult {
+func waitResult(mgr activityService, repo *registry.Repo, done bool) *mcp.CallToolResult {
 	res := jsonResult(viewRepo(mgr, repo))
 	if !done {
 		note := &mcp.TextContent{Text: "build still in progress: the wait ended before it finished, " +
@@ -624,7 +635,7 @@ type listCredentialsArgs struct {
 	PerPage int `json:"per_page,omitempty" jsonschema:"credentials per page (default 50, max 200)"`
 }
 
-func addCredentialTools(server *mcp.Server, mgr *manager.Manager) {
+func addCredentialTools(server *mcp.Server, mgr credentialService) {
 	addTool(server, &mcp.Tool{
 		Name: "set_credential",
 		Description: "Store a git credential for a host or host/path prefix. Used when cloning/pulling " +
@@ -637,7 +648,7 @@ func addCredentialTools(server *mcp.Server, mgr *manager.Manager) {
 			Username: args.Username,
 			Secret:   args.Secret,
 		}
-		if err := mgr.Credentials().Set(ctx, cred); err != nil {
+		if err := mgr.SetCredential(ctx, cred); err != nil {
 			return nil, nil, err
 		}
 
@@ -648,7 +659,7 @@ func addCredentialTools(server *mcp.Server, mgr *manager.Manager) {
 		Name:        "list_credentials",
 		Description: "List stored git credential patterns (kind and username only; secrets are never returned).",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args listCredentialsArgs) (*mcp.CallToolResult, any, error) {
-		creds, err := mgr.Credentials().List(ctx)
+		creds, err := mgr.ListCredentials(ctx)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -660,7 +671,7 @@ func addCredentialTools(server *mcp.Server, mgr *manager.Manager) {
 		Name:        "remove_credential",
 		Description: "Remove a stored git credential by its pattern.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args credentialPatternArgs) (*mcp.CallToolResult, any, error) {
-		if err := mgr.Credentials().Delete(ctx, args.Pattern); err != nil {
+		if err := mgr.DeleteCredential(ctx, args.Pattern); err != nil {
 			return nil, nil, err
 		}
 
@@ -730,7 +741,7 @@ type shortestPathArgs struct {
 	Namespace string `json:"namespace,omitempty" jsonschema:"namespace to scope to when repo is omitted; empty means the 'default' namespace, '*' searches all namespaces"`
 }
 
-func addQueryTools(server *mcp.Server, mgr *manager.Manager) {
+func addQueryTools(server *mcp.Server, mgr graphQueryService) {
 	addTool(server, &mcp.Tool{
 		Name:        "query_graph",
 		Description: "Answer architecture, dependency, call/data-flow, and cross-file relationship questions by traversing the code knowledge graph. Use search_code instead for symbols, paths, literals, definitions, usages, or implementation locations.",
@@ -878,7 +889,7 @@ type gitDiffArgs struct {
 	Patch bool   `json:"patch,omitempty" jsonschema:"include the change text (off by default; a release-sized patch is large)"`
 }
 
-func addHistoryTools(server *mcp.Server, mgr *manager.Manager) {
+func addHistoryTools(server *mcp.Server, mgr repoHistoryService) {
 	addTool(server, &mcp.Tool{
 		Name: "list_refs",
 		Description: "List a repository's tags and branches, newest first. Call it for exact version names before git_log or git_diff. " +
@@ -925,7 +936,7 @@ func addHistoryTools(server *mcp.Server, mgr *manager.Manager) {
 	})
 }
 
-func addFileTools(server *mcp.Server, mgr *manager.Manager) {
+func addFileTools(server *mcp.Server, mgr repoFileService) {
 	addTool(server, &mcp.Tool{
 		Name: "read_file",
 		Description: "Read the source of a file inside a tracked repository's clone. " +

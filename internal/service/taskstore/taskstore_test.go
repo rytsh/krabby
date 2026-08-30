@@ -32,12 +32,16 @@ func TestSaveListRemove(t *testing.T) {
 	ctx := context.Background()
 
 	now := time.Now().UTC().Truncate(time.Second)
-	s.Save(1, queue.Spec{Kind: "refresh", ID: "acme/repo"}, now)
-	s.Save(2, queue.Spec{
+	if err := s.Save(1, queue.Spec{Kind: "refresh", ID: "acme/repo"}, now); err != nil {
+		t.Fatalf("save 1: %v", err)
+	}
+	if err := s.Save(2, queue.Spec{
 		Kind:   "generate",
 		ID:     "acme/repo",
 		Params: map[string]string{"targets": "graph,docs", "force": "true"},
-	}, now)
+	}, now); err != nil {
+		t.Fatalf("save 2: %v", err)
+	}
 
 	got, err := s.List(ctx)
 	if err != nil {
@@ -61,7 +65,9 @@ func TestSaveListRemove(t *testing.T) {
 	}
 
 	// Remove one; the other survives.
-	s.Remove(1)
+	if err := s.Remove(1); err != nil {
+		t.Fatalf("remove 1: %v", err)
+	}
 	got, err = s.List(ctx)
 	if err != nil {
 		t.Fatalf("list after remove: %v", err)
@@ -71,24 +77,30 @@ func TestSaveListRemove(t *testing.T) {
 	}
 
 	// Removing a missing record is a no-op.
-	s.Remove(999)
+	if err := s.Remove(999); err != nil {
+		t.Fatalf("remove missing: %v", err)
+	}
 }
 
-func TestSaveReplaces(t *testing.T) {
+func TestSaveRejectsSequenceCollision(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	s.Save(1, queue.Spec{Kind: "refresh", ID: "a"}, time.Now())
-	s.Save(1, queue.Spec{Kind: "refresh", ID: "b"}, time.Now())
+	if err := s.Save(1, queue.Spec{Kind: "refresh", ID: "a"}, time.Now()); err != nil {
+		t.Fatalf("save original: %v", err)
+	}
+	if err := s.Save(1, queue.Spec{Kind: "refresh", ID: "b"}, time.Now()); err == nil {
+		t.Fatal("duplicate sequence save succeeded")
+	}
 
 	got, err := s.List(ctx)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
 	if len(got) != 1 {
-		t.Fatalf("len = %d, want 1 (replace, not append)", len(got))
+		t.Fatalf("len = %d, want 1", len(got))
 	}
-	if got[0].Spec.ID != "b" {
-		t.Fatalf("id = %q, want b", got[0].Spec.ID)
+	if got[0].Spec.ID != "a" {
+		t.Fatalf("id = %q, want original a", got[0].Spec.ID)
 	}
 }

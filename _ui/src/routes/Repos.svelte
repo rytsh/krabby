@@ -8,7 +8,6 @@
   import Status from "../lib/Status.svelte";
   import { successToast } from "../lib/toast.js";
 
-  let error = $state("");
   let addUrl = $state("");
   let addBranch = $state("");
   let addNamespace = $state("");
@@ -86,10 +85,8 @@
       if (seq !== loadSeq) return;
       items = res?.items || [];
       total = res?.total || 0;
-      error = "";
-    } catch (e) {
+    } catch {
       if (seq !== loadSeq) return;
-      error = e.message;
       items = [];
       total = 0;
     } finally {
@@ -138,11 +135,10 @@
       addNamespace = "";
       addOverrides = emptyOverrides();
       showAddAdvanced = false;
-      error = "";
       page = 1;
       await reload();
-    } catch (e) {
-      error = e.message;
+    } catch {
+      // The API wrapper reports request failures globally.
     } finally {
       adding = false;
     }
@@ -155,8 +151,8 @@
       await api.refreshRepo(id);
       successToast("Refresh queued");
       await reload();
-    } catch (err) {
-      error = err.message;
+    } catch {
+      // The API wrapper reports request failures globally.
     }
   }
 
@@ -167,8 +163,8 @@
       await api.cancelRepoJob(id);
       successToast("Cancel requested");
       await reload();
-    } catch (err) {
-      error = err.message;
+    } catch {
+      // The API wrapper reports request failures globally.
     }
   }
 
@@ -181,8 +177,8 @@
       // Stepping back a page if we just emptied the last one.
       if (items.length === 1 && page > 1) page -= 1;
       await reload();
-    } catch (err) {
-      error = err.message;
+    } catch {
+      // The API wrapper reports request failures globally.
     }
   }
 
@@ -266,7 +262,7 @@
     onchange={(e) => setStatus(e.target.value)}
   >
     <option value="">All statuses</option>
-    {#each statusOptions as s}
+    {#each statusOptions as s (s)}
       <option value={s} class="capitalize">{s}</option>
     {/each}
   </select>

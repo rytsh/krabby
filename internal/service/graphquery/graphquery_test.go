@@ -1,10 +1,14 @@
 package graphquery
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // writeGraph writes a graph.json fixture and returns its path.
@@ -222,6 +226,365 @@ func TestEngineCallAndReload(t *testing.T) {
 	}
 	if !strings.Contains(q, "Traversal: BFS depth=2") {
 		t.Errorf("depth arg not honoured:\n%s", q)
+	}
+}
+
+func TestEngineConcurrentDistinctQueryTerms(t *testing.T) {
+	p := writeGraph(t, smallGraph)
+	e := NewEngine(0)
+	cached, err := e.Graph(p)
+	if err != nil {
+		t.Fatalf("initial load: %v", err)
+	}
+
+	const (
+		callers = 16
+		queries = 50
+	)
+	start := make(chan struct{})
+	errs := make(chan error, callers)
+	var wg sync.WaitGroup
+	for caller := range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+
+			g, err := e.Graph(p)
+			if err != nil {
+				errs <- err
+
+				return
+			}
+			if g != cached {
+				errs <- fmt.Errorf("engine returned a different cached graph")
+
+				return
+			}
+			for query := range queries {
+				term := fmt.Sprintf("distinctterm%dvalue%d", caller, query)
+				if got := g.QueryGraph(term, QueryGraphOpts{}); got != "No matching nodes found." {
+					errs <- fmt.Errorf("query %q returned %q", term, got)
+
+					return
+				}
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+}
+
+func TestEngineInvalidReloadServesCachedGraph(t *testing.T) {
+	p := writeGraph(t, smallGraph)
+	e := NewEngine(0)
+	cached, err := e.Graph(p)
+	if err != nil {
+		t.Fatalf("initial load: %v", err)
+	}
+
+	e.mu.Lock()
+	cachedBytes := e.curBytes
+	e.mu.Unlock()
+
+	if err := os.WriteFile(p, []byte(`{"nodes":[`), 0o600); err != nil {
+		t.Fatalf("rewrite graph: %v", err)
+	}
+
+	got, err := e.Graph(p)
+	if err != nil {
+		t.Fatalf("reload invalid graph: %v", err)
+	}
+	if got != cached {
+		t.Fatal("invalid reload replaced the cached graph")
+	}
+
+	e.mu.Lock()
+	el := e.entries[p]
+	currentBytes := e.curBytes
+	e.mu.Unlock()
+	if el == nil || el.Value.(*cacheEntry).graph != cached {
+		t.Fatal("invalid reload removed the cached graph")
+	}
+	if currentBytes != cachedBytes {
+		t.Fatalf("invalid reload changed cache accounting from %d to %d", cachedBytes, currentBytes)
+	}
+}
+
+func TestEngineSingleflightLoadsPerPath(t *testing.T) {
+	const callers = 16
+
+	for _, tc := range []struct {
+		name  string
+		stale bool
+	}{
+		{name: "first load"},
+		{name: "stale reload", stale: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := writeGraph(t, smallGraph)
+			e := NewEngine(0)
+
+			var previous *Graph
+			if tc.stale {
+				var err error
+				previous, err = e.Graph(p)
+				if err != nil {
+					t.Fatalf("prime cache: %v", err)
+				}
+				if err := os.WriteFile(p, []byte(smallGraph+"\n"), 0o600); err != nil {
+					t.Fatalf("rewrite graph: %v", err)
+				}
+			}
+
+			var loads atomic.Int32
+			loadStarted := make(chan struct{}, callers)
+			releaseLoad := make(chan struct{})
+			var releaseOnce sync.Once
+			release := func() { releaseOnce.Do(func() { close(releaseLoad) }) }
+			defer release()
+			e.loadGraph = func(path string) (*Graph, error) {
+				loads.Add(1)
+				loadStarted <- struct{}{}
+				<-releaseLoad
+
+				return Load(path)
+			}
+
+			type result struct {
+				graph *Graph
+				err   error
+			}
+			start := make(chan struct{})
+			results := make(chan result, callers)
+			for range callers {
+				go func() {
+					<-start
+					g, err := e.Graph(p)
+					results <- result{graph: g, err: err}
+				}()
+			}
+			close(start)
+
+			select {
+			case <-loadStarted:
+			case <-time.After(5 * time.Second):
+				t.Fatal("timed out waiting for graph load")
+			}
+			release()
+
+			var loaded *Graph
+			for range callers {
+				select {
+				case got := <-results:
+					if got.err != nil {
+						t.Fatalf("Graph: %v", got.err)
+					}
+					if loaded == nil {
+						loaded = got.graph
+					} else if got.graph != loaded {
+						t.Fatal("concurrent callers received different parsed graphs")
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatal("timed out waiting for graph caller")
+				}
+			}
+
+			if got := loads.Load(); got != 1 {
+				t.Fatalf("loads = %d, want 1", got)
+			}
+			if previous != nil && loaded == previous {
+				t.Fatal("stale graph was not reloaded")
+			}
+		})
+	}
+}
+
+func TestEngineLoadsDifferentPathsConcurrently(t *testing.T) {
+	p1 := writeGraph(t, smallGraph)
+	p2 := writeGraph(t, smallGraph)
+	e := NewEngine(0)
+
+	loadStarted := make(chan string, 2)
+	releaseLoads := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseLoads) }) }
+	defer release()
+	e.loadGraph = func(path string) (*Graph, error) {
+		loadStarted <- path
+		<-releaseLoads
+
+		return Load(path)
+	}
+
+	errs := make(chan error, 2)
+	go func() {
+		_, err := e.Graph(p1)
+		errs <- err
+	}()
+	select {
+	case path := <-loadStarted:
+		if path != p1 {
+			t.Fatalf("first load path = %q, want %q", path, p1)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for first path load")
+	}
+
+	go func() {
+		_, err := e.Graph(p2)
+		errs <- err
+	}()
+	select {
+	case path := <-loadStarted:
+		if path != p2 {
+			t.Fatalf("second load path = %q, want %q", path, p2)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second path did not load while the first path was blocked")
+	}
+	release()
+
+	for range 2 {
+		select {
+		case err := <-errs:
+			if err != nil {
+				t.Fatalf("Graph: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for graph load")
+		}
+	}
+}
+
+func TestEngineInvalidateSupersedesInflightLoad(t *testing.T) {
+	p := writeGraph(t, smallGraph)
+	e := NewEngine(0)
+	if _, err := e.Graph(p); err != nil {
+		t.Fatalf("prime cache: %v", err)
+	}
+	if err := os.WriteFile(p, []byte(smallGraph+"\n"), 0o600); err != nil {
+		t.Fatalf("rewrite graph: %v", err)
+	}
+
+	oldGraph, err := Load(p)
+	if err != nil {
+		t.Fatalf("load old-generation graph: %v", err)
+	}
+	newGraph, err := Load(p)
+	if err != nil {
+		t.Fatalf("load new-generation graph: %v", err)
+	}
+
+	oldRelease := make(chan struct{})
+	newRelease := make(chan struct{})
+	var oldReleaseOnce, newReleaseOnce sync.Once
+	releaseOld := func() { oldReleaseOnce.Do(func() { close(oldRelease) }) }
+	releaseNew := func() { newReleaseOnce.Do(func() { close(newRelease) }) }
+	defer releaseOld()
+	defer releaseNew()
+
+	var loadMu sync.Mutex
+	loadCount := 0
+	loadStarted := make(chan int, 2)
+	e.loadGraph = func(string) (*Graph, error) {
+		loadMu.Lock()
+		loadCount++
+		loadNumber := loadCount
+		loadMu.Unlock()
+		loadStarted <- loadNumber
+
+		switch loadNumber {
+		case 1:
+			<-oldRelease
+
+			return oldGraph, nil
+		case 2:
+			<-newRelease
+
+			return newGraph, nil
+		default:
+			return nil, fmt.Errorf("unexpected load %d", loadNumber)
+		}
+	}
+
+	type result struct {
+		graph *Graph
+		err   error
+	}
+	oldResult := make(chan result, 1)
+	go func() {
+		g, err := e.Graph(p)
+		oldResult <- result{graph: g, err: err}
+	}()
+	select {
+	case loadNumber := <-loadStarted:
+		if loadNumber != 1 {
+			t.Fatalf("first load number = %d", loadNumber)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for old-generation load")
+	}
+
+	e.Invalidate(p)
+
+	newResult := make(chan result, 1)
+	go func() {
+		g, err := e.Graph(p)
+		newResult <- result{graph: g, err: err}
+	}()
+	select {
+	case loadNumber := <-loadStarted:
+		if loadNumber != 2 {
+			t.Fatalf("second load number = %d", loadNumber)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("post-invalidate request joined the old-generation load")
+	}
+
+	releaseOld()
+	select {
+	case got := <-oldResult:
+		if got.err != nil {
+			t.Fatalf("old-generation Graph: %v", got.err)
+		}
+		if got.graph != oldGraph {
+			t.Fatal("old-generation caller did not receive its parsed graph")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for old-generation load")
+	}
+
+	e.mu.Lock()
+	cached := e.entries[p]
+	e.mu.Unlock()
+	if cached != nil {
+		t.Fatal("old-generation load repopulated the cache after invalidation")
+	}
+
+	releaseNew()
+	select {
+	case got := <-newResult:
+		if got.err != nil {
+			t.Fatalf("new-generation Graph: %v", got.err)
+		}
+		if got.graph != newGraph {
+			t.Fatal("new-generation request received the wrong graph")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for new-generation load")
+	}
+
+	e.mu.Lock()
+	cached = e.entries[p]
+	e.mu.Unlock()
+	if cached == nil || cached.Value.(*cacheEntry).graph != newGraph {
+		t.Fatal("new-generation load did not populate the cache")
 	}
 }
 

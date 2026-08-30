@@ -198,9 +198,15 @@ func TestScheduleReindexDedups(t *testing.T) {
 	release := blockQueue(t, m.queue) // occupy the slot so tasks stay queued
 	t.Cleanup(release)
 
-	m.scheduleReindex("owner/repo")
-	m.scheduleReindex("owner/repo")
-	m.scheduleReindex("owner/repo")
+	if err := m.scheduleReindex("owner/repo"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.scheduleReindex("owner/repo"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.scheduleReindex("owner/repo"); err != nil {
+		t.Fatal(err)
+	}
 
 	count := 0
 	for _, it := range m.queue.Snapshot().Tasks {

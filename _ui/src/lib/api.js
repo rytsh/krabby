@@ -175,8 +175,8 @@ export const api = {
   cancelSource: (name) => req(`/sources/${name}/cancel`, { method: "POST", keepalive: true }),
   addSourcePage: (name, url) =>
     req(`/sources/${name}/pages`, { method: "POST", keepalive: true, body: JSON.stringify({ url }) }),
-  importSourcePages: (name, pages) =>
-    req(`/sources/${name}/pages/import`, { method: "POST", body: JSON.stringify({ pages }) }),
+  importSourcePages: (name, pages, { signal } = {}) =>
+    req(`/sources/${name}/pages/import`, { method: "POST", body: JSON.stringify({ pages }), signal }),
   importSourceSitemap: (name, url) =>
     req(`/sources/${name}/sitemap`, { method: "POST", keepalive: true, body: JSON.stringify({ url }) }),
   deleteSourcePage: (name, slug) =>
@@ -212,7 +212,8 @@ export const api = {
   refreshApiService: (name, force = false) =>
     req(`/apis/services/${name}/refresh${force ? "?force=true" : ""}`, { method: "POST", keepalive: true }),
   cancelApiService: (name) => req(`/apis/services/${name}/cancel`, { method: "POST", keepalive: true }),
-  apiOperation: (name, id) => req(`/apis/services/${name}/operation?id=${encodeURIComponent(id)}`),
-  callApiOperation: (name, body) =>
-    req(`/apis/services/${name}/operation/call`, { method: "POST", body: JSON.stringify(body) }),
+  apiOperation: (name, id, { signal } = {}) =>
+    req(`/apis/services/${name}/operation?id=${encodeURIComponent(id)}`, { signal }),
+  callApiOperation: (name, body, { signal } = {}) =>
+    req(`/apis/services/${name}/operation/call`, { method: "POST", body: JSON.stringify(body), signal }),
 };

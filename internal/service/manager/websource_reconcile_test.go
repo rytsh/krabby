@@ -3,10 +3,12 @@ package manager
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -97,10 +99,28 @@ func fakeReconcileEmbedServer(t *testing.T) *httptest.Server {
 // (fake embedder + real embedded vector store), an in-memory web-source store
 // and a single "fake" fetcher, enough to exercise RefreshWebSource end to end.
 func newReconcileManager(t *testing.T, fetcher websource.Fetcher) (*Manager, *websource.Store) {
+	return newReconcileManagerWithDeps(t, fetcher, "", nil)
+}
+
+func newReconcileManagerWithDeps(
+	t *testing.T,
+	fetcher websource.Fetcher,
+	embedURL string,
+	wrapStore func(vectorstore.Store) vectorstore.Store,
+) (*Manager, *websource.Store) {
 	t.Helper()
 	ctx := context.Background()
 
-	emb, err := embedder.New(config.Embedder{BaseURL: fakeReconcileEmbedServer(t).URL, Model: "fake"})
+	customEmbedder := embedURL != ""
+	if embedURL == "" {
+		embedURL = fakeReconcileEmbedServer(t).URL
+	}
+	embedCfg := config.Embedder{BaseURL: embedURL, Model: "fake"}
+	if customEmbedder {
+		embedCfg.Batch = 100
+		embedCfg.Concurrency = 1
+	}
+	emb, err := embedder.New(embedCfg)
 	if err != nil {
 		t.Fatalf("embedder.New: %v", err)
 	}
@@ -110,6 +130,9 @@ func newReconcileManager(t *testing.T, fetcher websource.Fetcher) (*Manager, *we
 		t.Fatalf("vectorstore.New: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
+	if wrapStore != nil {
+		store = wrapStore(store)
+	}
 
 	ragSvc := rag.New(config.RAG{ChunkSize: 200, ChunkOverlap: 40, TopK: 20, TopDocs: 5}, emb, store)
 
@@ -142,6 +165,104 @@ func newReconcileManager(t *testing.T, fetcher websource.Fetcher) (*Manager, *we
 	t.Cleanup(m.queue.Close)
 
 	return m, webStore
+}
+
+type durableWebRun struct {
+	pages    []websource.RemotePage
+	complete bool
+	state    json.RawMessage
+}
+
+type durableWebFetcher struct {
+	runs []durableWebRun
+	call int
+}
+
+func (f *durableWebFetcher) Validate(json.RawMessage) error { return nil }
+
+func (f *durableWebFetcher) MergeConfig(_, update json.RawMessage) (json.RawMessage, error) {
+	return update, nil
+}
+
+func (f *durableWebFetcher) ConfigView(json.RawMessage) any { return struct{}{} }
+
+func (f *durableWebFetcher) Fetch(_ context.Context, _ *websource.Collection, _ []*websource.Page, _ json.RawMessage, emit websource.Emit) (*websource.FetchResult, error) {
+	run := f.runs[f.call]
+	f.call++
+	for _, page := range run.pages {
+		if err := emit(page); err != nil {
+			return nil, err
+		}
+	}
+
+	return &websource.FetchResult{Complete: run.complete, State: run.state}, nil
+}
+
+type faultEmbeddingServer struct {
+	server *httptest.Server
+	armed  atomic.Bool
+	calls  atomic.Int64
+	failed atomic.Bool
+}
+
+func newFaultEmbeddingServer(t *testing.T) *faultEmbeddingServer {
+	t.Helper()
+	f := &faultEmbeddingServer{}
+	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A 512-chunk RAG flush takes six deterministic HTTP batches. Failing
+		// the seventh request leaves that first flush durably upserted.
+		if f.armed.Load() && f.calls.Add(1) == 7 && f.failed.CompareAndSwap(false, true) {
+			http.Error(w, "injected embedding failure", http.StatusBadRequest)
+
+			return
+		}
+
+		var req struct {
+			Input []string `json:"input"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		type datum struct {
+			Embedding []float32 `json:"embedding"`
+		}
+		resp := struct {
+			Data []datum `json:"data"`
+		}{Data: make([]datum, 0, len(req.Input))}
+		for _, text := range req.Input {
+			lower := strings.ToLower(text)
+			resp.Data = append(resp.Data, datum{Embedding: []float32{
+				float32(strings.Count(lower, "alpha")) + 0.01,
+				float32(strings.Count(lower, "beta")) + 0.01,
+				float32(strings.Count(lower, "gamma")) + 0.01,
+			}})
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	t.Cleanup(f.server.Close)
+
+	return f
+}
+
+func (f *faultEmbeddingServer) arm() {
+	f.calls.Store(0)
+	f.armed.Store(true)
+}
+
+type faultDeleteStore struct {
+	vectorstore.Store
+	armed  atomic.Bool
+	failed atomic.Bool
+}
+
+func (s *faultDeleteStore) DeletePaths(ctx context.Context, repo string, paths []string) error {
+	if s.armed.Load() && len(paths) > 1 && s.failed.CompareAndSwap(false, true) {
+		if err := s.Store.DeletePaths(ctx, repo, paths[:1]); err != nil {
+			return err
+		}
+
+		return errors.New("injected partial delete failure")
+	}
+
+	return s.Store.DeletePaths(ctx, repo, paths)
 }
 
 // TestRefreshWebSourceReembedsMissingOnIncrementalSync is the regression test
@@ -234,5 +355,168 @@ func TestRefreshWebSourceReembedsMissingOnIncrementalSync(t *testing.T) {
 	}
 	if !docs[0].UpdatedAt.Equal(updated) {
 		t.Fatalf("re-embedded doc UpdatedAt = %v, want %v", docs[0].UpdatedAt, updated)
+	}
+}
+
+func TestRefreshWebSourceRetriesDirtyPathAfterPartialVectorInsert(t *testing.T) {
+	ctx := context.Background()
+	initial := remotePage("alpha")
+	changed := initial
+	changed.Markdown = "# Alpha\n\n" + strings.Repeat("alpha ", 15000) + "gamma gamma\n"
+
+	fetcher := &durableWebFetcher{runs: []durableWebRun{
+		{pages: []websource.RemotePage{initial}, complete: true, state: json.RawMessage(`{"w":"1"}`)},
+		{pages: []websource.RemotePage{changed}, complete: false, state: json.RawMessage(`{"w":"2"}`)},
+		{pages: []websource.RemotePage{changed}, complete: false, state: json.RawMessage(`{"w":"2"}`)},
+	}}
+	fault := newFaultEmbeddingServer(t)
+	m, store := newReconcileManagerWithDeps(t, fetcher, fault.server.URL, nil)
+	if err := store.UpsertCollection(ctx, &websource.Collection{
+		Name: "wiki", Type: "fake", Status: websource.StatusPending, Config: json.RawMessage(`{}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.RefreshWebSource(ctx, "wiki"); err != nil {
+		t.Fatalf("initial refresh: %v", err)
+	}
+	before, err := store.GetPage(ctx, websource.PageID("wiki", "alpha"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	committedHash := before.Hash
+
+	fault.arm()
+	if err := m.RefreshWebSource(ctx, "wiki"); err == nil {
+		t.Fatal("partial embedding failure was not returned")
+	}
+	partial, err := store.GetPage(ctx, websource.PageID("wiki", "alpha"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !partial.IndexDirty {
+		t.Fatal("page was marked clean after a partial vector insert")
+	}
+	if partial.Hash != committedHash {
+		t.Fatalf("committed hash advanced from %q to %q after partial indexing", committedHash, partial.Hash)
+	}
+	indexed, err := m.docs.rag.IndexedPaths(ctx, websource.ScopeKey("wiki"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := indexed["alpha.md"]; !ok {
+		t.Fatal("fault did not leave a partial path in the vector index")
+	}
+	col, err := store.GetCollection(ctx, "wiki")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if col.Status != websource.StatusError || col.LastError == "" {
+		t.Fatalf("failed index status = %q, error = %q", col.Status, col.LastError)
+	}
+	if string(col.State) != `{"w":"1"}` {
+		t.Fatalf("watermark advanced after partial indexing: %s", col.State)
+	}
+
+	if err := m.RefreshWebSource(ctx, "wiki"); err != nil {
+		t.Fatalf("retry refresh: %v", err)
+	}
+	repaired, err := store.GetPage(ctx, websource.PageID("wiki", "alpha"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repaired.IndexDirty {
+		t.Fatal("page remained dirty after successful retry")
+	}
+	if repaired.Hash == committedHash {
+		t.Fatal("new content hash was not committed after successful retry")
+	}
+	col, err = store.GetCollection(ctx, "wiki")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(col.State) != `{"w":"2"}` {
+		t.Fatalf("watermark = %s, want retry state", col.State)
+	}
+	docs, err := m.docs.rag.Retrieve(ctx, vectorstore.FilterKey(websource.ScopeKey("wiki")), "gamma", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docs) != 1 || !strings.Contains(docs[0].Excerpt, "gamma gamma") {
+		t.Fatalf("tail chunks were not repaired: %+v", docs)
+	}
+}
+
+func TestRefreshWebSourceRetriesStaleRowsAfterPartialRemoval(t *testing.T) {
+	ctx := context.Background()
+	fetcher := &durableWebFetcher{runs: []durableWebRun{
+		{pages: []websource.RemotePage{remotePage("alpha"), remotePage("beta")}, complete: true, state: json.RawMessage(`{"w":"1"}`)},
+		{complete: true, state: json.RawMessage(`{"w":"2"}`)},
+		{complete: true, state: json.RawMessage(`{"w":"2"}`)},
+	}}
+	var fault *faultDeleteStore
+	m, store := newReconcileManagerWithDeps(t, fetcher, "", func(base vectorstore.Store) vectorstore.Store {
+		fault = &faultDeleteStore{Store: base}
+
+		return fault
+	})
+	if err := store.UpsertCollection(ctx, &websource.Collection{
+		Name: "wiki", Type: "fake", Status: websource.StatusPending, Config: json.RawMessage(`{}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RefreshWebSource(ctx, "wiki"); err != nil {
+		t.Fatalf("initial refresh: %v", err)
+	}
+
+	fault.armed.Store(true)
+	if err := m.RefreshWebSource(ctx, "wiki"); err == nil {
+		t.Fatal("partial removal failure was not returned")
+	}
+	pages, err := store.Pages(ctx, "wiki")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pages) != 0 {
+		t.Fatalf("removed page records survived: %+v", pages)
+	}
+	indexed, err := m.docs.rag.IndexedPaths(ctx, websource.ScopeKey("wiki"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(indexed) != 1 {
+		t.Fatalf("partial removal left %d vector paths, want 1: %v", len(indexed), indexed)
+	}
+	col, err := store.GetCollection(ctx, "wiki")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if col.Status != websource.StatusError || string(col.State) != `{"w":"1"}` {
+		t.Fatalf("failed removal status=%q state=%s error=%q", col.Status, col.State, col.LastError)
+	}
+
+	if err := m.RefreshWebSource(ctx, "wiki"); err != nil {
+		t.Fatalf("retry refresh: %v", err)
+	}
+	indexed, err = m.docs.rag.IndexedPaths(ctx, websource.ScopeKey("wiki"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(indexed) != 0 {
+		t.Fatalf("stale vector paths survived retry: %v", indexed)
+	}
+	textIndexed, err := m.docsText.IndexedPaths(ctx, websource.ScopeKey("wiki"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(textIndexed) != 0 {
+		t.Fatalf("stale text paths survived retry: %v", textIndexed)
+	}
+	col, err = store.GetCollection(ctx, "wiki")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if col.Status != websource.StatusReady || string(col.State) != `{"w":"2"}` {
+		t.Fatalf("repaired removal status=%q state=%s error=%q", col.Status, col.State, col.LastError)
 	}
 }

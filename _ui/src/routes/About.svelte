@@ -444,7 +444,7 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
       </p>
     </div>
     <div class="ml-auto flex items-center rounded-md border border-line bg-bg p-0.5" aria-label="Published MCP tool catalog">
-      {#each [["core", 22], ["api", 5], ["admin", 38]] as [catalog, count]}
+      {#each [["core", 22], ["api", 5], ["admin", 38]] as [catalog, count] (catalog)}
         <button
           class="rounded px-2.5 py-1 text-[11px] capitalize text-dim transition-colors hover:text-fg"
           class:!bg-surface-2={mcpCatalog === catalog}
@@ -460,12 +460,12 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
     Published at <code class="font-mono text-fg">{mcpUrl}</code>
   </p>
 
-  {#each visibleToolGroups as group}
+  {#each visibleToolGroups as group (group.name)}
     <h3 class="mb-1.5 mt-4 text-[13px] font-medium uppercase tracking-wider text-faint">{group.name}</h3>
     <div class="overflow-hidden rounded-md border border-line">
       <table class="w-full border-collapse">
         <tbody>
-          {#each group.tools as [name, desc]}
+          {#each group.tools as [name, desc] (name)}
             <tr class="border-b border-line last:border-b-0">
               <td class="w-[190px] px-3 py-2 align-top font-mono text-[12.5px] text-fg">{name}</td>
               <td class="px-3 py-2 text-[13px] text-dim">{desc}</td>

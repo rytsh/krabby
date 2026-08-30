@@ -128,7 +128,7 @@ type apiServiceView struct {
 	Progress        []manager.Progress `json:"progress,omitempty"`
 }
 
-func viewAPIService(mgr *manager.Manager, svc *apicatalog.Service) apiServiceView {
+func viewAPIService(mgr apiCatalogService, svc *apicatalog.Service) apiServiceView {
 	interval := ""
 	if svc.RefreshInterval > 0 {
 		interval = svc.RefreshInterval.String()
@@ -149,7 +149,7 @@ func viewAPIService(mgr *manager.Manager, svc *apicatalog.Service) apiServiceVie
 	}
 }
 
-func listAPIGroups(mgr *manager.Manager) ada.HandlerFunc {
+func listAPIGroups(mgr apiCatalogService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		groups, err := mgr.APIGroups(c.Request.Context())
 		if err != nil {
@@ -160,7 +160,7 @@ func listAPIGroups(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func upsertAPIGroup(mgr *manager.Manager) ada.HandlerFunc {
+func upsertAPIGroup(mgr apiCatalogService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req apiGroupRequest
 		if err := c.Bind(&req); err != nil {
@@ -177,7 +177,7 @@ func upsertAPIGroup(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func deleteAPIGroup(mgr *manager.Manager) ada.HandlerFunc {
+func deleteAPIGroup(mgr apiCatalogService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		name := c.Request.PathValue("name")
 		if err := mgr.DeleteAPIGroup(context.WithoutCancel(c.Request.Context()), name); err != nil {
@@ -189,7 +189,7 @@ func deleteAPIGroup(mgr *manager.Manager) ada.HandlerFunc {
 }
 
 // listAPIServices returns one page of services, filtered by ?group and ?search.
-func listAPIServices(mgr *manager.Manager) ada.HandlerFunc {
+func listAPIServices(mgr apiCatalogService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		query := c.Request.URL.Query()
 
@@ -223,7 +223,7 @@ func listAPIServices(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func addAPIService(mgr *manager.Manager) ada.HandlerFunc {
+func addAPIService(mgr apiCatalogService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req apiServiceRequest
 		if err := c.Bind(&req); err != nil {
@@ -246,7 +246,7 @@ func addAPIService(mgr *manager.Manager) ada.HandlerFunc {
 // getAPIService returns a service plus one page of its endpoints, filtered by
 // ?q, ?tag and ?method. Endpoints are paged at the store level so a large
 // specification is never loaded whole.
-func getAPIService(mgr *manager.Manager) ada.HandlerFunc {
+func getAPIService(mgr apiCatalogService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		name := c.Request.PathValue("name")
 
@@ -293,7 +293,7 @@ func getAPIService(mgr *manager.Manager) ada.HandlerFunc {
 }
 
 // getAPIOperation returns one endpoint's full structured detail.
-func getAPIOperation(mgr *manager.Manager) ada.HandlerFunc {
+func getAPIOperation(mgr apiCatalogService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		name := c.Request.PathValue("name")
 		handle := c.Request.URL.Query().Get("id")
@@ -339,7 +339,7 @@ type apiCallRequest struct {
 // assembled — an unknown endpoint, a missing path parameter, a service whose
 // kind cannot call — is a 400, because that is a mistake in the request to
 // krabby rather than an answer from the API.
-func callAPIOperation(mgr *manager.Manager) ada.HandlerFunc {
+func callAPIOperation(mgr apiCatalogService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		name := c.Request.PathValue("name")
 
@@ -366,7 +366,7 @@ func callAPIOperation(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func updateAPIService(mgr *manager.Manager) ada.HandlerFunc {
+func updateAPIService(mgr apiCatalogService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req apiServiceUpdateRequest
 		if err := c.Bind(&req); err != nil {
@@ -391,7 +391,7 @@ func updateAPIService(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func deleteAPIService(mgr *manager.Manager) ada.HandlerFunc {
+func deleteAPIService(mgr apiCatalogService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		name := c.Request.PathValue("name")
 
@@ -403,7 +403,7 @@ func deleteAPIService(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func refreshAPIService(mgr *manager.Manager) ada.HandlerFunc {
+func refreshAPIService(mgr apiCatalogService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		name := c.Request.PathValue("name")
 
@@ -417,17 +417,21 @@ func refreshAPIService(mgr *manager.Manager) ada.HandlerFunc {
 
 		// force=true re-renders from the same document, for when an override
 		// changed but the upstream specification did not.
+		var enqueueErr error
 		if c.Request.URL.Query().Get("force") == "true" {
-			mgr.TriggerAPIFullRefresh(name)
+			enqueueErr = mgr.TriggerAPIFullRefresh(name)
 		} else {
-			mgr.TriggerAPIRefresh(name)
+			enqueueErr = mgr.TriggerAPIRefresh(name)
+		}
+		if enqueueErr != nil {
+			return c.Err(enqueueErr)
 		}
 
 		return c.SetStatus(http.StatusAccepted).SendJSON(map[string]string{"status": "queued"})
 	}
 }
 
-func cancelAPIService(mgr *manager.Manager) ada.HandlerFunc {
+func cancelAPIService(mgr apiCatalogService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		name := c.Request.PathValue("name")
 
@@ -437,7 +441,7 @@ func cancelAPIService(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func testAPIServiceConfig(mgr *manager.Manager) ada.HandlerFunc {
+func testAPIServiceConfig(mgr apiCatalogService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req apiConfigTestRequest
 		if err := c.Bind(&req); err != nil {
@@ -453,7 +457,7 @@ func testAPIServiceConfig(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func listAPIServiceKinds(mgr *manager.Manager) ada.HandlerFunc {
+func listAPIServiceKinds(mgr apiCatalogService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		return c.SendJSON(map[string]any{"kinds": mgr.APIServiceKinds()})
 	}

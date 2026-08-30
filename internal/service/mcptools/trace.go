@@ -6,7 +6,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/rytsh/krabby/internal/observability/langfuse"
-	"github.com/rytsh/krabby/internal/service/manager"
 )
 
 // maxTracedResult caps how much of a tool result is attached to a span before
@@ -25,7 +24,7 @@ const maxTracedResult = 16 << 10
 // Only tools/call is traced. The rest of the MCP surface (initialize, listing,
 // ping) is protocol chatter that says nothing about what an agent asked for
 // and would multiply the observation count.
-func traceMiddleware(mgr *manager.Manager) mcp.Middleware {
+func traceMiddleware(mgr tracingService) mcp.Middleware {
 	return func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 			tracer := mgr.Tracer()

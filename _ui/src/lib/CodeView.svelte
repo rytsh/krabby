@@ -31,6 +31,7 @@
 
   // Skip highlighting for very large files to keep the UI responsive.
   const MAX_HIGHLIGHT_CHARS = 300_000;
+  const newline = "\n";
 
   // File extension (or exact filename) → Shiki language id.
   const extToLang = {
@@ -183,6 +184,6 @@
       {@html html}
     </div>
   {:else}
-    <pre class="code-view m-0 p-3.5 font-mono text-[12.5px] leading-relaxed"><code>{#each plainLines as l}<span class="line">{l}</span>{"\n"}{/each}</code></pre>
+    <pre class="code-view m-0 p-3.5 font-mono text-[12.5px] leading-relaxed"><code>{#each plainLines as l, lineIndex (lineIndex)}<span class="line">{l}</span>{newline}{/each}</code></pre>
   {/if}
 </div>

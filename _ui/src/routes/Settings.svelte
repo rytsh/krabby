@@ -3,6 +3,17 @@
   import { api } from "../lib/api.js";
   import { successToast } from "../lib/toast.js";
   import { sidebarPathMode } from "../lib/paths.js";
+  import RuntimeSettings from "../components/settings/RuntimeSettings.svelte";
+  import LangfuseSettings from "../components/settings/LangfuseSettings.svelte";
+  import {
+    buildDocsPayload,
+    buildLangfusePayload,
+    buildRuntimePayload,
+    createDocsDraft,
+    createLangfuseDraft,
+    createRuntimeDraft,
+    normalizeSettingsSnapshot,
+  } from "../lib/settings-config.js";
 
   let settings = $state(null);
   let creds = $state([]);
@@ -10,9 +21,12 @@
   let credentialBusy = $state(false);
   let error = $state("");
 
-  // Docs & RAG runtime config.
-  let docsCfg = $state(null); // redacted config from the server
-  let stopWordsText = $state(""); // rag_lexical_stop_words as a comma-separated field
+  // The server snapshot is authoritative and immutable. Each form edits its
+  // own draft so another section's save cannot submit or replace those edits.
+  let serverCfg = $state.raw(null);
+  let runtimeDraft = $state(null);
+  let docsDraft = $state(null);
+  let langfuseDraft = $state(null);
   let docsErr = $state("");
   let docsMsg = $state("");
   let saving = $state(false);
@@ -52,24 +66,17 @@
     }
   }
 
-  // adoptDocsCfg is the single place docsCfg is replaced by a server response.
-  //
-  // A Go nil slice marshals to null, not [], so any list the user has never
-  // touched arrives as null — and the template indexes repo_schedules
-  // directly. Every assignment therefore has to normalize, which is exactly
-  // what a partial save (the observability form, which sends no list fields at
-  // all) used to skip.
-  function adoptDocsCfg(cfg) {
-    if (!cfg) return;
-    if (!Array.isArray(cfg.repo_schedules)) cfg.repo_schedules = [];
-    if (typeof cfg.rag_keep_markdown_targets !== "boolean") cfg.rag_keep_markdown_targets = false;
-    if (typeof cfg.web_image_analysis_enabled !== "boolean") cfg.web_image_analysis_enabled = false;
-    if (typeof cfg.web_image_allow_authenticated !== "boolean") cfg.web_image_allow_authenticated = false;
-    if (!cfg.web_image_max_per_page) cfg.web_image_max_per_page = 3;
-    if (!cfg.web_image_max_bytes) cfg.web_image_max_bytes = 4 * 1024 * 1024;
-    if (!cfg.web_image_max_pixels) cfg.web_image_max_pixels = 16000000;
-    docsCfg = cfg;
-    stopWordsText = (cfg.rag_lexical_stop_words ?? []).join(", ");
+  function adoptServerCfg(cfg) {
+    serverCfg = normalizeSettingsSnapshot(cfg);
+    return serverCfg;
+  }
+
+  function initializeDrafts(cfg) {
+    const snapshot = adoptServerCfg(cfg);
+    if (!snapshot) return;
+    runtimeDraft = createRuntimeDraft(snapshot);
+    docsDraft = createDocsDraft(snapshot);
+    langfuseDraft = createLangfuseDraft(snapshot);
   }
 
   async function load() {
@@ -85,7 +92,7 @@
     }
 
     try {
-      adoptDocsCfg(await api.docsConfig());
+      initializeDrafts(await api.docsConfig());
     } catch (e) {
       docsErr = e.message;
     }
@@ -96,45 +103,6 @@
     } catch {
       namespaceOptions = [];
     }
-  }
-
-  // Lexical stop words are edited as one comma-separated field but stored as a
-  // list. Empty entries are dropped so a trailing comma is harmless.
-  function parseStopWords(text) {
-    return (text ?? "")
-      .split(",")
-      .map((w) => w.trim())
-      .filter(Boolean);
-  }
-
-  // Repository poll schedule editor. Each schedule targets a namespace ("*" =
-  // all, "" / "default" = untagged repos) and lists one or more cron specs;
-  // every spec triggers a poll of that namespace. Deep $state reactivity makes
-  // in-place push/splice update the UI.
-  function addSchedule() {
-    docsCfg.repo_schedules.push({ namespace: "*", specs: ["0 * * * *"], disabled: false });
-  }
-  function removeSchedule(i) {
-    docsCfg.repo_schedules.splice(i, 1);
-  }
-  function addSpec(i) {
-    docsCfg.repo_schedules[i].specs.push("");
-  }
-  function removeSpec(i, j) {
-    docsCfg.repo_schedules[i].specs.splice(j, 1);
-    if (docsCfg.repo_schedules[i].specs.length === 0) docsCfg.repo_schedules[i].specs.push("");
-  }
-
-  // cleanSchedules normalizes the editor state for the API: trims specs, drops
-  // empty ones, and removes schedules left without any spec.
-  function cleanSchedules(list) {
-    return (list || [])
-      .map((s) => ({
-        namespace: (s.namespace || "").trim(),
-        specs: (s.specs || []).map((x) => (x || "").trim()).filter(Boolean),
-        disabled: !!s.disabled,
-      }))
-      .filter((s) => s.specs.length > 0);
   }
 
   async function saveCredential() {
@@ -161,23 +129,8 @@
     }
   }
 
-  // buildPatch produces the request body from the form. Blank secret fields
-  // mean "keep the stored value" (the server merges them).
-  function buildPatch() {
-    const patch = { ...docsCfg };
-    delete patch.llm_api_key_set;
-    delete patch.embed_api_key_set;
-    delete patch.code_embed_api_key_set;
-    delete patch.langfuse_secret_key_set;
-    delete patch.docs_default_prompt;
-    delete patch.updated_at;
-    // Never submit half-edited (empty-spec) schedules the backend would reject.
-    patch.repo_schedules = cleanSchedules(docsCfg.repo_schedules);
-    patch.rag_lexical_stop_words = parseStopWords(stopWordsText);
-    patch.llm_api_key = llmKey;
-    patch.embed_api_key = embedKey;
-    patch.code_embed_api_key = codeEmbedKey;
-    return patch;
+  function docsPayload() {
+    return buildDocsPayload(docsDraft, { llm: llmKey, embed: embedKey, codeEmbed: codeEmbedKey });
   }
 
   async function saveDocs() {
@@ -185,7 +138,8 @@
     docsErr = "";
     docsMsg = "";
     try {
-      adoptDocsCfg(await api.setDocsConfig(buildPatch()));
+      const snapshot = adoptServerCfg(await api.setDocsConfig(docsPayload()));
+      docsDraft = createDocsDraft(snapshot);
       llmKey = embedKey = codeEmbedKey = "";
       docsMsg = "Saved. Existing repositories queued for reindex.";
       successToast("Saved");
@@ -201,20 +155,14 @@
   // editing the larger Docs & RAG form. Durations are Go nanoseconds in the
   // REST representation; the select keeps those values explicit.
   async function saveRuntime(clearWebhook = false) {
-    if (!docsCfg) return;
+    if (!runtimeDraft) return;
     runtimeBusy = true;
     runtimeMsg = "";
     runtimeErr = "";
     try {
-      const schedules = cleanSchedules(docsCfg.repo_schedules);
-      const patch = {
-        task_concurrency: Number(docsCfg.task_concurrency),
-        repo_schedules: schedules,
-      };
-      docsCfg.repo_schedules = schedules;
-      if (clearWebhook) patch.webhook_secret = "";
-      else if (webhookSecret) patch.webhook_secret = webhookSecret;
-      adoptDocsCfg(await api.setDocsConfig(patch));
+      const patch = buildRuntimePayload(runtimeDraft, webhookSecret, clearWebhook);
+      const snapshot = adoptServerCfg(await api.setDocsConfig(patch));
+      runtimeDraft = createRuntimeDraft(snapshot);
       webhookSecret = "";
       runtimeMsg = clearWebhook ? "Webhook verification disabled." : "Runtime settings saved.";
       successToast("Saved");
@@ -229,7 +177,7 @@
     testingLLM = true;
     llmTest = null;
     try {
-      llmTest = await api.testLLM(buildPatch());
+      llmTest = await api.testLLM(docsPayload());
       logTestFailure("LLM", llmTest);
     } catch (e) {
       llmTest = { ok: false, error: e.message };
@@ -243,7 +191,7 @@
     testingEmbed = true;
     embedTest = null;
     try {
-      embedTest = await api.testEmbedder(buildPatch());
+      embedTest = await api.testEmbedder(docsPayload());
       logTestFailure("embedder", embedTest);
     } catch (e) {
       embedTest = { ok: false, error: e.message };
@@ -257,7 +205,7 @@
     testingCodeEmbed = true;
     codeEmbedTest = null;
     try {
-      codeEmbedTest = await api.testCodeEmbedder(buildPatch());
+      codeEmbedTest = await api.testCodeEmbedder(docsPayload());
       logTestFailure("code embedder", codeEmbedTest);
     } catch (e) {
       codeEmbedTest = { ok: false, error: e.message };
@@ -267,33 +215,15 @@
     }
   }
 
-  // buildLangfusePatch sends only the observability fields. Keeping it narrow
-  // is what lets the server recognise the change as observability-only and skip
-  // the reindex an ordinary settings save triggers.
-  function buildLangfusePatch() {
-    return {
-      langfuse_enabled: !!docsCfg.langfuse_enabled,
-      langfuse_host: docsCfg.langfuse_host || "",
-      langfuse_public_key: docsCfg.langfuse_public_key || "",
-      langfuse_secret_key: langfuseKey,
-      langfuse_environment: docsCfg.langfuse_environment || "",
-      langfuse_capture: docsCfg.langfuse_capture || "full",
-      langfuse_max_content_bytes: Number(docsCfg.langfuse_max_content_bytes) || 0,
-      langfuse_trace_docs: !!docsCfg.langfuse_trace_docs,
-      langfuse_trace_embed: !!docsCfg.langfuse_trace_embed,
-      langfuse_trace_mcp: !!docsCfg.langfuse_trace_mcp,
-      langfuse_trace_http: !!docsCfg.langfuse_trace_http,
-    };
-  }
-
   async function saveLangfuse() {
     langfuseBusy = true;
     langfuseErr = "";
     langfuseMsg = "";
     try {
-      adoptDocsCfg(await api.setDocsConfig(buildLangfusePatch()));
+      const snapshot = adoptServerCfg(await api.setDocsConfig(buildLangfusePayload(langfuseDraft, langfuseKey)));
+      langfuseDraft = createLangfuseDraft(snapshot);
       langfuseKey = "";
-      langfuseMsg = docsCfg.langfuse_enabled
+      langfuseMsg = langfuseDraft.langfuse_enabled
         ? "Saved. Traces export from the next model call."
         : "Saved. Langfuse export is off.";
       successToast("Saved");
@@ -308,7 +238,7 @@
     testingLangfuse = true;
     langfuseTest = null;
     try {
-      langfuseTest = await api.testLangfuse(buildLangfusePatch());
+      langfuseTest = await api.testLangfuse(buildLangfusePayload(langfuseDraft, langfuseKey));
       logTestFailure("Langfuse", langfuseTest);
     } catch (e) {
       langfuseTest = { ok: false, error: e.message };
@@ -319,7 +249,7 @@
   }
 
   function useDefaultPrompt() {
-    docsCfg.docs_prompt = docsCfg.docs_default_prompt;
+    docsDraft.docs_prompt = docsDraft.docs_default_prompt;
     promptView = "custom";
   }
 
@@ -327,20 +257,18 @@
   // state is shown.
   let mcpKeyInput = $state("");
   let mcpMsg = $state("");
-  let mcpErr = $state("");
   let mcpBusy = $state(false);
 
   async function mcpAction(fn, okMsg) {
     mcpBusy = true;
-    mcpErr = "";
     mcpMsg = "";
     try {
       const res = await fn();
       if (settings) settings = { ...settings, mcp: { ...settings.mcp, api_key_set: res.api_key_set } };
       mcpKeyInput = "";
       mcpMsg = okMsg;
-    } catch (e) {
-      mcpErr = e.message;
+    } catch {
+      // The API wrapper reports request failures globally.
     } finally {
       mcpBusy = false;
     }
@@ -382,7 +310,7 @@
   <div class="card mt-4 overflow-hidden">
     <table class="w-full border-collapse">
       <tbody>
-        {#each rows(settings) as [label, value, isBool]}
+        {#each rows(settings) as [label, value, isBool] (label)}
           <tr class="hover:bg-surface-2">
             <td class="w-56 border-b border-line px-4 py-2.5 text-[13px] text-dim">{label}</td>
             <td class="border-b border-line px-4 py-2.5 font-mono text-[13px]">
@@ -490,7 +418,7 @@
           </tr>
         </thead>
         <tbody>
-          {#each creds as c}
+          {#each creds as c (c.pattern)}
             <tr class="hover:bg-surface-2">
               <td class="border-b border-line px-4 py-2.5 font-mono text-[13px]">{c.pattern}</td>
               <td class="border-b border-line px-4 py-2.5 text-[13px] text-faint">{c.kind}</td>
@@ -546,104 +474,16 @@
   Repository polling, background task concurrency and webhook security. Changes apply without a restart.
 </p>
 
-{#if docsCfg}
-  <div class="card mt-3 p-4">
-    <!-- Repository poll schedules (cron, per namespace) -->
-    <div class="mb-4">
-      <div class="mb-1 flex items-center justify-between">
-        <span class="text-[13px] font-semibold text-dim">Repository poll schedules</span>
-        <button class="btn btn-sm" onclick={addSchedule}>+ Add schedule</button>
-      </div>
-      <p class="mb-2 text-[12px] text-faint">
-        Poll repositories on cron schedules. Target a namespace (<code class="font-mono">*</code> = all,
-        <code class="font-mono">default</code> = untagged) and add one or more cron specs; each spec
-        triggers a poll. Multiple schedules and specs are supported. With no schedules configured, polling
-        falls back to the legacy fixed interval.
-      </p>
-
-      <datalist id="ns-options">
-        <option value="*"></option>
-        <option value="default"></option>
-        {#each namespaceOptions as ns}
-          <option value={ns.namespace}></option>
-        {/each}
-      </datalist>
-
-      {#if docsCfg.repo_schedules.length === 0}
-        <p class="rounded-md border border-dashed border-faint px-3 py-2 text-[12px] text-faint">
-          No schedules configured — repositories poll on the legacy fixed interval.
-        </p>
-      {/if}
-
-      {#each docsCfg.repo_schedules as sched, i}
-        <div class="mb-2 rounded-md border border-faint p-3">
-          <div class="flex flex-wrap items-end gap-3">
-            <label class="flex flex-col gap-1 text-[12px] text-dim">
-              Namespace
-              <input
-                class="input w-48"
-                list="ns-options"
-                bind:value={sched.namespace}
-                placeholder="* (all namespaces)"
-              />
-            </label>
-            <label class="flex items-center gap-2 text-[12px] text-dim">
-              <input type="checkbox" bind:checked={sched.disabled} />
-              Disabled
-            </label>
-            <button class="btn btn-sm btn-danger ml-auto" onclick={() => removeSchedule(i)}>
-              Remove schedule
-            </button>
-          </div>
-          <div class="mt-2 flex flex-col gap-1.5">
-            {#each sched.specs as _spec, j}
-              <div class="flex items-center gap-2">
-                <input
-                  class="input font-mono text-[12px]"
-                  bind:value={sched.specs[j]}
-                  placeholder="0 * * * *  (or @every 15m)"
-                />
-                <button class="btn btn-sm" onclick={() => removeSpec(i, j)} title="Remove cron spec">
-                  −
-                </button>
-              </div>
-            {/each}
-            <button class="btn btn-sm self-start" onclick={() => addSpec(i)}>+ Add cron spec</button>
-          </div>
-        </div>
-      {/each}
-    </div>
-
-    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-      <label class="flex flex-col gap-1 text-[13px] text-dim">
-        Concurrent tasks
-        <input class="input" type="number" min="1" max="64" bind:value={docsCfg.task_concurrency} />
-        <span class="text-[12px] text-faint">
-          How many background tasks (refresh, generate, web sync, reindex) run at once. Lower to protect
-          git/graphify/LLM/embedder backends; raise to process more repositories in parallel.
-        </span>
-      </label>
-      <label class="flex flex-col gap-1 text-[13px] text-dim">
-        Git webhook secret {docsCfg.webhook_secret_set ? "(set)" : "(not set)"}
-        <input
-          class="input"
-          type="password"
-          bind:value={webhookSecret}
-          placeholder="leave blank to keep existing"
-        />
-      </label>
-    </div>
-    <div class="mt-3 flex items-center gap-2">
-      <button class="btn btn-primary" onclick={() => saveRuntime(false)} disabled={runtimeBusy}>Save runtime settings</button>
-      <button
-        class="btn btn-danger"
-        onclick={() => saveRuntime(true)}
-        disabled={runtimeBusy || !docsCfg.webhook_secret_set}
-      >Disable webhook verification</button>
-      {#if runtimeMsg}<span class="text-[12px] text-ok">{runtimeMsg}</span>{/if}
-      {#if runtimeErr}<span class="text-[12px] text-err">{runtimeErr}</span>{/if}
-    </div>
-  </div>
+{#if serverCfg && runtimeDraft}
+  <RuntimeSettings
+    bind:draft={runtimeDraft}
+    bind:webhookSecret
+    {namespaceOptions}
+    busy={runtimeBusy}
+    message={runtimeMsg}
+    error={runtimeErr}
+    onSave={saveRuntime}
+  />
 {/if}
 
 <h2 class="mb-1 mt-10 text-[15px] font-semibold">Docs &amp; RAG</h2>
@@ -657,7 +497,7 @@
   <div class="mt-4 rounded-md border border-ok bg-ok/10 px-3 py-2.5 text-[13px] text-ok">{docsMsg}</div>
 {/if}
 
-{#if docsCfg}
+{#if serverCfg && docsDraft && langfuseDraft}
   <div class="card mt-4 p-4">
     <!-- Documentation generation -->
     <div class="mb-2 flex items-center justify-between">
@@ -676,33 +516,33 @@
       </span>
     </div>
     <label class="mb-3 flex items-center gap-2 text-[13px]">
-      <input type="checkbox" bind:checked={docsCfg.docs_enabled} />
+      <input type="checkbox" bind:checked={docsDraft.docs_enabled} />
       Generate markdown docs on refresh
     </label>
     <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         LLM base URL
-        <input class="input" bind:value={docsCfg.llm_base_url} placeholder="https://api.openai.com/v1" />
+        <input class="input" bind:value={docsDraft.llm_base_url} placeholder="https://api.openai.com/v1" />
       </label>
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         LLM model
-        <input class="input" bind:value={docsCfg.llm_model} placeholder="gpt-4o-mini" />
+        <input class="input" bind:value={docsDraft.llm_model} placeholder="gpt-4o-mini" />
       </label>
       <label class="flex flex-col gap-1 text-[13px] text-dim">
-        LLM API key {docsCfg.llm_api_key_set ? "(set)" : "(not set)"}
+        LLM API key {docsDraft.llm_api_key_set ? "(set)" : "(not set)"}
         <input class="input" type="password" bind:value={llmKey} placeholder="leave blank to keep" />
       </label>
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Doc concurrency
-        <input class="input" type="number" bind:value={docsCfg.docs_concurrency} />
+        <input class="input" type="number" bind:value={docsDraft.docs_concurrency} />
       </label>
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Max summary groups
-        <input class="input" type="number" bind:value={docsCfg.docs_max_groups} />
+        <input class="input" type="number" bind:value={docsDraft.docs_max_groups} />
       </label>
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Summary model (fast; blank = main model)
-        <input class="input" bind:value={docsCfg.docs_summary_model} placeholder="e.g. google-ai/gemini-2.5-flash" />
+        <input class="input" bind:value={docsDraft.docs_summary_model} placeholder="e.g. google-ai/gemini-2.5-flash" />
       </label>
     </div>
 
@@ -714,7 +554,7 @@
       off unless that provider is approved to receive the source content.
     </p>
     <label class="mb-3 flex items-start gap-2 text-[13px]">
-      <input class="mt-1" type="checkbox" bind:checked={docsCfg.web_image_analysis_enabled} />
+      <input class="mt-1" type="checkbox" bind:checked={docsDraft.web_image_analysis_enabled} />
       <span>
         Analyze images with a vision model
         <span class="block text-[12px] text-faint">Disabled by default. The configured LLM endpoint and credentials are used.</span>
@@ -723,25 +563,25 @@
     <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Vision model
-        <input class="input" bind:value={docsCfg.web_image_model} placeholder="blank = main LLM model" />
+        <input class="input" bind:value={docsDraft.web_image_model} placeholder="blank = main LLM model" />
       </label>
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Maximum images per page
-        <input class="input" type="number" min="1" max="50" bind:value={docsCfg.web_image_max_per_page} />
+        <input class="input" type="number" min="1" max="50" bind:value={docsDraft.web_image_max_per_page} />
       </label>
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Maximum bytes per image
-        <input class="input" type="number" min="1" max="33554432" bind:value={docsCfg.web_image_max_bytes} />
+        <input class="input" type="number" min="1" max="33554432" bind:value={docsDraft.web_image_max_bytes} />
         <span class="text-[12px] text-faint">Default 4 MiB (4194304 bytes).</span>
       </label>
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Maximum decoded pixels
-        <input class="input" type="number" min="1" max="100000000" bind:value={docsCfg.web_image_max_pixels} />
+        <input class="input" type="number" min="1" max="100000000" bind:value={docsDraft.web_image_max_pixels} />
         <span class="text-[12px] text-faint">Default 16 megapixels (16000000 pixels).</span>
       </label>
     </div>
     <label class="mt-3 flex items-start gap-2 text-[13px]">
-      <input class="mt-1" type="checkbox" bind:checked={docsCfg.web_image_allow_authenticated} />
+      <input class="mt-1" type="checkbox" bind:checked={docsDraft.web_image_allow_authenticated} />
       <span>
         Allow authenticated and private-network images
         <span class="block text-[12px] text-faint">
@@ -776,7 +616,7 @@
         <textarea
           class="input font-mono text-[12px]"
           rows="12"
-          bind:value={docsCfg.docs_prompt}
+          bind:value={docsDraft.docs_prompt}
           placeholder="Leave blank to use the built-in default prompt."
         ></textarea>
       {:else}
@@ -784,7 +624,7 @@
           class="input bg-surface-2 font-mono text-[12px]"
           rows="12"
           readonly
-          value={docsCfg.docs_default_prompt}
+          value={docsDraft.docs_default_prompt}
         ></textarea>
         <div class="mt-1 flex items-center justify-between gap-3">
           <span class="text-[12px] text-faint">Built into this krabby version. Select and copy any part you need.</span>
@@ -818,19 +658,19 @@
     <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Embedder base URL
-        <input class="input" bind:value={docsCfg.embed_base_url} placeholder="http://localhost:11434/v1" />
+        <input class="input" bind:value={docsDraft.embed_base_url} placeholder="http://localhost:11434/v1" />
       </label>
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Embedder model
-        <input class="input" bind:value={docsCfg.embed_model} placeholder="nomic-embed-text" />
+        <input class="input" bind:value={docsDraft.embed_model} placeholder="nomic-embed-text" />
       </label>
       <label class="flex flex-col gap-1 text-[13px] text-dim">
-        Embedder API key {docsCfg.embed_api_key_set ? "(set)" : "(not set)"}
+        Embedder API key {docsDraft.embed_api_key_set ? "(set)" : "(not set)"}
         <input class="input" type="password" bind:value={embedKey} placeholder="leave blank to keep" />
       </label>
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Embedding dim (0 = model default)
-        <input class="input" type="number" bind:value={docsCfg.embed_dim} />
+        <input class="input" type="number" bind:value={docsDraft.embed_dim} />
       </label>
     </div>
     <p class="mt-2 text-[12px] text-faint">
@@ -859,7 +699,7 @@
       </span>
     </div>
     <label class="mb-3 flex items-center gap-2 text-[13px]">
-      <input type="checkbox" bind:checked={docsCfg.code_rag_enabled} />
+      <input type="checkbox" bind:checked={docsDraft.code_rag_enabled} />
       Enable semantic code search
     </label>
     <p class="mb-3 text-[12px] text-faint">
@@ -869,43 +709,43 @@
     <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Code embedder base URL
-        <input class="input" bind:value={docsCfg.code_embed_base_url} placeholder="https://api.mistral.ai/v1" />
+        <input class="input" bind:value={docsDraft.code_embed_base_url} placeholder="https://api.mistral.ai/v1" />
       </label>
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Code embedder model
-        <input class="input" bind:value={docsCfg.code_embed_model} placeholder="codestral-embed-2505" />
+        <input class="input" bind:value={docsDraft.code_embed_model} placeholder="codestral-embed-2505" />
       </label>
       <label class="flex flex-col gap-1 text-[13px] text-dim">
-        Code embedder API key {docsCfg.code_embed_api_key_set ? "(set)" : "(not set)"}
+        Code embedder API key {docsDraft.code_embed_api_key_set ? "(set)" : "(not set)"}
         <input class="input" type="password" bind:value={codeEmbedKey} placeholder="leave blank to keep" />
       </label>
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Code embedding dim (0 = model default)
-        <input class="input" type="number" bind:value={docsCfg.code_embed_dim} />
+        <input class="input" type="number" bind:value={docsDraft.code_embed_dim} />
       </label>
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Code chunk size (chars)
-        <input class="input" type="number" bind:value={docsCfg.code_rag_chunk_size} />
+        <input class="input" type="number" bind:value={docsDraft.code_rag_chunk_size} />
       </label>
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Code chunk overlap (chars)
-        <input class="input" type="number" bind:value={docsCfg.code_rag_chunk_overlap} />
+        <input class="input" type="number" bind:value={docsDraft.code_rag_chunk_overlap} />
       </label>
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Code snippets returned (top_k)
-        <input class="input" type="number" bind:value={docsCfg.code_rag_top_k} />
+        <input class="input" type="number" bind:value={docsDraft.code_rag_top_k} />
       </label>
     </div>
 
     <!-- Retrieval -->
     <div class="mb-2 mt-6 text-[13px] font-semibold text-dim">Retrieval</div>
     <label class="mb-3 flex items-center gap-2 text-[13px]">
-      <input type="checkbox" bind:checked={docsCfg.rag_enabled} />
+      <input type="checkbox" bind:checked={docsDraft.rag_enabled} />
       Enable RAG indexing &amp; retrieval
     </label>
     <p class="mb-3 text-[12px] text-faint">Vectors are stored locally in embedded bw indexes.</p>
     <label class="mb-3 flex items-start gap-2 text-[13px]">
-      <input class="mt-1" type="checkbox" bind:checked={docsCfg.rag_keep_markdown_targets} />
+      <input class="mt-1" type="checkbox" bind:checked={docsDraft.rag_keep_markdown_targets} />
       <span>
         Keep link and image URLs in search indexes
         <span class="block text-[12px] text-faint">
@@ -916,19 +756,19 @@
     <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Docs returned (top_docs)
-        <input class="input" type="number" min="1" max="20" bind:value={docsCfg.rag_top_docs} />
+        <input class="input" type="number" min="1" max="20" bind:value={docsDraft.rag_top_docs} />
       </label>
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Chunk size (chars)
-        <input class="input" type="number" bind:value={docsCfg.rag_chunk_size} />
+        <input class="input" type="number" bind:value={docsDraft.rag_chunk_size} />
       </label>
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Chunk overlap (chars)
-        <input class="input" type="number" bind:value={docsCfg.rag_chunk_overlap} />
+        <input class="input" type="number" bind:value={docsDraft.rag_chunk_overlap} />
       </label>
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Chunk matches (top_k)
-        <input class="input" type="number" bind:value={docsCfg.rag_top_k} />
+        <input class="input" type="number" bind:value={docsDraft.rag_top_k} />
       </label>
     </div>
 
@@ -942,24 +782,24 @@
     <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Candidates per ranker
-        <input class="input" type="number" bind:value={docsCfg.rag_hybrid_candidates} />
+        <input class="input" type="number" bind:value={docsDraft.rag_hybrid_candidates} />
       </label>
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         RRF k
-        <input class="input" type="number" bind:value={docsCfg.rag_hybrid_rrf_k} />
+        <input class="input" type="number" bind:value={docsDraft.rag_hybrid_rrf_k} />
       </label>
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Lexical weight
-        <input class="input" type="number" step="0.1" bind:value={docsCfg.rag_hybrid_weight_lexical} />
+        <input class="input" type="number" step="0.1" bind:value={docsDraft.rag_hybrid_weight_lexical} />
       </label>
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Semantic weight
-        <input class="input" type="number" step="0.1" bind:value={docsCfg.rag_hybrid_weight_semantic} />
+        <input class="input" type="number" step="0.1" bind:value={docsDraft.rag_hybrid_weight_semantic} />
       </label>
     </div>
     <label class="mt-3 flex flex-col gap-1 text-[13px] text-dim">
       Lexical stop words (comma separated)
-      <input class="input" type="text" bind:value={stopWordsText} />
+      <input class="input" type="text" bind:value={docsDraft.rag_lexical_stop_words_text} />
     </label>
     <p class="mt-1 text-[12px] text-faint">
       Empty by default, and on purpose: BM25 already scores a word that appears in most
@@ -975,161 +815,17 @@
     </div>
   </div>
 
-  <!-- LLM observability (Langfuse) -->
-  <h2 class="mb-1 mt-10 text-[15px] font-semibold">LLM observability</h2>
-  <p class="mb-3 text-[13px] text-dim">
-    Export every model call to Langfuse as a trace: model, latency, time to first token, token
-    usage and cost. Traces are sent over OTLP/HTTP on a tracer provider separate from the
-    <code>telemetry</code> collector, because Langfuse does not accept gRPC. Saving here rebuilds
-    the clients but does not reindex anything.
-  </p>
-
-  <div class="card p-4">
-    <div class="mb-3 flex items-center justify-between">
-      <label class="flex items-center gap-2 text-[13px]">
-        <input type="checkbox" bind:checked={docsCfg.langfuse_enabled} />
-        Enable Langfuse export
-      </label>
-      <span class="flex items-center gap-2">
-        {#if langfuseTest}
-          {#if langfuseTest.ok}
-            <span class="text-[12px] text-ok">
-              ✓ ok{langfuseTest.model ? ` · project ${langfuseTest.model}` : ""} · {langfuseTest.latency_ms}ms
-            </span>
-          {:else}
-            <span class="max-w-[24rem] truncate text-[12px] text-err" title={langfuseTest.error}>✗ {langfuseTest.error}</span>
-          {/if}
-        {/if}
-        <button class="btn btn-sm" onclick={testLangfuse} disabled={testingLangfuse}>
-          {testingLangfuse ? "Testing…" : "Test connection"}
-        </button>
-      </span>
-    </div>
-
-    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-      <label class="flex flex-col gap-1 text-[13px] text-dim">
-        Host
-        <input class="input" bind:value={docsCfg.langfuse_host} placeholder="https://cloud.langfuse.com" />
-      </label>
-      <label class="flex flex-col gap-1 text-[13px] text-dim">
-        Environment
-        <input class="input" bind:value={docsCfg.langfuse_environment} placeholder="production" />
-      </label>
-      <label class="flex flex-col gap-1 text-[13px] text-dim">
-        Public key
-        <input class="input" bind:value={docsCfg.langfuse_public_key} placeholder="pk-lf-…" />
-      </label>
-      <label class="flex flex-col gap-1 text-[13px] text-dim">
-        Secret key {docsCfg.langfuse_secret_key_set ? "(set)" : "(not set)"}
-        <input class="input" type="password" bind:value={langfuseKey} placeholder="leave blank to keep" />
-      </label>
-    </div>
-    <p class="mt-2 text-[12px] text-faint">
-      For the EU region use <code>https://cloud.langfuse.com</code>; US, Japan and HIPAA have their
-      own hosts. A self-hosted instance needs v3.22.0 or newer for the OTLP endpoint.
-    </p>
-
-    <!-- What gets traced -->
-    <div class="mb-2 mt-6 text-[13px] font-semibold text-dim">What gets traced</div>
-    <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
-      <label class="flex items-start gap-2 text-[13px]">
-        <input type="checkbox" class="mt-1" bind:checked={docsCfg.langfuse_trace_docs} />
-        <span>
-          Documentation LLM calls
-          <span class="block text-[12px] text-faint">
-            One trace per docs build, one generation per summary group plus the synthesis.
-          </span>
-        </span>
-      </label>
-      <label class="flex items-start gap-2 text-[13px]">
-        <input type="checkbox" class="mt-1" bind:checked={docsCfg.langfuse_trace_embed} />
-        <span>
-          Embedding calls
-          <span class="block text-[12px] text-faint">
-            One observation per Embed call, not per batch — a large index would otherwise emit
-            thousands.
-          </span>
-        </span>
-      </label>
-      <label class="flex items-start gap-2 text-[13px]">
-        <input type="checkbox" class="mt-1" bind:checked={docsCfg.langfuse_trace_mcp} />
-        <span>
-          MCP tool calls
-          <span class="block text-[12px] text-faint">
-            Shows what a connected agent actually asked for. No model or token data.
-          </span>
-        </span>
-      </label>
-      <label class="flex items-start gap-2 text-[13px]">
-        <input type="checkbox" class="mt-1" bind:checked={docsCfg.langfuse_trace_http} />
-        <span>
-          REST API requests
-          <span class="block text-[12px] text-faint">
-            Wraps each <code>/api/v1</code> call in a trace, so a search made from this UI shows the
-            embedding it caused underneath it instead of as a standalone observation. Only the API
-            is covered — health checks, the UI's own assets and the MCP endpoint are not.
-            Off by default: the UI polls, so most of what this adds is requests that did no model
-            work at all.
-          </span>
-        </span>
-      </label>
-    </div>
-
-    <!-- Content capture -->
-    <div class="mb-2 mt-6 text-[13px] font-semibold text-dim">Prompt &amp; completion capture</div>
-    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-      <label class="flex flex-col gap-1 text-[13px] text-dim">
-        Capture mode
-        <select class="input" bind:value={docsCfg.langfuse_capture}>
-          <option value="full">full — send prompts and replies whole</option>
-          <option value="truncated">truncated — clip to 8 KiB</option>
-          <option value="off">off — metadata only</option>
-        </select>
-      </label>
-      <label class="flex flex-col gap-1 text-[13px] text-dim">
-        Max bytes per value (0 = no limit)
-        <input class="input" type="number" min="0" bind:value={docsCfg.langfuse_max_content_bytes} />
-      </label>
-    </div>
-
-    {#if docsCfg.langfuse_enabled && docsCfg.langfuse_capture === "full"}
-      <div class="mt-3 rounded border border-warn/40 bg-warn/10 p-3 text-[12px]">
-        <div class="mb-1 font-semibold text-warn">What "full" capture means</div>
-        <ul class="list-disc space-y-1 pl-4 text-dim">
-          <li>
-            <b>Your source code leaves this process.</b> Summary prompts embed the files being
-            documented, so private repository contents are sent to
-            {docsCfg.langfuse_host || "the configured Langfuse instance"} verbatim. On Langfuse Cloud
-            that is a third party.
-          </li>
-          <li>
-            <b>The payload is large.</b> A synthesis prompt reaches 256 KiB and a summary prompt
-            96 KiB; a forty-group build exports a few megabytes. Krabby caps the export batch at 8
-            spans and the queue at 256 to keep that off the memory budget, so a very busy build can
-            drop spans rather than grow.
-          </li>
-          <li>
-            <b>Removing the byte cap is not free.</b> Setting max bytes to 0 lets a single
-            attribute exceed what a hosted Langfuse will accept, and the whole batch is rejected.
-            Only do it against a self-hosted instance with a matching body limit.
-          </li>
-        </ul>
-        <div class="mt-2 text-dim">
-          Use <b>truncated</b> to keep prompts debuggable at 8 KiB, or <b>off</b> to export only
-          model, latency, tokens and cost.
-        </div>
-      </div>
-    {/if}
-
-    {#if langfuseErr}<div class="mt-3 text-[13px] text-err">{langfuseErr}</div>{/if}
-    {#if langfuseMsg}<div class="mt-3 text-[13px] text-ok">{langfuseMsg}</div>{/if}
-
-    <div class="mt-6">
-      <button class="btn btn-primary" onclick={saveLangfuse} disabled={langfuseBusy}>
-        {langfuseBusy ? "Saving…" : "Save observability settings"}
-      </button>
-    </div>
-  </div>
+  <LangfuseSettings
+    bind:draft={langfuseDraft}
+    bind:secretKey={langfuseKey}
+    testResult={langfuseTest}
+    testing={testingLangfuse}
+    busy={langfuseBusy}
+    message={langfuseMsg}
+    error={langfuseErr}
+    onTest={testLangfuse}
+    onSave={saveLangfuse}
+  />
 {:else if !docsErr}
   <div class="mt-4 text-dim">Loading…</div>
 {/if}

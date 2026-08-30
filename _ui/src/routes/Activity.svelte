@@ -1,6 +1,7 @@
 <script>
-  import { onDestroy, onMount } from "svelte";
+  import { onMount } from "svelte";
   import { api } from "../lib/api.js";
+  import { createLatestRequest, createPoller } from "../lib/async.js";
   import { link } from "../lib/router.js";
   import { fmtAgo, fmtDate, fmtEta } from "../lib/format.js";
   import Icon from "../lib/Icon.svelte";
@@ -133,23 +134,32 @@
   const liveIntervals = [0, 4_000, 10_000, 30_000, 60_000];
   const savedLiveInterval = Number(localStorage.getItem(LIVE_INTERVAL_KEY));
   let liveInterval = $state(liveIntervals.includes(savedLiveInterval) ? savedLiveInterval : 4_000);
-  let timer;
+  const refreshRequests = createLatestRequest();
 
-  async function refresh() {
+  async function refreshData() {
+    const isLatest = refreshRequests.next();
     refreshing = true;
     try {
-      const [tasks, activeList, page] = await Promise.all([
+      const [tasks, activeList, page] = await Promise.allSettled([
         api.tasks(),
         api.activeRepos(),
         api.repos({ page: 1, perPage: 1 }),
       ]);
-      snap = tasks && Array.isArray(tasks.tasks) ? tasks : { limit: 0, running: 0, pending: 0, tasks: [] };
-      active = Array.isArray(activeList) ? activeList : [];
-      repoCount = page?.total || 0;
+      if (!isLatest()) return;
+      if (tasks.status === "fulfilled" && Array.isArray(tasks.value?.tasks)) snap = tasks.value;
+      if (activeList.status === "fulfilled" && Array.isArray(activeList.value)) active = activeList.value;
+      if (page.status === "fulfilled") repoCount = page.value?.total || 0;
     } finally {
-      refreshing = false;
-      loaded = true;
+      if (isLatest()) {
+        refreshing = false;
+        loaded = true;
+      }
     }
+  }
+
+  const activityPoller = createPoller(refreshData);
+  function refresh() {
+    return activityPoller.run();
   }
 
   // In-flight action guard so a task's buttons disable while its request runs.
@@ -243,19 +253,18 @@
   function setLiveInterval(value) {
     liveInterval = Number(value);
     localStorage.setItem(LIVE_INTERVAL_KEY, String(liveInterval));
-    clearInterval(timer);
-    timer = undefined;
-    if (liveInterval > 0) {
-      refresh();
-      timer = setInterval(refresh, liveInterval);
-    }
+    if (liveInterval > 0) activityPoller.start(liveInterval, { immediate: true });
+    else activityPoller.stop();
   }
 
   onMount(() => {
-    refresh();
-    if (liveInterval > 0) timer = setInterval(refresh, liveInterval);
+    if (liveInterval > 0) activityPoller.start(liveInterval, { immediate: true });
+    else void activityPoller.run();
+    return () => {
+      activityPoller.stop();
+      refreshRequests.invalidate();
+    };
   });
-  onDestroy(() => clearInterval(timer));
 </script>
 
 <div class="mb-5 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
@@ -372,7 +381,7 @@
             </div>
             {#if task.state === "running" && steps(task.id).length > 0}
               <div class="mt-2 flex flex-wrap gap-1.5">
-                {#each steps(task.id) as label}
+                {#each steps(task.id) as label (label)}
                   <span class="rounded border border-busy/40 bg-surface-2 px-1.5 py-0.5 text-[11px] text-busy">{label}</span>
                 {/each}
               </div>

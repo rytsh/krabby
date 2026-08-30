@@ -8,11 +8,26 @@
   // actually needs, and because loading every endpoint of every service up
   // front is exactly what the catalog exists to avoid.
   import { onMount } from "svelte";
+  import { SvelteMap } from "svelte/reactivity";
   import { api } from "../lib/api.js";
+  import { createLatestRequest, createPoller } from "../lib/async.js";
   import { successToast } from "../lib/toast.js";
-  import { navigate, path as routePath } from "../lib/router.js";
+  import { path as routePath } from "../lib/router.js";
   import Icon from "../lib/Icon.svelte";
   import Status from "../lib/Status.svelte";
+  import ApiServiceForm from "../components/ApiServiceForm.svelte";
+  import ApiOperationDialog from "../components/ApiOperationDialog.svelte";
+  import {
+    apiServiceFormFromService,
+    buildApiConfigTestPayload,
+    buildApiServicePayload,
+    createApiServiceForm,
+  } from "../lib/api-service-config.js";
+  import {
+    API_METHOD_COLORS,
+    buildOperationCallPayload,
+    createOperationRequest,
+  } from "../lib/api-operation.js";
 
   let { apiName = "" } = $props();
 
@@ -37,6 +52,33 @@
   let filters = $state({});
   let detail = $state(null);
   let detailBusy = $state(false);
+  let tryOpen = $state(false);
+  let tryBusy = $state(false);
+  let tryRes = $state(null);
+  let tryReq = $state({ pathParams: [], query: [], headers: [], body: "" });
+  const loadRequests = createLatestRequest();
+  const detailRequests = createLatestRequest();
+  const tryRequests = createLatestRequest();
+  const endpointRequests = new SvelteMap();
+
+  function endpointRequest(name) {
+    if (!endpointRequests.has(name)) endpointRequests.set(name, createLatestRequest());
+    return endpointRequests.get(name);
+  }
+
+  function closeDetail() {
+    detailRequests.invalidate();
+    invalidateTry();
+    detail = null;
+    detailBusy = false;
+  }
+
+  function invalidateTry() {
+    tryRequests.invalidate();
+    tryOpen = false;
+    tryBusy = false;
+    tryRes = null;
+  }
 
   let showAdd = $state(false);
   let editingName = $state("");
@@ -45,52 +87,45 @@
 
   let groupForm = $state({ name: "", description: "" });
 
-  const emptyForm = () => ({
-    name: "",
-    kind: "openapi",
-    group: "",
-    description: "",
-    base_url: "",
-    refresh_interval: "24h",
-    schedule: "",
-    spec_patch: "",
-    operations: "",
-    // openapi
-    url: "",
-    user: "",
-    token: "",
-    insecure_skip_verify: false,
-    // grpc
-    target: "",
-    plaintext: false,
-    server_name: "",
-    grpc_services: "",
-  });
-
-  let form = $state(emptyForm());
+  let form = $state(createApiServiceForm());
 
   async function load() {
+    const isLatest = loadRequests.next();
     try {
       const [g, s, k] = await Promise.all([api.apiGroups(), api.apiServices(), api.apiKinds()]);
+      if (!isLatest()) return;
       groups = g || [];
       services = (s && s.services) || [];
       kinds = (k && k.kinds) || [];
       error = "";
     } catch (e) {
-      error = e.message;
+      if (isLatest()) error = e.message;
     } finally {
-      loaded = true;
+      if (isLatest()) loaded = true;
     }
   }
 
-  onMount(load);
+  const catalogPoller = createPoller(load);
+  onMount(() => {
+    void catalogPoller.run();
+    return () => {
+      catalogPoller.stop();
+      loadRequests.invalidate();
+      detailRequests.invalidate();
+      tryRequests.invalidate();
+      for (const request of endpointRequests.values()) request.invalidate();
+    };
+  });
 
   // Poll while anything is syncing so status and endpoint counts settle without
   // a manual reload; stop as soon as nothing is running.
   $effect(() => {
-    if (!services.some((s) => s.running || s.status === "fetching" || s.task_state === "queued")) return;
-    const id = setInterval(load, 2000);
-    return () => clearInterval(id);
+    if (!services.some((s) => s.running || s.status === "fetching" || s.task_state === "queued")) {
+      catalogPoller.stop();
+      return;
+    }
+    catalogPoller.start(2000);
+    return () => catalogPoller.stop();
   });
 
   // Deep link: /apis/<name> opens that service expanded.
@@ -102,15 +137,19 @@
   // navigating between two hits in the same service re-opens the detail rather
   // than leaving the first one on screen.
   let openedDoc = "";
+  let detailRoute = null;
   $effect(() => {
-    const link = `${apiName}\u0000${docParam}`;
-    if (!apiName || !docParam || openedDoc === link) return;
+    const route = `${apiName}\u0000${docParam}`;
+    const link = apiName && docParam ? route : "";
+    if (detailRoute === route && openedDoc === link) return;
+    detailRoute = route;
+    closeDetail();
     openedDoc = link;
-    openDetail(apiName, docParam.replace(/\.md$/, ""));
+    if (link) void openDetail(apiName, docParam.replace(/\.md$/, ""));
   });
 
   const grouped = $derived.by(() => {
-    const byGroup = new Map();
+    const byGroup = new SvelteMap();
     for (const g of groups) byGroup.set(g.name, { ...g, services: [] });
     for (const s of services) {
       const key = s.effective_group || "default";
@@ -126,9 +165,10 @@
 
   async function loadEndpoints(name) {
     const f = filterFor(name);
+    const isLatest = endpointRequest(name).next();
     try {
       const res = await api.apiService(name, { q: f.q, tag: f.tag, method: f.method });
-      endpoints = { ...endpoints, [name]: res };
+      if (isLatest()) endpoints = { ...endpoints, [name]: res };
     } catch {
       // errorToast already fired in the api wrapper
     }
@@ -136,6 +176,7 @@
 
   async function toggle(name) {
     expanded = { ...expanded, [name]: !expanded[name] };
+    if (!expanded[name]) endpointRequest(name).invalidate();
     if (expanded[name] && !endpoints[name]) await loadEndpoints(name);
   }
 
@@ -145,17 +186,19 @@
   }
 
   async function openDetail(service, operationId) {
+    const { isLatest, signal } = detailRequests.nextAbortable();
+    invalidateTry();
+    detail = null;
     detailBusy = true;
-    tryOpen = false;
-    tryRes = null;
     try {
-      const res = await api.apiOperation(service, operationId);
+      const res = await api.apiOperation(service, operationId, { signal });
+      if (!isLatest()) return;
       detail = { service, operationId, ...res };
       initTry(detail.detail || {});
-    } catch {
-      detail = null;
+    } catch (e) {
+      if (isLatest() && e?.name !== "AbortError") detail = null;
     } finally {
-      detailBusy = false;
+      if (isLatest()) detailBusy = false;
     }
   }
 
@@ -165,165 +208,42 @@
   // path/query parameter (example value when the spec gives one) and the
   // generated example body. The caller edits values, never the request shape —
   // that is the same boundary the backend enforces.
-  let tryOpen = $state(false);
-  let tryBusy = $state(false);
-  let tryRes = $state(null);
-  let tryReq = $state({ pathParams: [], query: [], headers: [], body: "" });
-
   function initTry(d) {
-    const params = d.parameters || [];
-    const prefill = (p) => p.example || p.default || "";
-    tryReq = {
-      pathParams: params
-        .filter((p) => p.in === "path")
-        .map((p) => ({ name: p.name, value: prefill(p), required: true })),
-      query: params
-        .filter((p) => p.in === "query")
-        .map((p) => ({ name: p.name, value: prefill(p), required: !!p.required })),
-      headers: [{ name: "", value: "" }],
-      body: d.request?.body ? JSON.stringify(d.request.body, null, 2) : "",
-    };
+    tryReq = createOperationRequest(d);
     tryRes = null;
-  }
-
-  function rowsToMap(rows, { keepEmpty = false } = {}) {
-    const out = {};
-    for (const r of rows) {
-      const name = (r.name || "").trim();
-      if (!name) continue;
-      if (!keepEmpty && r.value === "") continue;
-      out[name] = r.value;
-    }
-    return out;
   }
 
   async function sendTry() {
     if (!detail) return;
+    const selectedDetail = detail;
+    const { isLatest, signal } = tryRequests.nextAbortable();
     tryBusy = true;
     tryRes = null;
     try {
-      const body = tryReq.body.trim();
-      tryRes = await api.callApiOperation(detail.service, {
-        endpoint: detail.operationId,
-        path_params: rowsToMap(tryReq.pathParams),
-        query: rowsToMap(tryReq.query),
-        // Headers keep explicit empties: an empty value removes a configured
-        // header on the backend, which is how "call it unauthenticated" works.
-        headers: rowsToMap(tryReq.headers, { keepEmpty: true }),
-        ...(body ? { body: JSON.parse(body) } : {}),
-      });
+      const result = await api.callApiOperation(
+        selectedDetail.service,
+        buildOperationCallPayload(selectedDetail.operationId, tryReq),
+        { signal },
+      );
+      if (isLatest()) tryRes = result;
     } catch (e) {
       // A request krabby refused to assemble (missing parameter, bad JSON body).
-      tryRes = { status_text: "not sent", error: e.message, ok: false };
-    } finally {
-      tryBusy = false;
-    }
-  }
-
-  function prettyBody(res) {
-    if (!res?.body) return "";
-    if ((res.content_type || "").includes("json")) {
-      try {
-        return JSON.stringify(JSON.parse(res.body), null, 2);
-      } catch {
-        /* not actually JSON; show as-is */
+      if (isLatest() && e?.name !== "AbortError") {
+        tryRes = { status_text: "not sent", error: e.message, ok: false };
       }
+    } finally {
+      if (isLatest()) tryBusy = false;
     }
-    return res.body;
   }
 
   // ---- service form --------------------------------------------------------
-
-  // providerConfig builds the opaque config the selected provider owns. A blank
-  // secret is sent as an empty string, which the provider reads as "keep the
-  // stored one" — the redacted config the UI holds never contains a token.
-  function providerConfig() {
-    if (form.kind === "grpc") {
-      const cfg = {
-        target: form.target.trim(),
-        plaintext: form.plaintext,
-        insecure_skip_verify: form.insecure_skip_verify,
-        token: form.token,
-      };
-      if (form.server_name.trim()) cfg.server_name = form.server_name.trim();
-      const list = form.grpc_services
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
-      cfg.services = list.length ? list : null;
-      return cfg;
-    }
-    return {
-      url: form.url.trim(),
-      user: form.user.trim(),
-      token: form.token,
-      insecure_skip_verify: form.insecure_skip_verify,
-    };
-  }
-
-  // parseJSON returns [value, error]. An empty box means null, which clears the
-  // stored value — the same rule the API uses.
-  function parseJSON(raw, label) {
-    const text = raw.trim();
-    if (!text) return [null, ""];
-    try {
-      return [JSON.parse(text), ""];
-    } catch (e) {
-      return [null, `${label}: ${e.message}`];
-    }
-  }
-
-  function serviceBody() {
-    const [patch, patchErr] = parseJSON(form.spec_patch, "Spec patch");
-    if (patchErr) throw new Error(patchErr);
-    const [ops, opsErr] = parseJSON(form.operations, "Operation overrides");
-    if (opsErr) throw new Error(opsErr);
-
-    const specs = form.schedule
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-
-    return {
-      name: form.name.trim().toLowerCase(),
-      kind: form.kind,
-      group: form.group.trim(),
-      description: form.description.trim(),
-      base_url: form.base_url.trim(),
-      refresh_interval: form.refresh_interval === "manual" ? "" : form.refresh_interval,
-      specs,
-      spec_patch: patch,
-      operations: ops,
-      config: providerConfig(),
-    };
-  }
 
   function startEdit(s) {
     editingName = s.name;
     showAdd = true;
     testResult = null;
 
-    const cfg = s.config || {};
-    form = {
-      ...emptyForm(),
-      name: s.name,
-      kind: s.kind,
-      group: s.effective_group === "default" ? "" : s.effective_group,
-      description: s.description || "",
-      base_url: s.base_url || "",
-      refresh_interval: s.refresh_interval || "manual",
-      schedule: (s.specs || []).join(", "),
-      spec_patch: s.spec_patch ? JSON.stringify(s.spec_patch, null, 2) : "",
-      operations: s.operations ? JSON.stringify(s.operations, null, 2) : "",
-      url: cfg.url || "",
-      user: cfg.user || "",
-      token: "",
-      insecure_skip_verify: !!cfg.insecure_skip_verify,
-      target: cfg.target || "",
-      plaintext: !!cfg.plaintext,
-      server_name: cfg.server_name || "",
-      grpc_services: (cfg.services || []).join(", "),
-    };
+    form = apiServiceFormFromService(s);
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -331,13 +251,13 @@
     showAdd = false;
     editingName = "";
     testResult = null;
-    form = emptyForm();
+    form = createApiServiceForm();
   }
 
   async function save() {
     busy = true;
     try {
-      const body = serviceBody();
+      const body = buildApiServicePayload(form);
       if (editingName) {
         await api.updateApiService(editingName, body);
         successToast(`Updated ${editingName}`);
@@ -358,14 +278,7 @@
     busy = true;
     testResult = null;
     try {
-      const [patch, patchErr] = parseJSON(form.spec_patch, "Spec patch");
-      if (patchErr) throw new Error(patchErr);
-      testResult = await api.testApiConfig({
-        kind: form.kind,
-        existing_name: editingName,
-        config: providerConfig(),
-        spec_patch: patch,
-      });
+      testResult = await api.testApiConfig(buildApiConfigTestPayload(form, editingName));
     } catch (e) {
       if (e?.message) error = e.message;
     } finally {
@@ -407,14 +320,6 @@
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  const METHOD_COLORS = {
-    GET: "text-ok",
-    POST: "text-busy",
-    PUT: "text-warn",
-    PATCH: "text-warn",
-    DELETE: "text-err",
-    GRPC: "text-busy",
-  };
 </script>
 
 <div class="flex flex-col gap-4">
@@ -474,154 +379,16 @@
     {#if !showAdd}
       <button class="btn btn-primary" onclick={() => (showAdd = true)}>Add API service</button>
     {:else}
-      <div class="card flex flex-col gap-3 p-4">
-        <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
-          <label class="flex flex-col gap-1 text-[13px] text-dim">
-            Name (search scope)
-            <input class="input" placeholder="e.g. billing" bind:value={form.name} disabled={!!editingName} />
-          </label>
-          <label class="flex flex-col gap-1 text-[13px] text-dim">
-            Kind
-            <select class="input" bind:value={form.kind} disabled={!!editingName}>
-              {#each kinds as k (k)}
-                <option value={k}>{k === "grpc" ? "gRPC (server reflection)" : "OpenAPI / Swagger"}</option>
-              {/each}
-            </select>
-          </label>
-          <label class="flex flex-col gap-1 text-[13px] text-dim">
-            Group
-            <input class="input" placeholder="e.g. finance (blank = default)" bind:value={form.group} />
-          </label>
-        </div>
-
-        {#if form.kind === "grpc"}
-          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <label class="flex flex-col gap-1 text-[13px] text-dim">
-              Target (host:port)
-              <input class="input font-mono" placeholder="billing.internal:443" bind:value={form.target} />
-            </label>
-            <label class="flex flex-col gap-1 text-[13px] text-dim">
-              TLS server name (optional)
-              <input class="input" bind:value={form.server_name} />
-            </label>
-          </div>
-          <label class="flex flex-col gap-1 text-[13px] text-dim">
-            Services (optional, comma-separated; blank catalogues everything the server reports)
-            <input class="input font-mono" placeholder="billing.v1.Invoices, billing.v1.Payments" bind:value={form.grpc_services} />
-          </label>
-          <label class="flex items-center gap-2 text-[13px] text-dim">
-            <input type="checkbox" bind:checked={form.plaintext} />
-            Plaintext (no TLS)
-          </label>
-        {:else}
-          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <label class="flex flex-col gap-1 text-[13px] text-dim">
-              Document URL
-              <input
-                class="input font-mono"
-                placeholder="https://docs.corp/billing/openapi.yaml"
-                bind:value={form.url}
-              />
-            </label>
-            <label class="flex flex-col gap-1 text-[13px] text-dim">
-              Basic-auth user (optional)
-              <input class="input" bind:value={form.user} />
-            </label>
-          </div>
-        {/if}
-
-        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <label class="flex flex-col gap-1 text-[13px] text-dim">
-            Token {editingName ? "(leave blank to keep the stored one)" : "(optional)"}
-            <input class="input" type="password" autocomplete="off" bind:value={form.token} />
-          </label>
-          <label class="flex flex-col gap-1 text-[13px] text-dim">
-            Auto refresh {form.schedule.trim() ? "(overridden by schedule)" : ""}
-            <select class="input" bind:value={form.refresh_interval} disabled={!!form.schedule.trim()}>
-              <option value="manual">manual only</option>
-              <option value="1h">every hour</option>
-              <option value="6h">every 6 hours</option>
-              <option value="24h">daily</option>
-              <option value="168h">weekly</option>
-            </select>
-          </label>
-        </div>
-
-        <label class="flex items-center gap-2 text-[13px] text-dim">
-          <input type="checkbox" bind:checked={form.insecure_skip_verify} />
-          Skip TLS verification (for servers behind a private CA)
-        </label>
-
-        <label class="flex flex-col gap-1 text-[13px] text-dim">
-          Cron schedule (optional; comma-separated, overrides auto refresh)
-          <input class="input font-mono" placeholder="0 3 * * *,  @every 6h" bind:value={form.schedule} />
-        </label>
-
-        <label class="flex flex-col gap-1 text-[13px] text-dim">
-          Description (what this API is for — shown to MCP/AI; overrides the document's own)
-          <input class="input" placeholder="e.g. Invoicing, payments and dunning" bind:value={form.description} />
-        </label>
-
-        <label class="flex flex-col gap-1 text-[13px] text-dim">
-          Base URL override
-          <input class="input font-mono" placeholder="https://billing.internal.corp" bind:value={form.base_url} />
-          <span class="text-[11px] text-faint">
-            Replaces the servers the document declares. Set this when the published document names a
-            host you cannot reach — every generated request uses it.
-          </span>
-        </label>
-
-        <label class="flex flex-col gap-1 text-[13px] text-dim">
-          Spec patch (JSON Merge Patch, RFC 7386)
-          <textarea
-            class="input h-28 font-mono text-[12px]"
-            placeholder={'{ "components": { "schemas": { "Money": { "properties": { "amount": { "type": "string" } } } } } }'}
-            bind:value={form.spec_patch}
-          ></textarea>
-          <span class="text-[11px] text-faint">
-            Applied to the raw document before parsing, so it can correct anything — schemas
-            included. A <code class="font-mono">null</code> value deletes a key. Leave empty for none.
-          </span>
-        </label>
-
-        <label class="flex flex-col gap-1 text-[13px] text-dim">
-          Endpoint overrides (JSON, keyed by operation id or "METHOD /path")
-          <textarea
-            class="input h-24 font-mono text-[12px]"
-            placeholder={'{ "deleteAllInvoices": { "hidden": true }, "POST /v1/invoices": { "summary": "Raise an invoice" } }'}
-            bind:value={form.operations}
-          ></textarea>
-          <span class="text-[11px] text-faint">
-            Set <code class="font-mono">hidden</code> to drop an endpoint from the catalog entirely,
-            or override its <code class="font-mono">summary</code>,
-            <code class="font-mono">description</code> and <code class="font-mono">tags</code>.
-          </span>
-        </label>
-
-        {#if testResult}
-          <div class="rounded-md border border-line bg-surface-2 px-3 py-2 text-[12.5px]">
-            <span class="font-medium">{testResult.title || "(untitled)"}</span>
-            {#if testResult.version}<span class="text-faint"> v{testResult.version}</span>{/if}
-            <span class="text-dim"> — {testResult.operation_count} endpoints</span>
-            {#if testResult.base_url}
-              <div class="font-mono text-[11px] text-faint">{testResult.base_url}</div>
-            {/if}
-            {#if testResult.sample?.length}
-              <ul class="mt-1 font-mono text-[11px] text-faint">
-                {#each testResult.sample as line (line)}<li>{line}</li>{/each}
-              </ul>
-            {/if}
-          </div>
-        {/if}
-
-        <div class="flex gap-2">
-          <button class="btn btn-primary" onclick={save} disabled={busy}>
-            {editingName ? "Save changes" : "Add service"}
-          </button>
-          <button class="btn" onclick={test} disabled={busy}>Test &amp; preview</button>
-          <button class="btn" onclick={cancelEdit} disabled={busy}>Cancel</button>
-        </div>
-      </div>
+      <ApiServiceForm
+        bind:form
+        {editingName}
+        {kinds}
+        {busy}
+        {testResult}
+        onSave={save}
+        onTest={test}
+        onCancel={cancelEdit}
+      />
     {/if}
   </div>
 
@@ -747,7 +514,7 @@
                             class="flex items-center gap-2.5 py-1.5 text-left hover:bg-surface-2"
                             onclick={() => openDetail(s.name, op.operation_id)}
                           >
-                            <span class="w-16 shrink-0 font-mono text-[11.5px] font-medium {METHOD_COLORS[op.method] || 'text-dim'}">
+                            <span class="w-16 shrink-0 font-mono text-[11.5px] font-medium {API_METHOD_COLORS[op.method] || 'text-dim'}">
                               {op.method}
                             </span>
                             <span class="min-w-0 truncate font-mono text-[12.5px]">{op.path}</span>
@@ -780,200 +547,14 @@
 
 <!-- Endpoint detail -->
 {#if detail || detailBusy}
-  <div
-    class="fixed inset-0 z-40 flex justify-end bg-black/40"
-    role="button"
-    tabindex="-1"
-    onclick={(e) => {
-      if (e.target === e.currentTarget) detail = null;
-    }}
-    onkeydown={(e) => e.key === "Escape" && (detail = null)}
-  >
-    <div class="h-full w-full max-w-2xl overflow-y-auto bg-surface p-5 shadow-xl">
-      {#if detailBusy}
-        <div class="text-dim">Loading…</div>
-      {:else if detail}
-        {@const d = detail.detail || {}}
-        <div class="mb-3 flex items-start gap-2">
-          <div class="min-w-0 flex-1">
-            <div class="flex items-center gap-2">
-              <span class="font-mono text-[13px] font-medium {METHOD_COLORS[d.method] || 'text-dim'}">{d.method}</span>
-              <span class="min-w-0 break-all font-mono text-[13.5px]">{d.path}</span>
-            </div>
-            {#if d.summary}<div class="mt-1 text-[13px] text-dim">{d.summary}</div>{/if}
-            <div class="mt-1 font-mono text-[11px] text-faint">{detail.operationId}</div>
-          </div>
-          <button class="icon-btn" onclick={() => (detail = null)} aria-label="Close">
-            <Icon name="x" size={16} />
-          </button>
-        </div>
-
-        {#if d.truncated}
-          <div class="mb-3 rounded-md border border-warn bg-warn/10 px-3 py-2 text-[12px] text-warn">
-            Some schema detail was omitted to keep this bounded; consult the source specification for
-            the full definition.
-          </div>
-        {/if}
-
-        {#if d.description}
-          <p class="mb-3 whitespace-pre-wrap text-[13px] text-dim">{d.description}</p>
-        {/if}
-
-        {#if d.request?.command}
-          <h3 class="mb-1 text-[13px] font-medium">Example request</h3>
-          <pre class="mb-3 overflow-x-auto rounded-md bg-surface-2 p-3 font-mono text-[11.5px]">{d.request.command}</pre>
-        {/if}
-
-        <!-- Try it -->
-        <div class="mb-3 rounded-md border border-line">
-          <button
-            class="flex w-full items-center justify-between px-3 py-2 text-[13px] font-medium"
-            onclick={() => (tryOpen = !tryOpen)}
-          >
-            <span>Try it</span>
-            <Icon name={tryOpen ? "chevron-down" : "chevron-right"} size={14} />
-          </button>
-
-          {#if tryOpen}
-            <div class="border-t border-line p-3">
-              {#if tryReq.pathParams.length}
-                <div class="mb-1 text-[12px] font-medium text-dim">Path parameters</div>
-                {#each tryReq.pathParams as p (p.name)}
-                  <div class="mb-1 flex items-center gap-2">
-                    <span class="w-40 shrink-0 truncate font-mono text-[12px]">{p.name} <span class="text-warn">*</span></span>
-                    <input class="input h-7 flex-1 text-[12px]" bind:value={p.value} placeholder="value" />
-                  </div>
-                {/each}
-              {/if}
-
-              {#if tryReq.query.length}
-                <div class="mb-1 mt-2 text-[12px] font-medium text-dim">Query</div>
-                {#each tryReq.query as p (p.name)}
-                  <div class="mb-1 flex items-center gap-2">
-                    <span class="w-40 shrink-0 truncate font-mono text-[12px]">{p.name}{#if p.required}
-                        <span class="text-warn">*</span>{/if}</span>
-                    <input class="input h-7 flex-1 text-[12px]" bind:value={p.value} placeholder="value" />
-                  </div>
-                {/each}
-              {/if}
-
-              <div class="mb-1 mt-2 flex items-center justify-between">
-                <span class="text-[12px] font-medium text-dim">Headers</span>
-                <button
-                  class="text-[12px] text-faint hover:text-dim"
-                  onclick={() => (tryReq.headers = [...tryReq.headers, { name: "", value: "" }])}
-                >
-                  + add
-                </button>
-              </div>
-              {#each tryReq.headers as h, i (i)}
-                <div class="mb-1 flex items-center gap-2">
-                  <input class="input h-7 w-40 shrink-0 font-mono text-[12px]" bind:value={h.name} placeholder="Name" />
-                  <input class="input h-7 flex-1 text-[12px]" bind:value={h.value} placeholder="value (empty removes a configured header)" />
-                </div>
-              {/each}
-
-              {#if d.request_body || d.method === "GRPC"}
-                <div class="mb-1 mt-2 text-[12px] font-medium text-dim">
-                  Body <span class="font-mono text-[11px] text-faint">{d.request_body?.content_type || "application/json"}</span>
-                </div>
-                <textarea class="input h-32 w-full font-mono text-[12px]" bind:value={tryReq.body}></textarea>
-              {/if}
-
-              <div class="mt-2 flex items-center gap-2">
-                <button class="btn btn-primary h-7 text-[12px]" disabled={tryBusy} onclick={sendTry}>
-                  {tryBusy ? "Sending…" : "Send"}
-                </button>
-                <span class="text-[11px] text-faint">
-                  Sent by krabby using the service's configured credentials.
-                </span>
-              </div>
-
-              {#if tryRes}
-                <div class="mt-3 border-t border-line pt-2">
-                  <div class="flex items-center gap-3 text-[12.5px]">
-                    <span class="font-mono font-medium {tryRes.ok ? 'text-ok' : 'text-err'}">{tryRes.status_text}</span>
-                    {#if tryRes.duration_ms != null}<span class="text-faint">{tryRes.duration_ms} ms</span>{/if}
-                    {#if tryRes.body_bytes}<span class="text-faint">{tryRes.body_bytes} B</span>{/if}
-                    {#if tryRes.message_count}<span class="text-faint">{tryRes.message_count} message{tryRes.message_count > 1 ? "s" : ""}</span>{/if}
-                  </div>
-                  {#if tryRes.error}
-                    <div class="mt-1 text-[12px] text-err">{tryRes.error}</div>
-                  {/if}
-                  {#if tryRes.truncated}
-                    <div class="mt-1 text-[12px] text-warn">The response was truncated.</div>
-                  {/if}
-                  {#if tryRes.notes?.length}
-                    {#each tryRes.notes as note (note)}
-                      <div class="mt-1 text-[12px] text-faint">{note}</div>
-                    {/each}
-                  {/if}
-                  {#if tryRes.body}
-                    <pre class="mt-2 max-h-80 overflow-auto rounded-md bg-surface-2 p-3 font-mono text-[11.5px]">{prettyBody(tryRes)}</pre>
-                  {/if}
-                </div>
-              {/if}
-            </div>
-          {/if}
-        </div>
-
-        {#if d.parameters?.length}
-          <h3 class="mb-1 text-[13px] font-medium">Parameters</h3>
-          <table class="mb-3 w-full text-left text-[12px]">
-            <thead class="text-faint">
-              <tr><th class="py-1">Name</th><th>In</th><th>Type</th><th>Required</th></tr>
-            </thead>
-            <tbody>
-              {#each d.parameters as p (p.in + p.name)}
-                <tr class="border-t border-line">
-                  <td class="py-1 font-mono">{p.name}</td>
-                  <td class="text-dim">{p.in}</td>
-                  <td class="text-dim">{p.type || "—"}</td>
-                  <td class="text-dim">{p.required ? "yes" : ""}</td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        {/if}
-
-        {#if d.request_body?.schema}
-          <h3 class="mb-1 text-[13px] font-medium">
-            Request body <span class="font-mono text-[11px] text-faint">{d.request_body.content_type}</span>
-          </h3>
-          <pre class="mb-3 overflow-x-auto rounded-md bg-surface-2 p-3 font-mono text-[11.5px]">{JSON.stringify(
-              d.request_body.schema,
-              null,
-              2,
-            )}</pre>
-        {/if}
-
-        {#if d.responses?.length}
-          <h3 class="mb-1 text-[13px] font-medium">Responses</h3>
-          {#each d.responses as r (r.status)}
-            <div class="mb-2">
-              <div class="text-[12.5px]">
-                <span class="font-mono font-medium">{r.status}</span>
-                {#if r.description}<span class="text-dim"> — {r.description}</span>{/if}
-              </div>
-              {#if r.schema}
-                <pre class="mt-1 max-h-64 overflow-auto rounded-md bg-surface-2 p-3 font-mono text-[11.5px]">{JSON.stringify(
-                    r.schema,
-                    null,
-                    2,
-                  )}</pre>
-              {/if}
-            </div>
-          {/each}
-        {/if}
-
-        {#if d.notes?.length}
-          <div class="mt-3 flex flex-col gap-1">
-            {#each d.notes as note (note)}
-              <div class="text-[12px] text-faint">{note}</div>
-            {/each}
-          </div>
-        {/if}
-      {/if}
-    </div>
-  </div>
+  <ApiOperationDialog
+    {detail}
+    {detailBusy}
+    bind:tryOpen
+    bind:tryRequest={tryReq}
+    tryBusy={tryBusy}
+    tryResult={tryRes}
+    onClose={closeDetail}
+    onSend={sendTry}
+  />
 {/if}

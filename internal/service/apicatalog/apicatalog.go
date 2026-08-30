@@ -279,9 +279,13 @@ type Operation struct {
 	Detail json.RawMessage `bw:"detail" json:"-"`
 
 	// Hash fingerprints the rendered markdown so unchanged operations skip
-	// re-embedding.
-	Hash      string    `bw:"hash"       json:"-"`
-	UpdatedAt time.Time `bw:"updated_at" json:"updated_at,omitzero"`
+	// re-embedding. It is committed only after every configured index has
+	// accepted the current projection.
+	Hash string `bw:"hash" json:"-"`
+	// IndexDirty is persisted before the projection changes and cleared with
+	// Hash after indexing succeeds, so interrupted updates are retried.
+	IndexDirty bool      `bw:"index_dirty" json:"-"`
+	UpdatedAt  time.Time `bw:"updated_at" json:"updated_at,omitzero"`
 }
 
 // RemoteOperation is one operation discovered by a provider, already rendered.
@@ -399,7 +403,8 @@ func NormalizeGroup(name string) string {
 // schemaVersion must be bumped whenever Service, Group or Operation change
 // shape.
 // v1: initial catalog (groups, services, operations).
-const schemaVersion = 1
+// v2: Operation gained IndexDirty for recoverable incremental indexing.
+const schemaVersion = 2
 
 // Store persists groups, services and operations.
 type Store struct {

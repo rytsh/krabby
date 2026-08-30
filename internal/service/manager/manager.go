@@ -63,6 +63,12 @@ type Manager struct {
 	sourcesRootDir string
 	apisRootDir    string
 
+	// Bundle resource hooks keep construction and shutdown in one ownership
+	// boundary. Nil hooks use the package defaults in docs.go.
+	openVectorStore        func(string) (vectorstore.Store, error)
+	newLangfuseTracer      func(config.Langfuse) (*langfuse.Tracer, error)
+	shutdownLangfuseTracer func(context.Context, *langfuse.Tracer) error
+
 	// Web content sources (wiki pages, Confluence spaces). webFetchers maps a
 	// collection type to its fetcher implementation; new source types register
 	// here (see SetWebSources).
@@ -152,7 +158,7 @@ type Manager struct {
 
 // docsBundle is an immutable snapshot of the docs/RAG clients. A nil field means
 // that capability is disabled. Bundles are swapped atomically by Configure; the
-// previous bundle's owned store is closed after a swap.
+// previous bundle's owned resources are closed after a swap.
 type docsBundle struct {
 	gen      docgen.Generator
 	rag      *rag.Service
@@ -167,7 +173,8 @@ type docsBundle struct {
 	// is an inert tracer, so call sites need no guard. It is owned by the
 	// bundle and shut down on swap, but only when the replacement was built
 	// from a different configuration - see buildBundle.
-	tracer *langfuse.Tracer
+	tracer         *langfuse.Tracer
+	tracerShutdown func(context.Context) error
 
 	// ragCfg carries the docs retrieval tuning (hybrid fusion, lexical query
 	// building). It is kept on the bundle rather than read from rag because
@@ -311,9 +318,10 @@ type TaskStore interface {
 	List(ctx context.Context) ([]taskstore.PersistedTask, error)
 }
 
-// SetTaskStore installs the durable task store and wires it into the queue as
-// the persister. Call it once at startup, before RestoreTasks and before any
-// trigger enqueues work, so every submit is recorded.
+// SetTaskStore installs the durable task store and closes the queue's bootstrap
+// gates. Call it once at startup before any trigger enqueues work. RestoreTasks
+// enables durable submissions after listing, seeding and replaying every record;
+// StartTaskQueue releases dispatch after all startup dependencies are ready.
 func (m *Manager) SetTaskStore(store TaskStore) {
 	m.taskStore = store
 	m.queue.SetPersister(store)
@@ -323,7 +331,10 @@ func (m *Manager) SetTaskStore(store TaskStore) {
 // last stopped. Records are read in FIFO seq order and rebuilt from their spec;
 // a task that was running before the restart comes back as queued (its previous
 // run died with the process). Unknown or malformed specs are dropped so a bad
-// record cannot wedge startup. It is a no-op when no store is configured.
+// record cannot wedge startup. Duplicate restored keys keep the oldest record
+// and delete every coalesced record, avoiding durable orphans. Dispatch remains
+// paused until StartTaskQueue so restored closures cannot race startup setup. It
+// is a no-op when no store is configured.
 func (m *Manager) RestoreTasks(ctx context.Context) error {
 	if m.taskStore == nil {
 		return nil
@@ -333,27 +344,71 @@ func (m *Manager) RestoreTasks(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	var maxSeq uint64
+	for _, pt := range tasks {
+		maxSeq = max(maxSeq, pt.Seq)
+	}
+	// Seed from the complete listing, including malformed records that will be
+	// removed below, so no new task can ever reuse a sequence observed on disk.
+	m.queue.SeedSequence(maxSeq)
 
 	restored := 0
+	var cleanupErrs []error
 	for _, pt := range tasks {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		t, ok := m.rebuildTask(pt.Spec)
 		if !ok {
 			// Drop records we can no longer interpret so they are not retried
 			// on every restart.
-			m.taskStore.Remove(pt.Seq)
+			if rerr := m.taskStore.Remove(pt.Seq); rerr != nil {
+				cleanupErrs = append(cleanupErrs, rerr)
+			}
 
 			continue
 		}
 
-		m.queue.Restore(pt.Seq, t)
-		restored++
+		h, result := m.queue.Restore(pt.Seq, t)
+		switch result {
+		case queue.RestoreAccepted:
+			restored++
+		case queue.RestoreCoalesced:
+			// Restore dedup intentionally keeps the first (lowest-seq) task. The
+			// later durable row must be deleted or it will be replayed forever.
+			if rerr := m.taskStore.Remove(pt.Seq); rerr != nil {
+				cleanupErrs = append(cleanupErrs, rerr)
+			}
+		case queue.RestoreRejected:
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := h.Err(); err != nil {
+				return fmt.Errorf("restore persisted task %d; %w", pt.Seq, err)
+			}
+
+			return fmt.Errorf("restore persisted task %d rejected", pt.Seq)
+		}
 	}
+	if err := errors.Join(cleanupErrs...); err != nil {
+		return fmt.Errorf("clean persisted task records; %w", err)
+	}
+
+	m.queue.CompleteRestore()
 
 	if restored > 0 {
 		slog.Info("restored persisted background tasks", "count", restored)
 	}
 
 	return nil
+}
+
+// StartTaskQueue releases restored and startup-generated work for dispatch.
+// Call it only after RestoreTasks and after every dependency used by rebuilt Run
+// closures has been configured.
+func (m *Manager) StartTaskQueue() {
+	m.queue.StartDispatch()
 }
 
 // rebuildTask reconstructs a queue.Task (including its Run closure) from a
@@ -414,14 +469,30 @@ func (m *Manager) acquireDocs() (*docsBundle, func()) {
 	return m.docs, m.docsMu.RUnlock
 }
 
-// Credentials exposes the credential store for API and MCP handlers.
-func (m *Manager) Credentials() *credentials.Store { return m.creds }
+// SetCredential validates and stores transport-supplied credential material.
+// Keeping this operation on Manager prevents transports from bypassing policy
+// added around credential writes later.
+func (m *Manager) SetCredential(ctx context.Context, cred *credentials.Credential) error {
+	return m.creds.Set(ctx, cred)
+}
+
+// ListCredentials returns the stored credential metadata. Credential.Secret is
+// excluded from JSON serialization by the credentials package.
+func (m *Manager) ListCredentials(ctx context.Context) ([]*credentials.Credential, error) {
+	return m.creds.List(ctx)
+}
+
+// DeleteCredential removes one credential through the manager boundary.
+func (m *Manager) DeleteCredential(ctx context.Context, pattern string) error {
+	return m.creds.Delete(ctx, pattern)
+}
 
 // Wait blocks until in-flight background jobs finish.
 func (m *Manager) Wait() { m.wg.Wait() }
 
-// Close waits for background work and releases active vector stores. It is safe
-// to call once server shutdown has stopped accepting new manager operations.
+// Close waits for background work, flushes the active tracer and releases active
+// vector stores. It is safe to call once server shutdown has stopped accepting
+// new manager operations.
 func (m *Manager) Close() error {
 	m.lifecycleMu.Lock()
 	if m.closing {
@@ -447,20 +518,7 @@ func (m *Manager) Close() error {
 	m.docs = &docsBundle{}
 	m.docsMu.Unlock()
 
-	var errs []error
-	if prev != nil && prev.store != nil {
-		if err := prev.store.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("close docs vector store; %w", err))
-		}
-	}
-
-	if prev != nil && prev.codeStore != nil {
-		if err := prev.codeStore.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("close code vector store; %w", err))
-		}
-	}
-
-	return errors.Join(errs...)
+	return prev.closeExcept(nil)
 }
 
 // startWork registers one background task unless shutdown has started. The
@@ -845,8 +903,14 @@ func (m *Manager) BackfillGraphs(ctx context.Context) {
 	slog.Info("rebuilding graphs for current ignore rules and Graphify version",
 		"graphify_version", m.gfy.Version(), "repos", stale)
 
+	var errs []error
 	for _, id := range stale {
-		m.TriggerGenerate(id, []string{registry.StageGraph}, false)
+		if err := m.TriggerGenerate(id, []string{registry.StageGraph}, false); err != nil {
+			errs = append(errs, fmt.Errorf("enqueue graph backfill for %s; %w", id, err))
+		}
+	}
+	if err := errors.Join(errs...); err != nil {
+		slog.Error("enqueue graph metadata backfills", "error", err)
 	}
 }
 
@@ -980,14 +1044,18 @@ type RepoSpec struct {
 // If the repo already exists, it just triggers a refresh — which is what makes
 // this the usual "add or re-pull" entry point, so it takes the same per-run
 // skip list as TriggerRefresh. skip applies to the queued build only; use the
-// spec's Overrides.SkipStages to turn a stage off for good.
+// spec's Overrides.SkipStages to turn a stage off for good. A persistence
+// failure is returned; a newly registered repo is retained in StatusError so it
+// cannot remain indefinitely pending with no queued work.
 func (m *Manager) AddRepo(ctx context.Context, spec RepoSpec, skip ...string) (*registry.Repo, error) {
-	id, repo, _, err := m.registerRepo(ctx, spec)
+	id, repo, existed, err := m.registerRepo(ctx, spec)
 	if err != nil {
 		return nil, err
 	}
 
-	m.TriggerRefresh(id, skip...)
+	if err := m.TriggerRefresh(id, skip...); err != nil {
+		return repo, m.recordRepoEnqueueFailure(ctx, repo, existed, err)
+	}
 
 	return repo, nil
 }
@@ -999,15 +1067,38 @@ func (m *Manager) AddRepo(ctx context.Context, spec RepoSpec, skip ...string) (*
 // and the build keeps running (poll repo_status for the final state).
 //
 // A build failure is reported through the returned record's Status ("error") and
-// LastError, not as a Go error, so callers always get the final state back.
+// LastError, not as a Go error, so callers always get the final state back. An
+// enqueue failure is returned immediately.
 // skip drops stages from this build only; see AddRepo.
 func (m *Manager) AddRepoWait(ctx context.Context, spec RepoSpec, skip ...string) (*registry.Repo, bool, error) {
-	id, _, _, err := m.registerRepo(ctx, spec)
+	id, repo, existed, err := m.registerRepo(ctx, spec)
 	if err != nil {
 		return nil, false, err
 	}
 
-	return m.RefreshWait(ctx, id, skip...)
+	registered := repo
+	repo, done, err := m.RefreshWait(ctx, id, skip...)
+	if err != nil {
+		return registered, done, m.recordRepoEnqueueFailure(ctx, registered, existed, err)
+	}
+
+	return repo, done, nil
+}
+
+func (m *Manager) recordRepoEnqueueFailure(
+	ctx context.Context, repo *registry.Repo, existed bool, enqueueErr error,
+) error {
+	if existed || repo == nil {
+		return enqueueErr
+	}
+
+	repo.Status = registry.StatusError
+	repo.LastError = "enqueue refresh: " + enqueueErr.Error()
+	if err := m.reg.Upsert(context.WithoutCancel(ctx), repo); err != nil {
+		return errors.Join(enqueueErr, fmt.Errorf("save repo enqueue failure; %w", err))
+	}
+
+	return enqueueErr
 }
 
 // RefreshWait pulls and rebuilds a repository in the background and waits until
@@ -1015,18 +1106,21 @@ func (m *Manager) AddRepoWait(ctx context.Context, spec RepoSpec, skip ...string
 // reports whether the refresh completed within the wait; when false the build
 // continues detached and the record reflects the in-progress state.
 // A build failure is surfaced via the record's Status/LastError rather than a
-// Go error; only unexpected lookup failures return an error.
+// Go error; enqueue and unexpected lookup failures return an error.
 // skip names stages this run must not execute, on top of the repo's persisted
 // skip_stages override.
 func (m *Manager) RefreshWait(ctx context.Context, id string, skip ...string) (*registry.Repo, bool, error) {
 	// The refresh runs on the manager lifecycle context: a client that stops
 	// waiting (client-side tool timeout, ctrl+c, MCP cancellation) must not
 	// kill the clone/build mid-flight.
-	finished := m.refreshAsync(id, skip)
+	h := m.submitRefresh(id, skip)
+	if err := h.Err(); err != nil {
+		return nil, false, fmt.Errorf("enqueue refresh for %s; %w", id, err)
+	}
 
 	done := false
 	select {
-	case <-finished:
+	case <-h.Done():
 		done = true
 	case <-ctx.Done():
 	}
@@ -1089,14 +1183,6 @@ func (m *Manager) refreshTask(id string, skip []string) queue.Task {
 // once.
 func (m *Manager) submitRefresh(id string, skip []string) *queue.Handle {
 	return m.queue.Submit(m.refreshTask(id, skip))
-}
-
-// refreshAsync enqueues a refresh and returns a channel closed when that
-// refresh attempt completes. Refresh persists StatusError + LastError on
-// failure, so callers read the terminal state back from the registry. During
-// shutdown the channel is closed immediately.
-func (m *Manager) refreshAsync(id string, skip []string) <-chan struct{} {
-	return m.submitRefresh(id, skip).Done()
 }
 
 // registerRepo parses the url, upserts a pending record if the repo is new, and
@@ -1187,11 +1273,15 @@ func (m *Manager) SetRepoOverrides(ctx context.Context, ref string, over registr
 		// The graph itself is now wrong, and every artifact derived from it
 		// with it. A full refresh is the only path that rebuilds the graph;
 		// it detects the stale ignore block and forces the rebuild.
-		m.TriggerRefresh(updated.ID)
+		if err := m.TriggerRefresh(updated.ID); err != nil {
+			return updated, fmt.Errorf("repo overrides saved but refresh enqueue failed; %w", err)
+		}
 	case prev.Changed(updated.Overrides):
 		// Selection or prompt only: the graph still stands, so rebuild just the
 		// docs and indexes derived from it.
-		m.scheduleReindex(updated.ID)
+		if err := m.scheduleReindex(updated.ID); err != nil {
+			return updated, fmt.Errorf("repo overrides saved but reindex enqueue failed; %w", err)
+		}
 	}
 
 	return updated, nil
@@ -1556,9 +1646,10 @@ func (m *Manager) ensureCodeIndex(ctx context.Context, repoID, clonePath string)
 // queue. Concurrent triggers for the same repo and skip set coalesce, and the
 // queue's concurrency limit bounds how many repos refresh at once. skip names
 // stages this run must not execute, on top of the repo's persisted skip_stages
-// override; scheduled and webhook-driven refreshes pass none.
-func (m *Manager) TriggerRefresh(id string, skip ...string) {
-	m.submitRefresh(id, skip)
+// override; scheduled and webhook-driven refreshes pass none. A synchronous
+// queue persistence failure is returned.
+func (m *Manager) TriggerRefresh(id string, skip ...string) error {
+	return m.submitRefresh(id, skip).Err()
 }
 
 // generateOrder is the canonical stage execution order for selective runs:
@@ -1853,9 +1944,10 @@ func splitTargets(s string) []string {
 }
 
 // TriggerGenerate queues a background selective generation for a repo. When
-// force is true the docs stage ignores its incremental caches.
-func (m *Manager) TriggerGenerate(id string, targets []string, force bool) {
-	m.submitGenerate(id, targets, force)
+// force is true the docs stage ignores its incremental caches. A synchronous
+// queue persistence failure is returned.
+func (m *Manager) TriggerGenerate(id string, targets []string, force bool) error {
+	return m.submitGenerate(id, targets, force).Err()
 }
 
 // GenerateWait runs the selected generation stages for a repo in the background
@@ -1863,16 +1955,19 @@ func (m *Manager) TriggerGenerate(id string, targets []string, force bool) {
 // record. done reports whether the generation completed within the wait; when
 // false the run continues detached and the record reflects the in-progress
 // state. Stage failures are surfaced via the record's Status/LastError rather
-// than a Go error; only unexpected lookup failures return an error.
+// than a Go error; enqueue and unexpected lookup failures return an error.
 func (m *Manager) GenerateWait(ctx context.Context, id string, targets []string, force bool) (*registry.Repo, bool, error) {
 	// The generation runs on the manager lifecycle context: a client that stops
 	// waiting (client-side tool timeout, ctrl+c, MCP cancellation) must not
 	// kill the build mid-flight.
-	finished := m.generateAsync(id, targets, force)
+	h := m.submitGenerate(id, targets, force)
+	if err := h.Err(); err != nil {
+		return nil, false, fmt.Errorf("enqueue generate for %s; %w", id, err)
+	}
 
 	done := false
 	select {
-	case <-finished:
+	case <-h.Done():
 		done = true
 	case <-ctx.Done():
 	}
@@ -1891,14 +1986,6 @@ func (m *Manager) GenerateWait(ctx context.Context, id string, targets []string,
 	return repo, done, nil
 }
 
-// generateAsync enqueues a selective generation and returns a channel closed
-// when that run completes. Generate persists StatusError + LastError on failure,
-// so callers read the terminal state back from the registry. During shutdown the
-// channel is closed immediately.
-func (m *Manager) generateAsync(id string, targets []string, force bool) <-chan struct{} {
-	return m.submitGenerate(id, targets, force).Done()
-}
-
 // TriggerReindexAll rebuilds optional docs/code indexes for every ready repo
 // and web source without fetching git or rebuilding graphify output. It is used
 // after a live settings update because an ordinary refresh intentionally exits
@@ -1909,8 +1996,8 @@ func (m *Manager) generateAsync(id string, targets []string, force bool) <-chan 
 // governs how many run at once. A limit of 1 reindexes sequentially (the
 // previous behavior, which avoided multiplying LLM/embedder load); a higher
 // limit fans out within that bound.
-func (m *Manager) TriggerReindexAll() {
-	m.queue.Submit(m.reindexAllTask())
+func (m *Manager) TriggerReindexAll() error {
+	return m.queue.Submit(m.reindexAllTask()).Err()
 }
 
 // reindexAllTask builds the reindex coordinator task with a Spec so a restart
@@ -1929,26 +2016,33 @@ func (m *Manager) reindexAllTask() queue.Task {
 // reindexAll is the queue coordinator for TriggerReindexAll: it enqueues a
 // reindex task for each ready repo and each web-source collection.
 func (m *Manager) reindexAll(ctx context.Context) error {
+	var errs []error
 	repos, err := m.reg.List(ctx)
 	if err != nil {
-		slog.Error("list repos for reindex", "error", err)
+		errs = append(errs, fmt.Errorf("list repos for reindex; %w", err))
 	} else {
 		for _, listed := range repos {
 			if listed.Status != registry.StatusReady {
 				continue
 			}
 
-			m.scheduleReindex(listed.ID)
+			if err := m.scheduleReindex(listed.ID); err != nil {
+				errs = append(errs, fmt.Errorf("enqueue reindex for repo %s; %w", listed.ID, err))
+			}
 		}
 	}
 
 	// Web-source and API-catalog vectors live in the same docs index and follow
 	// the same embedder settings, so they are rebuilt from the on-disk markdown
 	// too.
-	m.enqueueWebReindex(ctx)
-	m.enqueueAPIReindex(ctx)
+	if err := m.enqueueWebReindex(ctx); err != nil {
+		errs = append(errs, err)
+	}
+	if err := m.enqueueAPIReindex(ctx); err != nil {
+		errs = append(errs, err)
+	}
 
-	return nil
+	return errors.Join(errs...)
 }
 
 // reindexTask builds a deduplicated reindex task for one repo, one web-source
@@ -2008,8 +2102,8 @@ func (m *Manager) reindexTask(id string) queue.Task {
 // scheduleReindex enqueues a deduplicated background reindex of one repo's
 // docs/code indexes. The queue key collapses repeats, so calling it while an
 // identical reindex is already queued/running is a no-op.
-func (m *Manager) scheduleReindex(id string) {
-	m.queue.Submit(m.reindexTask(id))
+func (m *Manager) scheduleReindex(id string) error {
+	return m.queue.Submit(m.reindexTask(id)).Err()
 }
 
 // reindexRepo rebuilds a single ready repo's docs/code indexes from its
@@ -2172,7 +2266,9 @@ func (m *Manager) buildDocsAndIndex(
 		slog.Warn("docs/code bundle unavailable during index build",
 			"repo", repo.ID, "requeued", deferReindex)
 		if deferReindex {
-			m.scheduleReindex(repo.ID)
+			if err := m.scheduleReindex(repo.ID); err != nil {
+				slog.Error("enqueue deferred repo reindex", "repo", repo.ID, "error", err)
+			}
 		}
 
 		return
@@ -3425,8 +3521,30 @@ func (m *Manager) ListRepoFilesPageAt(ctx context.Context, repoID, subdir, snaps
 	return result, nil
 }
 
-// Registry exposes read access for API handlers.
-func (m *Manager) Registry() *registry.Registry { return m.reg }
+// Repo returns a tracked repository by its canonical id.
+func (m *Manager) Repo(ctx context.Context, id string) (*registry.Repo, error) {
+	return m.reg.Get(ctx, id)
+}
+
+// ResolveRepo resolves a canonical id or an unambiguous legacy suffix.
+func (m *Manager) ResolveRepo(ctx context.Context, ref string) (*registry.Repo, error) {
+	return m.reg.Resolve(ctx, ref)
+}
+
+// ListRepos returns one filtered page of tracked repositories.
+func (m *Manager) ListRepos(ctx context.Context, opts registry.ListOptions) ([]*registry.Repo, int, error) {
+	return m.reg.ListPaged(ctx, opts)
+}
+
+// RepoOwners returns repository owner groups for transport discovery views.
+func (m *Manager) RepoOwners(ctx context.Context) ([]registry.OwnerGroup, error) {
+	return m.reg.Owners(ctx)
+}
+
+// RepoNamespaces returns repository namespace groups and descriptions.
+func (m *Manager) RepoNamespaces(ctx context.Context) ([]registry.NamespaceGroup, error) {
+	return m.reg.Namespaces(ctx)
+}
 
 // MergedPath returns the merged cross-repo graph location ("" when merging is
 // disabled or the graph is not built yet).

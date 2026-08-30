@@ -102,7 +102,7 @@ type sourceView struct {
 	Progress []manager.Progress `json:"progress,omitempty"`
 }
 
-func viewSource(mgr *manager.Manager, col *websource.Collection, pageCount int) sourceView {
+func viewSource(mgr sourceService, col *websource.Collection, pageCount int) sourceView {
 	interval := ""
 	if col.RefreshInterval > 0 {
 		interval = col.RefreshInterval.String()
@@ -123,7 +123,7 @@ func viewSource(mgr *manager.Manager, col *websource.Collection, pageCount int) 
 	}
 }
 
-func listSources(mgr *manager.Manager) ada.HandlerFunc {
+func listSources(mgr sourceService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		cols, err := mgr.ListWebCollections(c.Request.Context())
 		if err != nil {
@@ -144,7 +144,7 @@ func listSources(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func testSourceConfig(mgr *manager.Manager) ada.HandlerFunc {
+func testSourceConfig(mgr sourceService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req sourceConfigTestRequest
 		if err := c.Bind(&req); err != nil {
@@ -155,7 +155,7 @@ func testSourceConfig(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func addSource(mgr *manager.Manager) ada.HandlerFunc {
+func addSource(mgr sourceService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req sourceRequest
 		if err := c.Bind(&req); err != nil {
@@ -179,7 +179,7 @@ func addSource(mgr *manager.Manager) ada.HandlerFunc {
 // store level (?page, ?per_page) and optionally filtered by ?team, so a large
 // source (thousands of pages) is never loaded whole. The response carries the
 // total matching count and the paging cursor for the UI.
-func getSource(mgr *manager.Manager) ada.HandlerFunc {
+func getSource(mgr sourceService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		name := c.Request.PathValue("name")
 
@@ -248,7 +248,7 @@ func queryInt(s string, def int) int {
 	return n
 }
 
-func updateSource(mgr *manager.Manager) ada.HandlerFunc {
+func updateSource(mgr sourceService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req sourceUpdateRequest
 		if err := c.Bind(&req); err != nil {
@@ -273,7 +273,7 @@ func updateSource(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func deleteSource(mgr *manager.Manager) ada.HandlerFunc {
+func deleteSource(mgr sourceService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		name := c.Request.PathValue("name")
 
@@ -285,7 +285,7 @@ func deleteSource(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func refreshSource(mgr *manager.Manager) ada.HandlerFunc {
+func refreshSource(mgr sourceService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		name := c.Request.PathValue("name")
 
@@ -298,13 +298,15 @@ func refreshSource(mgr *manager.Manager) ada.HandlerFunc {
 			return c.SetStatus(http.StatusNotFound).SendJSON(map[string]string{"error": "not found"})
 		}
 
-		mgr.TriggerWebRefresh(name)
+		if err := mgr.TriggerWebRefresh(name); err != nil {
+			return c.Err(err)
+		}
 
 		return c.SetStatus(http.StatusAccepted).SendJSON(map[string]string{"status": "refresh queued", "source": name})
 	}
 }
 
-func cancelSource(mgr *manager.Manager) ada.HandlerFunc {
+func cancelSource(mgr sourceService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		name := c.Request.PathValue("name")
 		scope := websource.ScopeKey(name)
@@ -331,7 +333,7 @@ type importPagesRequest struct {
 	Pages []manager.WebPageImport `json:"pages"`
 }
 
-func addSourcePage(mgr *manager.Manager) ada.HandlerFunc {
+func addSourcePage(mgr sourceService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req addPageRequest
 		if err := c.Bind(&req); err != nil {
@@ -347,7 +349,7 @@ func addSourcePage(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func importSourceSitemap(mgr *manager.Manager) ada.HandlerFunc {
+func importSourceSitemap(mgr sourceService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req importSitemapRequest
 		if err := c.Bind(&req); err != nil {
@@ -366,7 +368,7 @@ func importSourceSitemap(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func importSourcePages(mgr *manager.Manager) ada.HandlerFunc {
+func importSourcePages(mgr sourceService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req importPagesRequest
 		if err := c.Bind(&req); err != nil {
@@ -382,7 +384,7 @@ func importSourcePages(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func deleteSourcePage(mgr *manager.Manager) ada.HandlerFunc {
+func deleteSourcePage(mgr sourceService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		slug := c.Request.URL.Query().Get("slug")
 		if slug == "" {
@@ -397,7 +399,7 @@ func deleteSourcePage(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func getSourceDoc(mgr *manager.Manager) ada.HandlerFunc {
+func getSourceDoc(mgr sourceService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		path := c.Request.URL.Query().Get("path")
 		if path == "" {

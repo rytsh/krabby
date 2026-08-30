@@ -3,15 +3,22 @@ package manager
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/rakunlabs/bw"
 
+	"github.com/rytsh/krabby/internal/config"
 	"github.com/rytsh/krabby/internal/service/apicatalog"
+	"github.com/rytsh/krabby/internal/service/embedder"
 	"github.com/rytsh/krabby/internal/service/queue"
+	"github.com/rytsh/krabby/internal/service/rag"
+	"github.com/rytsh/krabby/internal/service/vectorstore"
 )
 
 // fakeAPIProvider is a scriptable apicatalog.Provider: each Fetch pops the next
@@ -26,6 +33,7 @@ type fakeAPIRun struct {
 	complete  bool
 	unchanged bool
 	info      apicatalog.ServiceInfo
+	state     json.RawMessage
 }
 
 func (f *fakeAPIProvider) Validate(json.RawMessage) error { return nil }
@@ -53,11 +61,16 @@ func (f *fakeAPIProvider) Fetch(_ context.Context, _ *apicatalog.Service, _ json
 		}
 	}
 
+	state := run.state
+	if state == nil {
+		state = json.RawMessage(`{"v":1}`)
+	}
+
 	return &apicatalog.FetchResult{
 		Complete:  run.complete,
 		Unchanged: run.unchanged,
 		Info:      run.info,
-		State:     json.RawMessage(`{"v":1}`),
+		State:     state,
 	}, nil
 }
 
@@ -91,6 +104,78 @@ func newAPIManager(t *testing.T, provider apicatalog.Provider) (*Manager, *apica
 	t.Cleanup(m.queue.Close)
 
 	return m, store
+}
+
+func newIndexedAPIManager(
+	t *testing.T,
+	provider apicatalog.Provider,
+	wrapStore func(vectorstore.Store) vectorstore.Store,
+) (*Manager, *apicatalog.Store) {
+	t.Helper()
+	ctx := context.Background()
+
+	db, err := bw.Open("", bw.WithInMemory(true))
+	if err != nil {
+		t.Fatalf("bw.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	store, err := apicatalog.New(db)
+	if err != nil {
+		t.Fatalf("apicatalog.New: %v", err)
+	}
+	text, err := rag.NewTextStore(db)
+	if err != nil {
+		t.Fatalf("rag.NewTextStore: %v", err)
+	}
+	emb, err := embedder.New(config.Embedder{BaseURL: fakeReconcileEmbedServer(t).URL, Model: "fake"})
+	if err != nil {
+		t.Fatalf("embedder.New: %v", err)
+	}
+	vectors, err := vectorstore.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("vectorstore.New: %v", err)
+	}
+	t.Cleanup(func() { _ = vectors.Close() })
+	if wrapStore != nil {
+		vectors = wrapStore(vectors)
+	}
+
+	m := &Manager{
+		queue:        queue.New(ctx, 1),
+		locks:        map[string]*sync.Mutex{},
+		activity:     map[string]map[string]struct{}{},
+		progress:     map[string]map[string]Progress{},
+		apisRootDir:  t.TempDir(),
+		apiStore:     store,
+		apiProviders: map[string]apicatalog.Provider{"fake": provider},
+		docsText:     text,
+		docs: &docsBundle{
+			rag:   rag.New(config.RAG{ChunkSize: 200, ChunkOverlap: 40}, emb, vectors),
+			store: vectors,
+		},
+	}
+	t.Cleanup(m.queue.Close)
+
+	return m, store
+}
+
+type partialUpsertStore struct {
+	vectorstore.Store
+	armed  atomic.Bool
+	failed atomic.Bool
+}
+
+func (s *partialUpsertStore) Upsert(ctx context.Context, items []vectorstore.Item) error {
+	if s.armed.Load() && len(items) > 1 && s.failed.CompareAndSwap(false, true) {
+		if err := s.Store.Upsert(ctx, items[:1]); err != nil {
+			return err
+		}
+
+		return errors.New("injected partial upsert failure")
+	}
+
+	return s.Store.Upsert(ctx, items)
 }
 
 func remoteOp(method, path, summary string) apicatalog.RemoteOperation {
@@ -168,6 +253,78 @@ func TestRefreshAPIServiceWritesOperations(t *testing.T) {
 	}
 	if svc.Title != "Billing" || svc.ResolvedBaseURL != "https://b/api" {
 		t.Errorf("document metadata not copied onto the service: %+v", svc)
+	}
+}
+
+func TestRefreshAPIServiceRetriesDirtyPathAfterPartialVectorInsert(t *testing.T) {
+	ctx := context.Background()
+	initial := remoteOp("POST", "/v1/invoices", "Create an invoice")
+	changed := remoteOp("POST", "/v1/invoices", strings.Repeat("alpha ", 500)+"gamma gamma")
+	provider := &fakeAPIProvider{runs: []fakeAPIRun{
+		{complete: true, ops: []apicatalog.RemoteOperation{initial}, state: json.RawMessage(`{"v":1}`)},
+		{complete: true, ops: []apicatalog.RemoteOperation{changed}, state: json.RawMessage(`{"v":2}`)},
+		{complete: true, ops: []apicatalog.RemoteOperation{changed}, state: json.RawMessage(`{"v":2}`)},
+	}}
+	var fault *partialUpsertStore
+	m, store := newIndexedAPIManager(t, provider, func(base vectorstore.Store) vectorstore.Store {
+		fault = &partialUpsertStore{Store: base}
+
+		return fault
+	})
+	seedService(t, store, "billing", "")
+
+	if err := m.RefreshAPIService(ctx, "billing"); err != nil {
+		t.Fatalf("initial refresh: %v", err)
+	}
+	slug := initial.OpSlug
+	before, err := store.GetOperation(ctx, apicatalog.OperationID("billing", slug))
+	if err != nil {
+		t.Fatal(err)
+	}
+	committedHash := before.Hash
+
+	fault.armed.Store(true)
+	if err := m.RefreshAPIService(ctx, "billing"); err == nil {
+		t.Fatal("partial indexing failure was not returned")
+	}
+	partial, err := store.GetOperation(ctx, apicatalog.OperationID("billing", slug))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !partial.IndexDirty || partial.Hash != committedHash {
+		t.Fatalf("operation committed after partial indexing: dirty=%v hash=%q want=%q", partial.IndexDirty, partial.Hash, committedHash)
+	}
+	indexed, err := m.docs.rag.IndexedPaths(ctx, apicatalog.ScopeKey("billing"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := indexed[slug+".md"]; !ok {
+		t.Fatal("fault did not leave a partial operation path indexed")
+	}
+	svc, err := store.GetService(ctx, "billing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if svc.Status != apicatalog.StatusError || svc.LastError == "" || string(svc.State) != `{"v":1}` {
+		t.Fatalf("failed service status=%q state=%s error=%q", svc.Status, svc.State, svc.LastError)
+	}
+
+	if err := m.RefreshAPIService(ctx, "billing"); err != nil {
+		t.Fatalf("retry refresh: %v", err)
+	}
+	repaired, err := store.GetOperation(ctx, apicatalog.OperationID("billing", slug))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repaired.IndexDirty || repaired.Hash == committedHash {
+		t.Fatalf("operation was not committed after retry: dirty=%v hash=%q", repaired.IndexDirty, repaired.Hash)
+	}
+	svc, err = store.GetService(ctx, "billing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if svc.Status != apicatalog.StatusReady || string(svc.State) != `{"v":2}` {
+		t.Fatalf("repaired service status=%q state=%s error=%q", svc.Status, svc.State, svc.LastError)
 	}
 }
 
@@ -253,6 +410,50 @@ func TestRefreshAPIServiceUnchangedKeepsCatalog(t *testing.T) {
 	svc, _ := store.GetService(ctx, "billing")
 	if svc.Status != apicatalog.StatusReady {
 		t.Errorf("status after an unchanged sync = %q, want ready", svc.Status)
+	}
+}
+
+func TestRefreshAPIServiceUnchangedRemovesStaleIndexedPaths(t *testing.T) {
+	ctx := context.Background()
+	keep := remoteOp("POST", "/v1/invoices", "Create")
+	stale := remoteOp("GET", "/v1/invoices", "List")
+	provider := &fakeAPIProvider{runs: []fakeAPIRun{
+		{complete: true, ops: []apicatalog.RemoteOperation{keep, stale}},
+		{unchanged: true},
+	}}
+	m, store := newIndexedAPIManager(t, provider, nil)
+	seedService(t, store, "billing", "")
+	if err := m.RefreshAPIService(ctx, "billing"); err != nil {
+		t.Fatalf("initial refresh: %v", err)
+	}
+
+	// Simulate a crash after the catalog record and projection were removed but
+	// before either search index was cleaned up.
+	if err := store.DeleteOperation(ctx, apicatalog.OperationID("billing", stale.OpSlug)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(m.apisDir("billing"), stale.OpSlug+".md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RefreshAPIService(ctx, "billing"); err != nil {
+		t.Fatalf("recovery refresh: %v", err)
+	}
+
+	vectorPaths, err := m.docs.rag.IndexedPaths(ctx, apicatalog.ScopeKey("billing"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	textPaths, err := m.docsText.IndexedPaths(ctx, apicatalog.ScopeKey("billing"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for label, paths := range map[string]map[string]struct{}{"vectors": vectorPaths, "text": textPaths} {
+		if _, ok := paths[stale.OpSlug+".md"]; ok {
+			t.Errorf("%s retained stale operation path: %v", label, paths)
+		}
+		if _, ok := paths[keep.OpSlug+".md"]; !ok {
+			t.Errorf("%s lost current operation path: %v", label, paths)
+		}
 	}
 }
 

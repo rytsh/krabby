@@ -1,4 +1,4 @@
-on: [push]
+on: [push, pull_request]
 
 name: Test
 
@@ -6,7 +6,46 @@ permissions:
   contents: read
 
 jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Test backend
+        run: go test ./...
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.2.2
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: _ui/pnpm-lock.yaml
+      - name: Install frontend dependencies
+        working-directory: _ui
+        run: pnpm install --frozen-lockfile
+      - name: Test frontend
+        working-directory: _ui
+        run: pnpm test
+      - name: Check frontend
+        working-directory: _ui
+        run: pnpm check
+      - name: Lint frontend
+        working-directory: _ui
+        run: pnpm lint
+      - name: Build frontend
+        working-directory: _ui
+        run: pnpm build
+
   sonarcloud:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - name: Get repository name

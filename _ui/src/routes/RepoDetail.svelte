@@ -1,6 +1,8 @@
 <script>
-  import { onMount, onDestroy } from "svelte";
+  import { onMount } from "svelte";
+  import { SvelteMap } from "svelte/reactivity";
   import { api } from "../lib/api.js";
+  import { createLatestRequest, createPoller } from "../lib/async.js";
   import { path as routePath, link } from "../lib/router.js";
   import { fmtDate } from "../lib/format.js";
   import Status from "../lib/Status.svelte";
@@ -8,6 +10,8 @@
   import FileTree from "../lib/FileTree.svelte";
   import MarkdownView from "../lib/MarkdownView.svelte";
   import Icon from "../lib/Icon.svelte";
+  import RepoOverrides from "../components/RepoOverrides.svelte";
+  import { buildRepoOverridesPayload, createRepoOverridesDraft } from "../lib/repo-overrides.js";
   import { successToast } from "../lib/toast.js";
 
   let { repoId } = $props();
@@ -21,7 +25,9 @@
   );
 
   let repo = $state(null);
-  let error = $state("");
+  const repoRequests = createLatestRequest();
+  const settingsRequests = createLatestRequest();
+  const configRequests = createLatestRequest();
 
   // Generation stages shown in the Artifacts card. Enabled flags come from the
   // docs config; graph generation is always available. `needs` mirrors the
@@ -49,157 +55,27 @@
   let settings = $state(null);
   let showOverrides = $state(false);
   let savingOverrides = $state(false);
-  let overridesForm = $state(emptyOverrides());
-
-  function emptyOverrides() {
-    return {
-      include: "",
-      include_extra: "",
-      exclude: "",
-      graph_exclude: "",
-      docs_prompt: "",
-      docs_prompt_extra: "",
-      docs_max_source_bytes: "",
-      docs_max_group_bytes: "",
-      docs_max_synthesis_bytes: "",
-      skip_stages: [],
-    };
-  }
-
-  function overridesFromRepo(r) {
-    const o = r?.overrides || {};
-    return {
-      include: (o.include || []).join(", "),
-      include_extra: (o.include_extra || []).join(", "),
-      exclude: (o.exclude || []).join(", "),
-      graph_exclude: (o.graph_exclude || []).join(", "),
-      docs_prompt: o.docs_prompt || "",
-      docs_prompt_extra: o.docs_prompt_extra || "",
-      docs_max_source_bytes: o.docs_max_source_bytes ? String(o.docs_max_source_bytes) : "",
-      docs_max_group_bytes: o.docs_max_group_bytes ? String(o.docs_max_group_bytes) : "",
-      docs_max_synthesis_bytes: o.docs_max_synthesis_bytes ? String(o.docs_max_synthesis_bytes) : "",
-      skip_stages: [...(o.skip_stages || [])],
-    };
-  }
-
-  // Stages a repository can opt out of. The graph is worth skipping for a repo
-  // of plain config, where it yields nothing; its dependents still run, just
-  // without graph anchoring.
-  const skippableStages = [
-    { key: "graph", label: "Knowledge graph" },
-    { key: "code_index", label: "Semantic code index" },
-    { key: "docs", label: "Documentation" },
-    { key: "docs_index", label: "Documentation index" },
-  ];
-
-  function toggleSkip(key) {
-    const next = new Set(overridesForm.skip_stages);
-    if (next.has(key)) next.delete(key);
-    else next.add(key);
-    overridesForm = { ...overridesForm, skip_stages: [...next] };
-  }
+  let overridesForm = $state(createRepoOverridesDraft());
 
   async function loadSettings() {
+    const isLatest = settingsRequests.next();
     try {
-      settings = await api.repoSettings(repoId);
-    } catch (e) {
-      error = e.message;
+      const next = await api.repoSettings(repoId);
+      if (isLatest()) settings = next;
+    } catch {
+      // The API wrapper reports request failures globally.
     }
-  }
-
-  // Rows rendered in the read-only summary: label, effective value, and whether
-  // this repo is the reason it differs from the install-wide setting.
-  function settingsRows(st) {
-    if (!st) return [];
-    const eff = st.effective || {};
-    const over = st.overrides || {};
-    const list = (v) => (v?.length ? v.join(", ") : "");
-
-    return [
-      {
-        label: "Indexed files",
-        value: eff.code_include_is_default ? "built-in allowlist" : list(eff.code_include),
-        overridden: Boolean(over.include?.length),
-      },
-      { label: "Also indexed", value: list(eff.code_include_extra), overridden: Boolean(over.include_extra?.length) },
-      { label: "Skipped", value: list(eff.code_exclude), overridden: Boolean(over.exclude?.length) },
-      { label: "Graph ignores", value: list(eff.graph_exclude), overridden: Boolean(over.graph_exclude?.length) },
-      {
-        label: "Skipped stages",
-        value: list(eff.skip_stages),
-        overridden: Boolean(over.skip_stages?.length),
-      },
-      {
-        label: "Docs input budget",
-        value: eff.docs_limits ? `${kb(eff.docs_limits.max_source_bytes)} per file` : "",
-        overridden: Boolean(over.docs_max_source_bytes),
-      },
-      { label: "Docs prompt", value: eff.docs_prompt_source, overridden: eff.docs_prompt_source === "repo" },
-      {
-        label: "Extra doc rules",
-        value: eff.docs_prompt_extras?.length ? eff.docs_prompt_extras.join(" + ") : "none",
-        overridden: (eff.docs_prompt_extras || []).includes("repo"),
-      },
-    ].filter((r) => r.value);
-  }
-
-  function kb(n) {
-    return n ? `${Math.round(n / 1024)} KiB` : "";
-  }
-
-  // An empty box means "inherit"; only a positive number is an override.
-  function positiveInt(s) {
-    const n = Number.parseInt(String(s).trim(), 10);
-    return Number.isFinite(n) && n > 0 ? n : 0;
-  }
-
-  function splitGlobs(s) {
-    return s
-      .split(",")
-      .map((x) => x.trim())
-      .filter(Boolean);
-  }
-
-  function hasOverrides(r) {
-    const o = r?.overrides || {};
-    return Boolean(
-      o.include?.length ||
-        o.include_extra?.length ||
-        o.exclude?.length ||
-        o.docs_prompt ||
-        o.docs_prompt_extra ||
-        o.docs_max_source_bytes ||
-        o.docs_max_group_bytes ||
-        o.docs_max_synthesis_bytes ||
-        o.skip_stages?.length,
-    );
-  }
-
-  function openOverrides() {
-    overridesForm = overridesFromRepo(repo);
-    showOverrides = true;
   }
 
   async function saveOverrides() {
     savingOverrides = true;
     try {
-      await api.setRepoOverrides(repoId, {
-        include: splitGlobs(overridesForm.include),
-        include_extra: splitGlobs(overridesForm.include_extra),
-        exclude: splitGlobs(overridesForm.exclude),
-        graph_exclude: splitGlobs(overridesForm.graph_exclude),
-        docs_prompt: overridesForm.docs_prompt.trim(),
-        docs_prompt_extra: overridesForm.docs_prompt_extra.trim(),
-        docs_max_source_bytes: positiveInt(overridesForm.docs_max_source_bytes),
-        docs_max_group_bytes: positiveInt(overridesForm.docs_max_group_bytes),
-        docs_max_synthesis_bytes: positiveInt(overridesForm.docs_max_synthesis_bytes),
-        skip_stages: overridesForm.skip_stages,
-      });
+      await api.setRepoOverrides(repoId, buildRepoOverridesPayload(overridesForm));
       showOverrides = false;
       successToast("Settings saved; rebuild queued");
       await Promise.all([loadRepo(), loadSettings()]);
-    } catch (e) {
-      error = e.message;
+    } catch {
+      // The API wrapper reports request failures globally.
     } finally {
       savingOverrides = false;
     }
@@ -221,8 +97,8 @@
     try {
       await api.generate(repoId, [key], force);
       await loadRepo();
-    } catch (e) {
-      error = e.message;
+    } catch {
+      // The API wrapper reports request failures globally.
     } finally {
       if (force) forcing = { ...forcing, [key]: false };
       else generating = { ...generating, [key]: false };
@@ -252,6 +128,29 @@
   let docHeadings = $state([]);
   let docBrowserOpen = $state(false);
   let docsVersion;
+  const docsRequests = createLatestRequest();
+  const docRequests = createLatestRequest();
+  const rootRequests = createLatestRequest();
+  const fileRequests = createLatestRequest();
+  const linkRequests = createLatestRequest();
+  const directoryRequests = new SvelteMap();
+
+  function directoryRequest(path) {
+    if (!directoryRequests.has(path)) directoryRequests.set(path, createLatestRequest());
+    return directoryRequests.get(path);
+  }
+
+  function invalidateRequests() {
+    repoRequests.invalidate();
+    settingsRequests.invalidate();
+    configRequests.invalidate();
+    docsRequests.invalidate();
+    docRequests.invalidate();
+    rootRequests.invalidate();
+    fileRequests.invalidate();
+    linkRequests.invalidate();
+    for (const request of directoryRequests.values()) request.invalidate();
+  }
 
   function jumpToHeading(id) {
     document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -259,49 +158,66 @@
 
   // Resizable split: left pane width in px, persisted.
   let paneW = $state(Number(localStorage.getItem("krabby-pane-w")) || 260);
+  let dragMove;
+  let dragEnd;
+  let dragCancel;
+
+  function clearDrag(persist = false) {
+    if (!dragMove) return;
+    window.removeEventListener("pointermove", dragMove);
+    window.removeEventListener("pointerup", dragEnd);
+    window.removeEventListener("pointercancel", dragCancel);
+    dragMove = undefined;
+    dragEnd = undefined;
+    dragCancel = undefined;
+    if (persist) localStorage.setItem("krabby-pane-w", String(paneW));
+  }
 
   function startDrag(e) {
     e.preventDefault();
+    clearDrag();
     const startX = e.clientX;
     const startW = paneW;
 
-    function move(ev) {
+    dragMove = (ev) => {
       paneW = Math.min(640, Math.max(160, startW + ev.clientX - startX));
-    }
+    };
+    dragEnd = () => clearDrag(true);
+    dragCancel = () => clearDrag();
 
-    function up() {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-      localStorage.setItem("krabby-pane-w", String(paneW));
-    }
-
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
+    window.addEventListener("pointermove", dragMove);
+    window.addEventListener("pointerup", dragEnd);
+    window.addEventListener("pointercancel", dragCancel);
   }
 
   async function loadDocs() {
+    const isLatest = docsRequests.next();
     docsError = "";
     try {
       const docs = await api.docs(repoId);
+      if (!isLatest()) return;
       docList = Array.isArray(docs) ? docs : [];
       // Single comprehensive document: open it right away.
       if (docList.length > 0 && !selectedDoc) openDoc(docList[0]);
     } catch (e) {
+      if (!isLatest()) return;
       docsError = e.message;
       docList = [];
     }
   }
 
   async function openDoc(d) {
+    const isLatest = docRequests.next();
     selectedDoc = d.path;
     docContent = null;
     docHeadings = [];
     docsError = "";
     try {
       const res = await api.doc(repoId, d.path);
+      if (!isLatest()) return;
       docContent = res.content;
     } catch (e) {
-      docsError = e.message;
+      if (isLatest()) docsError = e.message;
     }
   }
 
@@ -312,8 +228,10 @@
   }
 
   async function loadRepo() {
+    const isLatest = repoRequests.next();
     try {
       const next = await api.repo(repoId);
+      if (!isLatest()) return;
       const snapshotChanged = repo?.path && next?.path && repo.path !== next.path;
       const docsStage = next?.stages?.docs;
       const nextDocsVersion = docsStage?.finished_at || "";
@@ -334,8 +252,8 @@
         if (mode === "files") await loadRoot();
       }
       if (docsFinished) await loadDocs();
-    } catch (e) {
-      error = e.message;
+    } catch {
+      // The API wrapper reports request failures globally.
     }
   }
 
@@ -346,16 +264,18 @@
 
   async function loadRoot() {
     const version = fileBrowserVersion;
+    const isLatest = rootRequests.next();
     fileError = "";
     rootLoaded = true;
     try {
       const result = await api.files(repoId, "", false);
-      if (version !== fileBrowserVersion) return;
+      if (!isLatest() || version !== fileBrowserVersion) return;
       fileSnapshot = result.snapshot;
       expanded = {};
       children = {};
       rootEntries = sortEntries(result.entries);
     } catch (e) {
+      if (!isLatest() || version !== fileBrowserVersion) return;
       fileError = e.message;
       rootEntries = [];
     }
@@ -366,16 +286,19 @@
     const version = fileBrowserVersion;
     const p = entry.path;
     if (expanded[p]) {
+      directoryRequest(p).invalidate();
       expanded = { ...expanded, [p]: false };
       return;
     }
     expanded = { ...expanded, [p]: true };
     if (!children[p]) {
+      const isLatest = directoryRequest(p).next();
       try {
         const result = await api.files(repoId, p, false, fileSnapshot);
-        if (version !== fileBrowserVersion) return;
+        if (!isLatest() || version !== fileBrowserVersion) return;
         children = { ...children, [p]: sortEntries(result.entries) };
       } catch (e) {
+        if (!isLatest() || version !== fileBrowserVersion) return;
         fileError = e.message;
         expanded = { ...expanded, [p]: false };
       }
@@ -384,15 +307,16 @@
 
   async function openFile(entry) {
     const version = fileBrowserVersion;
+    const isLatest = fileRequests.next();
     selected = entry.path;
     fileContent = null;
     fileError = "";
     try {
       const content = await api.file(repoId, entry.path, fileSnapshot);
-      if (version !== fileBrowserVersion) return;
+      if (!isLatest() || version !== fileBrowserVersion) return;
       fileContent = content;
     } catch (e) {
-      fileError = e.message;
+      if (isLatest() && version === fileBrowserVersion) fileError = e.message;
     }
   }
 
@@ -400,6 +324,7 @@
   let targetLine = $state(0);
 
   function openFromTree(entry) {
+    linkRequests.invalidate();
     targetLine = 0;
     openFile(entry);
   }
@@ -413,9 +338,10 @@
     for (let i = 0; i < parts.length - 1; i++) {
       prefix = prefix ? `${prefix}/${parts[i]}` : parts[i];
       if (!children[prefix]) {
+        const isLatest = directoryRequest(prefix).next();
         try {
           const result = await api.files(repoId, prefix, false, fileSnapshot);
-          if (version !== fileBrowserVersion) return;
+          if (!isLatest() || version !== fileBrowserVersion) return;
           children = { ...children, [prefix]: sortEntries(result.entries) };
         } catch {
           break;
@@ -432,9 +358,11 @@
   let lastDocLink = "";
 
   async function openFromLink(file, line) {
+    const isLatest = linkRequests.next();
     mode = "files";
     targetLine = line;
     await revealFile(file);
+    if (!isLatest()) return;
     await openFile({ path: file, is_dir: false });
   }
 
@@ -443,8 +371,8 @@
       await api.refreshRepo(repoId);
       successToast("Refresh queued");
       await loadRepo();
-    } catch (e) {
-      error = e.message;
+    } catch {
+      // The API wrapper reports request failures globally.
     }
   }
 
@@ -453,15 +381,14 @@
       await api.cancelRepoJob(repoId);
       successToast("Cancel requested");
       await loadRepo();
-    } catch (e) {
-      error = e.message;
+    } catch {
+      // The API wrapper reports request failures globally.
     }
   }
 
-  let timer;
+  const repoPoller = createPoller(loadRepo);
   function startPolling() {
-    clearInterval(timer);
-    timer = pollInterval > 0 ? setInterval(loadRepo, pollInterval) : undefined;
+    repoPoller.start(pollInterval);
   }
 
   function setPollInterval(value) {
@@ -470,15 +397,27 @@
     startPolling();
   }
 
-  onMount(async () => {
-    await loadRepo();
-    api.docsConfig().then((c) => (cfg = c)).catch(() => {});
-    loadSettings();
+  onMount(() => {
     // Poll so stage states and the running indicator update live.
     startPolling();
-    await loadDocs();
+    void repoPoller.run();
+    const configRequest = configRequests.next();
+    api
+      .docsConfig()
+      .then((c) => {
+        if (configRequest()) cfg = c;
+      })
+      .catch(() => {});
+    void loadSettings();
+    void loadDocs();
+
+    return () => {
+      repoPoller.stop();
+      invalidateRequests();
+      fileBrowserVersion += 1;
+      clearDrag();
+    };
   });
-  onDestroy(() => clearInterval(timer));
   // Derived rows so the card re-renders when the polled repo record changes.
   let stageRows = $derived(stageDefs.map((s) => {
     const st = (repo && repo.stages && repo.stages[s.key]) || {};
@@ -572,7 +511,7 @@
               <span class="font-mono text-[13px] text-faint">{docList.length}</span>
             </div>
             <ul class="m-0 list-none p-1.5">
-              {#each docList as d}
+              {#each docList as d (d.path)}
                 <li>
                   <button
                     class="flex w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-left text-[13px] text-dim hover:bg-surface-2 hover:text-fg"
@@ -891,125 +830,14 @@
         {/if}
       </div>
 
-      <div class="card shrink-0 flex flex-col gap-2.5 p-4 text-[13px]">
-        <div class="flex items-center justify-between gap-2">
-          <span class="text-dim">Build settings</span>
-          <button class="btn btn-sm" onclick={() => (showOverrides ? (showOverrides = false) : openOverrides())}>
-            {showOverrides ? "Close" : "Edit"}
-          </button>
-        </div>
-
-        {#if !showOverrides}
-          {#if settings}
-            {#each settingsRows(settings) as row}
-              <div class="flex items-start justify-between gap-2">
-                <span class="text-dim">{row.label}</span>
-                <span class="text-right">
-                  <span class="break-all font-mono text-faint">{row.value}</span>
-                  {#if row.overridden}
-                    <span class="ml-1 text-[11px] text-acc">repo</span>
-                  {/if}
-                </span>
-              </div>
-            {/each}
-            <p class="m-0 text-[12px] text-faint">
-              {hasOverrides(repo)
-                ? "Values marked “repo” override the global settings."
-                : "All values come from the global settings."}
-            </p>
-          {:else}
-            <p class="m-0 text-[12px] text-faint">Loading…</p>
-          {/if}
-        {:else}
-          <label class="flex flex-col gap-1 text-[13px] text-dim">
-            Also index these (added to the defaults)
-            <input class="input" placeholder="**/*.yaml, **/*.yml" bind:value={overridesForm.include_extra} />
-          </label>
-          <label class="flex flex-col gap-1 text-[13px] text-dim">
-            Index only these (replaces the defaults)
-            <input class="input" placeholder="empty = built-in allowlist" bind:value={overridesForm.include} />
-          </label>
-          <label class="flex flex-col gap-1 text-[13px] text-dim">
-            Skip these
-            <input class="input" placeholder="**/generated/**" bind:value={overridesForm.exclude} />
-          </label>
-          <label class="flex flex-col gap-1 text-[13px] text-dim">
-            Keep out of the knowledge graph
-            <input class="input" placeholder="proto/, **/*.gen.go" bind:value={overridesForm.graph_exclude} />
-          </label>
-          <label class="flex flex-col gap-1 text-[13px] text-dim">
-            Extra documentation instructions
-            <textarea
-              class="input min-h-[80px]"
-              placeholder="Environments are separate compose files; render a markdown table of service, image and version per environment."
-              bind:value={overridesForm.docs_prompt_extra}
-            ></textarea>
-          </label>
-          <div class="flex flex-col gap-1 text-[13px] text-dim">
-            Documentation input budget, bytes (empty = global default)
-            <div class="flex flex-wrap gap-2">
-              <input
-                class="input flex-1"
-                placeholder="per file, default 49152"
-                bind:value={overridesForm.docs_max_source_bytes}
-              />
-              <input
-                class="input flex-1"
-                placeholder="per summary call, default 98304"
-                bind:value={overridesForm.docs_max_group_bytes}
-              />
-              <input
-                class="input flex-1"
-                placeholder="final synthesis, default 262144"
-                bind:value={overridesForm.docs_max_synthesis_bytes}
-              />
-            </div>
-            <span class="text-[12px] text-faint">
-              Nothing past the per-file budget is ever sent to the model, so a repo whose substance
-              sits in a few very large files is documented from a truncated prefix until this is
-              raised. Raise the per-call budget with it, or that one binds first.
-            </span>
-          </div>
-          <div class="flex flex-col gap-1 text-[13px] text-dim">
-            Stages this repository does not run
-            <div class="flex flex-wrap gap-3">
-              {#each skippableStages as st (st.key)}
-                <label class="flex items-center gap-1 text-[13px]">
-                  <input
-                    type="checkbox"
-                    checked={overridesForm.skip_stages.includes(st.key)}
-                    onchange={() => toggleSkip(st.key)}
-                  />
-                  {st.label}
-                </label>
-              {/each}
-            </div>
-            <span class="text-[12px] text-faint">
-              Dependents still run without a skipped graph, just without symbol anchoring. Asking for
-              a skipped stage from the Generate buttons is rejected rather than silently doing nothing.
-            </span>
-          </div>
-          <label class="flex flex-col gap-1 text-[13px] text-dim">
-            Replace the documentation prompt
-            <textarea
-              class="input min-h-[60px]"
-              placeholder="empty = keep the default prompt"
-              bind:value={overridesForm.docs_prompt}
-            ></textarea>
-          </label>
-          <p class="m-0 text-[12px] text-faint">
-            Prefer the two “extra” fields: they add to the defaults. The replacing fields drop the
-            built-in allowlist and the default prompt’s formatting rules for this repo. Saving re-indexes
-            and re-documents this repository; changing the graph ignores rebuilds its graph too.
-          </p>
-          <div class="flex gap-2">
-            <button class="btn btn-primary" onclick={saveOverrides} disabled={savingOverrides}>
-              {savingOverrides ? "Saving…" : "Save settings"}
-            </button>
-            <button class="btn" onclick={() => (showOverrides = false)}>Cancel</button>
-          </div>
-        {/if}
-      </div>
+      <RepoOverrides
+        {repo}
+        {settings}
+        bind:form={overridesForm}
+        bind:open={showOverrides}
+        saving={savingOverrides}
+        onSave={saveOverrides}
+      />
     {/if}
   </div>
 </div>

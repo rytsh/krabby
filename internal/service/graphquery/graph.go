@@ -16,6 +16,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // maxGraphFileBytes caps graph.json size to avoid memory bombs (mirrors
@@ -60,6 +61,7 @@ type Graph struct {
 
 	// idfCache memoises IDF weights per query term (see scoring.go). Rebuilt with
 	// the graph, so it auto-invalidates on reload.
+	idfMu    sync.Mutex
 	idfCache map[string]float64
 }
 

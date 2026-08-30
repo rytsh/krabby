@@ -316,7 +316,7 @@ func summarizeSource(col *websource.Collection) sourceSummary {
 	}
 }
 
-func viewSourceMCP(mgr *manager.Manager, col *websource.Collection) sourceResult {
+func viewSourceMCP(mgr sourceAdminService, col *websource.Collection) sourceResult {
 	interval := ""
 	if col.RefreshInterval > 0 {
 		interval = col.RefreshInterval.String()
@@ -337,7 +337,7 @@ func viewSourceMCP(mgr *manager.Manager, col *websource.Collection) sourceResult
 
 // addDocTools registers the documentation + RAG tools. They surface even when
 // the subsystem is disabled; calls then return a clear 'not enabled' error.
-func addDocTools(server *mcp.Server, mgr *manager.Manager) {
+func addDocTools(server *mcp.Server, search docsSearchService, sources sourceReadService) {
 	addTool(server, &mcp.Tool{
 		Name:        "search_docs",
 		Description: "Search generated documentation and connected knowledge sources, including Confluence, Jira and pages. mode='semantic' (default) uses embedding retrieval and is the best general choice: its cost does not grow with how much of the collection shares the question's wording. mode='hybrid' combines semantic retrieval with local BM25 using weighted reciprocal rank fusion; it is the most thorough but waits for the BM25 arm, which on a large single-domain collection scores most of the corpus. A natural-language question is rewritten for BM25 into an OR of its words, so any shared product name or technical term contributes and the whole sentence is not required verbatim; words that look like keys, error codes, versions or paths (they contain a digit or . - _ / + @) stay required, so they still constrain the result. Semantic retrieval supplies paraphrase and conceptual recall. Use mode='lexical' for exact Jira keys, error codes, identifiers, quoted terms or page titles; it does not call an embedding model. Quote a phrase (\"gateway timeout\"), prefix a word with '-' to exclude it, or use OR/NOT explicitly to bypass the rewrite and control matching yourself. Use mode='semantic' for purely conceptual natural-language questions. Hybrid requires both indexes and does not silently fall back when semantic search is disabled. Scores are mode-specific and must not be compared across modes. Returns bounded ranked excerpts; use get_doc only when a result needs more context. Always scope with repo, web:<collection> or api:<service> when known. When repo is omitted the repo docs searched are limited to the 'default' namespace; pass namespace:'*' to search all namespaces (web sources and catalogued APIs always participate). Use list_sources only when the collection name is unknown.",
@@ -347,7 +347,7 @@ func addDocTools(server *mcp.Server, mgr *manager.Manager) {
 			return nil, searchDocsOutput{}, err
 		}
 
-		docs, err := mgr.SearchDocs(ctx, args.Scope, args.Repo, args.Namespace, mode, args.Question, args.TopDocs)
+		docs, err := search.SearchDocs(ctx, args.Scope, args.Repo, args.Namespace, mode, args.Question, args.TopDocs)
 		if err != nil {
 			return nil, searchDocsOutput{}, err
 		}
@@ -366,7 +366,7 @@ func addDocTools(server *mcp.Server, mgr *manager.Manager) {
 		}
 
 		if mode == "normal" {
-			result, err := mgr.SearchCodeText(ctx, args.Repo, args.Namespace, args.Query, args.Page, boundedCount(args.PerPage, 10, 50))
+			result, err := search.SearchCodeText(ctx, args.Repo, args.Namespace, args.Query, args.Page, boundedCount(args.PerPage, 10, 50))
 			if err != nil {
 				return nil, nil, err
 			}
@@ -375,7 +375,7 @@ func addDocTools(server *mcp.Server, mgr *manager.Manager) {
 			return jsonResult(result), nil, nil
 		}
 
-		snippets, err := mgr.SearchCode(ctx, args.Repo, args.Namespace, args.Query, boundedCount(args.TopK, 8, 20))
+		snippets, err := search.SearchCode(ctx, args.Repo, args.Namespace, args.Query, boundedCount(args.TopK, 8, 20))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -393,7 +393,7 @@ func addDocTools(server *mcp.Server, mgr *manager.Manager) {
 		Name:        "list_docs",
 		Description: "Discover generated document paths only when search_docs did not identify one or the user requests an inventory. Returns a bounded page, not document content.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args listDocsArgs) (*mcp.CallToolResult, any, error) {
-		docs, err := mgr.ListDocs(ctx, args.Repo)
+		docs, err := search.ListDocs(ctx, args.Repo)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -405,7 +405,7 @@ func addDocTools(server *mcp.Server, mgr *manager.Manager) {
 		Name:        "get_doc",
 		Description: "Read a known generated or synced Markdown document in bounded pages. Pass repo/scope_key and path exactly as returned by search_docs. Prefer search_docs first and continue with offset only while more context is needed.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args getDocArgs) (*mcp.CallToolResult, any, error) {
-		doc, err := mgr.GetDoc(ctx, args.Repo, args.Path, args.Offset, mcpReadSize(args.MaxBytes))
+		doc, err := search.GetDoc(ctx, args.Repo, args.Path, args.Offset, mcpReadSize(args.MaxBytes))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -417,7 +417,7 @@ func addDocTools(server *mcp.Server, mgr *manager.Manager) {
 		Name:        "list_sources",
 		Description: "List web sources with exact scope_key, type, status and description. Use it when the matching source is unknown; pass scope_key to search_docs.repo.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args listSourcesArgs) (*mcp.CallToolResult, pageResult[sourceSummary], error) {
-		cols, err := mgr.ListWebCollections(ctx)
+		cols, err := sources.ListWebCollections(ctx)
 		if err != nil {
 			return nil, pageResult[sourceSummary]{}, err
 		}
@@ -429,13 +429,13 @@ func addDocTools(server *mcp.Server, mgr *manager.Manager) {
 		page := pageSlice(summaries, args.Page, args.PerPage, 50)
 		return jsonResult(page), page, nil
 	})
-	addSourceInspectTool(server, mgr)
+	addSourceInspectTool(server, sources)
 }
 
 // addSourceInspectTool is read-only and belongs in the core MCP catalog: it lets a
 // model inspect sample titles/links after list_sources identifies a likely
 // collection, without exposing administration tools.
-func addSourceInspectTool(server *mcp.Server, mgr *manager.Manager) {
+func addSourceInspectTool(server *mcp.Server, mgr sourceReadService) {
 	addTool(server, &mcp.Tool{
 		Name:        "get_source",
 		Description: "Inspect one source's status and a bounded list of item titles and links when list_sources metadata is insufficient.",
@@ -481,15 +481,15 @@ func addSourceInspectTool(server *mcp.Server, mgr *manager.Manager) {
 	})
 }
 
-func addDocAdminTools(server *mcp.Server, mgr *manager.Manager) {
-	addDocConfigTools(server, mgr)
-	addSourceAdminTools(server, mgr)
+func addDocAdminTools(server *mcp.Server, settings docsSettingsService, sources sourceAdminService) {
+	addDocConfigTools(server, settings)
+	addSourceAdminTools(server, sources)
 }
 
 // addSourceAdminTools registers the web-source management tools (create,
 // update, delete, refresh, inspect) so sources like jira/confluence/pages can
 // be set up over MCP, mirroring the REST/UI surface. Admin profile only.
-func addSourceAdminTools(server *mcp.Server, mgr *manager.Manager) {
+func addSourceAdminTools(server *mcp.Server, mgr sourceAdminService) {
 	addTool(server, &mcp.Tool{
 		Name: "source_types",
 		Description: "List the web-source types that can be created (e.g. pages, confluence, jira) " +
@@ -587,7 +587,9 @@ func addSourceAdminTools(server *mcp.Server, mgr *manager.Manager) {
 		if col == nil {
 			return nil, nil, fmt.Errorf("source %s not found", name)
 		}
-		mgr.TriggerWebRefresh(name)
+		if err := mgr.TriggerWebRefresh(name); err != nil {
+			return nil, nil, err
+		}
 
 		return jsonResult(map[string]string{"status": "refresh queued", "source": name}), nil, nil
 	})
@@ -850,7 +852,7 @@ func (a setDocsConfigArgs) patch(raw json.RawMessage) (settings.Patch, error) {
 	return patch, nil
 }
 
-func settingsForArgs(ctx context.Context, mgr *manager.Manager, req *mcp.CallToolRequest, args setDocsConfigArgs) (settings.Settings, error) {
+func settingsForArgs(ctx context.Context, mgr docsSettingsService, req *mcp.CallToolRequest, args setDocsConfigArgs) (settings.Settings, error) {
 	current, err := mgr.GetDocsConfig(ctx)
 	if err != nil {
 		return settings.Settings{}, err
@@ -859,7 +861,7 @@ func settingsForArgs(ctx context.Context, mgr *manager.Manager, req *mcp.CallToo
 	return args.merge(current.Settings, req.Params.Arguments)
 }
 
-func addDocConfigTools(server *mcp.Server, mgr *manager.Manager) {
+func addDocConfigTools(server *mcp.Server, mgr docsSettingsService) {
 	addTool(server, &mcp.Tool{
 		Name: "get_docs_config",
 		Description: "Return the current docs/RAG configuration (LLM, embedders, chunking). " +

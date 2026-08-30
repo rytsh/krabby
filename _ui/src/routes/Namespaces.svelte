@@ -130,7 +130,7 @@
           </tr>
         </thead>
         <tbody>
-          {#each namespaces as ns}
+          {#each namespaces as ns (ns.namespace)}
             <tr class="hover:bg-surface-2">
               <td class="border-b border-line px-4 py-2.5">
                 <span class="inline-flex items-center gap-1.5 font-mono text-[13px]">

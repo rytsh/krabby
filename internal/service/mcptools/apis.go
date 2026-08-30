@@ -10,7 +10,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/rytsh/krabby/internal/service/apicatalog"
-	"github.com/rytsh/krabby/internal/service/manager"
 )
 
 // The API-catalog tools implement one deliberate shape: progressive disclosure.
@@ -202,7 +201,7 @@ type apiServiceConfigOutput struct {
 // ---- registration ----------------------------------------------------------
 
 // addAPITools registers the independent API discovery and call catalog.
-func addAPITools(server *mcp.Server, mgr *manager.Manager) {
+func addAPITools(server *mcp.Server, mgr apiReadService) {
 	addTool(server, &mcp.Tool{
 		Name: "list_api_groups",
 		Description: "List the API catalog's groups with their descriptions and service counts. " +
@@ -340,7 +339,7 @@ func addAPITools(server *mcp.Server, mgr *manager.Manager) {
 // addAPICallTool registers call_api_endpoint. The tool has real side effects on
 // the target API, but it cannot reach anything an operator did not already
 // catalogue. Administration lives on a separate MCP endpoint.
-func addAPICallTool(server *mcp.Server, mgr *manager.Manager) {
+func addAPICallTool(server *mcp.Server, mgr apiReadService) {
 	addTool(server, &mcp.Tool{
 		Name: "call_api_endpoint",
 		Description: "Send a real request to a catalogued endpoint and return the response. " +
@@ -369,7 +368,7 @@ func addAPICallTool(server *mcp.Server, mgr *manager.Manager) {
 
 // addAPIAdminTools registers the catalog management tools. Admin profile only:
 // they point krabby at arbitrary URLs and write persistent state.
-func addAPIAdminTools(server *mcp.Server, mgr *manager.Manager) {
+func addAPIAdminTools(server *mcp.Server, mgr apiAdminService) {
 	addTool(server, &mcp.Tool{
 		Name:        "api_service_kinds",
 		Description: "List the API service kinds that can be created (e.g. openapi) so add_api_service is called with a valid kind.",
@@ -493,7 +492,9 @@ func addAPIAdminTools(server *mcp.Server, mgr *manager.Manager) {
 			return nil, nil, fmt.Errorf("api service %s not found", name)
 		}
 
-		mgr.TriggerAPIRefresh(name)
+		if err := mgr.TriggerAPIRefresh(name); err != nil {
+			return nil, nil, err
+		}
 
 		return textResult("refresh queued"), nil, nil
 	})

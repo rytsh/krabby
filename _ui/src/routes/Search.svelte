@@ -74,6 +74,7 @@
   let total = $state(0);
   let page = $state(1);
   const perPage = 20;
+  const newline = "\n";
   let pageCount = $derived(Math.max(1, Math.ceil(total / perPage)));
   let loading = $state(false);
   let error = $state("");
@@ -164,6 +165,12 @@
       return `#/repos/${r.repo}?doc=${encodeURIComponent(r.path)}`;
     }
     return `#/repos/${r.repo}?file=${encodeURIComponent(r.path)}&line=${r.line || r.start_line || 1}`;
+  }
+
+  function resultKey(r) {
+    return scope === "docs"
+      ? `${r.repo}\0${r.path}`
+      : `${r.repo}\0${r.path}\0${r.line || r.start_line || r.end_line || 0}`;
   }
 
   function pct(score) {
@@ -401,7 +408,7 @@
       {/if}
     </div>
     <div class="flex flex-col gap-3">
-      {#each results as r, i (i)}
+      {#each results as r (resultKey(r))}
         {#if scope === "docs"}
           <a class="card block w-full cursor-pointer overflow-hidden text-left transition-colors hover:border-accent" href={resultHref(r)}>
             <div class="flex items-center gap-2 border-b border-line bg-surface-2/50 px-3.5 py-2">
@@ -438,8 +445,8 @@
             <pre
               class="snippet-view m-0 max-h-72 overflow-auto px-3.5 py-2.5 font-mono text-[12px] leading-relaxed text-dim"
               style={`counter-reset: line ${snip.first - 1}`}
-            ><code>{#if snip.clippedAbove}<span class="line-elided">⋯</span>{"\n"}{/if}{#each snip.lines as l, li}<span
-                  class="line {snip.match === snip.first + li ? 'line-target' : ''}">{l}</span>{"\n"}{/each}{#if snip.clippedBelow}<span class="line-elided">⋯</span>{/if}</code></pre>
+            ><code>{#if snip.clippedAbove}<span class="line-elided">⋯</span>{newline}{/if}{#each snip.lines as l, li (snip.first + li)}<span
+                  class="line {snip.match === snip.first + li ? 'line-target' : ''}">{l}</span>{newline}{/each}{#if snip.clippedBelow}<span class="line-elided">⋯</span>{/if}</code></pre>
           </a>
         {/if}
       {/each}

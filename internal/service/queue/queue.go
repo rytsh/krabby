@@ -16,7 +16,9 @@ package queue
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -42,6 +44,24 @@ const DefaultConcurrency = 3
 // maxRecent bounds the finished-task history kept for the UI.
 const maxRecent = 30
 
+var (
+	// ErrBootstrapIncomplete rejects durable work submitted before persisted
+	// tasks have been fully listed, sequence-seeded and restored.
+	ErrBootstrapIncomplete = errors.New("durable queue bootstrap is incomplete")
+	// ErrClosed rejects work submitted after queue shutdown has begun.
+	ErrClosed = errors.New("queue is closed")
+)
+
+// RestoreResult distinguishes a durable row that was restored from one that
+// coalesced with an older row or could not be accepted at all.
+type RestoreResult uint8
+
+const (
+	RestoreAccepted RestoreResult = iota
+	RestoreCoalesced
+	RestoreRejected
+)
+
 // Spec is the serializable description of a task, sufficient to rebuild its
 // Run closure after a restart. The queue never interprets it; it hands the Spec
 // to the Persister so the manager can round-trip queued/running work across
@@ -55,11 +75,10 @@ type Spec struct {
 // Persister records queued/running tasks durably so they survive a restart.
 // The queue calls Save when a task is enqueued and Remove once it reaches a
 // terminal state (done/error/canceled) or is dropped. Implementations must be
-// safe for concurrent use; errors are logged by the implementation, not the
-// queue. A nil Persister disables persistence.
+// safe for concurrent use. A nil Persister disables persistence.
 type Persister interface {
-	Save(seq uint64, spec Spec, enqueuedAt time.Time)
-	Remove(seq uint64)
+	Save(seq uint64, spec Spec, enqueuedAt time.Time) error
+	Remove(seq uint64) error
 }
 
 // Task describes one unit of background work submitted to the queue.
@@ -96,15 +115,42 @@ type Task struct {
 // Handle lets a caller wait for a submitted task to finish.
 type Handle struct {
 	done chan struct{}
+	once sync.Once
+	mu   sync.Mutex
+	err  error
 }
 
 // Done is closed when the task has finished, or immediately when the task was
 // rejected (queue closing) or coalesced onto an already-finished task.
 func (h *Handle) Done() <-chan struct{} { return h.done }
 
+// Err reports the task error recorded so far and is final after Done is closed.
+// Because Submit does not return until Save finishes, a durable submission whose
+// Save failed exposes that error as soon as Submit returns and never dispatches.
+func (h *Handle) Err() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	return h.err
+}
+
+func (h *Handle) complete(err error) {
+	h.mu.Lock()
+	h.err = err
+	h.mu.Unlock()
+	h.once.Do(func() { close(h.done) })
+}
+
 func closedHandle() *Handle {
 	h := &Handle{done: make(chan struct{})}
-	close(h.done)
+	h.complete(nil)
+
+	return h
+}
+
+func failedHandle(err error) *Handle {
+	h := &Handle{done: make(chan struct{})}
+	h.complete(err)
 
 	return h
 }
@@ -139,7 +185,8 @@ type task struct {
 	title      string
 	key        string
 	spec       Spec
-	persisted  bool // a Save was issued for this task and no Remove yet
+	persisting bool // Save is in progress; dispatch must wait for it
+	persisted  bool // Save succeeded and no Remove has succeeded yet
 	run        func(ctx context.Context) error
 	state      State
 	err        error
@@ -149,6 +196,7 @@ type task struct {
 	handle     *Handle
 	cancel     context.CancelFunc
 	canceled   bool
+	inRecent   bool
 }
 
 func (t *task) item() Item {
@@ -185,21 +233,74 @@ type Queue struct {
 	recent  []*task          // finished tasks, oldest first, capped at maxRecent
 	closed  bool
 
+	// Installing a Persister creates a two-phase startup gate. Restore first
+	// seeds/replays every durable record, CompleteRestore then allows new durable
+	// submissions, and StartDispatch finally lets any work run. This prevents a
+	// fresh low sequence from overwriting an unseen record and keeps restored
+	// closures dormant until their manager dependencies are configured.
+	persistenceReady bool
+	dispatchReady    bool
+
 	// persist records queued/running tasks so they survive a restart. It is set
-	// once via SetPersister before any Submit and is read without the lock.
+	// once via SetPersister before any durable Submit.
 	persist Persister
+	// persistWG covers Save calls that can outlive their Submit caller relative
+	// to Close (for example when Close races a blocked Save).
+	persistWG sync.WaitGroup
 
 	wake           chan struct{}
 	dispatcherDone chan struct{}
 }
 
-// SetPersister installs the durable store for queued/running tasks. It must be
-// called during setup, before Submit/Restore are used. A nil persister keeps
-// persistence disabled.
+// SetPersister installs the durable store for queued/running tasks. A non-nil
+// persister closes both bootstrap gates: callers must SeedSequence, replay all
+// records with Restore, call CompleteRestore, and finally call StartDispatch.
+// Until CompleteRestore, ordinary durable submissions are rejected rather than
+// risking a sequence collision. A nil persister keeps persistence disabled.
 func (q *Queue) SetPersister(p Persister) {
 	q.mu.Lock()
 	q.persist = p
+	q.persistenceReady = p == nil
+	q.dispatchReady = p == nil
 	q.mu.Unlock()
+
+	q.wakeUp()
+}
+
+// SeedSequence raises the sequence allocator to at least max. Bootstrap must
+// call it with the maximum sequence from the full persisted task listing before
+// any new durable submission is enabled.
+func (q *Queue) SeedSequence(max uint64) {
+	q.mu.Lock()
+	if max > q.seq {
+		q.seq = max
+	}
+	q.mu.Unlock()
+}
+
+// CompleteRestore marks the durable listing and replay phase complete. New
+// durable tasks may now be saved with sequence values above the seeded maximum,
+// but nothing dispatches until StartDispatch is called.
+func (q *Queue) CompleteRestore() {
+	q.mu.Lock()
+	q.persistenceReady = true
+	q.mu.Unlock()
+}
+
+// StartDispatch releases the bootstrap dispatch gate. It is separate from
+// CompleteRestore so startup-generated work can coalesce with restored pending
+// tasks before either is allowed to run.
+func (q *Queue) StartDispatch() {
+	q.mu.Lock()
+	if !q.persistenceReady {
+		q.mu.Unlock()
+
+		return
+	}
+	q.dispatchReady = true
+	q.mu.Unlock()
+
+	q.wakeUp()
 }
 
 // New creates a queue bound to baseCtx and starts its dispatcher. A limit <= 0
@@ -211,14 +312,16 @@ func New(baseCtx context.Context, limit int) *Queue {
 
 	ctx, cancel := context.WithCancel(baseCtx)
 	q := &Queue{
-		ctx:            ctx,
-		cancel:         cancel,
-		eg:             &errgroup.Group{},
-		limit:          limit,
-		active:         map[uint64]*task{},
-		byKey:          map[string]*task{},
-		wake:           make(chan struct{}, 1),
-		dispatcherDone: make(chan struct{}),
+		ctx:              ctx,
+		cancel:           cancel,
+		eg:               &errgroup.Group{},
+		limit:            limit,
+		active:           map[uint64]*task{},
+		byKey:            map[string]*task{},
+		persistenceReady: true,
+		dispatchReady:    true,
+		wake:             make(chan struct{}, 1),
+		dispatcherDone:   make(chan struct{}),
 	}
 
 	go q.dispatch()
@@ -255,20 +358,39 @@ func (q *Queue) Limit() int {
 // and returns that task's handle. When the queue is shutting down (or Run is
 // nil) an already-closed handle is returned and nothing is enqueued.
 func (q *Queue) Submit(t Task) *Handle {
+	h, _ := q.submit(t)
+
+	return h
+}
+
+// submit reports whether the task was accepted, coalesced with existing
+// pending work, or rejected before enqueue.
+func (q *Queue) submit(t Task) (*Handle, RestoreResult) {
 	if t.Run == nil {
-		return closedHandle()
+		return closedHandle(), RestoreRejected
 	}
 
 	q.mu.Lock()
-	defer q.mu.Unlock()
-
 	if q.closed {
-		return closedHandle()
+		q.mu.Unlock()
+
+		return failedHandle(ErrClosed), RestoreRejected
+	}
+
+	needsSave := t.Spec.Kind != "" && !t.noPersist && q.persist != nil
+	if needsSave && !q.persistenceReady {
+		q.mu.Unlock()
+
+		slog.Error("reject durable task before queue bootstrap", "kind", t.Spec.Kind, "id", t.Spec.ID)
+
+		return failedHandle(ErrBootstrapIncomplete), RestoreRejected
 	}
 
 	if t.Key != "" {
 		if existing, ok := q.byKey[t.Key]; ok {
-			return existing.handle
+			q.mu.Unlock()
+
+			return existing.handle, RestoreCoalesced
 		}
 	}
 
@@ -290,6 +412,7 @@ func (q *Queue) Submit(t Task) *Handle {
 		title:      firstNonEmpty(t.Title, t.Kind),
 		key:        t.Key,
 		spec:       t.Spec,
+		persisting: needsSave,
 		run:        t.Run,
 		state:      StateQueued,
 		enqueuedAt: enqueuedAt,
@@ -301,33 +424,81 @@ func (q *Queue) Submit(t Task) *Handle {
 		q.byKey[t.Key] = nt
 	}
 
-	// Persist queued work so it survives a restart. A Restore replaying an
-	// existing record skips the Save but still tracks the task so its terminal
-	// Remove fires; tasks without a serializable spec are never persisted.
-	switch {
-	case nt.spec.Kind == "":
-		// transient/coordinator task: not persisted
-	case t.noPersist:
+	// Restore replays an existing durable record. New durable work remains at
+	// the front of the FIFO in a non-dispatchable state while Save runs outside
+	// q.mu; this preserves submit order without making snapshots and controls
+	// wait for taskstore's timeout.
+	if t.noPersist && nt.spec.Kind != "" {
 		nt.persisted = true
-	case q.persist != nil:
-		nt.persisted = true
-		q.persist.Save(nt.seq, nt.spec, enqueuedAt)
+	}
+	p := q.persist
+	if needsSave {
+		q.persistWG.Add(1)
+	}
+	q.mu.Unlock()
+
+	if !needsSave {
+		q.wakeUp()
+
+		return nt.handle, RestoreAccepted
 	}
 
-	q.wakeUp()
+	saveErr := p.Save(nt.seq, nt.spec, enqueuedAt)
+	removeAfterSave := false
+	closeAfterSave := false
 
-	return nt.handle
+	q.mu.Lock()
+	nt.persisting = false
+	if saveErr != nil {
+		q.removePendingLocked(nt)
+		q.removeKeyLocked(nt)
+		nt.endedAt = time.Now()
+		nt.err = fmt.Errorf("persist queued task: %w", saveErr)
+		if !nt.canceled {
+			nt.state = StateError
+		}
+		q.pushRecentLocked(nt)
+		closeAfterSave = true
+	} else {
+		nt.persisted = true
+		switch {
+		case nt.canceled:
+			// Explicit cancellation raced Save. Delete only after Save has
+			// completed, otherwise the late write would create an orphan.
+			removeAfterSave = true
+			closeAfterSave = true
+		case q.closed:
+			// Shutdown keeps the successfully saved record for next startup.
+			closeAfterSave = true
+		}
+	}
+	q.mu.Unlock()
+
+	if saveErr != nil {
+		slog.Error("persist queued task", "seq", nt.seq, "error", saveErr)
+	}
+	if removeAfterSave {
+		q.removePersisted(p, nt)
+	}
+	if closeAfterSave {
+		nt.handle.complete(nt.err)
+	}
+	q.wakeUp()
+	q.persistWG.Done()
+
+	return nt.handle, RestoreAccepted
 }
 
 // Restore re-enqueues a task read from the Persister after a restart, reusing
 // its original seq so UI ids stay stable and skipping the Save (the record
 // already exists on disk). Terminal states still trigger Remove. It behaves
-// like Submit otherwise, including dedup by Key.
-func (q *Queue) Restore(seq uint64, t Task) *Handle {
+// like Submit otherwise, including dedup by Key. A coalesced result tells the
+// caller to remove the losing durable row; a rejected result must be retained.
+func (q *Queue) Restore(seq uint64, t Task) (*Handle, RestoreResult) {
 	t.seq = seq
 	t.noPersist = true
 
-	return q.Submit(t)
+	return q.submit(t)
 }
 
 // CancelPending drops queued (not-yet-started) tasks whose ID matches id,
@@ -336,9 +507,10 @@ func (q *Queue) Restore(seq uint64, t Task) *Handle {
 // queued tasks were removed.
 func (q *Queue) CancelPending(id string) int {
 	q.mu.Lock()
-	defer q.mu.Unlock()
 
 	kept := q.pending[:0]
+	var remove, complete []*task
+	p := q.persist
 	n := 0
 	for _, t := range q.pending {
 		if t.id != id {
@@ -349,13 +521,23 @@ func (q *Queue) CancelPending(id string) int {
 
 		t.state = StateCanceled
 		t.endedAt = time.Now()
+		t.canceled = true
 		q.removeKeyLocked(t)
-		q.removePersistedLocked(t)
 		q.pushRecentLocked(t)
-		close(t.handle.done)
+		if !t.persisting {
+			complete = append(complete, t)
+			if p != nil && t.persisted {
+				remove = append(remove, t)
+				q.persistWG.Add(1)
+			}
+		}
 		n++
 	}
 	q.pending = kept
+	q.mu.Unlock()
+
+	q.removeAndComplete(p, remove, complete)
+	q.wakeUp()
 
 	return n
 }
@@ -364,18 +546,29 @@ func (q *Queue) CancelPending(id string) int {
 // canceled tasks remain in recent history so the cancellation is visible.
 func (q *Queue) CancelAllPending() int {
 	q.mu.Lock()
-	defer q.mu.Unlock()
 
 	n := len(q.pending)
+	var remove, complete []*task
+	p := q.persist
 	for _, t := range q.pending {
 		t.state = StateCanceled
 		t.endedAt = time.Now()
+		t.canceled = true
 		q.removeKeyLocked(t)
-		q.removePersistedLocked(t)
 		q.pushRecentLocked(t)
-		close(t.handle.done)
+		if !t.persisting {
+			complete = append(complete, t)
+			if p != nil && t.persisted {
+				remove = append(remove, t)
+				q.persistWG.Add(1)
+			}
+		}
 	}
 	q.pending = nil
+	q.mu.Unlock()
+
+	q.removeAndComplete(p, remove, complete)
+	q.wakeUp()
 
 	return n
 }
@@ -384,9 +577,10 @@ func (q *Queue) CancelAllPending() int {
 // returns the number of tasks cancellation was requested for.
 func (q *Queue) CancelID(id string) int {
 	q.mu.Lock()
-	defer q.mu.Unlock()
 
 	kept := q.pending[:0]
+	var remove, complete []*task
+	p := q.persist
 	n := 0
 	for _, t := range q.pending {
 		if t.id != id {
@@ -397,10 +591,16 @@ func (q *Queue) CancelID(id string) int {
 
 		t.state = StateCanceled
 		t.endedAt = time.Now()
+		t.canceled = true
 		q.removeKeyLocked(t)
-		q.removePersistedLocked(t)
 		q.pushRecentLocked(t)
-		close(t.handle.done)
+		if !t.persisting {
+			complete = append(complete, t)
+			if p != nil && t.persisted {
+				remove = append(remove, t)
+				q.persistWG.Add(1)
+			}
+		}
 		n++
 	}
 	q.pending = kept
@@ -416,6 +616,10 @@ func (q *Queue) CancelID(id string) int {
 		}
 		n++
 	}
+	q.mu.Unlock()
+
+	q.removeAndComplete(p, remove, complete)
+	q.wakeUp()
 
 	return n
 }
@@ -445,7 +649,6 @@ func (q *Queue) LiveState(id string) State {
 // reaches the terminal canceled state when its Run function returns.
 func (q *Queue) CancelSeq(seq uint64) bool {
 	q.mu.Lock()
-	defer q.mu.Unlock()
 
 	for i, t := range q.pending {
 		if t.seq != seq {
@@ -455,10 +658,25 @@ func (q *Queue) CancelSeq(seq uint64) bool {
 		q.pending = append(q.pending[:i], q.pending[i+1:]...)
 		t.state = StateCanceled
 		t.endedAt = time.Now()
+		t.canceled = true
 		q.removeKeyLocked(t)
-		q.removePersistedLocked(t)
 		q.pushRecentLocked(t)
-		close(t.handle.done)
+		p := q.persist
+		complete := !t.persisting
+		remove := complete && p != nil && t.persisted
+		if remove {
+			q.persistWG.Add(1)
+		}
+		q.mu.Unlock()
+
+		if remove {
+			q.removePersisted(p, t)
+			q.persistWG.Done()
+		}
+		if complete {
+			t.handle.complete(t.err)
+		}
+		q.wakeUp()
 
 		return true
 	}
@@ -468,9 +686,11 @@ func (q *Queue) CancelSeq(seq uint64) bool {
 		if t.cancel != nil {
 			t.cancel()
 		}
+		q.mu.Unlock()
 
 		return true
 	}
+	q.mu.Unlock()
 
 	return false
 }
@@ -555,6 +775,7 @@ func (q *Queue) Close() {
 
 	<-q.dispatcherDone
 	_ = q.eg.Wait()
+	q.persistWG.Wait()
 }
 
 // dispatch is the single scheduler goroutine. It starts as many pending tasks
@@ -565,8 +786,11 @@ func (q *Queue) dispatch() {
 
 	for {
 		q.mu.Lock()
-		for !q.closed && len(q.pending) > 0 && q.running < q.limit {
+		for !q.closed && q.dispatchReady && len(q.pending) > 0 && q.running < q.limit {
 			t := q.pending[0]
+			if t.persisting {
+				break
+			}
 			q.pending = q.pending[1:]
 			q.removeKeyLocked(t) // a running task no longer dedups new submits
 
@@ -600,8 +824,11 @@ func (q *Queue) launchLocked(t *task) {
 	t.cancel = cancel
 	q.eg.Go(func() error {
 		err := safeRun(ctx, t.run)
+		// Capture this before the local cleanup cancel. Only cancellation that
+		// reached Run itself means shutdown interrupted durable work.
+		runCtxErr := ctx.Err()
 		cancel()
-		q.finish(t, err)
+		q.finish(t, err, runCtxErr)
 
 		// Errors are recorded per task; never propagate so one failure cannot
 		// tear down the shared errgroup.
@@ -609,35 +836,46 @@ func (q *Queue) launchLocked(t *task) {
 	})
 }
 
-func (q *Queue) finish(t *task, err error) {
+func (q *Queue) finish(t *task, err, runCtxErr error) {
 	q.mu.Lock()
 	q.running--
 	delete(q.active, t.seq)
 	t.endedAt = time.Now()
+	remove := false
+	p := q.persist
 	switch {
 	case t.canceled:
 		t.state = StateCanceled
 		t.err = nil
-		q.removePersistedLocked(t)
-	case err != nil && q.ctx.Err() != nil:
+		remove = p != nil && t.persisted
+	case runCtxErr != nil && q.ctx.Err() != nil:
 		// The whole queue is shutting down: this run was interrupted by the
 		// process exiting, not by the user. Keep its durable record so the
 		// task is re-enqueued (as queued) on the next start instead of lost.
+		// runCtxErr is captured before the task-local cancel, so a task that
+		// merely finishes while the queue is closed still removes its record.
 		t.state = StateCanceled
 		t.err = err
 	case err != nil:
 		t.state = StateError
 		t.err = err
-		q.removePersistedLocked(t)
+		remove = p != nil && t.persisted
 	default:
 		t.state = StateDone
-		q.removePersistedLocked(t)
+		remove = p != nil && t.persisted
+	}
+	if remove {
+		q.persistWG.Add(1)
 	}
 	q.pushRecentLocked(t)
 	q.mu.Unlock()
 
-	close(t.handle.done)
 	q.wakeUp()
+	if remove {
+		q.removePersisted(p, t)
+		q.persistWG.Done()
+	}
+	t.handle.complete(t.err)
 }
 
 // stopAccepting marks the queue closed and cancels every queued task. Running
@@ -650,6 +888,7 @@ func (q *Queue) stopAccepting() {
 		return
 	}
 	q.closed = true
+	var complete []*task
 	for _, t := range q.pending {
 		t.state = StateCanceled
 		t.endedAt = time.Now()
@@ -658,10 +897,15 @@ func (q *Queue) stopAccepting() {
 		// canceled only because the process is shutting down, so they must be
 		// restored (as queued) on the next start rather than discarded.
 		q.pushRecentLocked(t)
-		close(t.handle.done)
+		if !t.persisting {
+			complete = append(complete, t)
+		}
 	}
 	q.pending = nil
 	q.mu.Unlock()
+	for _, t := range complete {
+		t.handle.complete(t.err)
+	}
 
 	q.wakeUp()
 }
@@ -672,17 +916,53 @@ func (q *Queue) removeKeyLocked(t *task) {
 	}
 }
 
-// removePersistedLocked drops a task's durable record once it reaches a
-// terminal state, so restart never replays finished/canceled work. A no-op for
-// tasks that were never persisted.
-func (q *Queue) removePersistedLocked(t *task) {
-	if q.persist != nil && t.persisted {
-		q.persist.Remove(t.seq)
+// removePersisted drops a terminal task's durable record without holding q.mu.
+// A failed cleanup remains visible on the task and is logged; persisted stays
+// true because the record may still be present and replay on restart.
+func (q *Queue) removePersisted(p Persister, t *task) {
+	err := p.Remove(t.seq)
+
+	q.mu.Lock()
+	if err == nil {
 		t.persisted = false
+	} else {
+		t.err = errors.Join(t.err, fmt.Errorf("remove persisted task: %w", err))
+		if t.state == StateDone {
+			t.state = StateError
+		}
+	}
+	q.mu.Unlock()
+
+	if err != nil {
+		slog.Error("remove persisted task", "seq", t.seq, "error", err)
+	}
+}
+
+func (q *Queue) removeAndComplete(p Persister, remove, complete []*task) {
+	for _, t := range remove {
+		q.removePersisted(p, t)
+		q.persistWG.Done()
+	}
+	for _, t := range complete {
+		t.handle.complete(t.err)
+	}
+}
+
+func (q *Queue) removePendingLocked(target *task) {
+	for i, t := range q.pending {
+		if t == target {
+			q.pending = append(q.pending[:i], q.pending[i+1:]...)
+
+			return
+		}
 	}
 }
 
 func (q *Queue) pushRecentLocked(t *task) {
+	if t.inRecent {
+		return
+	}
+	t.inRecent = true
 	q.recent = append(q.recent, t)
 	if len(q.recent) > maxRecent {
 		q.recent = q.recent[len(q.recent)-maxRecent:]

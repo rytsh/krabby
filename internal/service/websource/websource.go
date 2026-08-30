@@ -147,8 +147,12 @@ type Page struct {
 	// upsert and never set by callers.
 	TeamsNorm []string `bw:"teams_norm,index" json:"-"`
 	// Hash fingerprints the converted markdown so unchanged pages skip
-	// re-embedding.
-	Hash string `bw:"hash"       json:"-"`
+	// re-embedding. It is committed only after every configured index has
+	// accepted the current markdown.
+	Hash string `bw:"hash" json:"-"`
+	// IndexDirty is persisted before the markdown changes and cleared with Hash
+	// after indexing succeeds, so interrupted incremental updates are retried.
+	IndexDirty bool `bw:"index_dirty" json:"-"`
 	// UpdatedAt is the source item's last-modified time (JIRA "updated",
 	// Confluence version.when). Persisted so it can be re-applied to the page's
 	// vectors during an index reconcile without re-fetching, and surfaced in
@@ -289,7 +293,8 @@ func ValidName(name string) bool { return nameRe.MatchString(name) }
 // v7: Collection gained Specs (per-source cron schedules).
 // v8: Page gained UpdatedAt (source last-modified time for recency).
 // v9: Collection gained AnalyzeImages (per-source vision opt-in).
-const schemaVersion = 9
+// v10: Page gained IndexDirty for recoverable incremental indexing.
+const schemaVersion = 10
 
 // Store persists collections and pages.
 type Store struct {

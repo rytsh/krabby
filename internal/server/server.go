@@ -39,8 +39,19 @@ import (
 	"github.com/rytsh/krabby/internal/service/settings"
 )
 
+// Handler builds the configured HTTP route graph without binding a socket.
+func Handler(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpServer, mcpAPIServer, mcpAdminServer *mcp.Server) http.Handler {
+	return newRouter(ctx, cfg, managerRouteServices(mgr), mcpServer, mcpAPIServer, mcpAdminServer)
+}
+
 // Start runs the HTTP server until ctx is cancelled.
 func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpServer, mcpAPIServer, mcpAdminServer *mcp.Server) error {
+	server := newRouter(ctx, cfg, managerRouteServices(mgr), mcpServer, mcpAPIServer, mcpAdminServer)
+
+	return server.StartWithContext(ctx, cfg.Server.Host+":"+cfg.Server.Port)
+}
+
+func newRouter(ctx context.Context, cfg *config.Config, services routeServices, mcpServer, mcpAPIServer, mcpAdminServer *mcp.Server) *ada.Server {
 	server := ada.New()
 	server.Use(
 		mrecover.Middleware(),
@@ -82,7 +93,7 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 
 	// The MCP key can be overridden at runtime from the UI; resolve it per
 	// request through the manager's cached value.
-	mgr.InitMCPKey(ctx, cfg.MCP.APIKey)
+	services.auth.InitMCPKey(ctx, cfg.MCP.APIKey)
 	// Each path owns a disjoint tool catalog. Clients add only the capabilities
 	// they need and can enable or disable API and administration independently.
 	for path, catalog := range mcpCatalogRoutes(cfg.MCP.Path, mcpServer, mcpAPIServer, mcpAdminServer) {
@@ -92,7 +103,7 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 		)
 		// mcpProbe wraps the handler rather than joining the middleware list so
 		// authentication runs before probes and protocol traffic reaches the SDK.
-		base.Handle(path, mcpProbe(handler), apiKeyMiddleware(mgr.MCPAPIKey))
+		base.Handle(path, mcpProbe(handler), apiKeyMiddleware(services.auth.MCPAPIKey))
 	}
 
 	// The Langfuse HTTP scope is attached to the API group rather than the
@@ -100,30 +111,30 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	// assets and the MCP path itself either carry no LLM work at all or are
 	// already traced by their own scope, and Langfuse bills per observation.
 	// A liveness probe every ten seconds is 8.6k observations a day of nothing.
-	api := base.Group("/api/v1", langfuseMiddleware(mgr))
-	api.GET("/settings", server.Wrap(getSettings(cfg, mgr)))
+	api := base.Group("/api/v1", langfuseMiddleware(services.tracing))
+	api.GET("/settings", server.Wrap(getSettings(cfg, services.auth, services.system)))
 	api.GET("/browser-extension.zip", server.Wrap(downloadBrowserExtension()))
-	api.GET("/mcp/api-key", server.Wrap(getMCPKey(mgr)))
-	api.PUT("/mcp/api-key", server.Wrap(setMCPKey(mgr)))
-	api.DELETE("/mcp/api-key", server.Wrap(clearMCPKey(mgr)))
-	api.GET("/repos", server.Wrap(listRepos(mgr)))
-	api.GET("/repos/owners", server.Wrap(listRepoOwners(mgr)))
-	api.GET("/repos/namespaces", server.Wrap(listRepoNamespaces(mgr)))
-	api.GET("/repos/active", server.Wrap(listActiveRepos(mgr)))
-	api.GET("/tasks", server.Wrap(listTasks(mgr)))
-	api.DELETE("/tasks/history", server.Wrap(clearTaskHistory(mgr)))
-	api.DELETE("/tasks/queued", server.Wrap(cancelPendingTasks(mgr)))
-	api.PUT("/tasks/concurrency", server.Wrap(setTaskConcurrency(mgr)))
-	api.POST("/tasks/{seq}/-/bump", server.Wrap(bumpTask(mgr)))
-	api.DELETE("/tasks/{seq}", server.Wrap(cancelTask(mgr)))
-	api.POST("/repos", server.Wrap(addRepo(mgr)))
+	api.GET("/mcp/api-key", server.Wrap(getMCPKey(services.auth)))
+	api.PUT("/mcp/api-key", server.Wrap(setMCPKey(services.auth)))
+	api.DELETE("/mcp/api-key", server.Wrap(clearMCPKey(services.auth)))
+	api.GET("/repos", server.Wrap(listRepos(services.repos)))
+	api.GET("/repos/owners", server.Wrap(listRepoOwners(services.repos)))
+	api.GET("/repos/namespaces", server.Wrap(listRepoNamespaces(services.repos)))
+	api.GET("/repos/active", server.Wrap(listActiveRepos(services.repos)))
+	api.GET("/tasks", server.Wrap(listTasks(services.queue)))
+	api.DELETE("/tasks/history", server.Wrap(clearTaskHistory(services.queue)))
+	api.DELETE("/tasks/queued", server.Wrap(cancelPendingTasks(services.queue)))
+	api.PUT("/tasks/concurrency", server.Wrap(setTaskConcurrency(services.queue)))
+	api.POST("/tasks/{seq}/-/bump", server.Wrap(bumpTask(services.queue)))
+	api.DELETE("/tasks/{seq}", server.Wrap(cancelTask(services.queue)))
+	api.POST("/repos", server.Wrap(addRepo(services.repos)))
 
 	// Namespace metadata (name + description). The repo tags themselves live on
 	// the repo records; these routes only manage the human/LLM-facing
 	// descriptions. GET reuses /repos/namespaces above (count + description).
-	api.GET("/namespaces", server.Wrap(listRepoNamespaces(mgr)))
-	api.POST("/namespaces", server.Wrap(upsertNamespace(mgr)))
-	api.DELETE("/namespaces/{name}", server.Wrap(deleteNamespace(mgr)))
+	api.GET("/namespaces", server.Wrap(listRepoNamespaces(services.repos)))
+	api.POST("/namespaces", server.Wrap(upsertNamespace(services.repos)))
+	api.DELETE("/namespaces/{name}", server.Wrap(deleteNamespace(services.repos)))
 
 	// Repo ids are full paths (host/group/.../name) with any number of "/"
 	// segments, so repo-scoped routes use a greedy wildcard and a GitLab-style
@@ -132,76 +143,76 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	//   POST   /repos/<id>/-/refresh        queue refresh
 	//   GET    /repos/<id>/-/files          list clone files
 	//   ...
-	api.GET("/repos/{ref...}", server.Wrap(dispatchRepo(mgr, map[string]ada.HandlerFunc{
-		"":       getRepo(mgr),
-		"graph":  repoArtifact(mgr, graphify.GraphPath),
-		"report": repoArtifact(mgr, graphify.ReportPath),
-		"html":   repoArtifact(mgr, graphify.HTMLPath),
-		"files":  listRepoFiles(mgr),
-		"file":   readRepoFile(mgr),
-		"docs":   listDocs(mgr),
-		"doc":    getDoc(mgr),
+	api.GET("/repos/{ref...}", server.Wrap(dispatchRepo(services.repos, map[string]ada.HandlerFunc{
+		"":       getRepo(services.repos),
+		"graph":  repoArtifact(services.repos, graphify.GraphPath),
+		"report": repoArtifact(services.repos, graphify.ReportPath),
+		"html":   repoArtifact(services.repos, graphify.HTMLPath),
+		"files":  listRepoFiles(services.docs),
+		"file":   readRepoFile(services.docs),
+		"docs":   listDocs(services.docs),
+		"doc":    getDoc(services.docs),
 		// The effective build configuration of this repo: the install-wide
 		// settings, this repo's overrides, and the merge the next build runs.
-		"settings": repoSettings(mgr),
+		"settings": repoSettings(services.repos),
 	})))
-	api.POST("/repos/{ref...}", server.Wrap(dispatchRepo(mgr, map[string]ada.HandlerFunc{
-		"refresh":   refreshRepo(mgr),
-		"generate":  generateRepo(mgr),
-		"cancel":    cancelRepoJob(mgr),
-		"namespace": setRepoNamespace(mgr),
-		"overrides": setRepoOverrides(mgr),
+	api.POST("/repos/{ref...}", server.Wrap(dispatchRepo(services.repos, map[string]ada.HandlerFunc{
+		"refresh":   refreshRepo(services.repos),
+		"generate":  generateRepo(services.repos),
+		"cancel":    cancelRepoJob(services.repos),
+		"namespace": setRepoNamespace(services.repos),
+		"overrides": setRepoOverrides(services.repos),
 	})))
-	api.DELETE("/repos/{ref...}", server.Wrap(dispatchRepo(mgr, map[string]ada.HandlerFunc{
-		"": deleteRepo(mgr),
+	api.DELETE("/repos/{ref...}", server.Wrap(dispatchRepo(services.repos, map[string]ada.HandlerFunc{
+		"": deleteRepo(services.repos),
 	})))
 	// Web content sources (wikis, Confluence spaces): named collections whose
 	// pages are synced to markdown and indexed into the docs RAG.
-	api.GET("/sources", server.Wrap(listSources(mgr)))
-	api.POST("/sources", server.Wrap(addSource(mgr)))
-	api.POST("/sources/config/test", server.Wrap(testSourceConfig(mgr)))
-	api.GET("/sources/{name}", server.Wrap(getSource(mgr)))
-	api.PUT("/sources/{name}", server.Wrap(updateSource(mgr)))
-	api.DELETE("/sources/{name}", server.Wrap(deleteSource(mgr)))
-	api.POST("/sources/{name}/refresh", server.Wrap(refreshSource(mgr)))
-	api.POST("/sources/{name}/cancel", server.Wrap(cancelSource(mgr)))
-	api.POST("/sources/{name}/pages", server.Wrap(addSourcePage(mgr)))
-	api.POST("/sources/{name}/pages/import", server.Wrap(importSourcePages(mgr)))
-	api.POST("/sources/{name}/sitemap", server.Wrap(importSourceSitemap(mgr)))
-	api.DELETE("/sources/{name}/pages", server.Wrap(deleteSourcePage(mgr)))
-	api.GET("/sources/{name}/doc", server.Wrap(getSourceDoc(mgr)))
+	api.GET("/sources", server.Wrap(listSources(services.sources)))
+	api.POST("/sources", server.Wrap(addSource(services.sources)))
+	api.POST("/sources/config/test", server.Wrap(testSourceConfig(services.sources)))
+	api.GET("/sources/{name}", server.Wrap(getSource(services.sources)))
+	api.PUT("/sources/{name}", server.Wrap(updateSource(services.sources)))
+	api.DELETE("/sources/{name}", server.Wrap(deleteSource(services.sources)))
+	api.POST("/sources/{name}/refresh", server.Wrap(refreshSource(services.sources)))
+	api.POST("/sources/{name}/cancel", server.Wrap(cancelSource(services.sources)))
+	api.POST("/sources/{name}/pages", server.Wrap(addSourcePage(services.sources)))
+	api.POST("/sources/{name}/pages/import", server.Wrap(importSourcePages(services.sources)))
+	api.POST("/sources/{name}/sitemap", server.Wrap(importSourceSitemap(services.sources)))
+	api.DELETE("/sources/{name}/pages", server.Wrap(deleteSourcePage(services.sources)))
+	api.GET("/sources/{name}/doc", server.Wrap(getSourceDoc(services.sources)))
 
 	// API catalog: OpenAPI documents and gRPC servers, catalogued as groups of
 	// services whose endpoints are browsable and indexed into the docs RAG.
-	api.GET("/apis/groups", server.Wrap(listAPIGroups(mgr)))
-	api.POST("/apis/groups", server.Wrap(upsertAPIGroup(mgr)))
-	api.DELETE("/apis/groups/{name}", server.Wrap(deleteAPIGroup(mgr)))
-	api.GET("/apis/kinds", server.Wrap(listAPIServiceKinds(mgr)))
-	api.GET("/apis/services", server.Wrap(listAPIServices(mgr)))
-	api.POST("/apis/services", server.Wrap(addAPIService(mgr)))
-	api.POST("/apis/services/config/test", server.Wrap(testAPIServiceConfig(mgr)))
-	api.GET("/apis/services/{name}", server.Wrap(getAPIService(mgr)))
-	api.PUT("/apis/services/{name}", server.Wrap(updateAPIService(mgr)))
-	api.DELETE("/apis/services/{name}", server.Wrap(deleteAPIService(mgr)))
-	api.POST("/apis/services/{name}/refresh", server.Wrap(refreshAPIService(mgr)))
-	api.POST("/apis/services/{name}/cancel", server.Wrap(cancelAPIService(mgr)))
-	api.GET("/apis/services/{name}/operation", server.Wrap(getAPIOperation(mgr)))
-	api.POST("/apis/services/{name}/operation/call", server.Wrap(callAPIOperation(mgr)))
+	api.GET("/apis/groups", server.Wrap(listAPIGroups(services.apis)))
+	api.POST("/apis/groups", server.Wrap(upsertAPIGroup(services.apis)))
+	api.DELETE("/apis/groups/{name}", server.Wrap(deleteAPIGroup(services.apis)))
+	api.GET("/apis/kinds", server.Wrap(listAPIServiceKinds(services.apis)))
+	api.GET("/apis/services", server.Wrap(listAPIServices(services.apis)))
+	api.POST("/apis/services", server.Wrap(addAPIService(services.apis)))
+	api.POST("/apis/services/config/test", server.Wrap(testAPIServiceConfig(services.apis)))
+	api.GET("/apis/services/{name}", server.Wrap(getAPIService(services.apis)))
+	api.PUT("/apis/services/{name}", server.Wrap(updateAPIService(services.apis)))
+	api.DELETE("/apis/services/{name}", server.Wrap(deleteAPIService(services.apis)))
+	api.POST("/apis/services/{name}/refresh", server.Wrap(refreshAPIService(services.apis)))
+	api.POST("/apis/services/{name}/cancel", server.Wrap(cancelAPIService(services.apis)))
+	api.GET("/apis/services/{name}/operation", server.Wrap(getAPIOperation(services.apis)))
+	api.POST("/apis/services/{name}/operation/call", server.Wrap(callAPIOperation(services.apis)))
 
-	api.GET("/docs/search", server.Wrap(searchDocs(mgr)))
-	api.GET("/code/search", server.Wrap(searchCode(mgr)))
-	api.GET("/docs/config", server.Wrap(getDocsConfig(mgr)))
-	api.PUT("/docs/config", server.Wrap(setDocsConfig(mgr)))
-	api.POST("/docs/config/test/llm", server.Wrap(testLLM(mgr)))
-	api.POST("/docs/config/test/embedder", server.Wrap(testEmbedder(mgr)))
-	api.POST("/docs/config/test/code-embedder", server.Wrap(testCodeEmbedder(mgr)))
-	api.POST("/docs/config/test/langfuse", server.Wrap(testLangfuse(mgr)))
-	api.GET("/graph", mergedGraph(mgr))
-	api.GET("/credentials", server.Wrap(listCredentials(mgr)))
-	api.PUT("/credentials", server.Wrap(setCredential(mgr)))
-	api.DELETE("/credentials", server.Wrap(deleteCredential(mgr)))
+	api.GET("/docs/search", server.Wrap(searchDocs(services.docs)))
+	api.GET("/code/search", server.Wrap(searchCode(services.docs)))
+	api.GET("/docs/config", server.Wrap(getDocsConfig(services.docsConfig)))
+	api.PUT("/docs/config", server.Wrap(setDocsConfig(services.docsConfig)))
+	api.POST("/docs/config/test/llm", server.Wrap(testLLM(services.docsConfig)))
+	api.POST("/docs/config/test/embedder", server.Wrap(testEmbedder(services.docsConfig)))
+	api.POST("/docs/config/test/code-embedder", server.Wrap(testCodeEmbedder(services.docsConfig)))
+	api.POST("/docs/config/test/langfuse", server.Wrap(testLangfuse(services.docsConfig)))
+	api.GET("/graph", mergedGraph(services.docs))
+	api.GET("/credentials", server.Wrap(listCredentials(services.credentials)))
+	api.PUT("/credentials", server.Wrap(setCredential(services.credentials)))
+	api.DELETE("/credentials", server.Wrap(deleteCredential(services.credentials)))
 
-	base.POST("/webhook/git", gitWebhook(mgr))
+	base.POST("/webhook/git", gitWebhook(services.webhook))
 
 	// Web UI: embedded Svelte SPA served at the base path with client-side
 	// routing fallback. Concrete routes above (/api, /mcp, /webhook, /healthz)
@@ -223,7 +234,7 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 
 	base.HandleWildcard("/", uiHandler)
 
-	return server.StartWithContext(ctx, cfg.Server.Host+":"+cfg.Server.Port)
+	return server
 }
 
 func mcpCatalogRoutes(root string, core, api, admin *mcp.Server) map[string]*mcp.Server {
@@ -296,7 +307,7 @@ type settingsResponse struct {
 	} `json:"graphify"`
 }
 
-func getSettings(cfg *config.Config, mgr *manager.Manager) ada.HandlerFunc {
+func getSettings(cfg *config.Config, auth mcpAuthService, system systemInfoService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var s settingsResponse
 
@@ -311,11 +322,11 @@ func getSettings(cfg *config.Config, mgr *manager.Manager) ada.HandlerFunc {
 		s.Server.BasePath = cfg.Server.BasePath
 
 		s.MCP.Path = cfg.MCP.Path
-		s.MCP.APIKeySet = mgr.MCPAPIKey() != ""
+		s.MCP.APIKeySet = auth.MCPAPIKey() != ""
 
 		s.Graphify.Bin = cfg.Graphify.Bin
 		s.Graphify.Python = cfg.Graphify.Python
-		s.Graphify.Version = mgr.GraphifyVersion()
+		s.Graphify.Version = system.GraphifyVersion()
 		s.Graphify.BuildTimeout = cfg.Graphify.BuildTimeout.String()
 
 		return c.SendJSON(s)
@@ -328,7 +339,7 @@ type mcpKeyRequest struct {
 	APIKey string `json:"api_key"`
 }
 
-func getMCPKey(mgr *manager.Manager) ada.HandlerFunc {
+func getMCPKey(mgr mcpAuthService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		return c.SendJSON(map[string]bool{"api_key_set": mgr.MCPAPIKey() != ""})
 	}
@@ -336,7 +347,7 @@ func getMCPKey(mgr *manager.Manager) ada.HandlerFunc {
 
 // setMCPKey stores a runtime override for the MCP API key and applies it
 // immediately. An empty api_key disables authentication.
-func setMCPKey(mgr *manager.Manager) ada.HandlerFunc {
+func setMCPKey(mgr mcpAuthService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req mcpKeyRequest
 		if err := c.Bind(&req); err != nil {
@@ -353,7 +364,7 @@ func setMCPKey(mgr *manager.Manager) ada.HandlerFunc {
 
 // clearMCPKey removes the runtime override so the file/env config value
 // applies again.
-func clearMCPKey(mgr *manager.Manager) ada.HandlerFunc {
+func clearMCPKey(mgr mcpAuthService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		if err := mgr.ClearMCPAPIKey(c.Request.Context()); err != nil {
 			return c.Err(err)
@@ -417,7 +428,7 @@ func namespaceParam(r *http.Request) string {
 // dispatchRepo routes /repos/{ref...} requests: it splits "<id>[/-/<action>]",
 // resolves the id (exact match or unique legacy-suffix match) to its canonical
 // form, and invokes the handler registered for the action.
-func dispatchRepo(mgr *manager.Manager, routes map[string]ada.HandlerFunc) ada.HandlerFunc {
+func dispatchRepo(mgr repoReader, routes map[string]ada.HandlerFunc) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		id, action := repoRef(c.Request)
 		if id == "" {
@@ -429,7 +440,7 @@ func dispatchRepo(mgr *manager.Manager, routes map[string]ada.HandlerFunc) ada.H
 			return c.SetStatus(http.StatusNotFound).SendJSON(map[string]string{"error": fmt.Sprintf("unknown repo action %q", action)})
 		}
 
-		repo, err := mgr.Registry().Resolve(c.Request.Context(), id)
+		repo, err := mgr.ResolveRepo(c.Request.Context(), id)
 		if err != nil {
 			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
 		}
@@ -451,7 +462,7 @@ type repoView struct {
 	Running string `json:"running,omitempty"`
 }
 
-func viewRepo(mgr *manager.Manager, repo *registry.Repo) repoView {
+func viewRepo(mgr repoReader, repo *registry.Repo) repoView {
 	return repoView{Repo: repo, Running: mgr.Activity(repo.ID)}
 }
 
@@ -463,7 +474,7 @@ type pagedRepos struct {
 	PerPage int        `json:"per_page"`
 }
 
-func listRepos(mgr *manager.Manager) ada.HandlerFunc {
+func listRepos(mgr repoReader) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		params := c.Request.URL.Query()
 
@@ -488,7 +499,7 @@ func listRepos(mgr *manager.Manager) ada.HandlerFunc {
 			opts.PerPage = n
 		}
 
-		repos, total, err := mgr.Registry().ListPaged(c.Request.Context(), opts)
+		repos, total, err := mgr.ListRepos(c.Request.Context(), opts)
 		if err != nil {
 			return c.Err(err)
 		}
@@ -512,9 +523,9 @@ func listRepos(mgr *manager.Manager) ada.HandlerFunc {
 }
 
 // listRepoOwners returns the owner groups (prefix + count) for the sidebar tree.
-func listRepoOwners(mgr *manager.Manager) ada.HandlerFunc {
+func listRepoOwners(mgr repoReader) ada.HandlerFunc {
 	return func(c *ada.Context) error {
-		owners, err := mgr.Registry().Owners(c.Request.Context())
+		owners, err := mgr.RepoOwners(c.Request.Context())
 		if err != nil {
 			return c.Err(err)
 		}
@@ -525,9 +536,9 @@ func listRepoOwners(mgr *manager.Manager) ada.HandlerFunc {
 
 // listRepoNamespaces returns the namespace groups (namespace + count +
 // description). Untagged repos are reported under "default".
-func listRepoNamespaces(mgr *manager.Manager) ada.HandlerFunc {
+func listRepoNamespaces(mgr repoReader) ada.HandlerFunc {
 	return func(c *ada.Context) error {
-		namespaces, err := mgr.Registry().Namespaces(c.Request.Context())
+		namespaces, err := mgr.RepoNamespaces(c.Request.Context())
 		if err != nil {
 			return c.Err(err)
 		}
@@ -545,7 +556,7 @@ type upsertNamespaceRequest struct {
 }
 
 // upsertNamespace creates or updates a namespace's description record.
-func upsertNamespace(mgr *manager.Manager) ada.HandlerFunc {
+func upsertNamespace(mgr repoAdmin) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req upsertNamespaceRequest
 		if err := c.Bind(&req); err != nil {
@@ -562,7 +573,7 @@ func upsertNamespace(mgr *manager.Manager) ada.HandlerFunc {
 }
 
 // deleteNamespace removes a namespace's description record (repos keep the tag).
-func deleteNamespace(mgr *manager.Manager) ada.HandlerFunc {
+func deleteNamespace(mgr repoAdmin) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		name := c.Request.PathValue("name")
 		if err := mgr.DeleteNamespace(context.WithoutCancel(c.Request.Context()), name); err != nil {
@@ -579,7 +590,7 @@ type setRepoNamespaceRequest struct {
 
 // setRepoNamespace moves a repo into a namespace ("" / "default" returns it to
 // the default bucket). It only re-tags the record; no rebuild is triggered.
-func setRepoNamespace(mgr *manager.Manager) ada.HandlerFunc {
+func setRepoNamespace(mgr repoAdmin) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		id := repoID(c.Request)
 
@@ -597,7 +608,7 @@ func setRepoNamespace(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func repoSettings(mgr *manager.Manager) ada.HandlerFunc {
+func repoSettings(mgr repoAdmin) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		out, err := mgr.RepoSettings(c.Request.Context(), repoID(c.Request))
 		if err != nil {
@@ -615,7 +626,7 @@ type setRepoOverridesRequest struct {
 	Overrides registry.Overrides `json:"overrides"`
 }
 
-func setRepoOverrides(mgr *manager.Manager) ada.HandlerFunc {
+func setRepoOverrides(mgr repoAdmin) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		id := repoID(c.Request)
 
@@ -649,14 +660,14 @@ type activeRepoView struct {
 
 // listActiveRepos returns only the repos that have running jobs, so the
 // Activity page never has to scan every tracked repository.
-func listActiveRepos(mgr *manager.Manager) ada.HandlerFunc {
+func listActiveRepos(mgr repoReader) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		active := mgr.ActiveRepos()
 
 		views := make([]activeRepoView, 0, len(active))
 		for id, running := range active {
 			v := activeRepoView{ID: id, Running: running}
-			if repo, err := mgr.Registry().Get(c.Request.Context(), id); err == nil && repo != nil {
+			if repo, err := mgr.Repo(c.Request.Context(), id); err == nil && repo != nil {
 				v.Status = repo.Status
 			}
 			v.Progress, _ = mgr.Progress(id)
@@ -672,7 +683,7 @@ func listActiveRepos(mgr *manager.Manager) ada.HandlerFunc {
 // listTasks returns the central work-queue snapshot: the concurrency limit,
 // live running/queued counters and the queued/running/recent tasks. Powers the
 // Activity page's task view.
-func listTasks(mgr *manager.Manager) ada.HandlerFunc {
+func listTasks(mgr queueService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		return c.SendJSON(mgr.TaskSnapshot())
 	}
@@ -680,7 +691,7 @@ func listTasks(mgr *manager.Manager) ada.HandlerFunc {
 
 // clearTaskHistory removes completed, failed and canceled tasks while leaving
 // queued and running work untouched.
-func clearTaskHistory(mgr *manager.Manager) ada.HandlerFunc {
+func clearTaskHistory(mgr queueService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		mgr.ClearTaskHistory()
 
@@ -689,7 +700,7 @@ func clearTaskHistory(mgr *manager.Manager) ada.HandlerFunc {
 }
 
 // cancelPendingTasks removes every queued task while running work continues.
-func cancelPendingTasks(mgr *manager.Manager) ada.HandlerFunc {
+func cancelPendingTasks(mgr queueService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		mgr.CancelPendingTasks()
 
@@ -704,7 +715,7 @@ type taskConcurrencyRequest struct {
 // setTaskConcurrency changes how many background tasks run at once, effective
 // immediately. It returns the resulting snapshot so the UI reflects the new
 // limit without a second fetch. The value is not persisted to settings.
-func setTaskConcurrency(mgr *manager.Manager) ada.HandlerFunc {
+func setTaskConcurrency(mgr queueService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req taskConcurrencyRequest
 		if err := c.Bind(&req); err != nil {
@@ -718,7 +729,7 @@ func setTaskConcurrency(mgr *manager.Manager) ada.HandlerFunc {
 }
 
 // bumpTask moves a queued task to the front of the backlog so it starts next.
-func bumpTask(mgr *manager.Manager) ada.HandlerFunc {
+func bumpTask(mgr queueService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		seq, err := strconv.ParseUint(c.Request.PathValue("seq"), 10, 64)
 		if err != nil {
@@ -737,7 +748,7 @@ func bumpTask(mgr *manager.Manager) ada.HandlerFunc {
 
 // cancelTask cancels a single task by seq: a queued task is dropped from the
 // backlog, while a running task has its underlying job aborted.
-func cancelTask(mgr *manager.Manager) ada.HandlerFunc {
+func cancelTask(mgr queueService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		seq, err := strconv.ParseUint(c.Request.PathValue("seq"), 10, 64)
 		if err != nil {
@@ -754,7 +765,7 @@ func cancelTask(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func addRepo(mgr *manager.Manager) ada.HandlerFunc {
+func addRepo(mgr repoAdmin) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req addRepoRequest
 		if err := c.Bind(&req); err != nil {
@@ -785,9 +796,9 @@ func addRepo(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func getRepo(mgr *manager.Manager) ada.HandlerFunc {
+func getRepo(mgr repoReader) ada.HandlerFunc {
 	return func(c *ada.Context) error {
-		repo, err := mgr.Registry().Get(c.Request.Context(), repoID(c.Request))
+		repo, err := mgr.Repo(c.Request.Context(), repoID(c.Request))
 		if err != nil {
 			return c.Err(err)
 		}
@@ -800,7 +811,7 @@ func getRepo(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func deleteRepo(mgr *manager.Manager) ada.HandlerFunc {
+func deleteRepo(mgr repoAdmin) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		if err := mgr.RemoveRepo(context.WithoutCancel(c.Request.Context()), repoID(c.Request)); err != nil {
 			return c.Err(err)
@@ -819,11 +830,11 @@ type refreshRequest struct {
 	Skip []string `json:"skip,omitempty"`
 }
 
-func refreshRepo(mgr *manager.Manager) ada.HandlerFunc {
+func refreshRepo(mgr repoService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		id := repoID(c.Request)
 
-		repo, err := mgr.Registry().Get(context.WithoutCancel(c.Request.Context()), id)
+		repo, err := mgr.Repo(context.WithoutCancel(c.Request.Context()), id)
 		if err != nil {
 			return c.Err(err)
 		}
@@ -843,7 +854,9 @@ func refreshRepo(mgr *manager.Manager) ada.HandlerFunc {
 			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
 		}
 
-		mgr.TriggerRefresh(id, req.Skip...)
+		if err := mgr.TriggerRefresh(id, req.Skip...); err != nil {
+			return c.Err(err)
+		}
 
 		out := map[string]any{"status": "refresh queued", "repo": id}
 		if len(req.Skip) > 0 {
@@ -896,11 +909,11 @@ type generateRequest struct {
 	Force bool `json:"force"`
 }
 
-func generateRepo(mgr *manager.Manager) ada.HandlerFunc {
+func generateRepo(mgr repoService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		id := repoID(c.Request)
 
-		repo, err := mgr.Registry().Get(context.WithoutCancel(c.Request.Context()), id)
+		repo, err := mgr.Repo(context.WithoutCancel(c.Request.Context()), id)
 		if err != nil {
 			return c.Err(err)
 		}
@@ -926,7 +939,9 @@ func generateRepo(mgr *manager.Manager) ada.HandlerFunc {
 			}
 		}
 
-		mgr.TriggerGenerate(id, req.Targets, req.Force)
+		if err := mgr.TriggerGenerate(id, req.Targets, req.Force); err != nil {
+			return c.Err(err)
+		}
 
 		return c.SetStatus(http.StatusAccepted).SendJSON(map[string]any{
 			"status": "generate queued", "repo": id, "targets": req.Targets, "force": req.Force,
@@ -935,7 +950,7 @@ func generateRepo(mgr *manager.Manager) ada.HandlerFunc {
 }
 
 // cancelRepoJob aborts the refresh/generate job currently running for a repo.
-func cancelRepoJob(mgr *manager.Manager) ada.HandlerFunc {
+func cancelRepoJob(mgr repoAdmin) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		id := repoID(c.Request)
 
@@ -954,9 +969,9 @@ func cancelRepoJob(mgr *manager.Manager) ada.HandlerFunc {
 // repoArtifact serves a graphify output file (graph.json, GRAPH_REPORT.md,
 // graph.html) for a tracked repository so external tools can consume them
 // without filesystem access.
-func repoArtifact(mgr *manager.Manager, pathFn func(repoPath string) string) ada.HandlerFunc {
+func repoArtifact(mgr repoReader, pathFn func(repoPath string) string) ada.HandlerFunc {
 	return func(c *ada.Context) error {
-		repo, err := mgr.Registry().Get(c.Request.Context(), repoID(c.Request))
+		repo, err := mgr.Repo(c.Request.Context(), repoID(c.Request))
 		if err != nil {
 			return c.Err(err)
 		}
@@ -980,7 +995,7 @@ func repoArtifact(mgr *manager.Manager, pathFn func(repoPath string) string) ada
 
 // ---- repo file handlers -----------------------------------------------------
 
-func listRepoFiles(mgr *manager.Manager) ada.HandlerFunc {
+func listRepoFiles(mgr docsService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		subdir := c.Request.URL.Query().Get("subdir")
 		snapshot := c.Request.URL.Query().Get("snapshot")
@@ -996,7 +1011,7 @@ func listRepoFiles(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func readRepoFile(mgr *manager.Manager) ada.HandlerFunc {
+func readRepoFile(mgr docsService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		path := c.Request.URL.Query().Get("path")
 		if path == "" {
@@ -1028,7 +1043,7 @@ func readRepoFile(mgr *manager.Manager) ada.HandlerFunc {
 
 // ---- docs + RAG handlers ----------------------------------------------------
 
-func listDocs(mgr *manager.Manager) ada.HandlerFunc {
+func listDocs(mgr docsService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		docs, err := mgr.ListDocs(c.Request.Context(), repoID(c.Request))
 		if err != nil {
@@ -1039,7 +1054,7 @@ func listDocs(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func getDoc(mgr *manager.Manager) ada.HandlerFunc {
+func getDoc(mgr docsService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		path := c.Request.URL.Query().Get("path")
 		if path == "" {
@@ -1055,7 +1070,7 @@ func getDoc(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func searchDocs(mgr *manager.Manager) ada.HandlerFunc {
+func searchDocs(mgr docsService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		q := c.Request.URL.Query().Get("q")
 		if q == "" {
@@ -1086,7 +1101,7 @@ func searchDocs(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func searchCode(mgr *manager.Manager) ada.HandlerFunc {
+func searchCode(mgr docsService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		q := strings.TrimSpace(c.Request.URL.Query().Get("q"))
 		if q == "" {
@@ -1144,7 +1159,7 @@ func searchCode(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func getDocsConfig(mgr *manager.Manager) ada.HandlerFunc {
+func getDocsConfig(mgr docsSettingsService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		cfg, err := mgr.GetDocsConfig(c.Request.Context())
 		if err != nil {
@@ -1155,7 +1170,7 @@ func getDocsConfig(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func setDocsConfig(mgr *manager.Manager) ada.HandlerFunc {
+func setDocsConfig(mgr docsSettingsService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var patch settings.Patch
 		if err := c.Bind(&patch); err != nil {
@@ -1176,7 +1191,7 @@ func setDocsConfig(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func testLLM(mgr *manager.Manager) ada.HandlerFunc {
+func testLLM(mgr docsSettingsService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var patch settings.Patch
 		if c.Request.ContentLength != 0 {
@@ -1194,7 +1209,7 @@ func testLLM(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func testEmbedder(mgr *manager.Manager) ada.HandlerFunc {
+func testEmbedder(mgr docsSettingsService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var patch settings.Patch
 		if c.Request.ContentLength != 0 {
@@ -1212,7 +1227,7 @@ func testEmbedder(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func testLangfuse(mgr *manager.Manager) ada.HandlerFunc {
+func testLangfuse(mgr docsSettingsService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var patch settings.Patch
 		if c.Request.ContentLength != 0 {
@@ -1230,7 +1245,7 @@ func testLangfuse(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func testCodeEmbedder(mgr *manager.Manager) ada.HandlerFunc {
+func testCodeEmbedder(mgr docsSettingsService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var patch settings.Patch
 		if c.Request.ContentLength != 0 {
@@ -1248,7 +1263,7 @@ func testCodeEmbedder(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func applySettingsPatch(ctx context.Context, mgr *manager.Manager, patch settings.Patch) (settings.Settings, error) {
+func applySettingsPatch(ctx context.Context, mgr docsSettingsService, patch settings.Patch) (settings.Settings, error) {
 	current, err := mgr.GetDocsConfig(ctx)
 	if err != nil {
 		return settings.Settings{}, err
@@ -1257,7 +1272,7 @@ func applySettingsPatch(ctx context.Context, mgr *manager.Manager, patch setting
 	return patch.Apply(current.Settings), nil
 }
 
-func mergedGraph(mgr *manager.Manager) http.HandlerFunc {
+func mergedGraph(mgr docsService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		path := mgr.MergedPath()
 		if path == "" {
@@ -1279,9 +1294,9 @@ type setCredentialRequest struct {
 	Secret   string `json:"secret"`
 }
 
-func listCredentials(mgr *manager.Manager) ada.HandlerFunc {
+func listCredentials(mgr credentialService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
-		creds, err := mgr.Credentials().List(c.Request.Context())
+		creds, err := mgr.ListCredentials(c.Request.Context())
 		if err != nil {
 			return c.Err(err)
 		}
@@ -1291,7 +1306,7 @@ func listCredentials(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func setCredential(mgr *manager.Manager) ada.HandlerFunc {
+func setCredential(mgr credentialService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req setCredentialRequest
 		if err := c.Bind(&req); err != nil {
@@ -1304,7 +1319,7 @@ func setCredential(mgr *manager.Manager) ada.HandlerFunc {
 			Username: req.Username,
 			Secret:   req.Secret,
 		}
-		if err := mgr.Credentials().Set(c.Request.Context(), cred); err != nil {
+		if err := mgr.SetCredential(c.Request.Context(), cred); err != nil {
 			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
 		}
 
@@ -1312,14 +1327,14 @@ func setCredential(mgr *manager.Manager) ada.HandlerFunc {
 	}
 }
 
-func deleteCredential(mgr *manager.Manager) ada.HandlerFunc {
+func deleteCredential(mgr credentialService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		pattern := c.Request.URL.Query().Get("pattern")
 		if pattern == "" {
 			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": "pattern query param is required"})
 		}
 
-		if err := mgr.Credentials().Delete(c.Request.Context(), pattern); err != nil {
+		if err := mgr.DeleteCredential(c.Request.Context(), pattern); err != nil {
 			return c.Err(err)
 		}
 
@@ -1347,7 +1362,7 @@ type gitPushEvent struct {
 	RepositoryURL string `json:"repository_url"`
 }
 
-func gitWebhook(mgr *manager.Manager) http.HandlerFunc {
+func gitWebhook(mgr webhookService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 		if err != nil {
@@ -1380,7 +1395,7 @@ func gitWebhook(mgr *manager.Manager) http.HandlerFunc {
 			return
 		}
 
-		repo, err := mgr.Registry().Resolve(r.Context(), ref)
+		repo, err := mgr.ResolveRepo(r.Context(), ref)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 
@@ -1393,7 +1408,11 @@ func gitWebhook(mgr *manager.Manager) http.HandlerFunc {
 			return
 		}
 
-		mgr.TriggerRefresh(repo.ID)
+		if err := mgr.TriggerRefresh(repo.ID); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+
+			return
+		}
 
 		w.WriteHeader(http.StatusAccepted)
 		_, _ = fmt.Fprintf(w, `{"status":"refresh queued","repo":%q}`, repo.ID)

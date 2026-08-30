@@ -5,7 +5,6 @@ import (
 	"net/http"
 
 	"github.com/rytsh/krabby/internal/observability/langfuse"
-	"github.com/rytsh/krabby/internal/service/manager"
 )
 
 // langfuseMiddleware exports REST requests to Langfuse.
@@ -17,7 +16,7 @@ import (
 //
 // The gRPC-side telemetry middleware already traces every request
 // independently; the two are separate providers and do not interfere.
-func langfuseMiddleware(mgr *manager.Manager) func(http.Handler) http.Handler {
+func langfuseMiddleware(mgr tracingService) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			tracer := mgr.Tracer()

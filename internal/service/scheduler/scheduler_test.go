@@ -1,8 +1,12 @@
 package scheduler
 
 import (
+	"context"
+	"errors"
 	"testing"
 
+	"github.com/rytsh/krabby/internal/service/manager"
+	"github.com/rytsh/krabby/internal/service/queue"
 	"github.com/rytsh/krabby/internal/service/settings"
 )
 
@@ -56,5 +60,22 @@ func TestNamespaceLabel(t *testing.T) {
 		if got := namespaceLabel(in); got != want {
 			t.Errorf("namespaceLabel(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestSourceCronJobsPropagateEnqueueRejection(t *testing.T) {
+	mgr := manager.New(context.Background(), nil, nil, nil, nil, nil, nil, "", "", false, manager.DocsDeps{})
+	if err := mgr.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s := &scheduler{mgr: mgr}
+
+	webCrons := s.buildWebCrons([]manager.WebSourceSchedule{{Name: "wiki", Specs: []string{"@every 1h"}}})
+	if len(webCrons) != 1 || !errors.Is(webCrons[0].Func(context.Background()), queue.ErrClosed) {
+		t.Fatalf("web cron did not propagate queue rejection")
+	}
+	apiCrons := s.buildAPICrons([]manager.APISchedule{{Name: "billing", Specs: []string{"@every 1h"}}})
+	if len(apiCrons) != 1 || !errors.Is(apiCrons[0].Func(context.Background()), queue.ErrClosed) {
+		t.Fatalf("api cron did not propagate queue rejection")
 	}
 }

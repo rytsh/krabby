@@ -1,38 +1,31 @@
 <script module>
-  // Colored file-type icons via Iconify's vscode-icons set — everything comes
-  // from npm, no asset copying. The icon data JSON is lazy-loaded once and
-  // registered offline so no network requests are made at render time.
-  import IconifyIcon, { addCollection, iconLoaded } from "@iconify/svelte";
-  import { getIconForFile, getIconForFolder, getIconForOpenFolder } from "vscode-icons-js";
+  import { addCollection } from "@iconify/svelte";
   import { writable } from "svelte/store";
 
   const ready = writable(false);
-  let loading = false;
+  let loading;
 
   function ensureLoaded() {
     if (loading) return;
-    loading = true;
-    import("@iconify-json/vscode-icons/icons.json")
-      .then((m) => {
-        addCollection(m.default ?? m);
+    loading = import("./file-icons.generated.js")
+      .then(({ vscodeIcons }) => {
+        addCollection(vscodeIcons);
         ready.set(true);
       })
       .catch(() => {
-        loading = false; // allow a retry on the next mount
+        loading = undefined;
       });
-  }
-
-  // vscode-icons-js returns svg filenames like "file_type_go.svg"; the Iconify
-  
-  function toIconifyName(svgName) {
-    return "vscode-icons:" + svgName.replace(/\.svg$/, "").replace(/_/g, "-");
   }
 </script>
 
 <script>
+  import IconifyIcon from "@iconify/svelte";
+
+  import { resolveFileIcon } from "./file-icons.js";
+
   /**
    * @typedef {Object} Props
-   * @property {string} [name] - set uses "vscode-icons:file-type-go". - base file or directory name
+   * @property {string} [name] - base file or directory name
    * @property {boolean} [isDir]
    * @property {boolean} [expanded]
    * @property {number} [size]
@@ -48,21 +41,7 @@
 
   ensureLoaded();
 
-  let icon = $derived((() => {
-    if (!$ready) return "";
-    const svg = isDir
-      ? (expanded ? getIconForOpenFolder(name) : getIconForFolder(name))
-      : getIconForFile(name);
-    let n = toIconifyName(svg || (isDir ? "default_folder.svg" : "default_file.svg"));
-    if (!iconLoaded(n)) {
-      n = isDir
-        ? expanded
-          ? "vscode-icons:default-folder-opened"
-          : "vscode-icons:default-folder"
-        : "vscode-icons:default-file";
-    }
-    return n;
-  })());
+  let icon = $derived($ready ? resolveFileIcon(name, { isDir, expanded }) : "");
 </script>
 
 {#if icon}

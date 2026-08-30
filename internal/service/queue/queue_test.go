@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -519,6 +520,9 @@ func TestSubmitAfterCloseIsRejected(t *testing.T) {
 
 	if got := atomic.LoadInt32(&ran); got != 0 {
 		t.Fatalf("task ran after close: %d", got)
+	}
+	if !errors.Is(h.Err(), ErrClosed) {
+		t.Fatalf("handle error = %v, want ErrClosed", h.Err())
 	}
 }
 

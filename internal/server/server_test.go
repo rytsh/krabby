@@ -1,9 +1,11 @@
 package server
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,8 +16,110 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/rakunlabs/ada"
 
+	"github.com/rytsh/krabby/internal/config"
 	"github.com/rytsh/krabby/internal/service/registry"
 )
+
+type routeAuth struct {
+	key string
+}
+
+type failingWebhookService struct {
+	err       error
+	triggered bool
+}
+
+func (*failingWebhookService) WebhookSecret() string { return "" }
+func (*failingWebhookService) ResolveRepo(context.Context, string) (*registry.Repo, error) {
+	return &registry.Repo{ID: "github.com/acme/widgets"}, nil
+}
+func (s *failingWebhookService) TriggerRefresh(string, ...string) error {
+	s.triggered = true
+
+	return s.err
+}
+
+func (a *routeAuth) InitMCPKey(_ context.Context, key string) { a.key = key }
+func (a *routeAuth) MCPAPIKey() string                        { return a.key }
+func (a *routeAuth) SetMCPAPIKey(_ context.Context, key string) error {
+	a.key = key
+
+	return nil
+}
+func (a *routeAuth) ClearMCPAPIKey(context.Context) error {
+	a.key = ""
+
+	return nil
+}
+
+func TestRouterBasePathAuthAndFallbackPrecedence(t *testing.T) {
+	auth := &routeAuth{}
+	cfg := &config.Config{
+		Server: config.Server{BasePath: "/krabby"},
+		MCP:    config.MCP{Path: "/mcp", APIKey: "secret"},
+	}
+	handler := newRouter(context.Background(), cfg, routeServices{auth: auth}, nil, nil, nil)
+
+	tests := []struct {
+		name         string
+		path         string
+		key          string
+		wantStatus   int
+		wantType     string
+		wantBody     string
+		wantLocation string
+	}{
+		{
+			name: "base path contains health route", path: "/krabby/healthz",
+			wantStatus: http.StatusOK, wantBody: "OK",
+		},
+		{
+			name: "route is not exposed outside base path", path: "/healthz",
+			wantStatus: http.StatusNotFound,
+		},
+		{
+			name: "bare base redirects before fallback", path: "/krabby",
+			wantStatus: http.StatusMovedPermanently, wantLocation: "/krabby/",
+		},
+		{
+			name: "mcp auth runs before probe", path: "/krabby/mcp",
+			wantStatus: http.StatusUnauthorized, wantBody: "unauthorized",
+		},
+		{
+			name: "authenticated mcp route wins over fallback", path: "/krabby/mcp", key: "secret",
+			wantStatus: http.StatusOK, wantType: "application/json", wantBody: `"transport":"mcp-streamable-http"`,
+		},
+		{
+			name: "unknown client route uses spa fallback", path: "/krabby/repos/example",
+			wantStatus: http.StatusOK, wantType: "text/html",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			if tt.key != "" {
+				req.Header.Set("X-Api-Key", tt.key)
+			}
+			rec := httptest.NewRecorder()
+
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d (body %q)", rec.Code, tt.wantStatus, rec.Body.String())
+			}
+			if tt.wantType != "" && !strings.HasPrefix(rec.Header().Get("Content-Type"), tt.wantType) {
+				t.Errorf("Content-Type = %q, want prefix %q", rec.Header().Get("Content-Type"), tt.wantType)
+			}
+			if tt.wantBody != "" && !strings.Contains(rec.Body.String(), tt.wantBody) {
+				t.Errorf("body = %q, want substring %q", rec.Body.String(), tt.wantBody)
+			}
+			if tt.wantLocation != "" && rec.Header().Get("Location") != tt.wantLocation {
+				t.Errorf("Location = %q, want %q", rec.Header().Get("Location"), tt.wantLocation)
+			}
+		})
+	}
+}
 
 func TestMCPCatalogRoutes(t *testing.T) {
 	core := mcp.NewServer(&mcp.Implementation{Name: "core", Version: "test"}, nil)
@@ -77,6 +181,24 @@ func TestGitEventRepoRef(t *testing.T) {
 	event.Project.PathWithNamespace = "group/sub/project"
 	if got := gitEventRepoRef(event); got != "group/sub/project" {
 		t.Fatalf("gitEventRepoRef() fallback = %q", got)
+	}
+}
+
+func TestGitWebhookDoesNotAcceptFailedRefreshEnqueue(t *testing.T) {
+	wantErr := errors.New("persist queued task: disk unavailable")
+	mgr := &failingWebhookService{err: wantErr}
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/git", strings.NewReader(
+		`{"repository":{"clone_url":"https://github.com/acme/widgets.git"}}`,
+	))
+	rec := httptest.NewRecorder()
+
+	gitWebhook(mgr).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d (body %q)", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	if !mgr.triggered || !strings.Contains(rec.Body.String(), wantErr.Error()) {
+		t.Fatalf("triggered = %v, body = %q; enqueue failure was not propagated", mgr.triggered, rec.Body.String())
 	}
 }
 
