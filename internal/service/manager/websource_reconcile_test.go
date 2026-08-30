@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -152,8 +151,8 @@ func newReconcileManagerWithDeps(
 	}
 
 	m := &Manager{
-		queue:          queue.New(ctx, 1),
-		locks:          map[string]*sync.Mutex{},
+		queue: queue.New(ctx, 1),
+
 		activity:       map[string]map[string]struct{}{},
 		progress:       map[string]map[string]Progress{},
 		sourcesRootDir: t.TempDir(),

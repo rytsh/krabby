@@ -66,7 +66,7 @@ func (p *Provider) Call(ctx context.Context, svc *apicatalog.Service, d *apicata
 	if err != nil {
 		return out, err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	md, err := resolveMethod(ctx, conn, cfg, service, method)
 	if err != nil {
@@ -307,10 +307,11 @@ func resolveMethod(
 	cfg resolvedConfig,
 	service, method string,
 ) (protoreflect.MethodDescriptor, error) {
-	client, err := openStream(withMetadata(ctx, cfg), conn)
+	client, _, err := openStream(withMetadata(ctx, cfg), conn)
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = client.stream.close() }()
 
 	seen := map[string]*descriptorpb.FileDescriptorProto{}
 	if err := client.collectSymbol(service, seen); err != nil {

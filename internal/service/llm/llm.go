@@ -495,7 +495,7 @@ func (c *Client) completeOnce(ctx context.Context, body []byte) (res completion,
 
 		return completion{}, 0, !timedOut && ctx.Err() == nil, fmt.Errorf("chat request; %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))

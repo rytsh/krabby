@@ -51,6 +51,10 @@ const dialTimeout = 60 * time.Second
 // otherwise stream indefinitely.
 const maxDescriptorFiles = 5000
 
+// previewSampleLimit bounds how many example endpoints Preview returns. The
+// preview is a config sanity check, not a catalog listing.
+const previewSampleLimit = 10
+
 // reflectionServices are the service names the reflection API itself exposes.
 // They describe the reflection mechanism, not the API, so they are never
 // catalogued.
@@ -318,7 +322,11 @@ func (p *Provider) Preview(ctx context.Context, raw json.RawMessage, _ json.RawM
 
 		methods := sd.Methods()
 		out.OperationCount += methods.Len()
-		if len(out.Sample) < 10 {
+		// A service with no methods is legal proto ("service Foo {}") and Get(0)
+		// would panic on it. lookupService already drops those, but the guard is
+		// local to the indexing it protects rather than relying on a caller
+		// invariant three functions away.
+		if methods.Len() > 0 && len(out.Sample) < previewSampleLimit {
 			out.Sample = append(out.Sample, "/"+string(sd.FullName())+"/"+string(methods.Get(0).Name()))
 		}
 	}
@@ -518,19 +526,15 @@ func describe(ctx context.Context, cfg resolvedConfig) (*descriptorpb.FileDescri
 	if err != nil {
 		return nil, nil, err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	ctx = withMetadata(ctx, cfg)
 
-	client, err := openStream(ctx, conn)
+	client, names, err := openStream(ctx, conn)
 	if err != nil {
 		return nil, nil, err
 	}
-
-	names, err := client.listServices()
-	if err != nil {
-		return nil, nil, err
-	}
+	defer func() { _ = client.stream.close() }()
 
 	wanted := selectServices(names, cfg.Services)
 	if len(wanted) == 0 {
@@ -617,6 +621,10 @@ func withMetadata(ctx context.Context, cfg resolvedConfig) context.Context {
 type reflectStream interface {
 	send(*v1.ServerReflectionRequest) error
 	recv() (*v1.ServerReflectionResponse, error)
+	// close half-closes the stream. Abandoning a bidi stream without it keeps
+	// the RPC alive until the connection is torn down, which matters for the
+	// v1 stream discarded during the v1alpha fallback probe.
+	close() error
 }
 
 // v1Stream speaks the current reflection service.
@@ -628,12 +636,20 @@ func (s v1Stream) send(req *v1.ServerReflectionRequest) error { return s.stream.
 
 func (s v1Stream) recv() (*v1.ServerReflectionResponse, error) { return s.stream.Recv() }
 
+func (s v1Stream) close() error { return s.stream.CloseSend() }
+
 // v1AlphaStream speaks the legacy reflection service, translating through the
 // wire format.
 //
 // The v1 and v1alpha protos are field-for-field identical — v1alpha was
 // promoted, not redesigned — so a marshal/unmarshal round trip is a faithful
 // conversion and needs no per-field mapping to keep in sync.
+//
+// The deprecation warning on v1alpha is the point of this type: it exists only
+// to talk to servers that never adopted v1, so the whole file cannot avoid the
+// deprecated symbols without dropping that fallback.
+//
+//nolint:staticcheck // SA1019: v1alpha is deliberate legacy-server support.
 type v1AlphaStream struct {
 	stream grpc.BidiStreamingClient[v1alpha.ServerReflectionRequest, v1alpha.ServerReflectionResponse]
 }
@@ -644,7 +660,7 @@ func (s v1AlphaStream) send(req *v1.ServerReflectionRequest) error {
 		return fmt.Errorf("encode reflection request; %w", err)
 	}
 
-	var out v1alpha.ServerReflectionRequest
+	var out v1alpha.ServerReflectionRequest //nolint:staticcheck // SA1019: deliberate legacy-server support.
 	if err := proto.Unmarshal(raw, &out); err != nil {
 		return fmt.Errorf("convert reflection request; %w", err)
 	}
@@ -671,6 +687,8 @@ func (s v1AlphaStream) recv() (*v1.ServerReflectionResponse, error) {
 	return &out, nil
 }
 
+func (s v1AlphaStream) close() error { return s.stream.CloseSend() }
+
 // reflectClient drives one reflection exchange.
 type reflectClient struct {
 	stream reflectStream
@@ -678,28 +696,45 @@ type reflectClient struct {
 }
 
 // openStream opens a v1 reflection stream, falling back to v1alpha when the
-// server does not implement v1.
+// server does not implement v1. It returns the service list alongside the
+// client because the version probe already has to fetch it.
 //
 // The fallback has to probe with a real request, not just open the stream: gRPC
 // does not report an unimplemented service until the first message is
 // exchanged, so a stream to a v1alpha-only server opens cleanly and fails on
-// use.
-func openStream(ctx context.Context, conn *grpc.ClientConn) (*reflectClient, error) {
+// use. Returning the probe's result keeps that to one ListServices round trip
+// instead of two.
+func openStream(ctx context.Context, conn *grpc.ClientConn) (*reflectClient, []string, error) {
 	if stream, err := v1.NewServerReflectionClient(conn).ServerReflectionInfo(ctx); err == nil {
 		client := &reflectClient{stream: v1Stream{stream: stream}}
-		if _, err := client.listServices(); err == nil {
-			return client, nil
-		} else if !isUnimplemented(err) {
-			return nil, err
+
+		names, probeErr := client.listServices()
+		switch {
+		case probeErr == nil:
+			return client, names, nil
+		case !isUnimplemented(probeErr):
+			_ = client.stream.close()
+
+			return nil, nil, probeErr
 		}
+		// v1 is unimplemented: half-close the probe stream before falling back
+		// so the abandoned RPC does not linger until conn.Close().
+		_ = client.stream.close()
 	}
 
 	stream, err := v1alpha.NewServerReflectionClient(conn).ServerReflectionInfo(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("open reflection stream; %w", err)
+		return nil, nil, fmt.Errorf("open reflection stream; %w", err)
 	}
 
-	return &reflectClient{stream: v1AlphaStream{stream: stream}}, nil
+	client := &reflectClient{stream: v1AlphaStream{stream: stream}}
+
+	names, err := client.listServices()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return client, names, nil
 }
 
 func isUnimplemented(err error) bool {

@@ -113,8 +113,13 @@ func TestFingerprintStability(t *testing.T) {
 		TraceDocs: true,
 	}
 
-	if Fingerprint(base) != Fingerprint(base) {
-		t.Fatal("fingerprint is not deterministic")
+	// A single comparison can agree by luck if the fingerprint depends on map
+	// iteration order, so repeat it against one captured value.
+	stable := Fingerprint(base)
+	for range 32 {
+		if Fingerprint(base) != stable {
+			t.Fatal("fingerprint is not deterministic")
+		}
 	}
 
 	changed := base

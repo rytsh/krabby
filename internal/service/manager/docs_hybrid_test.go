@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -112,9 +111,9 @@ func newHybridFixture(t *testing.T, embedDelay time.Duration, lexicalChunks int)
 	body := strings.Repeat("The payment gateway timed out during capture and was retried. ", 20)
 	for file := 0; file < lexicalChunks/chunksPerFile; file++ {
 		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("# Gateway timeout report %d\n\n", file))
+		fmt.Fprintf(&sb, "# Gateway timeout report %d\n\n", file)
 		for i := range chunksPerFile {
-			sb.WriteString(fmt.Sprintf("## Incident %d-%d\n\n%s\n\n", file, i, body))
+			fmt.Fprintf(&sb, "## Incident %d-%d\n\n%s\n\n", file, i, body)
 		}
 		mustWriteManagerTest(t, filepath.Join(bigDir, fmt.Sprintf("report-%d.md", file)), sb.String())
 	}
@@ -131,8 +130,8 @@ func newHybridFixture(t *testing.T, embedDelay time.Duration, lexicalChunks int)
 		reg:         reg,
 		docsText:    text,
 		docsRootDir: docsRoot,
-		locks:       map[string]*sync.Mutex{},
-		docs:        &docsBundle{rag: ragSvc, store: store},
+
+		docs: &docsBundle{rag: ragSvc, store: store},
 	}
 	m.docsTextWarmed.Store(true)
 
@@ -228,8 +227,8 @@ func TestHybridReportsRankerFailure(t *testing.T) {
 		reg:         reg,
 		docsText:    text,
 		docsRootDir: docsRoot,
-		locks:       map[string]*sync.Mutex{},
-		docs:        &docsBundle{},
+
+		docs: &docsBundle{},
 	}
 	m.docsTextWarmed.Store(true)
 

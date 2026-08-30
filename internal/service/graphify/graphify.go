@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/rytsh/krabby/internal/strutil"
 )
 
 // Client shells out to the graphify CLI.
@@ -94,7 +96,7 @@ func detectVersion(binPath string) string {
 		return "unknown"
 	}
 
-	return truncate(strings.Join(fields, " "), 128)
+	return strutil.TruncateSpace(strings.Join(fields, " "), 128)
 }
 
 // Exclude returns the install-wide graph ignore patterns, for surfacing the
@@ -125,7 +127,7 @@ func pythonFromShebang(binPath string) string {
 	if err != nil {
 		return "python3"
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	line, err := bufio.NewReader(f).ReadString('\n')
 	if err != nil && line == "" {
@@ -156,11 +158,11 @@ func (c *Client) run(ctx context.Context, dir string, args ...string) error {
 	slog.Debug("graphify run",
 		"args", strings.Join(args, " "),
 		"took", time.Since(start).String(),
-		"output", truncate(out.String(), 2000),
+		"output", strutil.TruncateSpace(out.String(), 2000),
 	)
 
 	if err != nil {
-		return fmt.Errorf("graphify %s; %w; %s", strings.Join(args, " "), err, truncate(out.String(), 2000))
+		return fmt.Errorf("graphify %s; %w; %s", strings.Join(args, " "), err, strutil.TruncateSpace(out.String(), 2000))
 	}
 
 	return nil
@@ -217,13 +219,4 @@ func ReportPath(repoPath string) string {
 // HTMLPath returns the interactive graph.html path for a scanned repository path.
 func HTMLPath(repoPath string) string {
 	return filepath.Join(repoPath, "graphify-out", "graph.html")
-}
-
-func truncate(s string, n int) string {
-	s = strings.TrimSpace(s)
-	if len(s) <= n {
-		return s
-	}
-
-	return s[:n] + "..."
 }

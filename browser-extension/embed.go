@@ -1,3 +1,6 @@
+// Package browserextension embeds the browser extension sources and serves
+// them as a zip archive, so the extension ships with the binary instead of
+// being downloaded separately.
 package browserextension
 
 import (

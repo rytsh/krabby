@@ -341,6 +341,13 @@ type FetchResult struct {
 // Emit receives one discovered operation. Returning an error aborts the fetch,
 // which must propagate the error unchanged so the manager can tell a provider
 // failure (retry later, do not advance the watermark) from a sink failure.
+//
+// Emit is NOT safe for concurrent use. A provider that fans out its discovery
+// must funnel the results back through a single goroutine before calling it.
+// The manager's sink accumulates the seen set, the changed-path list and the
+// per-operation records without synchronisation, and a concurrent caller would
+// corrupt them silently — a lost entry in the seen set makes the prune step
+// delete an operation that is actually still present upstream.
 type Emit func(RemoteOperation) error
 
 // Provider discovers the operations of one service. Implementations live in

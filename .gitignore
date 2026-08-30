@@ -5,6 +5,7 @@ bin/
 /dist/
 krabby.yaml
 krabby.toml
+/krabby
 .env
 .env.local
 /graphify-out

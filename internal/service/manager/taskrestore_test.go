@@ -58,7 +58,6 @@ func TestRestoreTasksReenqueues(t *testing.T) {
 	m := &Manager{
 		queue:    queue.New(ctx, 1),
 		activity: map[string]map[string]struct{}{},
-		locks:    map[string]*sync.Mutex{},
 	}
 	t.Cleanup(m.queue.Close)
 	m.SetTaskStore(store)
@@ -99,7 +98,6 @@ func TestRestoreTasksDropsUnknownSpec(t *testing.T) {
 	m := &Manager{
 		queue:    queue.New(ctx, 1),
 		activity: map[string]map[string]struct{}{},
-		locks:    map[string]*sync.Mutex{},
 	}
 	t.Cleanup(m.queue.Close)
 	m.SetTaskStore(store)
@@ -159,7 +157,9 @@ func TestRestoreTasksSeedsNewTaskSequence(t *testing.T) {
 	if err := m.RestoreTasks(ctx); err != nil {
 		t.Fatalf("RestoreTasks: %v", err)
 	}
-	m.TriggerRefresh("new/repo")
+	if err := m.TriggerRefresh("new/repo"); err != nil {
+		t.Fatalf("TriggerRefresh: %v", err)
+	}
 
 	left, err := store.List(ctx)
 	if err != nil {

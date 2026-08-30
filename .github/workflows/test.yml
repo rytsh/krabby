@@ -13,8 +13,27 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+      # -race is the point of running the suite in CI rather than just locally:
+      # this codebase coordinates queue dispatch, sync workers and index
+      # rebuilds across goroutines, and those are exactly the bugs a plain
+      # `go test` cannot see.
       - name: Test backend
-        run: go test ./...
+        run: go test -race ./...
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # Blocking, unlike the report-only run in the sonarcloud job below: that
+      # one exists to feed Sonar a full checkstyle report and must not fail the
+      # build, which meant nothing enforced the linters on a pull request.
+      - name: Lint backend
+        uses: golangci/golangci-lint-action@v9
+        with:
+          args: --timeout 10m
 
   frontend:
     runs-on: ubuntu-latest

@@ -307,7 +307,9 @@ func (s *Service) selectedFile(clonePath, rel string, filters config.Filters) bo
 		}
 
 		prefix = path.Join(prefix, seg)
-		if hardSkipDirs[seg] || (len(filters.Include) == 0 && defaultNoiseDirs[seg]) || matchAny(filters.Exclude, prefix+"/") {
+		if hardSkipDirs[seg] ||
+			(len(filters.Include) == 0 && defaultNoiseDirs[seg]) ||
+			repofs.MatchAny(filters.Exclude, prefix+"/") {
 			return false
 		}
 	}
@@ -317,7 +319,9 @@ func (s *Service) selectedFile(clonePath, rel string, filters config.Filters) bo
 		return false
 	}
 
-	return info.Size() <= repofs.MaxFileBytes && matchInclude(rel, filters) && !matchAny(filters.Exclude, rel)
+	return info.Size() <= repofs.MaxFileBytes &&
+		repofs.MatchInclude(rel, filters.Include, filters.IncludeExtra) &&
+		!repofs.MatchAny(filters.Exclude, rel)
 }
 
 // IndexText builds only the local bw FTS index. It is used to bootstrap the
@@ -614,9 +618,11 @@ func (s *Service) selectFiles(clonePath string, filters config.Filters) ([]strin
 	err := repofs.WalkFiles(clonePath, func(rel, name string) bool {
 		return hardSkipDirs[name] ||
 			(len(filters.Include) == 0 && defaultNoiseDirs[name]) ||
-			matchAny(filters.Exclude, rel+"/")
+			repofs.MatchAny(filters.Exclude, rel+"/")
 	}, func(rel string, size int64) error {
-		if size > repofs.MaxFileBytes || !matchInclude(rel, filters) || matchAny(filters.Exclude, rel) {
+		if size > repofs.MaxFileBytes ||
+			!repofs.MatchInclude(rel, filters.Include, filters.IncludeExtra) ||
+			repofs.MatchAny(filters.Exclude, rel) {
 			return nil
 		}
 
@@ -631,125 +637,6 @@ func (s *Service) selectFiles(clonePath string, filters config.Filters) ([]strin
 	sort.Strings(out)
 
 	return out, nil
-}
-
-// matchInclude applies the resolved filters to one repo-relative path.
-// IncludeExtra is checked first because it is purely additive: it widens
-// whatever Include resolved to, so a repository can opt one more family of
-// files in without restating the allowlist it was happy with.
-func matchInclude(rel string, filters config.Filters) bool {
-	if matchAny(filters.IncludeExtra, rel) {
-		return true
-	}
-
-	if len(filters.Include) == 0 {
-		return defaultIncluded(rel)
-	}
-
-	return matchAny(filters.Include, rel)
-}
-
-// defaultIncluded applies the built-in allowlist: a source extension, a known
-// build-config file name, or a deployment/CI config file.
-func defaultIncluded(rel string) bool {
-	rel = strings.ToLower(rel)
-
-	return defaultIncludeExts[path.Ext(rel)] ||
-		defaultIncludeNames[path.Base(rel)] ||
-		repofs.DeployConfigFile(rel)
-}
-
-// matchAny reports whether rel matches any glob. "**" spans path segments; a
-// glob is matched against both the full path and the base name, and a bare
-// directory prefix (e.g. "vendor/") matches everything under it.
-func matchAny(globs []string, rel string) bool {
-	base := path.Base(rel)
-	for _, gl := range globs {
-		if gl == "" {
-			continue
-		}
-
-		if strings.HasSuffix(gl, "/") && strings.HasPrefix(rel, gl) {
-			return true
-		}
-
-		if globMatch(gl, rel) {
-			return true
-		}
-
-		if ok, _ := path.Match(gl, base); ok {
-			return true
-		}
-	}
-
-	return false
-}
-
-// globMatch implements slash-aware glob matching with doublestar support. Each
-// ordinary segment uses path.Match; a "**" segment consumes zero or more path
-// segments.
-func globMatch(pattern, name string) bool {
-	patternParts := strings.Split(strings.Trim(pattern, "/"), "/")
-	nameParts := strings.Split(strings.Trim(name, "/"), "/")
-
-	type state struct{ pattern, name int }
-	memo := map[state]bool{}
-	seen := map[state]bool{}
-
-	var match func(int, int) bool
-	match = func(pi, ni int) bool {
-		st := state{pi, ni}
-		if seen[st] {
-			return memo[st]
-		}
-		seen[st] = true
-
-		var ok bool
-		switch {
-		case pi == len(patternParts):
-			ok = ni == len(nameParts)
-		case patternParts[pi] == "**":
-			ok = match(pi+1, ni) || (ni < len(nameParts) && match(pi, ni+1))
-		case ni < len(nameParts):
-			segmentOK, _ := path.Match(patternParts[pi], nameParts[ni])
-			ok = segmentOK && match(pi+1, ni+1)
-		}
-
-		memo[st] = ok
-
-		return ok
-	}
-
-	return match(0, 0)
-}
-
-// defaultIncludeExts is the source-file allowlist used when no Include globs
-// are configured.
-var defaultIncludeExts = map[string]bool{
-	".go": true, ".py": true, ".js": true, ".jsx": true, ".ts": true, ".tsx": true,
-	".java": true, ".kt": true, ".rb": true, ".rs": true, ".c": true, ".h": true,
-	".cc": true, ".cpp": true, ".hpp": true, ".cs": true, ".php": true, ".swift": true,
-	".scala": true, ".m": true, ".mm": true, ".sh": true, ".sql": true, ".svelte": true,
-	".vue": true, ".lua": true, ".zig": true, ".ex": true, ".exs": true,
-}
-
-// defaultIncludeNames is the allowlist of extensionless or dotted-suffix source
-// files (matched by base name, case-insensitively) indexed when no Include
-// globs are configured. path.Ext does not classify these usefully — e.g.
-// path.Ext("go.mod") is ".mod" — so they would otherwise be skipped, hiding
-// dependency versions and build config from full-text search.
-var defaultIncludeNames = map[string]bool{
-	"go.mod":           true,
-	"go.sum":           true,
-	"dockerfile":       true,
-	"makefile":         true,
-	"gemfile":          true,
-	"rakefile":         true,
-	"cargo.toml":       true,
-	"cargo.lock":       true,
-	"package.json":     true,
-	"pyproject.toml":   true,
-	"requirements.txt": true,
 }
 
 var hardSkipDirs = map[string]bool{

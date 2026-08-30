@@ -88,7 +88,8 @@ curl localhost:8080/api/v1/repos
 ```
 
 MCP catalogs for agents (opencode, Claude Desktop, etc.) use streamable HTTP.
-Set `mcp.api_key` to require `X-Api-Key` / `Authorization: Bearer` on all three:
+Krabby performs no authentication of its own on any endpoint — deploy it behind
+a proxy that authenticates every request:
 
 - `http://localhost:8080/mcp` — read-only repository, graph, file, history, and documentation tools
 - `http://localhost:8080/mcp/api` — API discovery plus `call_api_endpoint`, which sends real requests
@@ -221,9 +222,6 @@ with a small JSON descriptor instead. Nothing that a client uses is affected —
 `POST`, `DELETE`, and any `GET` carrying a session id go straight to the
 transport — because a request without that header could only ever have received
 an error.
-
-When an MCP API key is configured, an unauthenticated probe still gets `401`,
-which is both correct and already a usable liveness signal.
 
 ## Data layout & external tools
 
@@ -571,5 +569,8 @@ are detected on the first request and stay at their native width — `Test
 embedder` reports the width actually returned, not the one asked for. Changing
 the dim changes the index dimension, which wipes and rebuilds it.
 
-`GET <base>/debug/pprof/heap` is mounted for when the numbers still do not add
-up.
+`GET <base>/debug/pprof/heap` is available for when the numbers still do not add
+up, but it is off by default — set `server.pprof: true` to mount it. The
+profiling handlers are unauthenticated like every other route, and a heap dump
+is a copy of process memory, which holds git tokens, LLM API keys and repository
+content. Turn it on for an investigation and turn it back off afterwards.

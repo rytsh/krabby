@@ -1,7 +1,7 @@
 # krabby example configuration.
 # Copy to krabby.yaml (auto-discovered in cwd) or point CONFIG_FILE at it.
 # Every field can also be set via env with the KRABBY_ prefix,
-# e.g. KRABBY_SERVER_PORT=9090, KRABBY_MCP_API_KEY=....
+# e.g. KRABBY_SERVER_PORT=9090, KRABBY_LOG_LEVEL=debug.
 
 log_level: info
 
@@ -16,10 +16,16 @@ server:
                          # subpath. Empty (default) serves everything at root.
                          # The UI uses a hash router + relative assets, so it is
                          # base-path agnostic and needs no rebuild.
+  # pprof: true          # mount runtime profiling at <base_path>/debug/pprof/.
+                         # Off by default: the handlers are unauthenticated and
+                         # a heap dump carries process memory (git tokens, LLM
+                         # keys, repository content). Enable for the duration of
+                         # an investigation, not permanently.
 
 mcp:
   path: /mcp                      # core; API is /mcp/api, admin is /mcp/admin
-  # api_key: change-me            # require X-Api-Key / Bearer on all MCP paths
+  # Krabby authenticates nothing itself. Run it behind a proxy that
+  # authenticates every request before it reaches these paths.
 
 graphify:
   bin: graphify              # graphify CLI (uv tool install graphifyy==0.9.26)

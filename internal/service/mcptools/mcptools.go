@@ -684,11 +684,6 @@ func addCredentialTools(server *mcp.Server, mgr credentialService) {
 // repoField documents the shared repo selector on query tools.
 const repoField = "repository id (owner/name) to query; always provide it when known, and omit only for explicit cross-repository analysis"
 
-// namespaceField documents the shared namespace selector. When repo is omitted,
-// the query is scoped to this namespace; an omitted namespace means the
-// 'default' namespace, and '*' searches every namespace.
-const namespaceField = "namespace to scope to when repo is omitted; empty means the 'default' namespace, '*' searches all namespaces"
-
 type queryGraphArgs struct {
 	Question    string   `json:"question" jsonschema:"architectural or relationship question; use search_code instead for symbols, paths, literals, definitions, and usages"`
 	Repo        string   `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; always provide when known, omit only for explicit cross-repository analysis"`

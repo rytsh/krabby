@@ -108,7 +108,7 @@ func TestRefreshRepoToolReportsEnqueueRejection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer session.Close()
+	defer func() { _ = session.Close() }()
 
 	result, callErr := session.CallTool(context.Background(), &mcp.CallToolParams{
 		Name:      "refresh_repo",

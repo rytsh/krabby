@@ -30,6 +30,7 @@ import (
 	"github.com/worldline-go/types"
 
 	"github.com/rytsh/krabby/internal/service/apicatalog"
+	"github.com/rytsh/krabby/internal/strutil"
 )
 
 // maxDocumentBytes bounds a fetched specification. Real documents run to a few
@@ -408,7 +409,7 @@ func (p *Provider) get(ctx context.Context, cfg resolvedConfig, state syncState,
 	if err != nil {
 		return nil, meta, fmt.Errorf("fetch api document; %w", err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 
 	meta.etag = res.Header.Get("ETag")
 	meta.lastModified = res.Header.Get("Last-Modified")
@@ -433,7 +434,7 @@ func (p *Provider) get(ctx context.Context, cfg resolvedConfig, state syncState,
 	}
 
 	if res.StatusCode != http.StatusOK {
-		return nil, meta, fmt.Errorf("fetch api document: status %s: %s", res.Status, truncate(string(body), 300))
+		return nil, meta, fmt.Errorf("fetch api document: status %s: %s", res.Status, strutil.Truncate(string(body), 300))
 	}
 	if len(body) == 0 {
 		return nil, meta, errors.New("api document is empty")
@@ -484,13 +485,5 @@ func describe(doc []byte) string {
 		return " (the url returned an HTML page, not a specification: point it at the raw document, e.g. /swagger.json, /v2/api-docs or /openapi.yaml)"
 	}
 
-	return " (document begins: " + truncate(head, 200) + ")"
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-
-	return s[:n] + "…"
+	return " (document begins: " + strutil.Truncate(head, 200) + ")"
 }

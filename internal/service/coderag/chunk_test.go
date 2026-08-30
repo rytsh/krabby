@@ -38,29 +38,6 @@ func TestParseLine(t *testing.T) {
 	}
 }
 
-func TestGlobMatchDoublestar(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		pattern string
-		name    string
-		want    bool
-	}{
-		{"**/*.go", "main.go", true},
-		{"**/*.go", "internal/service/main.go", true},
-		{"**/generated/**", "pkg/generated/client/api.go", true},
-		{"vendor/**", "vendor/lib/code.go", true},
-		{"src/*.go", "src/nested/main.go", false},
-		{"**/*.go", "README.md", false},
-	}
-
-	for _, tt := range tests {
-		if got := globMatch(tt.pattern, tt.name); got != tt.want {
-			t.Errorf("globMatch(%q, %q) = %v, want %v", tt.pattern, tt.name, got, tt.want)
-		}
-	}
-}
-
 func TestChunkFileUsesSymbolBoundaries(t *testing.T) {
 	t.Parallel()
 

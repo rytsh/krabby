@@ -221,6 +221,13 @@ type FetchResult struct {
 // Emit receives one fetched page. Returning an error aborts the fetch, which
 // must propagate the error unchanged so the manager can tell a provider failure
 // (retry later, do not advance the watermark) from a sink failure.
+//
+// Emit is NOT safe for concurrent use. A provider that fans out its fetching
+// must funnel the results back through a single goroutine before calling it.
+// The manager's sink accumulates the seen set, the changed-path list and the
+// per-page records without synchronisation, and a concurrent caller would
+// corrupt them silently — a lost entry in the seen set makes the prune step
+// delete a page that is actually still present upstream.
 type Emit func(RemotePage) error
 
 // Fetcher lists and converts the current remote pages of one collection.

@@ -247,7 +247,7 @@ func jiraServer(t *testing.T, issues string) (*httptest.Server, *[]string) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		queries = append(queries, r.URL.Query().Get("jql"))
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"startAt":0,"maxResults":50,"total":2,"issues":[%s]}`, issues)
+		_, _ = fmt.Fprintf(w, `{"startAt":0,"maxResults":50,"total":2,"issues":[%s]}`, issues)
 	}))
 	t.Cleanup(srv.Close)
 
@@ -310,7 +310,7 @@ func TestPreviewCountsFilteredIssuesWithoutContentFields(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestedFields = r.URL.Query().Get("fields")
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"startAt":0,"maxResults":50,"total":2,"issues":[%s]}`, twoIssues)
+		_, _ = fmt.Fprintf(w, `{"startAt":0,"maxResults":50,"total":2,"issues":[%s]}`, twoIssues)
 	}))
 	defer srv.Close()
 

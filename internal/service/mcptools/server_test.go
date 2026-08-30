@@ -86,7 +86,7 @@ func TestToolCatalogs(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer session.Close()
+			defer func() { _ = session.Close() }()
 
 			result, err := session.ListTools(context.Background(), nil)
 			if err != nil {
@@ -190,7 +190,7 @@ func TestPublishedCallSchemaAcceptsJSONBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer session.Close()
+	defer func() { _ = session.Close() }()
 
 	result, err := session.ListTools(context.Background(), nil)
 	if err != nil {
@@ -257,7 +257,7 @@ func TestAdminCatalogUsesTypedJSONObjects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer session.Close()
+	defer func() { _ = session.Close() }()
 	result, err := session.ListTools(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)

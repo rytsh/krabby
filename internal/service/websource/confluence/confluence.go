@@ -26,6 +26,7 @@ import (
 
 	"github.com/rytsh/krabby/internal/service/progress"
 	"github.com/rytsh/krabby/internal/service/websource"
+	"github.com/rytsh/krabby/internal/strutil"
 )
 
 const (
@@ -756,7 +757,7 @@ func (f *Fetcher) get(ctx context.Context, cfg resolvedConfig, endpoint string) 
 	if err != nil {
 		return nil, fmt.Errorf("request confluence; %w", err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 
 	body, err := io.ReadAll(io.LimitReader(res.Body, 64<<20))
 	if err != nil {
@@ -764,7 +765,7 @@ func (f *Fetcher) get(ctx context.Context, cfg resolvedConfig, endpoint string) 
 	}
 
 	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("confluence request: status %s: %s", res.Status, truncate(string(body), 300))
+		return nil, fmt.Errorf("confluence request: status %s: %s", res.Status, strutil.Truncate(string(body), 300))
 	}
 
 	return body, nil
@@ -826,7 +827,7 @@ func (f *Fetcher) FetchImage(ctx context.Context, col *websource.Collection, pag
 		}
 		return websource.ImageContent{}, fmt.Errorf("fetch confluence image; %w", err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	if res.StatusCode != http.StatusOK {
 		return websource.ImageContent{}, fmt.Errorf("%w: confluence image status %s", websource.ErrImageUnsupported, res.Status)
 	}
@@ -876,12 +877,4 @@ func labelSelected(page contentPage, include, exclude []string) bool {
 	}
 
 	return false
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-
-	return s[:n] + "…"
 }

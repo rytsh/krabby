@@ -11,14 +11,12 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/worldline-go/hardloop"
 
 	"github.com/rytsh/krabby/internal/service/progress"
 	"github.com/rytsh/krabby/internal/service/queue"
-	"github.com/rytsh/krabby/internal/service/rag"
 	"github.com/rytsh/krabby/internal/service/repofs"
 	"github.com/rytsh/krabby/internal/service/websource"
 )
@@ -91,6 +89,23 @@ func (m *Manager) sourcesDir(name string) string {
 	return filepath.Join(m.sourcesRootDir, name)
 }
 
+// webCorpus describes one collection for the index stages shared with the API
+// catalog (see corpussync.go).
+func (m *Manager) webCorpus(name string) docsCorpus {
+	return docsCorpus{
+		kind:   "web source",
+		logKey: "source",
+		name:   name,
+		scope:  websource.ScopeKey(name),
+		dir:    m.sourcesDir(name),
+	}
+}
+
+// webSyncTaskMode builds the queue task for a web-source sync.
+func (m *Manager) webSyncTaskMode(name string, forceFull bool) queue.Task {
+	return m.syncTask(m.webCorpus(name), taskKindWebSync, forceFull, m.refreshWebSource)
+}
+
 // collectionLock serialises read-modify-write cycles on one collection record.
 //
 // It is deliberately a different lock from the sync lock. RefreshWebSource
@@ -100,8 +115,8 @@ func (m *Manager) sourcesDir(name string) string {
 //
 // Lock order, where both are taken: sync lock first, then this one. Nothing
 // takes them in the opposite order.
-func (m *Manager) collectionLock(name string) *sync.Mutex {
-	return m.lockFor(websource.ScopeKey(name) + "#record")
+func (m *Manager) collectionLock(name string) func() {
+	return m.lockKey(websource.ScopeKey(name) + "#record")
 }
 
 // mutateCollection applies fn to the current stored record under the record
@@ -115,9 +130,7 @@ func (m *Manager) collectionLock(name string) *sync.Mutex {
 // record just before a delete would re-insert it afterwards, leaving a
 // collection with no pages, no directory and no index that nothing can clean up.
 func (m *Manager) mutateCollection(ctx context.Context, name string, fn func(*websource.Collection) error) error {
-	l := m.collectionLock(name)
-	l.Lock()
-	defer l.Unlock()
+	defer m.collectionLock(name)()
 
 	col, err := m.webStore.GetCollection(ctx, name)
 	if err != nil {
@@ -163,15 +176,14 @@ func (m *Manager) AddWebCollection(ctx context.Context, col *websource.Collectio
 	// The exists-check and the insert are one critical section, or two
 	// concurrent creates of the same name both "succeed" and the second
 	// silently overwrites the first.
-	l := m.collectionLock(col.Name)
-	l.Lock()
+	release := m.collectionLock(col.Name)
 
 	if existing, err := m.webStore.GetCollection(ctx, col.Name); err != nil {
-		l.Unlock()
+		release()
 
 		return err
 	} else if existing != nil {
-		l.Unlock()
+		release()
 
 		return fmt.Errorf("collection %s already exists", col.Name)
 	}
@@ -180,7 +192,7 @@ func (m *Manager) AddWebCollection(ctx context.Context, col *websource.Collectio
 	col.CreatedAt = time.Now()
 
 	err = m.webStore.UpsertCollection(ctx, col)
-	l.Unlock()
+	release()
 
 	if err != nil {
 		return err
@@ -350,9 +362,7 @@ func (m *Manager) DeleteWebCollection(ctx context.Context, name string) error {
 	// slipped in between the record delete and here would re-insert the
 	// collection, leaving a record with no pages, no directory and no index
 	// entries — and no path that ever cleans it up.
-	rl := m.collectionLock(name)
-	rl.Lock()
-	defer rl.Unlock()
+	defer m.collectionLock(name)()
 
 	col, err := m.webStore.GetCollection(ctx, name)
 	if err != nil {
@@ -381,15 +391,8 @@ func (m *Manager) DeleteWebCollection(ctx context.Context, name string) error {
 		return err
 	}
 
-	// The name is already ValidName-checked on create, but this guards an
-	// os.RemoveAll: use a separator-aware containment test rather than
-	// filepath.HasPrefix, which is deprecated precisely because "…/srcs-evil"
-	// passes a prefix test against "…/srcs".
-	dir := m.sourcesDir(name)
-	if m.sourcesRootDir != "" && withinDir(m.sourcesRootDir, dir) {
-		if err := os.RemoveAll(dir); err != nil {
-			return fmt.Errorf("remove source content %s; %w", dir, err)
-		}
+	if err := removeContentDir(m.sourcesRootDir, m.sourcesDir(name), "source"); err != nil {
+		return err
 	}
 
 	return nil
@@ -760,7 +763,7 @@ func (m *Manager) importWebPages(ctx context.Context, name string, imports []Web
 		if err != nil {
 			return result, err
 		}
-		path := remote.Slug + ".md"
+		path := docFileName(remote.Slug)
 		contentChanged := rec.IndexDirty || hash != rec.Hash || !fileExists(file)
 		needsIndex := contentChanged || metadataChanged
 		if needsIndex && !rec.IndexDirty {
@@ -790,7 +793,7 @@ func (m *Manager) importWebPages(ctx context.Context, name string, imports []Web
 	}
 
 	if len(changedPaths) > 0 {
-		if err := m.indexWebSourcePaths(ctx, name, changedPaths, nil, updatedAt); err != nil {
+		if err := m.indexPaths(ctx, m.webCorpus(name), changedPaths, nil, updatedAt); err != nil {
 			return result, fmt.Errorf("index imported pages; %w", err)
 		}
 		if err := m.commitWebSourceHashes(context.WithoutCancel(ctx), name, changedPaths); err != nil {
@@ -942,7 +945,7 @@ func (m *Manager) DeleteWebPage(ctx context.Context, name, slug string) error {
 
 	// Only this page's vectors and text rows go; rebuilding the collection
 	// would re-embed every remaining document to delete one.
-	if err := m.indexWebSourcePaths(ctx, name, nil, []string{slug + ".md"}, nil); err != nil {
+	if err := m.indexPaths(ctx, m.webCorpus(name), nil, []string{docFileName(slug)}, nil); err != nil {
 		return fmt.Errorf("drop index entries for %s; %w", slug, err)
 	}
 	if err := m.webStore.DeletePage(ctx, websource.PageID(name, slug)); err != nil {
@@ -990,33 +993,6 @@ func (m *Manager) TriggerWebFullRefresh(name string) error {
 // scope key as ID) so the sync is persisted and rebuildable after a restart.
 func (m *Manager) webSyncTask(name string) queue.Task {
 	return m.webSyncTaskMode(name, false)
-}
-
-func (m *Manager) webSyncTaskMode(name string, forceFull bool) queue.Task {
-	scope := websource.ScopeKey(name)
-	key := taskKindWebSync + ":" + name
-	spec := queue.Spec{Kind: taskKindWebSync, ID: scope}
-	if forceFull {
-		key += ":full"
-		spec.Params = map[string]string{"force_full": "true"}
-	}
-
-	return queue.Task{
-		ID:    scope,
-		Kind:  taskKindWebSync,
-		Title: "Sync " + scope,
-		Key:   key,
-		Spec:  spec,
-		Run: func(ctx context.Context) error {
-			if err := m.refreshWebSource(ctx, name, forceFull); err != nil {
-				slog.Error("refresh web source", "source", name, "error", err)
-
-				return err
-			}
-
-			return nil
-		},
-	}
 }
 
 // RefreshDueWebSources triggers a sync for every collection whose refresh
@@ -1131,14 +1107,14 @@ func (m *Manager) refreshWebSource(ctx context.Context, name string, forceFull b
 		return fmt.Errorf("no fetcher for source type %q", col.Type)
 	}
 
-	m.setActivity(scope, "sync")
-	defer m.clearActivity(scope, "sync")
+	m.setActivity(scope, stepSync)
+	defer m.clearActivity(scope, stepSync)
 
 	// Progress is published throughout the sync so the UI can show live state.
 	// Fetching and persisting are one step — a page is written as it arrives —
 	// so they share the fetch phase, reported by the provider as it walks; the
 	// index phase below then reports embedded/total chunks.
-	m.setProgress(scope, Progress{Phase: "fetch"})
+	m.setProgress(scope, Progress{Phase: phaseFetch})
 	// The sync owns the scope's phases end to end, so clear them all: an early
 	// return between phases must not leave a stale bar on screen.
 	defer m.clearAllProgress(scope)
@@ -1193,7 +1169,7 @@ func (m *Manager) refreshWebSource(ctx context.Context, name string, forceFull b
 	// the fetch phase shows a determinate bar and a time estimate instead of an
 	// open-ended spinner. Providers that cannot simply never report.
 	fetchCtx := progress.With(ctx, func(done, total int) {
-		m.setProgress(scope, Progress{Phase: "fetch", Done: done, Total: total})
+		m.setProgress(scope, Progress{Phase: phaseFetch, Done: done, Total: total})
 	})
 
 	dir := m.sourcesDir(name)
@@ -1258,9 +1234,22 @@ func (m *Manager) refreshWebSource(ctx context.Context, name string, forceFull b
 
 		if remote.Err != nil {
 			// Keep the previous content; record the failure.
+			//
+			// A failure to fetch this page is not a failure of the sync, so the
+			// walk continues. A failure to *store* that outcome is treated like
+			// every other store failure in this closure: swallowing it left the
+			// page advertising its previous StatusReady with the error never
+			// reaching the UI, which reads as a page that synced cleanly.
 			rec.Status = websource.StatusError
 			rec.LastError = remote.Err.Error()
-			_ = m.webStore.UpsertPage(ctx, rec)
+
+			if err := m.webStore.UpsertPage(ctx, rec); err != nil {
+				writeErr = err
+
+				return writeErr
+			}
+
+			existing[remote.Slug] = rec
 
 			return nil
 		}
@@ -1271,7 +1260,7 @@ func (m *Manager) refreshWebSource(ctx context.Context, name string, forceFull b
 
 		rec.Teams = remote.Teams
 		rec.UpdatedAt = remote.UpdatedAt
-		updatedAt[remote.Slug+".md"] = remote.UpdatedAt
+		updatedAt[docFileName(remote.Slug)] = remote.UpdatedAt
 
 		enriched, err := m.enrichWebImages(ctx, col, rec.ID, remote.URL, rec.Title, remote.Markdown)
 		if err != nil {
@@ -1288,7 +1277,7 @@ func (m *Manager) refreshWebSource(ctx context.Context, name string, forceFull b
 			return writeErr
 		}
 
-		path := remote.Slug + ".md"
+		path := docFileName(remote.Slug)
 		if rec.IndexDirty || hash != rec.Hash || !fileExists(file) {
 			// Persist intent before replacing the file. Hash remains the last
 			// successfully indexed content until the whole index pass commits.
@@ -1337,7 +1326,7 @@ func (m *Manager) refreshWebSource(ctx context.Context, name string, forceFull b
 		return fail(fmt.Errorf("fetch %s; %w", name, err))
 	}
 
-	m.clearProgress(scope, "fetch")
+	m.clearProgress(scope, phaseFetch)
 
 	// Pruning of vanished records. Deleting a stored page because it was not
 	// seen is only sound when the provider enumerated the whole collection, so
@@ -1379,7 +1368,7 @@ func (m *Manager) refreshWebSource(ctx context.Context, name string, forceFull b
 		}
 
 		_ = os.Remove(file)
-		removedPaths = append(removedPaths, rec.Slug+".md")
+		removedPaths = append(removedPaths, docFileName(rec.Slug))
 	}
 
 	// Reconcile the index against every page currently on disk, not just the
@@ -1397,7 +1386,7 @@ func (m *Manager) refreshWebSource(ctx context.Context, name string, forceFull b
 		reconcile[slug] = true
 	}
 	for _, path := range removedPaths {
-		delete(reconcile, strings.TrimSuffix(path, ".md"))
+		delete(reconcile, docSlug(path))
 	}
 	for slug := range seen {
 		reconcile[slug] = true
@@ -1405,7 +1394,7 @@ func (m *Manager) refreshWebSource(ctx context.Context, name string, forceFull b
 
 	queuedChanges := pathSet(changedPaths)
 	for slug, rec := range existing {
-		path := slug + ".md"
+		path := docFileName(slug)
 		if !reconcile[slug] || !rec.IndexDirty || !fileExists(filepath.Join(dir, path)) {
 			continue
 		}
@@ -1417,7 +1406,7 @@ func (m *Manager) refreshWebSource(ctx context.Context, name string, forceFull b
 		updatedAt[path] = rec.UpdatedAt
 	}
 
-	missing, extra, err := m.reconcileWebSourceIndex(ctx, name, dir, reconcile, changedPaths, removedPaths)
+	missing, extra, err := m.reconcileIndex(ctx, m.webCorpus(name), reconcile, changedPaths, removedPaths)
 	if err != nil {
 		return fail(err)
 	}
@@ -1429,7 +1418,7 @@ func (m *Manager) refreshWebSource(ctx context.Context, name string, forceFull b
 		// markdown), so their UpdatedAt may not be in the map yet; take it from
 		// the stored record so the recency stamp is preserved on re-embed.
 		for _, path := range missing {
-			slug := strings.TrimSuffix(path, ".md")
+			slug := docSlug(path)
 			if rec := existing[slug]; rec != nil {
 				updatedAt[path] = rec.UpdatedAt
 			}
@@ -1449,7 +1438,7 @@ func (m *Manager) refreshWebSource(ctx context.Context, name string, forceFull b
 	// errored so the failure is visible and a refresh retries the work.
 	var indexErr error
 	if len(changedPaths) > 0 || len(removedPaths) > 0 {
-		if err := m.indexWebSourcePaths(ctx, name, changedPaths, removedPaths, updatedAt); err != nil {
+		if err := m.indexPaths(ctx, m.webCorpus(name), changedPaths, removedPaths, updatedAt); err != nil {
 			indexErr = err
 			slog.Error("web source indexing failed; watermark not advanced",
 				"source", name, "changed", len(changedPaths), "error", err)
@@ -1496,101 +1485,6 @@ func (m *Manager) refreshWebSource(ctx context.Context, name string, forceFull b
 	return nil
 }
 
-// indexWebSource rebuilds a collection's configured lexical and semantic docs
-// indexes. Semantic indexing is skipped when RAG is disabled.
-func (m *Manager) indexWebSource(ctx context.Context, name string) {
-	d, releaseDocs := m.acquireDocs()
-	defer releaseDocs()
-
-	if d.rag == nil && m.docsText == nil {
-		slog.Debug("docs search disabled; web source not indexed", "source", name)
-
-		return
-	}
-
-	scope := websource.ScopeKey(name)
-
-	m.setActivity(scope, "docs_index")
-	defer m.clearActivity(scope, "docs_index")
-
-	if err := m.indexDocs(ctx, d, scope, m.sourcesDir(name)); err != nil {
-		slog.Error("index web source", "source", name, "error", err)
-	}
-}
-
-// reconcileWebSourceIndex returns expected markdown paths missing from any
-// configured index and indexed paths with no page record. The latter makes
-// partially completed removals retry even after their records are gone.
-func (m *Manager) reconcileWebSourceIndex(ctx context.Context, name, dir string, candidates map[string]bool, changed, removed []string) ([]string, []string, error) {
-	d, releaseDocs := m.acquireDocs()
-	defer releaseDocs()
-	if d.rag == nil && m.docsText == nil {
-		return nil, nil, nil
-	}
-
-	indexedSets := make([]map[string]struct{}, 0, 2)
-	if d.rag != nil {
-		indexed, err := d.rag.IndexedPaths(ctx, websource.ScopeKey(name))
-		if err != nil {
-			return nil, nil, fmt.Errorf("scan web source %s vector paths; %w", name, err)
-		}
-		indexedSets = append(indexedSets, indexed)
-	}
-	if m.docsText != nil {
-		indexed, err := m.docsText.IndexedPaths(ctx, websource.ScopeKey(name))
-		if err != nil {
-			return nil, nil, fmt.Errorf("scan web source %s text paths; %w", name, err)
-		}
-		indexedSets = append(indexedSets, indexed)
-	}
-
-	queuedChanges := pathSet(changed)
-	queuedRemovals := pathSet(removed)
-	expected := make(map[string]struct{}, len(candidates))
-
-	var missing []string
-	for slug := range candidates {
-		path := slug + ".md"
-		expected[path] = struct{}{}
-		indexedEverywhere := true
-		for _, indexed := range indexedSets {
-			if _, ok := indexed[path]; !ok {
-				indexedEverywhere = false
-				break
-			}
-		}
-		if indexedEverywhere {
-			continue
-		}
-		if _, ok := queuedChanges[path]; ok {
-			continue // already about to be embedded this run
-		}
-		if !fileExists(filepath.Join(dir, path)) {
-			continue // no markdown to embed (e.g. a pending, never-fetched page)
-		}
-		missing = append(missing, path)
-	}
-
-	extraSet := map[string]struct{}{}
-	for _, indexed := range indexedSets {
-		for path := range indexed {
-			if _, ok := expected[path]; ok {
-				continue
-			}
-			if _, ok := queuedRemovals[path]; ok {
-				continue
-			}
-			extraSet[path] = struct{}{}
-		}
-	}
-	extra := make([]string, 0, len(extraSet))
-	for path := range extraSet {
-		extra = append(extra, path)
-	}
-
-	return missing, extra, nil
-}
-
 func pathSet(paths []string) map[string]struct{} {
 	set := make(map[string]struct{}, len(paths))
 	for _, path := range paths {
@@ -1605,7 +1499,7 @@ func pathSet(paths []string) map[string]struct{} {
 // the page was fetched during this process or survived an earlier crash.
 func (m *Manager) commitWebSourceHashes(ctx context.Context, name string, changed []string) error {
 	for path := range pathSet(changed) {
-		slug := strings.TrimSuffix(path, ".md")
+		slug := docSlug(path)
 		rec, err := m.webStore.GetPage(ctx, websource.PageID(name, slug))
 		if err != nil {
 			return err
@@ -1630,59 +1524,6 @@ func (m *Manager) commitWebSourceHashes(ctx context.Context, name string, change
 	}
 
 	return nil
-}
-
-// indexWebSourcePaths incrementally updates changed/removed docs in every
-// configured search index, avoiding a full rebuild for large JIRA projects. An
-// index failure prevents the fetch watermark from advancing.
-func (m *Manager) indexWebSourcePaths(ctx context.Context, name string, changed, removed []string, updatedAt map[string]time.Time) error {
-	d, releaseDocs := m.acquireDocs()
-	defer releaseDocs()
-
-	if d.rag == nil && m.docsText == nil {
-		slog.Debug("docs search disabled; web source not indexed", "source", name)
-
-		return nil
-	}
-
-	scope := websource.ScopeKey(name)
-
-	m.setActivity(scope, "docs_index")
-	defer m.clearActivity(scope, "docs_index")
-
-	// Publish live embedding progress so the UI can show a determinate bar
-	// ("1200/22697 chunks embedded"). Cleared when this step returns.
-	m.setProgress(scope, Progress{Phase: "index"})
-	defer m.clearProgress(scope, "index")
-	onProgress := func(done, total int) {
-		m.setProgress(scope, Progress{Phase: "index", Done: done, Total: total})
-	}
-
-	// Carry each page's source last-modified time onto its vectors so retrieval
-	// can surface and weigh recency.
-	opts := &rag.IndexOptions{
-		UpdatedAt:           func(path string) time.Time { return updatedAt[path] },
-		KeepMarkdownTargets: d.ragCfg.KeepMarkdownTargets,
-	}
-
-	var errs []error
-	if m.docsText != nil {
-		if err := m.docsText.IndexPaths(ctx, scope, m.sourcesDir(name), changed, removed, opts); err != nil {
-			errs = append(errs, fmt.Errorf("index web source %s text; %w", name, err))
-		}
-		// Query tuning is derived from the corpus, so it follows the corpus.
-		// A failure here only costs lexical query speed, never correctness.
-		if err := m.docsText.RefreshStats(ctx); err != nil {
-			slog.Warn("refresh docs search stats", "source", name, "error", err)
-		}
-	}
-	if d.rag != nil {
-		if err := d.rag.IndexPathsProgress(ctx, scope, m.sourcesDir(name), changed, removed, onProgress, opts); err != nil {
-			errs = append(errs, fmt.Errorf("index web source %s vectors; %w", name, err))
-		}
-	}
-
-	return errors.Join(errs...)
 }
 
 // enqueueWebReindex submits a reindex task for every web-source collection so

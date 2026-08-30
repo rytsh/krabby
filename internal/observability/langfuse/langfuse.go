@@ -190,7 +190,12 @@ func New(cfg config.Langfuse) (*Tracer, error) {
 		// Second line of defence behind maxLen: a span that somehow carries an
 		// oversized attribute is clipped by the SDK rather than by Langfuse
 		// rejecting the whole batch.
-		sdktrace.WithSpanLimits(spanLimits(cfg)),
+		//
+		// The raw variant is used because it applies the limits literally. The
+		// deprecated WithSpanLimits rewrites any value <= 0 to a default, so it
+		// cannot express "unlimited" — which is exactly what spanLimits returns
+		// when MaxContentBytes is unset.
+		sdktrace.WithRawSpanLimits(spanLimits(cfg)),
 	)
 
 	return &Tracer{

@@ -20,10 +20,6 @@ import (
 	"github.com/rytsh/krabby/internal/service/registry"
 )
 
-type routeAuth struct {
-	key string
-}
-
 type failingWebhookService struct {
 	err       error
 	triggered bool
@@ -39,31 +35,16 @@ func (s *failingWebhookService) TriggerRefresh(string, ...string) error {
 	return s.err
 }
 
-func (a *routeAuth) InitMCPKey(_ context.Context, key string) { a.key = key }
-func (a *routeAuth) MCPAPIKey() string                        { return a.key }
-func (a *routeAuth) SetMCPAPIKey(_ context.Context, key string) error {
-	a.key = key
-
-	return nil
-}
-func (a *routeAuth) ClearMCPAPIKey(context.Context) error {
-	a.key = ""
-
-	return nil
-}
-
-func TestRouterBasePathAuthAndFallbackPrecedence(t *testing.T) {
-	auth := &routeAuth{}
+func TestRouterBasePathAndFallbackPrecedence(t *testing.T) {
 	cfg := &config.Config{
 		Server: config.Server{BasePath: "/krabby"},
-		MCP:    config.MCP{Path: "/mcp", APIKey: "secret"},
+		MCP:    config.MCP{Path: "/mcp"},
 	}
-	handler := newRouter(context.Background(), cfg, routeServices{auth: auth}, nil, nil, nil)
+	handler := newRouter(context.Background(), cfg, routeServices{}, nil, nil, nil)
 
 	tests := []struct {
 		name         string
 		path         string
-		key          string
 		wantStatus   int
 		wantType     string
 		wantBody     string
@@ -82,11 +63,7 @@ func TestRouterBasePathAuthAndFallbackPrecedence(t *testing.T) {
 			wantStatus: http.StatusMovedPermanently, wantLocation: "/krabby/",
 		},
 		{
-			name: "mcp auth runs before probe", path: "/krabby/mcp",
-			wantStatus: http.StatusUnauthorized, wantBody: "unauthorized",
-		},
-		{
-			name: "authenticated mcp route wins over fallback", path: "/krabby/mcp", key: "secret",
+			name: "mcp route wins over the spa fallback", path: "/krabby/mcp",
 			wantStatus: http.StatusOK, wantType: "application/json", wantBody: `"transport":"mcp-streamable-http"`,
 		},
 		{
@@ -98,9 +75,6 @@ func TestRouterBasePathAuthAndFallbackPrecedence(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
-			if tt.key != "" {
-				req.Header.Set("X-Api-Key", tt.key)
-			}
 			rec := httptest.NewRecorder()
 
 			handler.ServeHTTP(rec, req)
@@ -118,6 +92,64 @@ func TestRouterBasePathAuthAndFallbackPrecedence(t *testing.T) {
 				t.Errorf("Location = %q, want %q", rec.Header().Get("Location"), tt.wantLocation)
 			}
 		})
+	}
+}
+
+// pprof is opt-in. /debug/pprof/heap is a dump of process memory — git tokens,
+// LLM API keys, repository content — and krabby authenticates nothing itself,
+// so a profiler mounted by default is one proxy rule away from disclosing all
+// of it.
+func TestPprofIsOffByDefault(t *testing.T) {
+	cfg := &config.Config{Server: config.Server{}, MCP: config.MCP{Path: "/mcp"}}
+	handler := newRouter(context.Background(), cfg, routeServices{}, nil, nil, nil)
+
+	for _, path := range []string{
+		"/debug/pprof/",
+		"/debug/pprof/cmdline",
+		"/debug/pprof/profile",
+		"/debug/pprof/symbol",
+		"/debug/pprof/trace",
+		"/debug/pprof/goroutine?debug=1",
+		"/debug/pprof/heap",
+	} {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+
+		// The SPA fallback answers unknown paths, so the assertion is about the
+		// content rather than the status: no profile may come back.
+		if body := rec.Body.String(); strings.Contains(body, "goroutine profile") ||
+			strings.Contains(body, "# runtime.MemStats") ||
+			strings.Contains(body, "Types of profiles available") {
+			t.Errorf("%s served a pprof profile while server.pprof is disabled", path)
+		}
+	}
+}
+
+func TestPprofMountsWhenEnabled(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.Server{BasePath: "/krabby", Pprof: true},
+		MCP:    config.MCP{Path: "/mcp"},
+	}
+	handler := newRouter(context.Background(), cfg, routeServices{}, nil, nil, nil)
+
+	// A named profile behind a base path is the case pprof.Index cannot serve
+	// itself, so it is the one worth asserting.
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/krabby/debug/pprof/goroutine?debug=1", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "goroutine profile") {
+		t.Errorf("body = %q, want a goroutine profile", rec.Body.String())
+	}
+
+	// The index must also be reachable, under the base path.
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/krabby/debug/pprof/", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("index status = %d, want 200", rec.Code)
 	}
 }
 
@@ -202,69 +234,6 @@ func TestGitWebhookDoesNotAcceptFailedRefreshEnqueue(t *testing.T) {
 	}
 }
 
-func TestAPIKeyMiddleware(t *testing.T) {
-	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-
-	key := "secret-key"
-	handler := apiKeyMiddleware(func() string { return key })(next)
-
-	tests := []struct {
-		name   string
-		header map[string]string
-		want   int
-	}{
-		{name: "no key", header: nil, want: http.StatusUnauthorized},
-		{name: "wrong key", header: map[string]string{"X-Api-Key": "nope"}, want: http.StatusUnauthorized},
-		{name: "x-api-key", header: map[string]string{"X-Api-Key": "secret-key"}, want: http.StatusOK},
-		{name: "bearer", header: map[string]string{"Authorization": "Bearer secret-key"}, want: http.StatusOK},
-	}
-
-	for _, tt := range tests {
-		req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
-		for k, v := range tt.header {
-			req.Header.Set(k, v)
-		}
-
-		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
-
-		if rec.Code != tt.want {
-			t.Errorf("%s: got %d, want %d", tt.name, rec.Code, tt.want)
-		}
-	}
-
-	// Empty key disables auth.
-	open := apiKeyMiddleware(func() string { return "" })(next)
-	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
-	rec := httptest.NewRecorder()
-	open.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("empty api key should disable auth, got %d", rec.Code)
-	}
-
-	// The key is resolved per request: a runtime change applies immediately.
-	key = "rotated"
-	req = httptest.NewRequest(http.MethodPost, "/mcp", nil)
-	req.Header.Set("X-Api-Key", "secret-key")
-	rec = httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("old key should be rejected after rotation, got %d", rec.Code)
-	}
-
-	req = httptest.NewRequest(http.MethodPost, "/mcp", nil)
-	req.Header.Set("X-Api-Key", "rotated")
-	rec = httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("rotated key should be accepted, got %d", rec.Code)
-	}
-}
 
 func TestValidateStages(t *testing.T) {
 	tests := []struct {

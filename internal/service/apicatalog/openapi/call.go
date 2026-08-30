@@ -90,7 +90,7 @@ func (p *Provider) Call(ctx context.Context, svc *apicatalog.Service, d *apicata
 
 		return out, nil
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 
 	raw, readErr := io.ReadAll(io.LimitReader(res.Body, apicatalog.MaxCallBodyBytes+1))
 	if readErr != nil && len(raw) == 0 {

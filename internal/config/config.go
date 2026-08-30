@@ -86,12 +86,24 @@ type Server struct {
 	// It is normalized to a leading slash with no trailing slash; empty (the
 	// default) serves everything at the root.
 	BasePath string `cfg:"base_path"`
+	// Pprof mounts the runtime profiling endpoints under
+	// <base_path>/debug/pprof/.
+	//
+	// Off by default, and deliberately opt-in rather than opt-out: krabby
+	// authenticates nothing itself, and /debug/pprof/heap is a dump of process
+	// memory — which holds git tokens, LLM API keys and repository content. A
+	// profiler that is always on is a credential disclosure waiting for one
+	// misconfigured proxy rule. Turn it on for the duration of an
+	// investigation, not permanently.
+	Pprof bool `cfg:"pprof"`
 }
 
 // MCP configures the model-context-protocol endpoint.
+//
+// There is no API key here: the endpoint carries no authentication of its own
+// and is expected to run behind a proxy that authenticates every request.
 type MCP struct {
-	Path   string `cfg:"path" default:"/mcp"`
-	APIKey string `cfg:"api_key" log:"-"`
+	Path string `cfg:"path" default:"/mcp"`
 	// WaitTimeout caps how long wait=true add_repo/refresh_repo calls block
 	// before returning the in-progress status. The build keeps running in the
 	// background either way; poll repo_status for the final state. 0 waits

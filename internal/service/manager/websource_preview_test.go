@@ -50,7 +50,7 @@ func TestWebSourcePreviewUsesStoredSecretWithoutPersisting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	store, err := websource.New(db)
 	if err != nil {
@@ -83,7 +83,7 @@ func TestWebSourceSchedulesIncludeFullResyncCron(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	store, err := websource.New(db)
 	if err != nil {

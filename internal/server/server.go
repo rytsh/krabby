@@ -72,28 +72,10 @@ func newRouter(ctx context.Context, cfg *config.Config, services routeServices, 
 		_, _ = w.Write([]byte("OK"))
 	})
 
-	// Runtime profiling endpoints (goroutine, heap, CPU, ...) for diagnosing
-	// stuck/slow work such as a hung vector upsert. Mounted under
-	// <base>/debug/pprof/. Kept unauthenticated to match /healthz; the server is
-	// only reachable inside the cluster. Fetch e.g. /debug/pprof/goroutine?debug=2.
-	base.GET("/debug/pprof/", http.HandlerFunc(pprof.Index))
-	base.GET("/debug/pprof/cmdline", http.HandlerFunc(pprof.Cmdline))
-	base.GET("/debug/pprof/profile", http.HandlerFunc(pprof.Profile))
-	base.GET("/debug/pprof/symbol", http.HandlerFunc(pprof.Symbol))
-	base.GET("/debug/pprof/trace", http.HandlerFunc(pprof.Trace))
-	// Named profiles (goroutine, heap, allocs, ...) are served by their own
-	// handler rather than pprof.Index, because Index only recognises a named
-	// profile when the URL path is exactly "/debug/pprof/<name>". Under a base
-	// path (e.g. "/krabby/debug/pprof/goroutine") that check fails and Index
-	// would always return the profile list. Resolving the handler by the {name}
-	// segment keeps ?debug=2 (full text dump) working behind the base path.
-	base.GET("/debug/pprof/{name}", func(w http.ResponseWriter, r *http.Request) {
-		pprof.Handler(r.PathValue("name")).ServeHTTP(w, r)
-	})
+	if cfg.Server.Pprof {
+		mountPprof(base)
+	}
 
-	// The MCP key can be overridden at runtime from the UI; resolve it per
-	// request through the manager's cached value.
-	services.auth.InitMCPKey(ctx, cfg.MCP.APIKey)
 	// Each path owns a disjoint tool catalog. Clients add only the capabilities
 	// they need and can enable or disable API and administration independently.
 	for path, catalog := range mcpCatalogRoutes(cfg.MCP.Path, mcpServer, mcpAPIServer, mcpAdminServer) {
@@ -101,9 +83,9 @@ func newRouter(ctx context.Context, cfg *config.Config, services routeServices, 
 			func(_ *http.Request) *mcp.Server { return catalog },
 			&mcp.StreamableHTTPOptions{},
 		)
-		// mcpProbe wraps the handler rather than joining the middleware list so
-		// authentication runs before probes and protocol traffic reaches the SDK.
-		base.Handle(path, mcpProbe(handler), apiKeyMiddleware(services.auth.MCPAPIKey))
+		// The MCP paths carry no authentication of their own: krabby is deployed
+		// behind a proxy that authenticates every request before it arrives.
+		base.Handle(path, mcpProbe(handler))
 	}
 
 	// The Langfuse HTTP scope is attached to the API group rather than the
@@ -112,11 +94,8 @@ func newRouter(ctx context.Context, cfg *config.Config, services routeServices, 
 	// already traced by their own scope, and Langfuse bills per observation.
 	// A liveness probe every ten seconds is 8.6k observations a day of nothing.
 	api := base.Group("/api/v1", langfuseMiddleware(services.tracing))
-	api.GET("/settings", server.Wrap(getSettings(cfg, services.auth, services.system)))
+	api.GET("/settings", server.Wrap(getSettings(cfg, services.system)))
 	api.GET("/browser-extension.zip", server.Wrap(downloadBrowserExtension()))
-	api.GET("/mcp/api-key", server.Wrap(getMCPKey(services.auth)))
-	api.PUT("/mcp/api-key", server.Wrap(setMCPKey(services.auth)))
-	api.DELETE("/mcp/api-key", server.Wrap(clearMCPKey(services.auth)))
 	api.GET("/repos", server.Wrap(listRepos(services.repos)))
 	api.GET("/repos/owners", server.Wrap(listRepoOwners(services.repos)))
 	api.GET("/repos/namespaces", server.Wrap(listRepoNamespaces(services.repos)))
@@ -245,41 +224,36 @@ func mcpCatalogRoutes(root string, core, api, admin *mcp.Server) map[string]*mcp
 	}
 }
 
-// ---- middleware -------------------------------------------------------------
+// ---- profiling --------------------------------------------------------------
 
-// apiKeyMiddleware guards a handler with an API key resolved per request, so
-// runtime changes (UI-managed MCP key) apply without a restart. An empty key
-// means the endpoint is open.
-func apiKeyMiddleware(getKey func() string) func(next http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			apiKey := getKey()
-			if apiKey == "" {
-				next.ServeHTTP(w, r)
-
-				return
-			}
-
-			got := r.Header.Get("X-Api-Key")
-			if got == "" {
-				got = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-			}
-
-			if subtle.ConstantTimeCompare([]byte(got), []byte(apiKey)) != 1 {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-
-				return
-			}
-
-			next.ServeHTTP(w, r)
-		})
-	}
+// mountPprof registers the runtime profiling endpoints (goroutine, heap, CPU,
+// ...) under <base>/debug/pprof/, for diagnosing stuck or slow work such as a
+// hung vector upsert. Fetch e.g. /debug/pprof/goroutine?debug=2.
+//
+// Only called when server.pprof is enabled. The handlers are unauthenticated
+// like every other route, and heap dumps carry process memory, so mounting them
+// is a decision the operator makes rather than a default.
+func mountPprof(base *ada.Mux) {
+	base.GET("/debug/pprof/", http.HandlerFunc(pprof.Index))
+	base.GET("/debug/pprof/cmdline", http.HandlerFunc(pprof.Cmdline))
+	base.GET("/debug/pprof/profile", http.HandlerFunc(pprof.Profile))
+	base.GET("/debug/pprof/symbol", http.HandlerFunc(pprof.Symbol))
+	base.GET("/debug/pprof/trace", http.HandlerFunc(pprof.Trace))
+	// Named profiles (goroutine, heap, allocs, ...) are served by their own
+	// handler rather than pprof.Index, because Index only recognises a named
+	// profile when the URL path is exactly "/debug/pprof/<name>". Under a base
+	// path (e.g. "/krabby/debug/pprof/goroutine") that check fails and Index
+	// would always return the profile list. Resolving the handler by the {name}
+	// segment keeps ?debug=2 (full text dump) working behind the base path.
+	base.GET("/debug/pprof/{name}", func(w http.ResponseWriter, r *http.Request) {
+		pprof.Handler(r.PathValue("name")).ServeHTTP(w, r)
+	})
 }
 
 // ---- settings handler -------------------------------------------------------
 
 // settingsResponse is a redacted view of the running config for the UI. Secrets
-// (MCP api key, webhook secret) are deliberately omitted; booleans indicate
+// (the webhook secret) are deliberately omitted; booleans indicate
 // only whether they are configured.
 type settingsResponse struct {
 	Version   string `json:"version"`
@@ -295,8 +269,7 @@ type settingsResponse struct {
 	} `json:"server"`
 
 	MCP struct {
-		Path      string `json:"path"`
-		APIKeySet bool   `json:"api_key_set"`
+		Path string `json:"path"`
 	} `json:"mcp"`
 
 	Graphify struct {
@@ -307,7 +280,7 @@ type settingsResponse struct {
 	} `json:"graphify"`
 }
 
-func getSettings(cfg *config.Config, auth mcpAuthService, system systemInfoService) ada.HandlerFunc {
+func getSettings(cfg *config.Config, system systemInfoService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var s settingsResponse
 
@@ -322,7 +295,6 @@ func getSettings(cfg *config.Config, auth mcpAuthService, system systemInfoServi
 		s.Server.BasePath = cfg.Server.BasePath
 
 		s.MCP.Path = cfg.MCP.Path
-		s.MCP.APIKeySet = auth.MCPAPIKey() != ""
 
 		s.Graphify.Bin = cfg.Graphify.Bin
 		s.Graphify.Python = cfg.Graphify.Python
@@ -330,47 +302,6 @@ func getSettings(cfg *config.Config, auth mcpAuthService, system systemInfoServi
 		s.Graphify.BuildTimeout = cfg.Graphify.BuildTimeout.String()
 
 		return c.SendJSON(s)
-	}
-}
-
-// ---- MCP api key handlers ---------------------------------------------------
-
-type mcpKeyRequest struct {
-	APIKey string `json:"api_key"`
-}
-
-func getMCPKey(mgr mcpAuthService) ada.HandlerFunc {
-	return func(c *ada.Context) error {
-		return c.SendJSON(map[string]bool{"api_key_set": mgr.MCPAPIKey() != ""})
-	}
-}
-
-// setMCPKey stores a runtime override for the MCP API key and applies it
-// immediately. An empty api_key disables authentication.
-func setMCPKey(mgr mcpAuthService) ada.HandlerFunc {
-	return func(c *ada.Context) error {
-		var req mcpKeyRequest
-		if err := c.Bind(&req); err != nil {
-			return c.SetStatus(http.StatusBadRequest).Err(err)
-		}
-
-		if err := mgr.SetMCPAPIKey(c.Request.Context(), strings.TrimSpace(req.APIKey)); err != nil {
-			return c.Err(err)
-		}
-
-		return c.SendJSON(map[string]bool{"api_key_set": mgr.MCPAPIKey() != ""})
-	}
-}
-
-// clearMCPKey removes the runtime override so the file/env config value
-// applies again.
-func clearMCPKey(mgr mcpAuthService) ada.HandlerFunc {
-	return func(c *ada.Context) error {
-		if err := mgr.ClearMCPAPIKey(c.Request.Context()); err != nil {
-			return c.Err(err)
-		}
-
-		return c.SendJSON(map[string]bool{"api_key_set": mgr.MCPAPIKey() != ""})
 	}
 }
 

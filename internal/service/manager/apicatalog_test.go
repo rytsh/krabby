@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -92,8 +91,8 @@ func newAPIManager(t *testing.T, provider apicatalog.Provider) (*Manager, *apica
 	}
 
 	m := &Manager{
-		queue:        queue.New(context.Background(), 1),
-		locks:        map[string]*sync.Mutex{},
+		queue: queue.New(context.Background(), 1),
+
 		activity:     map[string]map[string]struct{}{},
 		progress:     map[string]map[string]Progress{},
 		apisRootDir:  t.TempDir(),
@@ -142,8 +141,8 @@ func newIndexedAPIManager(
 	}
 
 	m := &Manager{
-		queue:        queue.New(ctx, 1),
-		locks:        map[string]*sync.Mutex{},
+		queue: queue.New(ctx, 1),
+
 		activity:     map[string]map[string]struct{}{},
 		progress:     map[string]map[string]Progress{},
 		apisRootDir:  t.TempDir(),

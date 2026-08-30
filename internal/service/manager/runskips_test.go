@@ -211,9 +211,19 @@ func TestTriggerRefreshDoesNotCoalesceAcrossSkipSets(t *testing.T) {
 	release := blockQueue(t, m.queue) // occupy the slot so tasks stay queued
 	t.Cleanup(release)
 
-	m.TriggerRefresh("owner/repo")
-	m.TriggerRefresh("owner/repo", registry.StageDocs)
-	m.TriggerRefresh("owner/repo", registry.StageDocs) // identical: must coalesce
+	// The first two must actually enqueue; asserting only on the final count
+	// would let an enqueue failure masquerade as successful coalescing.
+	if err := m.TriggerRefresh("owner/repo"); err != nil {
+		t.Fatalf("TriggerRefresh(full) error = %v", err)
+	}
+	if err := m.TriggerRefresh("owner/repo", registry.StageDocs); err != nil {
+		t.Fatalf("TriggerRefresh(skip docs) error = %v", err)
+	}
+	// Identical to the previous call: must coalesce into it rather than queue a
+	// third task. Coalescing is not an error condition.
+	if err := m.TriggerRefresh("owner/repo", registry.StageDocs); err != nil {
+		t.Fatalf("TriggerRefresh(duplicate) error = %v", err)
+	}
 
 	queued := 0
 	for _, it := range m.queue.Snapshot().Tasks {

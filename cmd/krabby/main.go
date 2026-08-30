@@ -86,7 +86,11 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("init telemetry; %w", err)
 	}
-	defer collector.Shutdown()
+	defer func() {
+		if err := collector.Shutdown(); err != nil {
+			slog.Warn("shutdown telemetry", "error", err)
+		}
+	}()
 
 	// State database + registry.
 	db, err := storage.Open(cfg.StateDir())
@@ -94,7 +98,14 @@ func run(ctx context.Context) error {
 		return err
 	}
 
-	defer db.Close()
+	// Closing the state database flushes its write-ahead log; a failure here
+	// means shutdown may have lost recent writes, which is worth a line in the
+	// log rather than being discarded.
+	defer func() {
+		if err := db.Close(); err != nil {
+			slog.Error("close state database", "error", err)
+		}
+	}()
 
 	reg, err := registry.New(db)
 	if err != nil {

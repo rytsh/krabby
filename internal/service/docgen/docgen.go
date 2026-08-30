@@ -302,7 +302,21 @@ func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir st
 		return nil, fmt.Errorf("select source files; %w", err)
 	}
 
-	priorMan, _ := LoadManifest(docsDir)
+	// A missing manifest is the normal first-run case and returns (nil, nil).
+	// A real read/parse failure is not fatal — the run just re-summarizes
+	// everything — but it is expensive enough in LLM spend to be worth saying
+	// out loud rather than silently degrading to a full regeneration.
+	// Deliberately not the named return: this failure is recovered from, and
+	// assigning it to err would leave the trace's error field poisoned for any
+	// path that later returns without overwriting it.
+	priorMan, manErr := LoadManifest(docsDir)
+	if manErr != nil {
+		slog.Warn("read prior docs manifest; regenerating every summary",
+			"repo", repo, "dir", docsDir, "error", manErr)
+
+		priorMan = nil
+	}
+
 	prior := priorSummaries(priorMan)
 
 	// A forced run ignores every incremental cache: dropping the prior manifest
@@ -347,15 +361,27 @@ func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir st
 	// with a known group count, so the caller can show a real estimate.
 	progress.Report(ctx, 0, len(groups))
 
+	// A group failure does not abort the run. Every summary that succeeds is
+	// written to the manifest below and reused by the next build, so pressing
+	// on salvages work that cancelling would force a later run to redo; the
+	// first error is still reported once the fan-out drains.
+	cancelled := false
+
 	for _, grp := range groups {
+		// Acquiring the slot is itself the cancellation point. A bare send
+		// would block past a cancel until some in-flight LLM call returned,
+		// because the slots are all held while work is running.
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
+			cancelled = true
+		case sem <- struct{}{}:
+		}
+
+		if cancelled {
+			break
 		}
 
 		wg.Add(1)
-		sem <- struct{}{}
 
 		go func(grp fileGroup) {
 			defer wg.Done()
@@ -385,7 +411,15 @@ func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir st
 		}(grp)
 	}
 
+	// Drained before returning on cancellation too: the previous version
+	// returned straight out of the loop, leaving summary goroutines running
+	// detached and still reporting progress for a build the caller had already
+	// given up on.
 	wg.Wait()
+
+	if cancelled {
+		return nil, ctx.Err()
+	}
 
 	sort.Slice(summaries, func(i, j int) bool { return summaries[i].Path < summaries[j].Path })
 
@@ -1058,7 +1092,7 @@ func (g *llmGenerator) selectFiles(clonePath string, filters config.Filters) ([]
 			return true
 		}
 
-		return matchAny(filters.Exclude, rel+"/")
+		return repofs.MatchAny(filters.Exclude, rel+"/")
 	}, func(rel string, _ int64) error {
 		// Documentation summarises what the system does, not its tests;
 		// including them bloats every per-file summary call and the final
@@ -1068,7 +1102,8 @@ func (g *llmGenerator) selectFiles(clonePath string, filters config.Filters) ([]
 			return nil
 		}
 
-		if !matchInclude(rel, filters) || matchAny(filters.Exclude, rel) {
+		if !repofs.MatchInclude(rel, filters.Include, filters.IncludeExtra) ||
+			repofs.MatchAny(filters.Exclude, rel) {
 			return nil
 		}
 
@@ -1083,83 +1118,6 @@ func (g *llmGenerator) selectFiles(clonePath string, filters config.Filters) ([]
 	sort.Strings(out)
 
 	return out, nil
-}
-
-// matchInclude applies the resolved filters to one repo-relative path.
-// IncludeExtra is checked first because it is purely additive: it widens
-// whatever Include resolved to, so a repository can document one more family of
-// files without restating the whole allowlist.
-func matchInclude(rel string, filters config.Filters) bool {
-	if matchAny(filters.IncludeExtra, rel) {
-		return true
-	}
-
-	if len(filters.Include) > 0 {
-		return matchAny(filters.Include, rel)
-	}
-
-	rel = strings.ToLower(rel)
-
-	// Deploy config is documented as well as indexed: which service runs which
-	// image version per environment is part of understanding a system, and for
-	// a deployment-only repository it is the only thing there — without it such
-	// a repo synthesizes documentation from no files at all.
-	return defaultIncludeExts[path.Ext(rel)] ||
-		defaultIncludeNames[path.Base(rel)] ||
-		repofs.DeployConfigFile(rel)
-}
-
-// matchAny reports whether rel matches any glob. A glob is matched against both
-// the full path and the base name, and a bare directory prefix (e.g. "vendor/")
-// matches everything under it.
-func matchAny(globs []string, rel string) bool {
-	base := path.Base(rel)
-	for _, gl := range globs {
-		if gl == "" {
-			continue
-		}
-
-		if strings.HasSuffix(gl, "/") && strings.HasPrefix(rel, gl) {
-			return true
-		}
-
-		if ok, _ := path.Match(gl, rel); ok {
-			return true
-		}
-
-		if ok, _ := path.Match(gl, base); ok {
-			return true
-		}
-	}
-
-	return false
-}
-
-// defaultIncludeExts is the source-file allowlist used when no Include globs are
-// configured.
-var defaultIncludeExts = map[string]bool{
-	".go": true, ".py": true, ".js": true, ".jsx": true, ".ts": true, ".tsx": true,
-	".java": true, ".kt": true, ".rb": true, ".rs": true, ".c": true, ".h": true,
-	".cc": true, ".cpp": true, ".hpp": true, ".cs": true, ".php": true, ".swift": true,
-	".scala": true, ".m": true, ".mm": true, ".sh": true, ".sql": true,
-}
-
-// defaultIncludeNames is the allowlist of extensionless or dotted-suffix source
-// files (matched by base name, case-insensitively) documented when no Include
-// globs are configured. path.Ext does not classify these usefully — e.g.
-// path.Ext("go.mod") is ".mod" — so they would otherwise be skipped.
-var defaultIncludeNames = map[string]bool{
-	"go.mod":           true,
-	"go.sum":           true,
-	"dockerfile":       true,
-	"makefile":         true,
-	"gemfile":          true,
-	"rakefile":         true,
-	"cargo.toml":       true,
-	"cargo.lock":       true,
-	"package.json":     true,
-	"pyproject.toml":   true,
-	"requirements.txt": true,
 }
 
 // docNoiseDirs are path segments whose subtrees carry no documentation value

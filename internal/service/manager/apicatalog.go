@@ -9,13 +9,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/rytsh/krabby/internal/service/apicatalog"
 	"github.com/rytsh/krabby/internal/service/progress"
 	"github.com/rytsh/krabby/internal/service/queue"
-	"github.com/rytsh/krabby/internal/service/rag"
 )
 
 // ErrNoAPICatalog is returned when catalog methods are called before the store
@@ -44,23 +42,38 @@ func (m *Manager) apisDir(name string) string {
 	return filepath.Join(m.apisRootDir, name)
 }
 
+// apiCorpus describes one service for the index stages shared with web sources
+// (see corpussync.go).
+func (m *Manager) apiCorpus(name string) docsCorpus {
+	return docsCorpus{
+		kind:   "api service",
+		logKey: "service",
+		name:   name,
+		scope:  apicatalog.ScopeKey(name),
+		dir:    m.apisDir(name),
+	}
+}
+
+// apiSyncTaskMode builds the queue task for an API-catalog sync.
+func (m *Manager) apiSyncTaskMode(name string, forceFull bool) queue.Task {
+	return m.syncTask(m.apiCorpus(name), taskKindAPISync, forceFull, m.refreshAPIService)
+}
+
 // serviceLock serialises read-modify-write cycles on one service record.
 //
 // It is a different lock from the sync lock for the same reason web sources
 // keep them apart: a sync holds the sync lock for a whole sweep, and a config
 // edit that waited on it would block the HTTP request for the duration. Lock
 // order where both are taken: sync lock first, then this one.
-func (m *Manager) serviceLock(name string) *sync.Mutex {
-	return m.lockFor(apicatalog.ScopeKey(name) + "#record")
+func (m *Manager) serviceLock(name string) func() {
+	return m.lockKey(apicatalog.ScopeKey(name) + "#record")
 }
 
 // mutateService applies fn to the current stored record under the record lock
 // and writes the result back, so a sync that started before an edit cannot
 // write its stale snapshot back over it.
 func (m *Manager) mutateService(ctx context.Context, name string, fn func(*apicatalog.Service) error) error {
-	l := m.serviceLock(name)
-	l.Lock()
-	defer l.Unlock()
+	defer m.serviceLock(name)()
 
 	svc, err := m.apiStore.GetService(ctx, name)
 	if err != nil {
@@ -143,15 +156,14 @@ func (m *Manager) AddAPIService(ctx context.Context, svc *apicatalog.Service) er
 	// The exists-check and the insert are one critical section, or two
 	// concurrent creates of the same name both "succeed" and the second
 	// silently overwrites the first.
-	l := m.serviceLock(svc.Name)
-	l.Lock()
+	release := m.serviceLock(svc.Name)
 
 	if existing, err := m.apiStore.GetService(ctx, svc.Name); err != nil {
-		l.Unlock()
+		release()
 
 		return err
 	} else if existing != nil {
-		l.Unlock()
+		release()
 
 		return fmt.Errorf("api service %s already exists", svc.Name)
 	}
@@ -160,7 +172,7 @@ func (m *Manager) AddAPIService(ctx context.Context, svc *apicatalog.Service) er
 	svc.CreatedAt = time.Now()
 
 	err = m.apiStore.UpsertService(ctx, svc)
-	l.Unlock()
+	release()
 
 	if err != nil {
 		return err
@@ -240,16 +252,18 @@ func (m *Manager) DeleteAPIService(ctx context.Context, name string) error {
 	scope := apicatalog.ScopeKey(name)
 	defer m.lockKey(scope)()
 
-	l := m.serviceLock(name)
-	l.Lock()
+	release := m.serviceLock(name)
 	err := m.apiStore.DeleteService(ctx, name)
-	l.Unlock()
+	release()
 
 	if err != nil {
 		return err
 	}
 
-	if err := os.RemoveAll(m.apisDir(name)); err != nil {
+	// Logged rather than returned for the same reason as dropAPIIndex below:
+	// the record is already gone, so refusing to finish would leave a service
+	// that cannot be deleted at all.
+	if err := removeContentDir(m.apisRootDir, m.apisDir(name), "api service"); err != nil {
 		slog.Warn("remove api service directory", "service", name, "error", err)
 	}
 
@@ -376,7 +390,7 @@ func (m *Manager) TestAPIServiceConfig(ctx context.Context, name, kind string, c
 		}
 	}
 
-	if merged == nil || len(merged) == 0 {
+	if len(merged) == 0 {
 		return out, errors.New("config is required")
 	}
 
@@ -462,33 +476,6 @@ func (m *Manager) TriggerAPIRefresh(name string) error {
 // one run, used when an override changed what the same document renders to.
 func (m *Manager) TriggerAPIFullRefresh(name string) error {
 	return m.queue.Submit(m.apiSyncTaskMode(name, true)).Err()
-}
-
-func (m *Manager) apiSyncTaskMode(name string, forceFull bool) queue.Task {
-	scope := apicatalog.ScopeKey(name)
-	key := taskKindAPISync + ":" + name
-	spec := queue.Spec{Kind: taskKindAPISync, ID: scope}
-	if forceFull {
-		key += ":full"
-		spec.Params = map[string]string{"force_full": "true"}
-	}
-
-	return queue.Task{
-		ID:    scope,
-		Kind:  taskKindAPISync,
-		Title: "Sync " + scope,
-		Key:   key,
-		Spec:  spec,
-		Run: func(ctx context.Context) error {
-			if err := m.refreshAPIService(ctx, name, forceFull); err != nil {
-				slog.Error("refresh api service", "service", name, "error", err)
-
-				return err
-			}
-
-			return nil
-		},
-	}
 }
 
 // APISchedule is one service's cron schedule, used by the scheduler to build a
@@ -594,10 +581,10 @@ func (m *Manager) refreshAPIService(ctx context.Context, name string, forceFull 
 		return fmt.Errorf("no provider for api service kind %q", svc.Kind)
 	}
 
-	m.setActivity(scope, "sync")
-	defer m.clearActivity(scope, "sync")
+	m.setActivity(scope, stepSync)
+	defer m.clearActivity(scope, stepSync)
 
-	m.setProgress(scope, Progress{Phase: "fetch"})
+	m.setProgress(scope, Progress{Phase: phaseFetch})
 	defer m.clearAllProgress(scope)
 
 	setSyncState := func(ctx context.Context, apply func(*apicatalog.Service)) {
@@ -656,7 +643,7 @@ func (m *Manager) refreshAPIService(ctx context.Context, name string, forceFull 
 	)
 
 	fetchCtx := progress.With(ctx, func(done, total int) {
-		m.setProgress(scope, Progress{Phase: "fetch", Done: done, Total: total})
+		m.setProgress(scope, Progress{Phase: phaseFetch, Done: done, Total: total})
 	})
 
 	write := func(remote apicatalog.RemoteOperation) error {
@@ -701,7 +688,7 @@ func (m *Manager) refreshAPIService(ctx context.Context, name string, forceFull 
 		rec.Deprecated = remote.Deprecated
 		rec.Detail = remote.Detail
 		rec.UpdatedAt = now
-		updatedAt[remote.OpSlug+".md"] = now
+		updatedAt[docFileName(remote.OpSlug)] = now
 
 		hash := apicatalog.Hash(remote.Markdown)
 
@@ -712,7 +699,7 @@ func (m *Manager) refreshAPIService(ctx context.Context, name string, forceFull 
 			return writeErr
 		}
 
-		path := remote.OpSlug + ".md"
+		path := docFileName(remote.OpSlug)
 		if rec.IndexDirty || hash != rec.Hash || !fileExists(file) {
 			// Persist intent before replacing the projection. Hash remains the
 			// last content accepted by every configured index.
@@ -757,7 +744,7 @@ func (m *Manager) refreshAPIService(ctx context.Context, name string, forceFull 
 		return fail(fmt.Errorf("fetch %s; %w", name, err))
 	}
 
-	m.clearProgress(scope, "fetch")
+	m.clearProgress(scope, phaseFetch)
 
 	// Deleting a stored operation because it was not seen is only sound when
 	// the provider enumerated the whole document. An unchanged document emits
@@ -782,7 +769,7 @@ func (m *Manager) refreshAPIService(ctx context.Context, name string, forceFull 
 			}
 
 			_ = os.Remove(file)
-			removedPaths = append(removedPaths, rec.OpSlug+".md")
+			removedPaths = append(removedPaths, docFileName(rec.OpSlug))
 		}
 	}
 
@@ -794,7 +781,7 @@ func (m *Manager) refreshAPIService(ctx context.Context, name string, forceFull 
 	}
 	queuedChanges := pathSet(changedPaths)
 	for slug, rec := range existing {
-		path := slug + ".md"
+		path := docFileName(slug)
 		if !rec.IndexDirty || !fileExists(filepath.Join(dir, path)) {
 			continue
 		}
@@ -806,7 +793,7 @@ func (m *Manager) refreshAPIService(ctx context.Context, name string, forceFull 
 		updatedAt[path] = rec.UpdatedAt
 	}
 
-	missing, extra, err := m.reconcileAPIServiceIndex(ctx, name, dir, reconcile, changedPaths, removedPaths)
+	missing, extra, err := m.reconcileIndex(ctx, m.apiCorpus(name), reconcile, changedPaths, removedPaths)
 	if err != nil {
 		return fail(err)
 	}
@@ -815,7 +802,7 @@ func (m *Manager) refreshAPIService(ctx context.Context, name string, forceFull 
 			"service", name, "missing", len(missing))
 		changedPaths = append(changedPaths, missing...)
 		for _, path := range missing {
-			slug := strings.TrimSuffix(path, ".md")
+			slug := docSlug(path)
 			if rec := existing[slug]; rec != nil {
 				updatedAt[path] = rec.UpdatedAt
 			}
@@ -829,7 +816,7 @@ func (m *Manager) refreshAPIService(ctx context.Context, name string, forceFull 
 
 	var indexErr error
 	if len(changedPaths) > 0 || len(removedPaths) > 0 {
-		if err := m.indexAPIServicePaths(ctx, name, changedPaths, removedPaths, updatedAt); err != nil {
+		if err := m.indexPaths(ctx, m.apiCorpus(name), changedPaths, removedPaths, updatedAt); err != nil {
 			indexErr = err
 			slog.Error("api service indexing failed; watermark not advanced",
 				"service", name, "changed", len(changedPaths), "error", err)
@@ -890,88 +877,11 @@ func (m *Manager) refreshAPIService(ctx context.Context, name string, forceFull 
 	return nil
 }
 
-// reconcileAPIServiceIndex returns expected projection paths missing from any
-// configured index and indexed paths with no operation record.
-func (m *Manager) reconcileAPIServiceIndex(ctx context.Context, name, dir string, candidates map[string]bool, changed, removed []string) ([]string, []string, error) {
-	d, release := m.acquireDocs()
-	defer release()
-	if d.rag == nil && m.docsText == nil {
-		return nil, nil, nil
-	}
-
-	scope := apicatalog.ScopeKey(name)
-
-	indexedSets := make([]map[string]struct{}, 0, 2)
-	if d.rag != nil {
-		indexed, err := d.rag.IndexedPaths(ctx, scope)
-		if err != nil {
-			return nil, nil, fmt.Errorf("scan api service %s vector paths; %w", name, err)
-		}
-		indexedSets = append(indexedSets, indexed)
-	}
-	if m.docsText != nil {
-		indexed, err := m.docsText.IndexedPaths(ctx, scope)
-		if err != nil {
-			return nil, nil, fmt.Errorf("scan api service %s text paths; %w", name, err)
-		}
-		indexedSets = append(indexedSets, indexed)
-	}
-
-	queuedChanges := pathSet(changed)
-	queuedRemovals := pathSet(removed)
-	expected := make(map[string]struct{}, len(candidates))
-
-	var missing []string
-	for slug := range candidates {
-		path := slug + ".md"
-		expected[path] = struct{}{}
-
-		indexedEverywhere := true
-		for _, indexed := range indexedSets {
-			if _, ok := indexed[path]; !ok {
-				indexedEverywhere = false
-
-				break
-			}
-		}
-		if indexedEverywhere {
-			continue
-		}
-		if _, ok := queuedChanges[path]; ok {
-			continue
-		}
-		if !fileExists(filepath.Join(dir, path)) {
-			continue
-		}
-
-		missing = append(missing, path)
-	}
-
-	extraSet := map[string]struct{}{}
-	for _, indexed := range indexedSets {
-		for path := range indexed {
-			if _, ok := expected[path]; ok {
-				continue
-			}
-			if _, ok := queuedRemovals[path]; ok {
-				continue
-			}
-			extraSet[path] = struct{}{}
-		}
-	}
-	extra := make([]string, 0, len(extraSet))
-	for path := range extraSet {
-		extra = append(extra, path)
-	}
-
-	return missing, extra, nil
-}
-
 // commitAPIServiceHashes clears dirty operations only after every configured
 // index succeeded, using the durable projection as the hash source.
 func (m *Manager) commitAPIServiceHashes(ctx context.Context, name string, changed []string) error {
 	for path := range pathSet(changed) {
-		slug := strings.TrimSuffix(path, ".md")
+		slug := docSlug(path)
 		rec, err := m.apiStore.GetOperation(ctx, apicatalog.OperationID(name, slug))
 		if err != nil {
 			return err
@@ -996,78 +906,6 @@ func (m *Manager) commitAPIServiceHashes(ctx context.Context, name string, chang
 	}
 
 	return nil
-}
-
-// indexAPIServicePaths incrementally updates changed/removed operation
-// projections in every configured search index. An index failure prevents the
-// fetch watermark from advancing.
-func (m *Manager) indexAPIServicePaths(ctx context.Context, name string, changed, removed []string, updatedAt map[string]time.Time) error {
-	d, release := m.acquireDocs()
-	defer release()
-
-	if d.rag == nil && m.docsText == nil {
-		slog.Debug("docs search disabled; api service not indexed", "service", name)
-
-		return nil
-	}
-
-	scope := apicatalog.ScopeKey(name)
-
-	m.setActivity(scope, "docs_index")
-	defer m.clearActivity(scope, "docs_index")
-
-	m.setProgress(scope, Progress{Phase: "index"})
-	defer m.clearProgress(scope, "index")
-	onProgress := func(done, total int) {
-		m.setProgress(scope, Progress{Phase: "index", Done: done, Total: total})
-	}
-
-	opts := &rag.IndexOptions{
-		UpdatedAt:           func(path string) time.Time { return updatedAt[path] },
-		KeepMarkdownTargets: d.ragCfg.KeepMarkdownTargets,
-	}
-
-	dir := m.apisDir(name)
-
-	var errs []error
-	if m.docsText != nil {
-		if err := m.docsText.IndexPaths(ctx, scope, dir, changed, removed, opts); err != nil {
-			errs = append(errs, fmt.Errorf("index api service %s text; %w", name, err))
-		}
-		if err := m.docsText.RefreshStats(ctx); err != nil {
-			slog.Warn("refresh docs search stats", "service", name, "error", err)
-		}
-	}
-	if d.rag != nil {
-		if err := d.rag.IndexPathsProgress(ctx, scope, dir, changed, removed, onProgress, opts); err != nil {
-			errs = append(errs, fmt.Errorf("index api service %s vectors; %w", name, err))
-		}
-	}
-
-	return errors.Join(errs...)
-}
-
-// indexAPIService rebuilds one service's configured lexical and semantic docs
-// indexes from its on-disk markdown. Semantic indexing is skipped when RAG is
-// disabled.
-func (m *Manager) indexAPIService(ctx context.Context, name string) {
-	d, release := m.acquireDocs()
-	defer release()
-
-	if d.rag == nil && m.docsText == nil {
-		slog.Debug("docs search disabled; api service not indexed", "service", name)
-
-		return
-	}
-
-	scope := apicatalog.ScopeKey(name)
-
-	m.setActivity(scope, "docs_index")
-	defer m.clearActivity(scope, "docs_index")
-
-	if err := m.indexDocs(ctx, d, scope, m.apisDir(name)); err != nil {
-		slog.Error("index api service", "service", name, "error", err)
-	}
 }
 
 // enqueueAPIReindex submits a reindex task for every service so its indexes are

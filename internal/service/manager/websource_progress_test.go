@@ -157,7 +157,9 @@ func TestCancelTasksStopsRunningWebSource(t *testing.T) {
 		t.Fatalf("seed collection: %v", err)
 	}
 
-	m.TriggerWebRefresh("wiki")
+	if err := m.TriggerWebRefresh("wiki"); err != nil {
+		t.Fatalf("TriggerWebRefresh: %v", err)
+	}
 	select {
 	case <-fetcher.started:
 	case <-time.After(time.Second):

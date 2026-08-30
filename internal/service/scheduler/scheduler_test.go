@@ -23,8 +23,14 @@ func TestScheduleSignatureChangesWithContent(t *testing.T) {
 	if scheduleSignature(a) == scheduleSignature(c) {
 		t.Fatal("different namespaces produced the same signature")
 	}
-	if scheduleSignature(a) != scheduleSignature(a) {
-		t.Fatal("signature is not stable for identical input")
+	// Determinism gates reconcile: a signature that varies for identical input
+	// (map iteration order, pointer formatting) would reload every cron on
+	// every poll. A single comparison can agree by luck, so repeat it.
+	stable := scheduleSignature(a)
+	for range 32 {
+		if scheduleSignature(a) != stable {
+			t.Fatal("signature is not stable for identical input")
+		}
 	}
 
 	// The disabled flag must change the signature so reconcile reloads.

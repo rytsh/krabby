@@ -1,0 +1,21 @@
+version: "2"
+
+# Lint is a merge gate (see .github/workflows/test.yml), so the defaults that
+# silently truncate output are turned off: a capped report makes a clean run
+# indistinguishable from a run with fifty more findings behind the cap.
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+linters:
+  default: standard
+  settings:
+    staticcheck:
+      checks:
+        - all
+        # QF1008 wants the embedded field dropped from a selector
+        # ("s.cfg.Filters.Merge" -> "s.cfg.Merge"). This codebase writes the
+        # embedded field explicitly on purpose: at these call sites the
+        # shortened form reads as though the outer type owns the method, which
+        # is exactly the ambiguity the explicit selector removes.
+        - -QF1008

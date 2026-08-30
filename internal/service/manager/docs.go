@@ -52,69 +52,6 @@ func (m *Manager) SetSettingsStore(s *settings.Store) {
 	m.settings = s
 }
 
-// InitMCPKey resolves the effective MCP API key at startup: a persisted
-// runtime override wins over the file/env config value.
-func (m *Manager) InitMCPKey(ctx context.Context, configKey string) {
-	key := configKey
-
-	if m.settings != nil {
-		if rec, err := m.settings.MCPKey(ctx); err != nil {
-			slog.Error("load mcp key override", "error", err)
-		} else if rec != nil {
-			key = rec.Key
-		}
-	}
-
-	m.mcpKeyMu.Lock()
-	m.mcpKey = key
-	m.mcpConfigKey = configKey
-	m.mcpKeyMu.Unlock()
-}
-
-// MCPAPIKey returns the currently effective MCP API key ("" = open endpoint).
-func (m *Manager) MCPAPIKey() string {
-	m.mcpKeyMu.RLock()
-	defer m.mcpKeyMu.RUnlock()
-
-	return m.mcpKey
-}
-
-// SetMCPAPIKey persists a runtime MCP key override and applies it immediately.
-// An empty key disables authentication.
-func (m *Manager) SetMCPAPIKey(ctx context.Context, key string) error {
-	if m.settings == nil {
-		return ErrNoSettingsStore
-	}
-
-	if err := m.settings.SetMCPKey(ctx, key); err != nil {
-		return err
-	}
-
-	m.mcpKeyMu.Lock()
-	m.mcpKey = key
-	m.mcpKeyMu.Unlock()
-
-	return nil
-}
-
-// ClearMCPAPIKey removes the runtime override; the file/env config value (as
-// captured at startup) applies again.
-func (m *Manager) ClearMCPAPIKey(ctx context.Context) error {
-	if m.settings == nil {
-		return ErrNoSettingsStore
-	}
-
-	if err := m.settings.ClearMCPKey(ctx); err != nil {
-		return err
-	}
-
-	m.mcpKeyMu.Lock()
-	m.mcpKey = m.mcpConfigKey
-	m.mcpKeyMu.Unlock()
-
-	return nil
-}
-
 // PollInterval returns the repo polling cadence from the runtime settings:
 // the persisted value, one hour when unset, disabled (0) when negative.
 func (m *Manager) PollInterval() time.Duration {
@@ -726,7 +663,7 @@ func (m *Manager) TestLangfuse(ctx context.Context, patch settings.Settings) Tes
 
 		return res
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
 
@@ -795,7 +732,7 @@ func probeOTLP(ctx context.Context, host string, cfg config.Langfuse, timeout ti
 	if err != nil {
 		return fmt.Errorf("otlp endpoint %s unreachable; %w", endpoint, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
 
@@ -1281,11 +1218,11 @@ func (m *Manager) ensureDocsTextKey(ctx context.Context, key, docsDir string) er
 	// TryLock, not lockKey: a concurrent backfill of the same key is already
 	// doing this work, so walking away is correct and waiting would only stall
 	// a search behind it.
-	lock := m.lockFor(key)
-	if !lock.TryLock() {
+	release, ok := m.tryLockKey(key)
+	if !ok {
 		return nil
 	}
-	defer lock.Unlock()
+	defer release()
 
 	// Re-probe under the lock: a concurrent backfill may have finished while
 	// this call was between the probe and the lock.
@@ -1867,7 +1804,15 @@ func (m *Manager) enrichDocSources(ctx context.Context, docs []rag.Doc) {
 		}
 		col, seen := collections[name]
 		if !seen {
-			col, _ = m.webStore.GetCollection(ctx, name)
+			var err error
+			// A lookup failure degrades this hit's metadata but must not fail
+			// the search, so it is logged rather than returned. The result is
+			// cached either way: one broken store should not be re-queried once
+			// per hit. Bounded by distinct collection names per search.
+			if col, err = m.webStore.GetCollection(ctx, name); err != nil {
+				slog.Warn("enrich web doc: collection lookup failed",
+					"collection", name, "error", err)
+			}
 			collections[name] = col
 		}
 		if col != nil {
@@ -1875,9 +1820,17 @@ func (m *Manager) enrichDocSources(ctx context.Context, docs []rag.Doc) {
 			docs[i].CollectionDescription = col.Description
 		}
 
-		slug := strings.TrimSuffix(docs[i].Path, ".md")
+		slug := docSlug(docs[i].Path)
 		page, err := m.webStore.GetPage(ctx, websource.PageID(name, slug))
-		if err != nil || page == nil {
+		if err != nil {
+			// Debug rather than warn: this runs once per hit, so a store
+			// outage would otherwise emit a line per result.
+			slog.Debug("enrich web doc: page lookup failed",
+				"collection", name, "slug", slug, "error", err)
+
+			continue
+		}
+		if page == nil {
 			continue
 		}
 
@@ -1899,7 +1852,13 @@ func (m *Manager) enrichAPIDoc(ctx context.Context, doc *rag.Doc, service string
 
 	svc, seen := cache[service]
 	if !seen {
-		svc, _ = m.apiStore.GetService(ctx, service)
+		var err error
+		// Logged, not returned: missing service metadata degrades the hit but
+		// must not fail the search. Bounded by distinct service names.
+		if svc, err = m.apiStore.GetService(ctx, service); err != nil {
+			slog.Warn("enrich api doc: service lookup failed",
+				"service", service, "error", err)
+		}
 		cache[service] = svc
 	}
 	if svc == nil {

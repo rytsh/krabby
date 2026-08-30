@@ -25,7 +25,9 @@ test: ## Run tests
 .PHONY: lint
 lint: ## Run linters
 	go vet ./...
-	command -v golangci-lint > /dev/null && golangci-lint run ./... || true
+	@command -v golangci-lint > /dev/null \
+		|| { echo "golangci-lint not installed: https://golangci-lint.run/welcome/install/"; exit 1; }
+	golangci-lint run ./...
 
 .PHONY: build-container
 build-container: ## Build the amd64 container image with a test tag

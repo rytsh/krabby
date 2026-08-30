@@ -217,6 +217,51 @@ func TestWithinDir(t *testing.T) {
 	}
 }
 
+// TestRemoveContentDirRefusesOutsideRoot covers the guard shared by the
+// web-source and API-catalog delete paths. The API side used to call
+// os.RemoveAll unguarded, so a name that escaped its root — or an unconfigured
+// root, which collapses filepath.Join to a bare relative name — deleted an
+// unrelated directory.
+func TestRemoveContentDirRefusesOutsideRoot(t *testing.T) {
+	root := t.TempDir()
+
+	inside := filepath.Join(root, "keep")
+	outside := filepath.Join(t.TempDir(), "untouched")
+	for _, dir := range []string{inside, outside} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	// A sibling that only shares a string prefix must not be removed.
+	if err := removeContentDir(root, root+"-evil", "source"); err != nil {
+		t.Fatalf("removeContentDir(sibling) error = %v", err)
+	}
+	// An escaping path must not be removed.
+	if err := removeContentDir(root, outside, "source"); err != nil {
+		t.Fatalf("removeContentDir(outside) error = %v", err)
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Errorf("directory outside the root was removed: %v", err)
+	}
+
+	// An unconfigured root removes nothing at all.
+	if err := removeContentDir("", inside, "source"); err != nil {
+		t.Fatalf("removeContentDir(empty root) error = %v", err)
+	}
+	if _, err := os.Stat(inside); err != nil {
+		t.Errorf("empty root still removed %s: %v", inside, err)
+	}
+
+	// A contained path is removed.
+	if err := removeContentDir(root, inside, "source"); err != nil {
+		t.Fatalf("removeContentDir(inside) error = %v", err)
+	}
+	if _, err := os.Stat(inside); !os.IsNotExist(err) {
+		t.Errorf("contained directory was not removed (err = %v)", err)
+	}
+}
+
 // seedScriptedJSON keeps the compiler honest about the config shape used by the
 // scripted fixture above.
 var _ = json.RawMessage(`{}`)

@@ -20,13 +20,6 @@ import (
 	"github.com/rytsh/krabby/internal/service/websource"
 )
 
-type mcpAuthService interface {
-	InitMCPKey(context.Context, string)
-	MCPAPIKey() string
-	SetMCPAPIKey(context.Context, string) error
-	ClearMCPAPIKey(context.Context) error
-}
-
 type systemInfoService interface {
 	GraphifyVersion() string
 }
@@ -154,7 +147,6 @@ type webhookService interface {
 }
 
 type routeServices struct {
-	auth        mcpAuthService
 	system      systemInfoService
 	repos       repoService
 	queue       queueService
@@ -169,14 +161,13 @@ type routeServices struct {
 
 func managerRouteServices(mgr *manager.Manager) routeServices {
 	return routeServices{
-		auth: mgr, system: mgr, repos: mgr, queue: mgr, docs: mgr,
+		system: mgr, repos: mgr, queue: mgr, docs: mgr,
 		docsConfig: mgr, sources: mgr, apis: mgr, credentials: mgr,
 		tracing: mgr, webhook: mgr,
 	}
 }
 
 var (
-	_ mcpAuthService      = (*manager.Manager)(nil)
 	_ systemInfoService   = (*manager.Manager)(nil)
 	_ repoReader          = (*manager.Manager)(nil)
 	_ repoAdmin           = (*manager.Manager)(nil)

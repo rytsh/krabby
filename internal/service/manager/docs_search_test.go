@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/rakunlabs/bw"
@@ -175,8 +174,8 @@ func TestSearchDocsLexicalWithoutSemanticIndex(t *testing.T) {
 		reg:         reg,
 		docsText:    text,
 		docsRootDir: docsRoot,
-		locks:       map[string]*sync.Mutex{},
-		docs:        &docsBundle{},
+
+		docs: &docsBundle{},
 	}
 	docs, err := m.SearchDocs(ctx, ScopeRepos, repo.ID, "", DocsSearchLexical, "PAY-1842", 5)
 	if err != nil {
@@ -265,8 +264,8 @@ func TestSearchDocsRetriesWithoutFrequentTermFilter(t *testing.T) {
 		reg:         reg,
 		docsText:    text,
 		docsRootDir: docsRoot,
-		locks:       map[string]*sync.Mutex{},
-		docs:        &docsBundle{},
+
+		docs: &docsBundle{},
 	}
 
 	if err := m.WarmDocsSearch(ctx); err != nil {

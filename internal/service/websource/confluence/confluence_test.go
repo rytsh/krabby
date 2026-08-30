@@ -107,7 +107,7 @@ func TestPreviewCountsFilteredPagesWithoutBodies(t *testing.T) {
 			t.Errorf("expand = %q, want metadata.labels", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"results":[
+		_, _ = fmt.Fprint(w, `{"results":[
 			{"id":"1","metadata":{"labels":{"results":[{"name":"published"}]}}},
 			{"id":"2","metadata":{"labels":{"results":[{"name":"draft"}]}}}
 		],"size":2,"_links":{}}`)
@@ -130,7 +130,7 @@ func TestPreviewValidatesExcludedRootPage(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/rest/api/content/search") {
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"results":[],"size":0,"_links":{}}`)
+			_, _ = fmt.Fprint(w, `{"results":[],"size":0,"_links":{}}`)
 
 			return
 		}

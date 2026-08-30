@@ -510,7 +510,7 @@ func (c *Client) embedBatchOnce(ctx context.Context, batch []string, dims int) (
 
 		return nil, usage, 0, retryableErr{fmt.Errorf("embed request; %w", err)}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Read one byte past the limit so an overrun is distinguishable from a
 	// body that merely ends there.

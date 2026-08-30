@@ -6,19 +6,11 @@
 
   let basePath = $derived((settings && settings.server && settings.server.base_path) || "");
   let mcpPath = $derived((settings && settings.mcp && settings.mcp.path) || "/mcp");
-  let apiKeySet = $derived(!!(settings && settings.mcp && settings.mcp.api_key_set));
   let mcpRoot = $derived(`${window.location.origin}${basePath}${mcpPath}`);
   let apiBase = $derived(`${window.location.origin}${basePath}/api/v1`);
   let mcpCatalog = $state("core");
   let mcpUrl = $derived(`${mcpRoot}${mcpCatalog === "core" ? "" : `/${mcpCatalog}`}`);
   let mcpName = $derived(`krabby${mcpCatalog === "core" ? "" : `-${mcpCatalog}`}`);
-  let configHeaders = $derived.by(() => {
-    const headers = [];
-    if (apiKeySet) headers.push(`"X-Api-Key": "<your-api-key>"`);
-    return headers.length ? `,\n      "headers": { ${headers.join(", ")} }` : "";
-  });
-  let cliHeaders = $derived(apiKeySet ? ' --header "X-Api-Key: <your-api-key>"' : "");
-
   let copied = $state("");
   async function copy(text, key) {
     try {
@@ -35,18 +27,18 @@
   "mcp": {
     "${mcpName}": {
       "type": "remote",
-      "url": "${mcpUrl}"${configHeaders}
+      "url": "${mcpUrl}"
     }
   }
 }`);
 
-  let claudeCmd = $derived(`claude mcp add --transport http ${mcpName} ${mcpUrl}${cliHeaders}`);
+  let claudeCmd = $derived(`claude mcp add --transport http ${mcpName} ${mcpUrl}`);
 
   let genericConfig = $derived(`{
   "mcpServers": {
     "${mcpName}": {
       "type": "http",
-      "url": "${mcpUrl}"${configHeaders}
+      "url": "${mcpUrl}"
     }
   }
 }`);
@@ -57,7 +49,7 @@ Server name: ${mcpName}
 Transport: streamable HTTP
 URL: ${mcpUrl}
 Tool catalog: ${mcpCatalog} (${mcpCatalog === "core" ? "read-only code, graph, files and docs" : mcpCatalog === "api" ? "API discovery and live endpoint calls" : "Krabby administration and mutations"})
-${apiKeySet ? "Authentication: send the API key in the X-Api-Key header. Ask me for the key before editing the configuration." : "Authentication: none"}
+Authentication: none — the server is reached through a proxy that authenticates the request.
 
 Detect this client's MCP configuration format and update the appropriate project or user configuration. Preserve all existing settings and other MCP servers. After configuring it, verify the connection and confirm that the Krabby tools are available.`);
 
@@ -258,15 +250,10 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
       <div class="mt-2 text-[11px] font-medium text-accent">38 tools · view below</div>
     </button>
   </div>
-  {#if apiKeySet}
-    <p class="mb-0 mt-2 text-[13px] text-warn">
-      An API key is configured: clients must send it in the <code class="font-mono">X-Api-Key</code> header.
-    </p>
-  {:else}
-    <p class="mb-0 mt-2 text-[13px] text-faint">
-      No API key configured — all MCP endpoints are open. Set <code class="font-mono">KRABBY_MCP_API_KEY</code> to protect them.
-    </p>
-  {/if}
+  <p class="mb-0 mt-2 text-[13px] text-faint">
+    Krabby does not authenticate requests itself; deploy it behind a proxy that authenticates every
+    request before it reaches these endpoints.
+  </p>
 </div>
 
 <div class="card my-4 p-4">
@@ -429,8 +416,7 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
 
     <p class="mb-0 mt-2 text-[13px] text-faint">
       This is the same endpoint the "Add repo" button uses, so it's safe to call repeatedly — an existing
-      repo is simply queued for a refresh. Note the MCP <code class="font-mono text-[12px]">X-Api-Key</code>
-      guards all three MCP endpoints under <code class="font-mono text-[12px]">{mcpPath}</code>, not the REST API.
+      repo is simply queued for a refresh.
     </p>
   </div>
 </div>

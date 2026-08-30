@@ -128,9 +128,6 @@ export const api = {
     req("/credentials", { method: "PUT", body: JSON.stringify(credential) }),
   deleteCredential: (pattern) =>
     req(`/credentials?pattern=${encodeURIComponent(pattern)}`, { method: "DELETE" }),
-  mcpKey: () => req("/mcp/api-key"),
-  setMcpKey: (apiKey) => req("/mcp/api-key", { method: "PUT", body: JSON.stringify({ api_key: apiKey }) }),
-  clearMcpKey: () => req("/mcp/api-key", { method: "DELETE" }),
   docsConfig: () => req("/docs/config"),
   setDocsConfig: (cfg) => req("/docs/config", { method: "PUT", body: JSON.stringify(cfg) }),
   testLLM: (cfg) => req("/docs/config/test/llm", { method: "POST", body: JSON.stringify(cfg) }),

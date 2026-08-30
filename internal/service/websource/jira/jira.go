@@ -34,6 +34,7 @@ import (
 
 	"github.com/rytsh/krabby/internal/service/progress"
 	"github.com/rytsh/krabby/internal/service/websource"
+	"github.com/rytsh/krabby/internal/strutil"
 )
 
 // pageLimit is the REST page size for the issue search.
@@ -687,7 +688,7 @@ func (f *Fetcher) search(ctx context.Context, cfg resolvedConfig, jql string, st
 	if err != nil {
 		return nil, fmt.Errorf("search jira issues; %w", err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 
 	body, err := io.ReadAll(io.LimitReader(res.Body, 64<<20))
 	if err != nil {
@@ -695,7 +696,7 @@ func (f *Fetcher) search(ctx context.Context, cfg resolvedConfig, jql string, st
 	}
 
 	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("search jira issues: status %s: %s", res.Status, truncate(string(body), 300))
+		return nil, fmt.Errorf("search jira issues: status %s: %s", res.Status, strutil.Truncate(string(body), 300))
 	}
 
 	var result searchResult
@@ -912,12 +913,4 @@ func fieldValues(raw json.RawMessage) []string {
 	}
 
 	return nil
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-
-	return s[:n] + "…"
 }

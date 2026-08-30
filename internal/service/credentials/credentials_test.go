@@ -61,7 +61,7 @@ func newTestStore(t *testing.T) *Store {
 		t.Fatalf("open db: %v", err)
 	}
 
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { _ = db.Close() })
 
 	store, err := New(db, filepath.Join(dir, "keys"))
 	if err != nil {

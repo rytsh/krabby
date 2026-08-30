@@ -102,8 +102,7 @@ type Manager struct {
 
 	baseCtx context.Context //nolint:containedctx // background lifecycle for async jobs
 
-	mu          sync.Mutex
-	locks       map[string]*sync.Mutex
+	locks       keyedLocks
 	mergeMu     sync.Mutex
 	wg          sync.WaitGroup
 	lifecycleMu sync.Mutex
@@ -139,13 +138,6 @@ type Manager struct {
 	// job per repo so users can abort long builds manually.
 	jobMu sync.Mutex
 	jobs  map[string]*job
-
-	// Effective MCP API key (runtime override or config), cached for the
-	// per-request auth check. mcpConfigKey is the startup config value used
-	// when the override is cleared.
-	mcpKeyMu     sync.RWMutex
-	mcpKey       string
-	mcpConfigKey string
 
 	// codeWarm tracks background warming of the normal (full-text) code search
 	// index. pending holds repo ids whose index has not been built yet; a
@@ -237,7 +229,6 @@ func New(
 			codeRag: coderag.New(config.CodeRAG{}, nil, nil, engine, codeText),
 		},
 		baseCtx:  baseCtx,
-		locks:    map[string]*sync.Mutex{},
 		activity: map[string]map[string]struct{}{},
 		progress: map[string]map[string]Progress{},
 		jobs:     map[string]*job{},
@@ -259,6 +250,35 @@ const (
 	taskKindReindex   = "reindex"
 	taskKindAPISync   = "apisync"
 )
+
+// Pipeline step names, reported by Activity and consumed by the UI. They are
+// part of the UI contract, so they live beside the task kinds rather than being
+// spelled out at each of the two dozen call sites that used to repeat them.
+const (
+	stepSync      = "sync"
+	stepFetch     = "fetch"
+	stepGraph     = "graph"
+	stepDocs      = "docs"
+	stepDocsIndex = "docs_index"
+	stepCodeIndex = "code_index"
+)
+
+// Progress phase names, reported alongside Done/Total counters.
+const (
+	phaseFetch = "fetch"
+	phaseIndex = "index"
+)
+
+// docsExt is the extension of every generated markdown document. Slugs are
+// stored without it and paths carry it, so the two conversions below are the
+// only places the spelling appears.
+const docsExt = ".md"
+
+// docFileName returns the markdown file name for a document slug.
+func docFileName(slug string) string { return slug + docsExt }
+
+// docSlug returns the document slug for a markdown file name.
+func docSlug(path string) string { return strings.TrimSuffix(path, docsExt) }
 
 // SetTaskConcurrency updates the central work queue's concurrency limit live.
 // A value <= 0 falls back to the queue default. Called at startup and whenever
@@ -986,45 +1006,28 @@ func (m *Manager) runStage(ctx context.Context, repo *registry.Repo, name string
 	return err
 }
 
-// lockFor returns the per-key mutex, creating it on first use. It hands back an
-// UNLOCKED mutex, which is why almost nothing should call it: acquire the lock
-// through lockKey instead, so a caller cannot end up unlocking a mutex it never
-// locked (in Go that is an unrecoverable fatal error, not a panic a handler can
-// contain — it takes the whole process down).
-//
-// The two legitimate uses are the TryLock probe in docs.go, which must be able
-// to walk away when the lock is held, and tests that hold a lock to observe
-// contention.
-func (m *Manager) lockFor(key string) *sync.Mutex {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.locks == nil {
-		m.locks = map[string]*sync.Mutex{}
-	}
-	if l, ok := m.locks[key]; ok {
-		return l
-	}
-
-	l := &sync.Mutex{}
-	m.locks[key] = l
-
-	return l
-}
-
 // lockKey acquires the per-key mutex and returns its release function, so the
 // only way to obtain an unlock is to have taken the lock first:
 //
 //	defer m.lockKey(repo.ID)()
 //
+// This shape exists because the per-key mutexes are held across whole pipeline
+// stages, so obtaining one and unlocking it without having locked it is easy to
+// write and catastrophic to run: Go answers an unlock of an unlocked mutex with
+// a fatal error that no recover can contain. Handing back a release that is
+// bound to a completed acquisition removes the opportunity.
+//
 // Keys are repository ids and web-source scopes; they share one namespace, so a
 // key must be distinct enough not to collide with another subsystem's (see
-// collectionLock, which suffixes its own).
+// lockRecord, which suffixes its own).
 func (m *Manager) lockKey(key string) func() {
-	l := m.lockFor(key)
-	l.Lock()
+	return m.locks.acquire(key)
+}
 
-	return l.Unlock
+// tryLockKey is lockKey for callers that must be able to walk away when the
+// lock is already held rather than queue behind it.
+func (m *Manager) tryLockKey(key string) (func(), bool) {
+	return m.locks.tryAcquire(key)
 }
 
 // RepoSpec describes a repository to track. Only URL is required.
@@ -1820,7 +1823,12 @@ func (m *Manager) Generate(ctx context.Context, id string, targets []string, for
 				st.Error = err.Error()
 				st.Commit = repo.LastCommit
 				st.FinishedAt = time.Now()
-				_ = m.reg.Upsert(context.WithoutCancel(ctx), repo)
+				// Logged rather than returned: serr is the failure the caller
+				// needs to see. But losing this write silently leaves the stage
+				// looking like it never failed, so it must not vanish.
+				if err := m.reg.Upsert(context.WithoutCancel(ctx), repo); err != nil {
+					slog.Error("persist graph stage failure", "repo", repo.ID, "error", err)
+				}
 			} else {
 				// Generate is already an explicit stage selection, so it adds
 				// no run-level skips on top of the repo's overrides.
@@ -2063,7 +2071,7 @@ func (m *Manager) reindexTask(id string) queue.Task {
 			Run: func(ctx context.Context) error {
 				defer m.lockKey(scope)()
 
-				m.indexWebSource(ctx, name)
+				m.indexAll(ctx, m.webCorpus(name))
 
 				return nil
 			},
@@ -2082,7 +2090,7 @@ func (m *Manager) reindexTask(id string) queue.Task {
 			Run: func(ctx context.Context) error {
 				defer m.lockKey(scope)()
 
-				m.indexAPIService(ctx, name)
+				m.indexAll(ctx, m.apiCorpus(name))
 
 				return nil
 			},
@@ -2182,9 +2190,9 @@ func (m *Manager) refresh(ctx context.Context, repo *registry.Repo, skips runSki
 	staleIgnore := !graphSkipped && hadGraph && m.gfy.GraphNeedsIgnoreRebuild(repo.Path, repo.Overrides.GraphExclude)
 	staleVersion := !graphSkipped && hadGraph && !m.gfy.GraphBuiltWithCurrentVersion(repo.Path)
 
-	m.setActivity(repo.ID, "sync")
+	m.setActivity(repo.ID, stepSync)
 	snapshot, err := m.prepareSnapshot(ctx, repo, !hadGraph || staleIgnore || staleVersion)
-	m.clearActivity(repo.ID, "sync")
+	m.clearActivity(repo.ID, stepSync)
 
 	if err != nil {
 		return err
@@ -2666,7 +2674,7 @@ func (m *Manager) removeRepoDocs(repoID string) error {
 
 		return err
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 
 	return root.RemoveAll(rel)
 }
@@ -2926,8 +2934,14 @@ func (m *Manager) buildGraphSnapshot(
 		st.Error = err.Error()
 		st.Commit = snapshot.Commit
 		st.FinishedAt = time.Now()
-		_ = m.reg.Upsert(context.WithoutCancel(ctx), repo)
-		_ = os.RemoveAll(path)
+		// Logged rather than returned: err is the failure the caller needs to
+		// see, but a lost write leaves the stage looking like it never failed.
+		if upErr := m.reg.Upsert(context.WithoutCancel(ctx), repo); upErr != nil {
+			slog.Error("persist graph stage failure", "repo", repo.ID, "error", upErr)
+		}
+		if rmErr := os.RemoveAll(path); rmErr != nil {
+			slog.Warn("remove failed graph output", "path", path, "error", rmErr)
+		}
 
 		return err
 	}
@@ -3310,14 +3324,6 @@ func (m *Manager) GraphifyVersion() string {
 	return m.gfy.Version()
 }
 
-// repoCloneDir resolves a repo id to its on-disk clone directory, verifying the
-// repo is tracked and has actually been cloned.
-func (m *Manager) repoCloneDir(ctx context.Context, repoID string) (string, error) {
-	dir, _, err := m.repoCloneDirAt(ctx, repoID, "")
-
-	return dir, err
-}
-
 // repoCloneDirAt resolves an optional snapshot token. A token is a soft hint,
 // not a hard requirement: while the pinned immutable version still exists it is
 // honored so paginated reads stay on one commit, but an unknown, malformed, or
@@ -3575,6 +3581,36 @@ func withinDir(root, path string) bool {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
+// removeContentDir deletes a generated-content directory, but only after
+// confirming it really lies inside root.
+//
+// Entity names are ValidName-checked on create, so the guard is not the primary
+// defence; it protects the os.RemoveAll against a name that predates the
+// current validation, and against an unconfigured root, where the naive
+// filepath.Join(root, name) collapses to a bare relative name and would delete
+// an arbitrary directory next to the working directory.
+//
+// It exists as a shared helper because the web-source and API-catalog delete
+// paths are copies of one another and the guard was already lost once in the
+// copying: only the web-source side had it.
+func removeContentDir(root, dir, what string) error {
+	if root == "" {
+		return nil
+	}
+
+	if !withinDir(root, dir) {
+		slog.Warn("refusing to remove content outside its root", "kind", what, "dir", dir, "root", root)
+
+		return nil
+	}
+
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("remove %s content %s; %w", what, dir, err)
+	}
+
+	return nil
+}
+
 // dirHasMarkdown reports whether dir contains at least one generated markdown
 // document, used to decide whether the docs stage has already produced output.
 func dirHasMarkdown(dir string) bool {
@@ -3610,7 +3646,7 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 
 	tmp := dst + ".tmp"
 
@@ -3620,12 +3656,21 @@ func copyFile(src, dst string) error {
 	}
 
 	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
+		_ = out.Close()
+		// Without this the failed attempt leaves a partial ".tmp" file next to
+		// the destination, which the next run would overwrite but a snapshot
+		// sweep would otherwise carry along as if it were content.
+		_ = os.Remove(tmp)
 
 		return err
 	}
 
+	// Checked, not deferred: Close is where buffered writes surface their
+	// error, and renaming a short file over the destination would silently
+	// corrupt it.
 	if err := out.Close(); err != nil {
+		_ = os.Remove(tmp)
+
 		return err
 	}
 

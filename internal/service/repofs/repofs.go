@@ -223,13 +223,13 @@ func ReadFile(rootDir, rel string, offset int64, maxBytes int) (*FileContent, er
 	if err != nil {
 		return nil, fmt.Errorf("open repo root; %w", err)
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 
 	f, err := root.Open(cleaned)
 	if err != nil {
 		return nil, fmt.Errorf("open %s; %w", cleaned, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	info, err := f.Stat()
 	if err != nil {
@@ -284,7 +284,7 @@ func ListFiles(rootDir, subdir string, recursive bool) ([]Entry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open repo root; %w", err)
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 
 	var entries []Entry
 
@@ -356,7 +356,7 @@ func listShallow(root *os.Root, dir string) ([]Entry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open %s; %w", dir, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	names, err := f.Readdirnames(-1)
 	if err != nil {

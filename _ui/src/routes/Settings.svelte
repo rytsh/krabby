@@ -253,34 +253,6 @@
     promptView = "custom";
   }
 
-  // MCP API key runtime management. The key is write-only; only the set/unset
-  // state is shown.
-  let mcpKeyInput = $state("");
-  let mcpMsg = $state("");
-  let mcpBusy = $state(false);
-
-  async function mcpAction(fn, okMsg) {
-    mcpBusy = true;
-    mcpMsg = "";
-    try {
-      const res = await fn();
-      if (settings) settings = { ...settings, mcp: { ...settings.mcp, api_key_set: res.api_key_set } };
-      mcpKeyInput = "";
-      mcpMsg = okMsg;
-    } catch {
-      // The API wrapper reports request failures globally.
-    } finally {
-      mcpBusy = false;
-    }
-  }
-
-  const saveMcpKey = () =>
-    mcpAction(() => api.setMcpKey(mcpKeyInput.trim()), "API key set. Clients must now send it.");
-  const disableMcpKey = () =>
-    mcpAction(() => api.setMcpKey(""), "Authentication disabled; the MCP endpoint is open.");
-  const resetMcpKey = () =>
-    mcpAction(() => api.clearMcpKey(), "Override removed; the config/env value applies again.");
-
   onMount(load);
 
   // Rows rendered as [label, value] with an optional boolean "set" style.
@@ -295,7 +267,6 @@
       ["MCP core path", s.mcp.path],
       ["MCP API path", `${s.mcp.path}/api`],
       ["MCP admin path", `${s.mcp.path}/admin`],
-      ["MCP API key", s.mcp.api_key_set ? "set" : "not set", s.mcp.api_key_set],
       ["Graphify bin", s.graphify.bin],
       ["Graphify version", s.graphify.version || "unknown"],
       ["Graphify python", s.graphify.python || "auto (shebang)"],
@@ -324,55 +295,6 @@
         {/each}
       </tbody>
     </table>
-  </div>
-
-  <h2 class="mb-1 mt-8 text-[15px] font-semibold">MCP access</h2>
-  <p class="text-dim">
-    Protect all three MCP endpoints with one API key. Changes apply immediately — no restart needed. Clients
-    send the key in the <code class="font-mono text-[12px]">X-Api-Key</code> header. Core, API, and admin are
-    separate tool catalogs; clients add and enable only the endpoint they need.
-  </p>
-
-  <div class="card mt-3 p-4">
-    <div class="mb-3 flex items-center gap-2 text-[13px]">
-      <span class="text-dim">Status</span>
-      <span class={settings.mcp.api_key_set ? "text-ok" : "text-faint"}>
-        {settings.mcp.api_key_set ? "protected (API key required)" : "open (no API key)"}
-      </span>
-    </div>
-
-    <div class="flex gap-2">
-      <input
-        class="input flex-1"
-        type="password"
-        placeholder="new API key"
-        bind:value={mcpKeyInput}
-        onkeydown={(e) => e.key === "Enter" && mcpKeyInput.trim() && saveMcpKey()}
-      />
-      <button class="btn btn-primary" disabled={mcpBusy || !mcpKeyInput.trim()} onclick={saveMcpKey}>
-        Set key
-      </button>
-      <button
-        class="btn btn-danger"
-        disabled={mcpBusy || !settings.mcp.api_key_set}
-        onclick={disableMcpKey}
-        title="Remove the API key requirement entirely"
-      >
-        Disable auth
-      </button>
-      <button
-        class="btn"
-        disabled={mcpBusy}
-        onclick={resetMcpKey}
-        title="Drop the runtime override and fall back to the config/env value"
-      >
-        Reset to config
-      </button>
-    </div>
-
-    {#if mcpMsg}
-      <p class="mb-0 mt-3 text-[13px] text-ok">{mcpMsg}</p>
-    {/if}
   </div>
 
   <h2 class="mb-3 mt-8 text-[15px] font-semibold">Git credentials</h2>

@@ -46,8 +46,8 @@ func waitLockFree(t *testing.T, m *Manager, key string) bool {
 
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if m.lockFor(key).TryLock() {
-			m.lockFor(key).Unlock()
+		if release, ok := m.tryLockKey(key); ok {
+			release()
 
 			return true
 		}
@@ -68,16 +68,17 @@ func TestLockKeyReturnsAWorkingUnlock(t *testing.T) {
 	unlock := m.lockKey("owner/repo")
 
 	// Held: a second acquisition must not succeed.
-	if m.lockFor("owner/repo").TryLock() {
+	if _, ok := m.tryLockKey("owner/repo"); ok {
 		t.Fatal("lockKey returned without holding the lock")
 	}
 
 	unlock()
 
-	if !m.lockFor("owner/repo").TryLock() {
+	release, ok := m.tryLockKey("owner/repo")
+	if !ok {
 		t.Fatal("the returned unlock did not release the lock")
 	}
-	m.lockFor("owner/repo").Unlock()
+	release()
 }
 
 func TestLockKeyIsPerKey(t *testing.T) {
@@ -87,10 +88,11 @@ func TestLockKeyIsPerKey(t *testing.T) {
 
 	// A different key must be unaffected, or one slow repository build would
 	// serialize every other repository behind it.
-	if !m.lockFor("owner/b").TryLock() {
+	release, ok := m.tryLockKey("owner/b")
+	if !ok {
 		t.Fatal("locking one key blocked another")
 	}
-	m.lockFor("owner/b").Unlock()
+	release()
 }
 
 // SetRepoOverrides took the per-repo mutex without locking it and then

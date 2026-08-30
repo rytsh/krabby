@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 
@@ -164,13 +163,12 @@ func TestEnsureDocsTextKeySkipsLockedKey(t *testing.T) {
 		reg:         reg,
 		docsText:    text,
 		docsRootDir: docsRoot,
-		locks:       map[string]*sync.Mutex{},
-		docs:        &docsBundle{},
+
+		docs: &docsBundle{},
 	}
 
 	// Simulate a refresh/generate holding the repo lock.
-	lock := m.lockFor(repo.ID)
-	lock.Lock()
+	releaseRepoLock := m.lockKey(repo.ID)
 
 	done := make(chan error, 1)
 	go func() {
@@ -184,11 +182,11 @@ func TestEnsureDocsTextKeySkipsLockedKey(t *testing.T) {
 			t.Fatalf("search while key is locked: %v", err)
 		}
 	case <-time.After(5 * time.Second):
-		lock.Unlock()
+		releaseRepoLock()
 		t.Fatal("search blocked waiting for the key lock")
 	}
 
-	lock.Unlock()
+	releaseRepoLock()
 
 	// Once the key is free the backfill runs and the same query resolves.
 	docs, err := m.SearchDocs(ctx, ScopeRepos, repo.ID, "", DocsSearchLexical, "PAY-1842", 5)

@@ -6,11 +6,16 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 	testpb "google.golang.org/grpc/reflection/grpc_testing"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protodesc"
+	"google.golang.org/protobuf/reflect/protoregistry"
+	"google.golang.org/protobuf/types/descriptorpb"
 
 	"github.com/rytsh/krabby/internal/service/apicatalog"
 )
@@ -279,6 +284,90 @@ func TestPreview(t *testing.T) {
 		t.Errorf("BaseURL = %q, want %q", out.BaseURL, target)
 	}
 }
+
+// TestPreviewMethodlessService covers a service declared with no methods
+// ("service Foo {}" is legal proto). Preview indexes methods.Get(0) to build
+// its sample, so a methodless service must be skipped rather than counted or
+// sampled; this pins that behaviour against a regression in either the
+// lookupService filter or the sampling guard.
+func TestPreviewMethodlessService(t *testing.T) {
+	target := startServerWithEmptyService(t)
+
+	out, err := New().Preview(context.Background(), configFor(target), nil)
+	if err != nil {
+		t.Fatalf("Preview() error = %v", err)
+	}
+	// SearchService contributes two methods; the empty service contributes none
+	// and must not appear in the sample.
+	if out.OperationCount != 2 {
+		t.Errorf("OperationCount = %d, want 2", out.OperationCount)
+	}
+	for _, s := range out.Sample {
+		if strings.Contains(s, "EmptyService") {
+			t.Errorf("Sample contains a methodless service: %q", s)
+		}
+	}
+}
+
+// startServerWithEmptyService runs a reflection-enabled server that also
+// advertises a service with zero methods.
+func startServerWithEmptyService(t *testing.T) string {
+	t.Helper()
+
+	registerEmptyServiceFile(t)
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	server := grpc.NewServer()
+	testpb.RegisterSearchServiceServer(server, &searchServer{})
+	server.RegisterService(&grpc.ServiceDesc{
+		ServiceName: "krabby.testing.EmptyService",
+		HandlerType: (*any)(nil),
+		Metadata:    emptyServiceFile,
+	}, struct{}{})
+	reflection.Register(server)
+
+	go func() { _ = server.Serve(lis) }()
+	t.Cleanup(server.Stop)
+
+	return lis.Addr().String()
+}
+
+const emptyServiceFile = "krabby_testing_empty.proto"
+
+// registerEmptyServiceFile puts a methodless service in the global proto
+// registry so the reflection walk can resolve its descriptor. Registration is
+// process-wide and idempotent per run, hence the sync.Once.
+func registerEmptyServiceFile(t *testing.T) {
+	t.Helper()
+
+	emptyServiceOnce.Do(func() {
+		fd, err := protodesc.NewFile(&descriptorpb.FileDescriptorProto{
+			Name:    proto.String(emptyServiceFile),
+			Package: proto.String("krabby.testing"),
+			Syntax:  proto.String("proto3"),
+			Service: []*descriptorpb.ServiceDescriptorProto{{Name: proto.String("EmptyService")}},
+		}, nil)
+		if err != nil {
+			emptyServiceErr = err
+
+			return
+		}
+		emptyServiceErr = protoregistry.GlobalFiles.RegisterFile(fd)
+	})
+
+	if emptyServiceErr != nil {
+		t.Fatalf("register empty service descriptor: %v", emptyServiceErr)
+	}
+}
+
+var (
+	emptyServiceOnce sync.Once
+	emptyServiceErr  error
+)
 
 // ---- helpers ---------------------------------------------------------------
 

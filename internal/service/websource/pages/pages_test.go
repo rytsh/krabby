@@ -58,8 +58,7 @@ func TestFetchCustomPages(t *testing.T) {
 }
 
 func TestFetchOneUsesRedirectURLAsRelativeBase(t *testing.T) {
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/old":
 			http.Redirect(w, r, "/docs/start", http.StatusFound)

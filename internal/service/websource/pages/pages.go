@@ -162,7 +162,7 @@ func (f *Fetcher) fetchSitemap(ctx context.Context, sitemapURL string) (*sitemap
 	if err != nil {
 		return nil, fmt.Errorf("fetch %s; %w", sitemapURL, err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	if res.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("fetch %s; unexpected status %s", sitemapURL, res.Status)
 	}
@@ -196,7 +196,7 @@ func readSitemapBody(r io.Reader) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open gzip sitemap; %w", err)
 	}
-	defer zr.Close()
+	defer func() { _ = zr.Close() }()
 
 	body, err = io.ReadAll(io.LimitReader(zr, maxSitemapBytes+1))
 	if err != nil {
@@ -312,7 +312,7 @@ func (f *Fetcher) fetchOne(ctx context.Context, pageURL string) (title, markdown
 	if err != nil {
 		return "", "", fmt.Errorf("fetch %s; %w", pageURL, err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 
 	if res.StatusCode != http.StatusOK {
 		return "", "", fmt.Errorf("fetch %s; unexpected status %s", pageURL, res.Status)
@@ -411,7 +411,7 @@ func fetchImageResponse(client *http.Client, req *http.Request, maxBytes int64, 
 		}
 		return websource.ImageContent{}, fmt.Errorf("fetch image; %w", err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	if res.StatusCode != http.StatusOK {
 		return websource.ImageContent{}, fmt.Errorf("%w: fetch image status %s", websource.ErrImageUnsupported, res.Status)
 	}
