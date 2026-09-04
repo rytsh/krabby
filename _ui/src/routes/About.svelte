@@ -65,7 +65,7 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
   -d '{"url": "https://github.com/owner/repo", "branch": ""}'`);
 
   // The complete tool inventory, kept in sync with the registrations in
-  // internal/service/mcptools (TestToolCatalogs pins the disjoint counts: 22
+  // internal/service/mcptools (TestToolCatalogs pins the disjoint counts: 25
   // core, 5 api, 38 admin). A tool's third element selects its catalog;
   // absent means core.
   const toolGroups = [
@@ -95,6 +95,8 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
       name: "Knowledge graph",
       tools: [
         ["query_graph", "Analyze architecture, dependencies, flows, and cross-file relationships with BFS/DFS."],
+        ["find_definition", "Locate where a symbol is defined — a real graph node with a path and a line, not a text guess."],
+        ["find_references", "List where a symbol is used as real incoming graph edges; filter by edge context to ask 'who calls this'."],
         ["get_node", "Get full details for a node by label or ID."],
         ["get_neighbors", "Page through direct neighbors of a node with edge details."],
         ["get_community", "Page through nodes in a community by community ID."],
@@ -107,6 +109,7 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
       name: "Files & history",
       tools: [
         ["list_files", "Inspect a bounded page of files and directories in a tracked clone."],
+        ["glob", "Find files by path pattern (\"**/Makefile\", \"*.sql\") without walking directories one at a time."],
         ["read_file", "Read a bounded page of a known source file."],
         ["git_log", "Commit history of a repository, a ref range, or one file."],
         ["git_diff", "Diff between two refs or commits."],
@@ -116,7 +119,7 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
     {
       name: "Docs & search",
       tools: [
-        ["search_code", "First choice for symbols, paths, definitions, usages, and implementation locations."],
+        ["search_code", "First choice for symbols, paths, literals and implementation locations; mode selects term (normal), regex or semantic retrieval, and path narrows any of them to a file glob."],
         ["search_docs", "Search repo docs and web sources with hybrid, semantic, or lexical retrieval."],
         ["list_docs", "Page through generated documentation metadata for a repository."],
         ["get_doc", "Read a bounded page of a known generated document."],
