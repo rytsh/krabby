@@ -13,6 +13,7 @@ import (
 	"github.com/rytsh/krabby/internal/service/credentials"
 	"github.com/rytsh/krabby/internal/service/docgen"
 	"github.com/rytsh/krabby/internal/service/gitops"
+	"github.com/rytsh/krabby/internal/service/graphquery"
 	"github.com/rytsh/krabby/internal/service/manager"
 	"github.com/rytsh/krabby/internal/service/queue"
 	"github.com/rytsh/krabby/internal/service/rag"
@@ -63,11 +64,14 @@ type queueService interface {
 
 type graphQueryService interface {
 	CallGraphTool(context.Context, string, string, string, map[string]any) (*mcp.CallToolResult, error)
+	FindDefinition(context.Context, string, string, string, int) (graphquery.SymbolDefs, error)
+	FindReferences(context.Context, string, string, string, []string, int, int) (graphquery.SymbolRefs, error)
 }
 
 type repoFileService interface {
 	ReadRepoFileAt(context.Context, string, string, string, int64, int) (*repofs.FileContent, error)
-	ListRepoFilesPageAt(context.Context, string, string, string, bool, int, int) (repofs.EntryPage, error)
+	ListRepoFilesPageAt(context.Context, string, string, string, bool, string, int) (repofs.EntryPage, error)
+	GlobRepoFiles(context.Context, string, string, string, int) (repofs.GlobPage, error)
 	BlameRepoFile(context.Context, string, string, string, int, int) (*manager.BlameFileResult, error)
 }
 
@@ -78,9 +82,10 @@ type repoHistoryService interface {
 }
 
 type docsSearchService interface {
-	SearchDocs(context.Context, string, string, string, string, string, int) ([]rag.Doc, error)
-	SearchCodeText(context.Context, string, string, string, int, int) (coderag.SearchPage, error)
-	SearchCode(context.Context, string, string, string, int) ([]coderag.Snippet, error)
+	SearchDocs(context.Context, string, string, string, string, string, int) (rag.DocsPage, error)
+	SearchCodeText(context.Context, string, string, string, coderag.TextSearchOptions) (coderag.SearchPage, error)
+	SearchCodeRegex(context.Context, string, string, string, coderag.RegexOptions) (coderag.RegexPage, error)
+	SearchCode(context.Context, string, string, string, coderag.SemanticOptions) (coderag.SemanticPage, error)
 	ListDocs(context.Context, string) ([]docgen.DocMeta, error)
 	GetDoc(context.Context, string, string, int64, int) (*repofs.FileContent, error)
 }

@@ -111,25 +111,26 @@ func resolveContextFilters(question string, explicit []string) ([]string, string
 	return nil, ""
 }
 
-// filteredNeighbors returns successor node ids reachable via edges whose context
-// is in the filter set. An empty filter set returns all successors (mirrors
-// _filter_graph_by_context applied during traversal over successors).
-func (g *Graph) filteredNeighbors(id string, filters map[string]bool) []string {
+// filteredNeighbors returns successor edges whose context is in the filter set.
+// An empty filter set returns all successors (mirrors _filter_graph_by_context
+// applied during traversal over successors). The edge is returned alongside the
+// neighbour so callers that render the traversal never have to look it up again.
+func (g *Graph) filteredNeighbors(id string, filters map[string]bool) []edgeRef {
 	refs := g.out[id]
-	out := make([]string, 0, len(refs))
+	out := make([]edgeRef, 0, len(refs))
 	for _, r := range refs {
 		if len(filters) == 0 || filters[r.edge.Context] {
-			out = append(out, r.other)
+			out = append(out, r)
 		}
 	}
 
 	return out
 }
 
-// hubThreshold returns the degree above which nodes are not expanded as transit:
-// p99 of the degree distribution, floored at 50 (mirrors the shared helper in
-// _bfs/_dfs).
-func (g *Graph) hubThreshold() int {
+// computeHubThreshold returns the degree above which nodes are not expanded as
+// transit: p99 of the degree distribution, floored at 50 (mirrors the shared
+// helper in _bfs/_dfs). Called once per load; the result lives on Graph.
+func computeHubThreshold(g *Graph) int {
 	if len(g.nodeList) == 0 {
 		return 50
 	}
@@ -148,16 +149,19 @@ func (g *Graph) hubThreshold() int {
 	return max(50, degrees[p99])
 }
 
-// edgePair is a (from, to) edge recorded during traversal, in visit order.
+// edgePair is one edge recorded during traversal, in visit order. It carries the
+// traversed *Edge so rendering does not re-scan the source node's adjacency —
+// that lookup made rendering quadratic in the degree of a hub node.
 type edgePair struct {
 	from string
 	to   string
+	edge *Edge
 }
 
 // bfs performs a breadth-first traversal over context-filtered successors,
 // refusing to expand through high-degree hubs (except seeds) (mirrors _bfs).
 func (g *Graph) bfs(start []string, depth int, filters map[string]bool) (map[string]bool, []edgePair) {
-	hub := g.hubThreshold()
+	hub := g.hubThreshold
 	seedSet := toSet(start)
 	visited := toSet(start)
 	frontier := toSet(start)
@@ -171,10 +175,10 @@ func (g *Graph) bfs(start []string, depth int, filters map[string]bool) (map[str
 				continue
 			}
 
-			for _, nb := range g.filteredNeighbors(n, filters) {
-				if !visited[nb] {
-					next[nb] = true
-					edges = append(edges, edgePair{from: n, to: nb})
+			for _, r := range g.filteredNeighbors(n, filters) {
+				if !visited[r.other] {
+					next[r.other] = true
+					edges = append(edges, edgePair{from: n, to: r.other, edge: r.edge})
 				}
 			}
 		}
@@ -191,7 +195,7 @@ func (g *Graph) bfs(start []string, depth int, filters map[string]bool) (map[str
 // dfs performs a depth-first traversal mirroring _dfs (LIFO stack, seeds pushed
 // in reverse so the first seed is explored first).
 func (g *Graph) dfs(start []string, depth int, filters map[string]bool) (map[string]bool, []edgePair) {
-	hub := g.hubThreshold()
+	hub := g.hubThreshold
 	seedSet := toSet(start)
 	visited := map[string]bool{}
 	var edges []edgePair
@@ -219,10 +223,10 @@ func (g *Graph) dfs(start []string, depth int, filters map[string]bool) (map[str
 			continue
 		}
 
-		for _, nb := range g.filteredNeighbors(f.node, filters) {
-			if !visited[nb] {
-				stack = append(stack, frame{node: nb, d: f.d + 1})
-				edges = append(edges, edgePair{from: f.node, to: nb})
+		for _, r := range g.filteredNeighbors(f.node, filters) {
+			if !visited[r.other] {
+				stack = append(stack, frame{node: r.other, d: f.d + 1})
+				edges = append(edges, edgePair{from: f.node, to: r.other, edge: r.edge})
 			}
 		}
 	}
@@ -232,8 +236,8 @@ func (g *Graph) dfs(start []string, depth int, filters map[string]bool) (map[str
 
 // subgraphToText renders a subgraph as text, cutting at tokenBudget (~3 chars per
 // token). Seeds are rendered first, then remaining nodes by degree desc (mirrors
-// _subgraph_to_text). filters restrict which edge context is available when
-// looking up an edge for rendering.
+// _subgraph_to_text). Each edge is rendered from the edge the traversal actually
+// followed, so a context filter is honoured here as well as during expansion.
 func (g *Graph) subgraphToText(nodes map[string]bool, edges []edgePair, tokenBudget int, seeds []string) string {
 	charBudget := tokenBudget * 3
 	var lines []string
@@ -265,21 +269,16 @@ func (g *Graph) subgraphToText(nodes map[string]bool, edges []edgePair, tokenBud
 			continue
 		}
 
-		edge, ok := g.Edge(e.from, e.to)
-		if !ok {
-			continue
-		}
-
 		contextSuffix := ""
-		if edge.Context != "" {
-			contextSuffix = " context=" + sanitize(edge.Context)
+		if e.edge.Context != "" {
+			contextSuffix = " context=" + sanitize(e.edge.Context)
 		}
 
 		lines = append(lines, fmt.Sprintf(
 			"EDGE %s --%s [%s%s]--> %s",
 			sanitize(g.labelOf(e.from)),
-			sanitize(edge.Relation),
-			sanitize(edge.Confidence),
+			sanitize(e.edge.Relation),
+			sanitize(e.edge.Confidence),
 			contextSuffix,
 			sanitize(g.labelOf(e.to)),
 		))

@@ -146,11 +146,35 @@ export const api = {
       `/docs/search?q=${encodeURIComponent(q)}&repo=${encodeURIComponent(repo)}&top=${top}&scope=${encodeURIComponent(scope)}&namespace=${encodeURIComponent(namespace)}&mode=${encodeURIComponent(mode)}`,
       { signal },
     ),
-  searchCode: (q, repo = "", mode = "normal", page = 1, perPage = 20, top = 0, namespace = "", { signal } = {}) =>
-    req(
-      `/code/search?q=${encodeURIComponent(q)}&repo=${encodeURIComponent(repo)}&mode=${mode}&page=${page}&per_page=${perPage}&top=${top}&namespace=${encodeURIComponent(namespace)}`,
-      { signal },
-    ),
+  searchCode: (
+    q,
+    repo = "",
+    mode = "normal",
+    page = 1,
+    perPage = 20,
+    top = 0,
+    namespace = "",
+    { signal, caseSensitive = false, contextLines = 0, path = "" } = {},
+  ) => {
+    const p = new URLSearchParams({
+      q,
+      repo,
+      mode,
+      page: String(page),
+      per_page: String(perPage),
+      top: String(top),
+      namespace,
+    });
+    // The path filter applies to every mode; the rest are regex-only and are
+    // omitted elsewhere so the URL stays the shape each mode actually reads.
+    if (path) p.set("path", path);
+    if (mode === "regex") {
+      if (caseSensitive) p.set("case_sensitive", "true");
+      if (contextLines) p.set("context_lines", String(contextLines));
+    }
+
+    return req(`/code/search?${p.toString()}`, { signal });
+  },
   docs: (id) => req(`/repos/${id}/-/docs`),
   doc: (id, path) => req(`/repos/${id}/-/doc?path=${encodeURIComponent(path)}`),
   // Web content sources (wikis, Confluence spaces).

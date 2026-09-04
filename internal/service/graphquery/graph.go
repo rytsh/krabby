@@ -57,6 +57,11 @@ type Graph struct {
 	// degree is total (in+out) degree per node, matching networkx DiGraph.degree.
 	degree map[string]int
 
+	// hubThreshold is the transit-expansion cutoff computed once at load time.
+	// Deriving it per traversal meant allocating and sorting the whole degree
+	// slice on every query, which dominated BFS/DFS on large graphs.
+	hubThreshold int
+
 	communities map[int][]string // community id -> node ids (insertion order)
 
 	// idfCache memoises IDF weights per query term (see scoring.go). Rebuilt with
@@ -254,6 +259,8 @@ func fromRaw(raw *rawGraph) (*Graph, error) {
 		g.degree[e.Target]++
 	}
 
+	g.hubThreshold = computeHubThreshold(g)
+
 	return g, nil
 }
 
@@ -278,37 +285,6 @@ func (g *Graph) Successors(id string) []edgeRef { return g.out[id] }
 
 // Predecessors returns incoming edges to id (other -> id).
 func (g *Graph) Predecessors(id string) []edgeRef { return g.in[id] }
-
-// Neighbors returns successor node ids (networkx DiGraph.neighbors == successors),
-// used by BFS/DFS which mirror the python traversal over successors.
-func (g *Graph) Neighbors(id string) []string {
-	refs := g.out[id]
-	out := make([]string, 0, len(refs))
-	for _, r := range refs {
-		out = append(out, r.other)
-	}
-
-	return out
-}
-
-// Edge returns the first edge attributes for (u, v) in either direction, matching
-// graphify.build.edge_data used across the tools. ok is false when no edge exists.
-func (g *Graph) Edge(u, v string) (*Edge, bool) {
-	for _, r := range g.out[u] {
-		if r.other == v {
-			return r.edge, true
-		}
-	}
-
-	return nil, false
-}
-
-// HasEdge reports whether a directed edge u -> v exists.
-func (g *Graph) HasEdge(u, v string) bool {
-	_, ok := g.Edge(u, v)
-
-	return ok
-}
 
 // Community returns the node ids in a community, in insertion order.
 func (g *Graph) Community(id int) []string { return g.communities[id] }

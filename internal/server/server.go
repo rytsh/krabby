@@ -31,6 +31,7 @@ import (
 	"github.com/worldline-go/types"
 
 	"github.com/rytsh/krabby/internal/config"
+	"github.com/rytsh/krabby/internal/service/coderag"
 	"github.com/rytsh/krabby/internal/service/credentials"
 	"github.com/rytsh/krabby/internal/service/gitops"
 	"github.com/rytsh/krabby/internal/service/graphify"
@@ -128,6 +129,7 @@ func newRouter(ctx context.Context, cfg *config.Config, services routeServices, 
 		"report": repoArtifact(services.repos, graphify.ReportPath),
 		"html":   repoArtifact(services.repos, graphify.HTMLPath),
 		"files":  listRepoFiles(services.docs),
+		"glob":   globRepoFiles(services.docs),
 		"file":   readRepoFile(services.docs),
 		"docs":   listDocs(services.docs),
 		"doc":    getDoc(services.docs),
@@ -942,6 +944,23 @@ func listRepoFiles(mgr docsService) ada.HandlerFunc {
 	}
 }
 
+func globRepoFiles(mgr docsService) ada.HandlerFunc {
+	return func(c *ada.Context) error {
+		params := c.Request.URL.Query()
+		pattern := strings.TrimSpace(params.Get("pattern"))
+		if pattern == "" {
+			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": "pattern query param is required"})
+		}
+
+		page, err := mgr.GlobRepoFiles(c.Request.Context(), repoID(c.Request), params.Get("snapshot"), pattern, queryInt(params.Get("limit"), 0))
+		if err != nil {
+			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+		}
+		c.Response.Header().Set("X-Krabby-Snapshot", page.Snapshot)
+
+		return c.SendJSON(page)
+	}
+}
 func readRepoFile(mgr docsService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		path := c.Request.URL.Query().Get("path")
@@ -1049,42 +1068,49 @@ func searchCode(mgr docsService) ada.HandlerFunc {
 
 		switch mode {
 		case "normal":
-			page, perPage := 1, 20
-			if n, err := strconv.Atoi(params.Get("page")); err == nil && n > 0 {
-				page = n
-			}
-			if n, err := strconv.Atoi(params.Get("per_page")); err == nil && n > 0 {
-				perPage = n
+			result, err := mgr.SearchCodeText(c.Request.Context(), repo, namespace, q, coderag.TextSearchOptions{
+				Page:    queryInt(params.Get("page"), 1),
+				PerPage: queryInt(params.Get("per_page"), 20),
+				Path:    params.Get("path"),
+			})
+			if err != nil {
+				return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
 			}
 
-			result, err := mgr.SearchCodeText(c.Request.Context(), repo, namespace, q, page, perPage)
+			return c.SendJSON(result)
+		case "regex":
+			opts := coderag.RegexOptions{
+				CaseSensitive: params.Get("case_sensitive") == "true",
+				Path:          params.Get("path"),
+				Page:          queryInt(params.Get("page"), 1),
+				PerPage:       queryInt(params.Get("per_page"), 20),
+			}
+			if n, err := strconv.Atoi(params.Get("context_lines")); err == nil {
+				opts.ContextLines = n
+			}
+			if n, err := strconv.Atoi(params.Get("max_matches")); err == nil {
+				opts.MaxMatches = n
+			}
+
+			result, err := mgr.SearchCodeRegex(c.Request.Context(), repo, namespace, q, opts)
 			if err != nil {
 				return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
 			}
 
 			return c.SendJSON(result)
 		case "semantic":
-			var top int
-			if v := params.Get("top"); v != "" {
-				if n, err := strconv.Atoi(v); err == nil {
-					top = n
-				}
-			}
-
-			snippets, err := mgr.SearchCode(c.Request.Context(), repo, namespace, q, top)
+			page, err := mgr.SearchCode(c.Request.Context(), repo, namespace, q, coderag.SemanticOptions{
+				TopK: queryInt(params.Get("top"), 0),
+				Path: params.Get("path"),
+			})
 			if err != nil {
 				return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
 			}
 
-			return c.SendJSON(map[string]any{
-				"results":  snippets,
-				"total":    len(snippets),
-				"page":     1,
-				"per_page": len(snippets),
-			})
+			return c.SendJSON(page)
 		default:
 			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{
-				"error": "mode must be normal or semantic",
+				"error": "mode must be normal, regex or semantic",
 			})
 		}
 	}

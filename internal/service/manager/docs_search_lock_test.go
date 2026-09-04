@@ -100,7 +100,8 @@ func TestSearchDocsDoesNotBlockOnRunningSync(t *testing.T) {
 	searched := make(chan []rag.Doc, 1)
 	failed := make(chan error, 1)
 	go func() {
-		docs, err := m.SearchDocs(ctx, ScopeSources, "", registry.NamespaceAll, DocsSearchLexical, "alpha", 5)
+		page, err := m.SearchDocs(ctx, ScopeSources, "", registry.NamespaceAll, DocsSearchLexical, "alpha", 5)
+		docs := page.Results
 		if err != nil {
 			failed <- err
 
@@ -189,7 +190,8 @@ func TestEnsureDocsTextKeySkipsLockedKey(t *testing.T) {
 	releaseRepoLock()
 
 	// Once the key is free the backfill runs and the same query resolves.
-	docs, err := m.SearchDocs(ctx, ScopeRepos, repo.ID, "", DocsSearchLexical, "PAY-1842", 5)
+	page, err := m.SearchDocs(ctx, ScopeRepos, repo.ID, "", DocsSearchLexical, "PAY-1842", 5)
+	docs := page.Results
 	if err != nil {
 		t.Fatal(err)
 	}

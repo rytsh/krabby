@@ -12,6 +12,7 @@ import (
 
 	"github.com/rytsh/krabby/internal/service/credentials"
 	"github.com/rytsh/krabby/internal/service/gitops"
+	"github.com/rytsh/krabby/internal/service/graphquery"
 	"github.com/rytsh/krabby/internal/service/manager"
 	"github.com/rytsh/krabby/internal/service/registry"
 )
@@ -20,22 +21,23 @@ import (
 // initialize. Most MCP clients surface it to the LLM as high-level context, so
 // it explains what krabby is and which tool to reach for first. Per-tool
 // specifics stay in each tool's Description.
-const serverInstructions = `Krabby tracks git repositories and builds a searchable knowledge graph over each one, so you can locate code, read the actual source from the clone, understand how it fits together, attribute changes to commits, and search its documentation - without cloning anything yourself.
+const serverInstructions = `Krabby tracks git repositories and builds a searchable knowledge graph over each one, so you can locate code, read the actual source, understand how it fits together, attribute changes to commits, and search its documentation - without cloning anything yourself.
 
 Tool selection (roughly what to reach for, in order):
-- Use search_code first for symbols, paths, literals, definitions, usages, and implementation locations. Use normal mode for exact text and semantic mode for conceptual source search.
-- Use read_file to view the actual source behind a result (node 'src' fields give the path); reads are sandboxed to the clone and paginated.
-- Use query_graph for architecture, dependencies, call/data flow, and relationships across files. It is not a keyword or symbol search.
-- Use git_blame to attribute lines to a commit (start_line/end_line blames a range), then git_diff with that sha to see what it changed.
-- Use git_log with from/to to compare releases or follow one file; list_refs gives tag names.
-- Use search_docs for documentation and knowledge; it covers generated repo docs, web sources (Confluence, Jira, pages) and catalogued API endpoints. Semantic is the default when configured, otherwise lexical; request hybrid explicitly for fused retrieval. Use lexical for exact keys/titles/identifiers and semantic for conceptual questions. Pass the user's full question. Scope a web source with the exact scope_key returned by list_sources.
-- Use list_* only when an identifier is unknown or the user explicitly requests an inventory. Do not exhaust pages or request a recursive file tree without a clear need.
-- Use get_* tools only after a search/query identifies the target.
-- If a graph tool returns "Repository selection required", retry it with one of the provided repo ids instead of treating the result as a failure.
+- Use search_code first for symbols, literals, usages and implementation locations. Normal mode is BM25 over source chunks and works on a question: prose words are ORed and ranked, identifier-shaped words stay required. Regex mode matches an RE2 pattern line by line and returns exact line/column - what signatures, punctuation, line anchors and case-sensitive lookups need. Semantic mode answers conceptual queries. Narrow any mode with path.
+- Use find_definition / find_references for an exact symbol: they read the graph, so a definition is a real location and a reference a real edge. context:['call'] answers "who calls this".
+- Use glob to find files by name or extension ('**/Makefile', '*.sql'); list_files inspects one known directory.
+- Use read_file to view the source behind a result (node 'src' fields give the path); reads are sandboxed and paginated.
+- Use query_graph for architecture, dependencies, call/data flow and cross-file relationships. It is not a keyword or symbol search.
+- Use git_blame to attribute lines to a commit, then git_diff with that sha to see what it changed; git_log with from/to compares releases or follows one file, and list_refs gives tag names.
+- Use search_docs for documentation and knowledge: generated repo docs, web sources (Confluence, Jira, pages) and catalogued API endpoints. Semantic is the default when configured, otherwise lexical; request hybrid for fused retrieval, and lexical for exact keys/titles/identifiers. Pass the user's full question and scope a web source with the exact scope_key from list_sources.
+- Use list_* only when an identifier is unknown or an inventory was requested, and get_* only after a search identified the target. Do not exhaust pages.
+- Treat "Repository selection required" and a result's note field as instructions, not failures.
+- A code search page reports its repositories' index state; when nothing matched, check whether the index is stale or unbuilt before concluding the code is absent.
 
 Always pass repo when it is known. Omit repo only when the user explicitly requests cross-repository analysis and merged search is intended.
 
-Repos are grouped into namespaces. When the repo is unknown a search covers only the 'default' namespace, so the answer may live elsewhere: before concluding nothing was found, check list_namespaces and pass the matching namespace, or namespace:'*' to search them all.`
+Repos are grouped into namespaces. When the repo is unknown a search covers only the 'default' namespace, so the answer may live elsewhere: check list_namespaces and pass the matching namespace, or namespace:'*', before concluding nothing was found.`
 
 const apiInstructions = `This server contains only the API catalog. To call an API, walk it: list_api_groups -> list_api_services -> list_api_endpoints -> get_api_endpoint. Only the last returns schemas; narrow with search/tag rather than listing every endpoint. call_api_endpoint then sends a real request to the target service, so call mutating endpoints only when explicitly requested.`
 
@@ -94,7 +96,7 @@ func newServer(mgr tracingService, name, title, version, instructions string) *m
 
 type addRepoArgs struct {
 	URL       string `json:"url" jsonschema:"git URL of the repository (ssh or https)"`
-	Branch    string `json:"branch,omitempty" jsonschema:"branch to track (default: repo default branch)"`
+	Branch    string `json:"branch,omitempty" jsonschema:"branch to track (default: repo default branch). Ignored if the repo is already tracked"`
 	Namespace string `json:"namespace,omitempty" jsonschema:"namespace to assign this repo to (arbitrary grouping label); omitted means the 'default' namespace. '*' is reserved and rejected. Ignored if the repo is already tracked (use set_repo_namespace to move it)"`
 	Wait      bool   `json:"wait,omitempty" jsonschema:"when true, block until the clone and graph build finish and return the final status (ready or error) instead of returning immediately"`
 
@@ -118,6 +120,23 @@ type repoOverrideArgs struct {
 	DocsMaxSynthesisBytes int `json:"docs_max_synthesis_bytes,omitempty" jsonschema:"summary bytes fed to the final documentation.md synthesis (default 262144); 0 inherits"`
 
 	SkipStages []string `json:"skip_stages,omitempty" jsonschema:"stages this repo does not run: graph, docs, docs_index, code_index. Dependents still run degraded (docs summarize per file without a graph). Requesting a skipped stage is an error, not a no-op"`
+}
+
+// validateSkipStages rejects unknown names in the persisted skip list.
+// registry.Overrides.Normalize silently drops names it does not recognise,
+// which is right for a stored record read back from disk but fatal here: a
+// typo like skip_stages:['docs_gen'] would be answered with success while the
+// docs stage keeps running and keeps spending LLM budget, with nothing in the
+// response to give it away. The caller is the only party who can fix the typo,
+// so the surface that accepted it refuses it.
+func (a repoOverrideArgs) validateSkipStages() error {
+	for _, s := range a.SkipStages {
+		if !registry.ValidStage(s) {
+			return unknownStageError(s)
+		}
+	}
+
+	return nil
 }
 
 func (a repoOverrideArgs) overrides() registry.Overrides {
@@ -301,8 +320,13 @@ func addManagementTools(
 				"By default returns immediately (status 'pending'); check progress with repo_status. " +
 				"Pass wait=true to wait for the result: it returns the final status when the build finishes in time, " +
 				"otherwise the in-progress status. The build always continues in the background even if the call " +
-				"times out or is cancelled; poll repo_status until status is 'ready' or 'error'.",
+				"times out or is cancelled; poll repo_status until status is 'ready' or 'error'. " +
+				"Calling it for an already tracked repository applies the overrides named in the call and leaves the others as stored.",
 		}, func(ctx context.Context, _ *mcp.CallToolRequest, args addRepoArgs) (*mcp.CallToolResult, any, error) {
+			if err := args.validateSkipStages(); err != nil {
+				return nil, nil, err
+			}
+
 			if !args.Wait {
 				repo, err := adminService.AddRepo(ctx, args.spec())
 				if err != nil {
@@ -342,6 +366,10 @@ func addManagementTools(
 				"The payload replaces the whole override set, so send every field you want to keep; an empty payload clears them. " +
 				"A change rebuilds that repository's index and docs in the background.",
 		}, func(ctx context.Context, _ *mcp.CallToolRequest, args setRepoOverridesArgs) (*mcp.CallToolResult, any, error) {
+			if err := args.validateSkipStages(); err != nil {
+				return nil, nil, err
+			}
+
 			repo, err := adminService.SetRepoOverrides(ctx, args.Repo, args.overrides())
 			if err != nil {
 				return nil, nil, err
@@ -368,7 +396,7 @@ func addManagementTools(
 			}
 
 			out := namespaceListOutput{Namespaces: groups}
-			return jsonResult(out), out, nil
+			return nil, out, nil
 		})
 	}
 
@@ -502,7 +530,8 @@ func addManagementTools(
 			Name: "cancel_repo_job",
 			Description: "Cancel the refresh/generate job currently running for a repository. " +
 				"The in-flight step is aborted and recorded as 'cancelled by user'; the repo can be " +
-				"refreshed again later. Fails if no job is running (check the 'running' field of repo_status).",
+				"refreshed again later. Fails if no job is running (check the 'running' field of repo_status). " +
+				"It only reaches work already running: use cancel_task with repo to drop the repository's queued tasks too.",
 		}, func(_ context.Context, _ *mcp.CallToolRequest, args repoIDArgs) (*mcp.CallToolResult, any, error) {
 			if !adminService.CancelJob(args.Repo) {
 				return nil, nil, fmt.Errorf("no job running for %s", args.Repo)
@@ -688,10 +717,34 @@ type queryGraphArgs struct {
 	Question    string   `json:"question" jsonschema:"architectural or relationship question; use search_code instead for symbols, paths, literals, definitions, and usages"`
 	Repo        string   `json:"repo,omitempty" jsonschema:"repository id (owner/name) to query; always provide when known, omit only for explicit cross-repository analysis"`
 	Namespace   string   `json:"namespace,omitempty" jsonschema:"namespace to scope to when repo is omitted; empty means the 'default' namespace, '*' searches all namespaces"`
-	Mode        string   `json:"mode,omitempty" jsonschema:"traversal mode: 'bfs' for broad context (default) or 'dfs' to trace a specific path"`
+	Mode        string   `json:"mode,omitempty" jsonschema:"traversal mode: 'bfs' for broad context (default) or 'dfs' to trace a specific path; any other value is rejected"`
 	Depth       int      `json:"depth,omitempty" jsonschema:"traversal depth 1-6 (default 3)"`
 	TokenBudget int      `json:"token_budget,omitempty" jsonschema:"max output tokens (default 2000, max 4000)"`
 	Context     []string `json:"context_filter,omitempty" jsonschema:"optional explicit edge-context filter, e.g. ['call','field']"`
+}
+
+// traversalMode validates the traversal mode at the surface that accepted it,
+// so a typo returns a tool error naming the accepted values instead of a
+// breadth-first subgraph presented as the trace the caller requested. Empty
+// keeps meaning "use the default". Mirrors searchCodeArgs.searchMode.
+func (a queryGraphArgs) traversalMode() (string, error) {
+	return graphquery.NormalizeTraversalMode(a.Mode)
+}
+
+type findSymbolArgs struct {
+	Symbol    string `json:"symbol" jsonschema:"exact symbol name, e.g. 'SearchCodeText'; resolution falls back to a prefix then a substring match and reports the other candidates it saw"`
+	Repo      string `json:"repo,omitempty" jsonschema:"repository id (owner/name); always provide when known"`
+	Namespace string `json:"namespace,omitempty" jsonschema:"namespace to scope to when repo is omitted; empty means the 'default' namespace, '*' searches all namespaces"`
+	Limit     int    `json:"limit,omitempty" jsonschema:"maximum definitions to return (default 50, max 200)"`
+}
+
+type findReferencesArgs struct {
+	Symbol    string   `json:"symbol" jsonschema:"exact symbol name whose usages to list"`
+	Repo      string   `json:"repo,omitempty" jsonschema:"repository id (owner/name); always provide when known"`
+	Namespace string   `json:"namespace,omitempty" jsonschema:"namespace to scope to when repo is omitted; empty means the 'default' namespace, '*' searches all namespaces"`
+	Context   []string `json:"context,omitempty" jsonschema:"edge contexts to keep: call, import, field, parameter_type, return_type, generic_arg, attribute, export"`
+	Page      int      `json:"page,omitempty" jsonschema:"page number (default 1)"`
+	PerPage   int      `json:"per_page,omitempty" jsonschema:"references per page (default 50, max 200)"`
 }
 
 type nodeArgs struct {
@@ -741,6 +794,10 @@ func addQueryTools(server *mcp.Server, mgr graphQueryService) {
 		Name:        "query_graph",
 		Description: "Answer architecture, dependency, call/data-flow, and cross-file relationship questions by traversing the code knowledge graph. Use search_code instead for symbols, paths, literals, definitions, usages, or implementation locations.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args queryGraphArgs) (*mcp.CallToolResult, any, error) {
+		if _, err := args.traversalMode(); err != nil {
+			return nil, nil, err
+		}
+
 		call := map[string]any{"question": args.Question}
 		setIf(call, "mode", args.Mode)
 		setIfInt(call, "depth", args.Depth)
@@ -753,6 +810,34 @@ func addQueryTools(server *mcp.Server, mgr graphQueryService) {
 		res, err := mgr.CallGraphTool(ctx, args.Repo, args.Namespace, "query_graph", call)
 
 		return res, nil, err
+	})
+
+	addTool(server, &mcp.Tool{
+		Name: "find_definition",
+		Description: "Locate where a symbol is defined, from the knowledge graph: an exact path and line for every definition, not a best guess. " +
+			"Use it when you have an exact identifier; use search_code with mode='regex' when you have a pattern, and query_graph when the question is about relationships rather than a location. " +
+			"A symbol defined in several places returns all of them. " + repoField + ".",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args findSymbolArgs) (*mcp.CallToolResult, any, error) {
+		res, err := mgr.FindDefinition(ctx, args.Repo, args.Namespace, args.Symbol, args.Limit)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return jsonResult(res), nil, nil
+	})
+
+	addTool(server, &mcp.Tool{
+		Name: "find_references",
+		Description: "List where a symbol is used, from the knowledge graph's incoming edges: each reference carries the referring symbol's own path and line, plus the relation and edge context. " +
+			"Filter with context to ask a narrower question - context:['call'] answers 'who calls this' rather than 'who mentions it'. " +
+			"An empty result names the edge contexts the symbol actually has, so 'no callers' is never inferred from a filter that matched nothing. " + repoField + ".",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args findReferencesArgs) (*mcp.CallToolResult, any, error) {
+		res, err := mgr.FindReferences(ctx, args.Repo, args.Namespace, args.Symbol, args.Context, args.Page, args.PerPage)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return jsonResult(res), nil, nil
 	})
 
 	addTool(server, &mcp.Tool{
@@ -838,9 +923,16 @@ type listFilesArgs struct {
 	Repo      string `json:"repo" jsonschema:"repository id (owner/name) whose clone to list"`
 	Subdir    string `json:"subdir,omitempty" jsonschema:"repo-relative directory to list (default: repository root)"`
 	Snapshot  string `json:"snapshot,omitempty" jsonschema:"snapshot token returned by an earlier list_files call; pass it on later pages to keep a stable listing"`
-	Recursive bool   `json:"recursive,omitempty" jsonschema:"when true, walk the whole subtree (skips .git and graphify-out); otherwise list one level"`
-	Page      int    `json:"page,omitempty" jsonschema:"page number (default 1)"`
+	Recursive bool   `json:"recursive,omitempty" jsonschema:"when true, walk the whole subtree (skips .git, graphify-out and vendor); otherwise list one level"`
+	Cursor    string `json:"cursor,omitempty" jsonschema:"next_cursor from the previous page, passed back verbatim; omit for the first page"`
 	PerPage   int    `json:"per_page,omitempty" jsonschema:"entries per page (default 100, max 200)"`
+}
+
+type globFilesArgs struct {
+	Repo     string `json:"repo" jsonschema:"repository id (owner/name) whose clone to search"`
+	Pattern  string `json:"pattern" jsonschema:"path glob; without '/' it matches a file name at any depth ('*.sql', 'Makefile'), with '/' it is anchored at the repository root ('_ui/src/**')"`
+	Snapshot string `json:"snapshot,omitempty" jsonschema:"snapshot token from an earlier read; pass it to stay on the same commit"`
+	Limit    int    `json:"limit,omitempty" jsonschema:"maximum paths to return (default 200, max 2000)"`
 }
 
 type gitBlameArgs struct {
@@ -948,15 +1040,30 @@ func addFileTools(server *mcp.Server, mgr repoFileService) {
 	})
 
 	addTool(server, &mcp.Tool{
-		Name:        "list_files",
-		Description: "Inspect one known directory, or discover a path when search_code cannot identify it. Pass the returned snapshot token on later pages. Do not request recursive=true unless the user explicitly needs a tree or inventory.",
+		Name: "list_files",
+		Description: "Inspect one known directory. Pass the returned snapshot token on later pages, and next_cursor to continue. " +
+			"Prefer glob when looking for files by name or extension: a recursive listing walks the tree a page at a time, while a pattern goes straight to the matches.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args listFilesArgs) (*mcp.CallToolResult, any, error) {
-		entries, err := mgr.ListRepoFilesPageAt(ctx, args.Repo, args.Subdir, args.Snapshot, args.Recursive, args.Page, args.PerPage)
+		entries, err := mgr.ListRepoFilesPageAt(ctx, args.Repo, args.Subdir, args.Snapshot, args.Recursive, args.Cursor, args.PerPage)
 		if err != nil {
 			return nil, nil, err
 		}
 
 		return jsonResult(entries), nil, nil
+	})
+
+	addTool(server, &mcp.Tool{
+		Name: "glob",
+		Description: "Find files by path pattern: '**/Makefile', '*.sql', '_ui/src/**'. " +
+			"This is the tool for locating a file by name or extension - search_code searches contents, and list_files walks one directory at a time. " +
+			"Results are the lexicographically smallest matches up to limit; truncated says there were more, and total how many matched in all.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args globFilesArgs) (*mcp.CallToolResult, any, error) {
+		page, err := mgr.GlobRepoFiles(ctx, args.Repo, args.Snapshot, args.Pattern, args.Limit)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return jsonResult(page), nil, nil
 	})
 
 	addTool(server, &mcp.Tool{
@@ -1049,6 +1156,16 @@ func textResult(text string) *mcp.CallToolResult {
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}
 }
 
+// jsonResult is only for handlers that return nil as their output value (their
+// Out type is `any`): the SDK fills StructuredContent from that value, so such
+// a tool would answer with nothing at all unless it builds a text block here.
+//
+// Every handler that does return an output value must return a nil
+// *mcp.CallToolResult. The SDK serialises the value into StructuredContent and
+// mirrors it into Content only when the handler left Content empty, so
+// returning jsonResult(x) alongside x puts the whole payload on the wire twice
+// - worst on the largest results in the catalog (search_docs excerpts,
+// list_api_endpoints pages, call_api_endpoint bodies).
 func jsonResult(v any) *mcp.CallToolResult {
 	b, err := json.Marshal(v)
 	if err != nil {

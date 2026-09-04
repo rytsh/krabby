@@ -1,6 +1,9 @@
 package rag
 
-import "strings"
+import (
+	"strings"
+	"unicode/utf8"
+)
 
 // chunk splits markdown into heading-aware, size-capped chunks.
 //
@@ -119,18 +122,43 @@ func isHeading(line string) bool {
 
 // window splits s into fixed-size chunks with overlap characters of context
 // between adjacent windows, cutting on line boundaries where possible.
+//
+// size and overlap are byte counts, so every cut is snapped back to a rune
+// boundary: these chunks are embedded and handed to callers verbatim as
+// search excerpts, where a replacement character from a halved rune is
+// indistinguishable from corruption in the source document.
 func window(s string, size, overlap int) []string {
 	var out []string
 
 	step := size - overlap
 
 	for start := 0; start < len(s); start += step {
+		// The previous window ended on a rune boundary, so a rune split by
+		// start was already emitted whole with it: skipping forward drops no
+		// text, and unlike walking back it cannot undo the loop's progress.
+		for start < len(s) && !utf8.RuneStart(s[start]) {
+			start++
+		}
+
 		end := min(start+size, len(s))
 
 		// Prefer to cut at a newline near the end of the window.
 		if end < len(s) {
 			if nl := strings.LastIndexByte(s[start:end], '\n'); nl > step/2 {
 				end = start + nl
+			}
+
+			for end > start && !utf8.RuneStart(s[end]) {
+				end--
+			}
+
+			// A window narrower than the rune it starts on would collapse to
+			// nothing and stall the loop, so take that rune whole instead.
+			if end == start {
+				end++
+				for end < len(s) && !utf8.RuneStart(s[end]) {
+					end++
+				}
 			}
 
 			step = end - start - overlap

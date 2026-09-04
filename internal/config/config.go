@@ -192,11 +192,6 @@ func (f Filters) Merge(over Filters) Filters {
 	return out
 }
 
-// Empty reports whether no filter is set at all.
-func (f Filters) Empty() bool {
-	return len(f.Include) == 0 && len(f.IncludeExtra) == 0 && len(f.Exclude) == 0
-}
-
 // concatGlobs joins two glob lists without aliasing either input, so a merged
 // result can never be appended into one of the sources it was built from.
 func concatGlobs(a, b []string) []string {
@@ -298,11 +293,6 @@ func (l DocsLimits) Resolve() DocsLimits {
 	return l
 }
 
-// Empty reports whether no limit is set at all.
-func (l DocsLimits) Empty() bool {
-	return l.MaxSourceBytes <= 0 && l.MaxGroupBytes <= 0 && l.MaxSynthesisBytes <= 0
-}
-
 // Merge overlays a per-repository override on install-wide limits. Each field
 // is an independent replacement, so a repo raising only MaxSourceBytes keeps
 // the install-wide values for the other two.
@@ -331,11 +321,6 @@ type DocsOverride struct {
 	Limits      DocsLimits
 	Prompt      string
 	PromptExtra string
-}
-
-// Empty reports whether the override carries nothing at all.
-func (o DocsOverride) Empty() bool {
-	return o.Filters.Empty() && o.Limits.Empty() && o.Prompt == "" && o.PromptExtra == ""
 }
 
 // LLM configures an OpenAI-compatible chat-completions endpoint.
@@ -470,9 +455,11 @@ type RAG struct {
 	// KeepMarkdownTargets keeps link destinations and image sources in indexed
 	// text. The default strips them while preserving visible labels and alt text.
 	KeepMarkdownTargets bool `cfg:"keep_markdown_targets"`
-	// ChunkSize is the target chunk length in characters.
+	// ChunkSize is the target chunk length in bytes. The chunker counts bytes,
+	// not runes, so a non-ASCII corpus yields shorter chunks than the number
+	// suggests.
 	ChunkSize int `cfg:"chunk_size" default:"1200"`
-	// ChunkOverlap is the character overlap between adjacent chunks.
+	// ChunkOverlap is the byte overlap between adjacent chunks.
 	ChunkOverlap int `cfg:"chunk_overlap" default:"200"`
 	// TopK is how many chunk matches to fetch before grouping into docs.
 	TopK int `cfg:"top_k" default:"20"`
@@ -506,10 +493,11 @@ type CodeRAG struct {
 	// Enabled turns on semantic vector indexing. Normal search_code queries use
 	// the always-available local bw full-text index.
 	Enabled bool `cfg:"enabled"`
-	// ChunkSize is the target chunk length in characters. The 3000/1000
-	// defaults follow the Codestral Embed retrieval recommendation.
+	// ChunkSize is the target chunk length in bytes (the chunker counts bytes,
+	// not runes). The 3000/1000 defaults follow the Codestral Embed retrieval
+	// recommendation.
 	ChunkSize int `cfg:"chunk_size" default:"3000"`
-	// ChunkOverlap is the character overlap between adjacent chunks.
+	// ChunkOverlap is the byte overlap between adjacent chunks.
 	ChunkOverlap int `cfg:"chunk_overlap" default:"1000"`
 	// TopK is how many code snippets to return per search.
 	TopK int `cfg:"top_k" default:"10"`

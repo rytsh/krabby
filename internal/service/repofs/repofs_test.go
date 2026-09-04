@@ -2,6 +2,7 @@ package repofs
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -93,22 +94,203 @@ func TestReadFilePagination(t *testing.T) {
 	}
 }
 
-func TestListFilesPage(t *testing.T) {
+// deepRepo builds a tree with more entries than MaxListEntries — the cap that
+// used to make the tail of a recursive listing unreachable — and returns every
+// path the listing must eventually yield.
+func deepRepo(t *testing.T) (string, map[string]bool) {
+	t.Helper()
+
+	dir := t.TempDir()
+	want := map[string]bool{}
+
+	for i := range 60 {
+		top := fmt.Sprintf("pkg%02d", i)
+		want[top] = true
+
+		for j := range 2 {
+			sub := fmt.Sprintf("%s/sub%d", top, j)
+			want[sub] = true
+
+			for k := range 20 {
+				rel := fmt.Sprintf("%s/f%02d.go", sub, k)
+				want[rel] = true
+				mustWrite(t, filepath.Join(dir, filepath.FromSlash(rel)), "package p\n")
+			}
+		}
+	}
+
+	return dir, want
+}
+
+// collectPages walks every page of a cursor listing and returns the entries in
+// the order they were served.
+func collectPages(t *testing.T, dir string, recursive bool, perPage int) []Entry {
+	t.Helper()
+
+	var (
+		all    []Entry
+		cursor string
+	)
+
+	for pages := 1; ; pages++ {
+		if pages > 1000 {
+			t.Fatal("cursor paging did not terminate")
+		}
+
+		page, err := ListFilesCursor(dir, "", cursor, recursive, perPage)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if page.PerPage != perPage {
+			t.Fatalf("page %d per_page = %d, want %d", pages, page.PerPage, perPage)
+		}
+
+		all = append(all, page.Entries...)
+
+		if page.NextCursor == "" {
+			return all
+		}
+
+		if len(page.Entries) != perPage {
+			t.Fatalf("page %d served %d of %d entries yet promised more", pages, len(page.Entries), perPage)
+		}
+
+		cursor = page.NextCursor
+	}
+}
+
+func TestListFilesCursorPagesOneDirectory(t *testing.T) {
+	t.Parallel()
+
 	dir := setupRepo(t)
-	page, err := ListFilesPage(dir, "", false, 1, 1)
+
+	page, err := ListFilesCursor(dir, "", "", false, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Entries) != 1 || !page.HasMore || page.Page != 1 || page.PerPage != 1 {
+
+	if len(page.Entries) != 1 || page.NextCursor == "" || page.PerPage != 1 {
 		t.Fatalf("unexpected first page: %+v", page)
 	}
 
-	next, err := ListFilesPage(dir, "", false, 2, 1)
+	next, err := ListFilesCursor(dir, "", page.NextCursor, false, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(next.Entries) != 1 || next.Entries[0].Path == page.Entries[0].Path {
 		t.Fatalf("unexpected second page: %+v", next)
+	}
+
+	if next.NextCursor != "" {
+		t.Fatalf("listing of two entries did not end: %+v", next)
+	}
+}
+
+// The defect this pager replaced: the page-number listing built the whole
+// sorted listing, truncated it at MaxListEntries and sliced a page out of that,
+// so no request could reach an entry past the cap. Every entry of a tree larger
+// than the cap must now be served exactly once.
+func TestListFilesCursorReachesEveryEntryPastTheOldCap(t *testing.T) {
+	t.Parallel()
+
+	dir, want := deepRepo(t)
+	if len(want) <= MaxListEntries {
+		t.Fatalf("fixture has %d entries, needs more than the %d cap", len(want), MaxListEntries)
+	}
+
+	got := map[string]bool{}
+
+	for _, e := range collectPages(t, dir, true, 100) {
+		if got[e.Path] {
+			t.Fatalf("entry %s served twice", e.Path)
+		}
+
+		got[e.Path] = true
+
+		if !want[e.Path] {
+			t.Fatalf("entry %s is not in the tree", e.Path)
+		}
+	}
+
+	if len(got) != len(want) {
+		for p := range want {
+			if !got[p] {
+				t.Fatalf("entry %s was never served (%d of %d reached)", p, len(got), len(want))
+			}
+		}
+	}
+}
+
+// Listings order directories before files, then by path, and paging must not
+// break that: a client rendering a tree from consecutive pages depends on it.
+func TestListFilesCursorOrdersDirectoriesBeforeFilesAcrossPages(t *testing.T) {
+	t.Parallel()
+
+	dir, _ := deepRepo(t)
+
+	entries := collectPages(t, dir, true, 100)
+	if len(entries) < 2 {
+		t.Fatalf("expected a populated listing, got %d entries", len(entries))
+	}
+
+	for i := 1; i < len(entries); i++ {
+		if compareEntries(entries[i-1], entries[i]) >= 0 {
+			t.Fatalf("entry %d (%+v) does not sort before entry %d (%+v)", i-1, entries[i-1], i, entries[i])
+		}
+	}
+
+	if !entries[0].IsDir || entries[len(entries)-1].IsDir {
+		t.Fatalf("listing must run directories first then files, got %+v .. %+v", entries[0], entries[len(entries)-1])
+	}
+}
+
+// Resuming must skip whole subtrees whose every path is already behind the
+// cursor, otherwise each page costs a full walk again. This test is not
+// parallel: it swaps the package-level readDir seam to count directory reads.
+func TestListFilesCursorSkipsSubtreesBehindTheCursor(t *testing.T) {
+	dir, _ := deepRepo(t)
+
+	// The cursor of the final page: everything before it is behind the cursor.
+	last := "f:pkg59/sub1/f19.go"
+
+	var reads int
+
+	original := readDir
+	readDir = func(fsys fs.FS, name string) ([]fs.DirEntry, error) {
+		reads++
+
+		return original(fsys, name)
+	}
+
+	t.Cleanup(func() { readDir = original })
+
+	page, err := ListFilesCursor(dir, "", last, true, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(page.Entries) != 0 || page.NextCursor != "" {
+		t.Fatalf("page after the last entry should be empty, got %+v", page)
+	}
+
+	// The tree holds 181 directories. Resuming at the last path may only read
+	// the root and the chain leading to it.
+	if reads > 5 {
+		t.Fatalf("resuming read %d directories, want the pruned path (<=5)", reads)
+	}
+}
+
+// A cursor is opaque and must be handed back verbatim. Guessing at an
+// unrecognised one would silently skip or repeat entries, so it is refused.
+func TestListFilesCursorRejectsAForeignCursor(t *testing.T) {
+	t.Parallel()
+
+	dir := setupRepo(t)
+
+	if _, err := ListFilesCursor(dir, "", "main.go", false, 10); err == nil {
+		t.Fatal("a cursor without its phase prefix must be refused")
 	}
 }
 

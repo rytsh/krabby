@@ -210,6 +210,29 @@ func (e *Engine) Call(path, tool string, args map[string]any) (string, error) {
 	}
 }
 
+// Definitions resolves symbol definitions against the graph at path. It goes
+// through the same cache as Call so symbol navigation shares the mtime+size
+// hot-reload path instead of re-parsing graph.json per lookup.
+func (e *Engine) Definitions(path, symbol string, limit int) (SymbolDefs, error) {
+	g, err := e.Graph(path)
+	if err != nil {
+		return SymbolDefs{}, err
+	}
+
+	return g.Definitions(symbol, limit), nil
+}
+
+// References resolves symbol references against the graph at path, sharing the
+// cache with Call for the same reason as Definitions.
+func (e *Engine) References(path, symbol string, contexts []string, page, perPage int) (SymbolRefs, error) {
+	g, err := e.Graph(path)
+	if err != nil {
+		return SymbolRefs{}, err
+	}
+
+	return g.References(symbol, contexts, page, perPage), nil
+}
+
 func argStr(m map[string]any, k string) string {
 	if v, ok := m[k].(string); ok {
 		return v

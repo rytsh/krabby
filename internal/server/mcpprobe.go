@@ -35,10 +35,6 @@ import (
 // answered with an error. POST (all JSON-RPC), DELETE (session teardown) and
 // any GET carrying a session id are passed through untouched.
 //
-// Note this sits behind the API key middleware. When a key is configured an
-// unauthenticated probe still gets 401 and never reaches here, which is the
-// correct answer and already probe-friendly.
-//
 // A dedicated /healthz is still the better thing to point a health check at;
 // this only stops the MCP path from lying about its own state when it is what
 // somebody probed.

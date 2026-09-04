@@ -115,7 +115,7 @@ func TestGetNode(t *testing.T) {
 
 func TestGetNeighbors(t *testing.T) {
 	g := loadSmall(t)
-	got := g.GetNeighbors("Service", "")
+	got := g.GetNeighborsPage("Service", "", 1, 50)
 	if !strings.Contains(got, "--> handleRequest [calls] [EXTRACTED]") {
 		t.Errorf("missing successor edge:\n%s", got)
 	}
@@ -124,7 +124,7 @@ func TestGetNeighbors(t *testing.T) {
 	}
 
 	// relation filter keeps only 'calls'
-	filtered := g.GetNeighbors("Service", "call")
+	filtered := g.GetNeighborsPage("Service", "call", 1, 50)
 	if strings.Contains(filtered, "references") {
 		t.Errorf("relation filter leaked references:\n%s", filtered)
 	}
@@ -132,11 +132,11 @@ func TestGetNeighbors(t *testing.T) {
 
 func TestGetCommunity(t *testing.T) {
 	g := loadSmall(t)
-	got := g.GetCommunity(0)
-	if !strings.Contains(got, "Community 0 (2 nodes):") {
+	got := g.GetCommunityPage(0, 1, 50)
+	if !strings.Contains(got, "Community 0 (2 nodes, page 1") {
 		t.Errorf("community header wrong:\n%s", got)
 	}
-	if miss := g.GetCommunity(99); !strings.Contains(miss, "not found") {
+	if miss := g.GetCommunityPage(99, 1, 50); !strings.Contains(miss, "not found") {
 		t.Errorf("expected not found, got %q", miss)
 	}
 }
@@ -744,23 +744,23 @@ func loadDup(t *testing.T) *Graph {
 	return g
 }
 
-// GetNode and GetNeighbors must resolve an ambiguous label to the SAME node
+// GetNode and GetNeighborsPage must resolve an ambiguous label to the SAME node
 // (previously GetNode used a divergent substring scan and could pick a different
-// node than GetNeighbors).
+// node than the neighbour listing).
 func TestResolutionConsistency(t *testing.T) {
 	g := loadDup(t)
 
 	node := g.GetNode("Process")
-	neigh := g.GetNeighbors("Process", "")
+	neigh := g.GetNeighborsPage("Process", "", 1, 50)
 
 	// The chosen node is findNode's first match: pkga_process (insertion order,
-	// exact tier). GetNode must report that ID and GetNeighbors must show that
-	// node's edge (calls Helper), not pkgb's (referenced by Runner).
+	// exact tier). GetNode must report that ID and GetNeighborsPage must show
+	// that node's edge (calls Helper), not pkgb's (referenced by Runner).
 	if !strings.Contains(node, "ID: pkga_process") {
 		t.Errorf("GetNode resolved unexpected node:\n%s", node)
 	}
 	if !strings.Contains(neigh, "Helper") || strings.Contains(neigh, "Runner") {
-		t.Errorf("GetNeighbors resolved a different node than GetNode:\n%s", neigh)
+		t.Errorf("GetNeighborsPage resolved a different node than GetNode:\n%s", neigh)
 	}
 }
 
@@ -771,8 +771,8 @@ func TestAmbiguityHint(t *testing.T) {
 	if got := g.GetNode("Process"); !strings.Contains(got, "matched 2 nodes") {
 		t.Errorf("GetNode missing ambiguity hint:\n%s", got)
 	}
-	if got := g.GetNeighbors("Process", ""); !strings.Contains(got, "matched 2 nodes") {
-		t.Errorf("GetNeighbors missing ambiguity hint:\n%s", got)
+	if got := g.GetNeighborsPage("Process", "", 1, 50); !strings.Contains(got, "matched 2 nodes") {
+		t.Errorf("GetNeighborsPage missing ambiguity hint:\n%s", got)
 	}
 
 	// Unambiguous label must NOT carry the hint.
@@ -796,7 +796,7 @@ func TestGetNodeRelations(t *testing.T) {
 func TestRelationFilterInvalidFailsLoud(t *testing.T) {
 	g := loadSmall(t)
 
-	got := g.GetNeighbors("Service", "calledby") // 'calledby' is not a real relation
+	got := g.GetNeighborsPage("Service", "calledby", 1, 50) // 'calledby' is not a real relation
 	if !strings.Contains(got, "No relation matching 'calledby'") {
 		t.Errorf("invalid filter did not fail loud:\n%s", got)
 	}
@@ -813,7 +813,7 @@ func TestRelationFilterInvalidFailsLoud(t *testing.T) {
 // A valid relation_filter still works and filters correctly.
 func TestRelationFilterValidStillWorks(t *testing.T) {
 	g := loadSmall(t)
-	got := g.GetNeighbors("Service", "call")
+	got := g.GetNeighborsPage("Service", "call", 1, 50)
 	if !strings.Contains(got, "handleRequest [calls]") {
 		t.Errorf("valid filter dropped matching edge:\n%s", got)
 	}

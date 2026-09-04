@@ -48,6 +48,12 @@ keeps those indexes fresh in the background.
   reader's environment, so a service can override the base URL, patch the raw
   document (RFC 7386 JSON Merge Patch, schemas included) and correct or hide
   individual endpoints.
+- **Regex code search**: every indexed source chunk also carries a
+  byte-trigram index in the same BadgerDB transaction as the chunk itself,
+  so `search_code` answers RE2 patterns with exact file/line/column
+  locations — signatures, punctuation, line anchors and case-sensitive
+  lookups that a term index cannot express. See
+  [Code search modes](#code-search-modes).
 - **Semantic code search (optional)**: source is chunked at graphify symbol
   boundaries (with line-window fallback), embedded with a dedicated code model
   such as Codestral Embed, and returned as ranked path/line snippets.
@@ -123,15 +129,20 @@ Example OpenCode config with core and admin registered separately:
 | `list_repos` / `repo_status` | Core: discover tracked repositories and inspect build state |
 | `add_repo` / `remove_repo` / `refresh_repo` | Admin: manage tracked repositories and rebuilds |
 | `set_credential` / `list_credentials` / `remove_credential` | Admin: per-host / per-org git credentials |
-| `search_code` | First choice for symbols, paths, literals, definitions, usages, and implementation locations |
-| `read_file` / `list_files` | Page through a known source file or inspect a bounded directory listing |
+| `search_code` | First choice for symbols, literals, usages and implementation locations; `mode` selects term (`normal`), regular-expression (`regex`) or vector (`semantic`) retrieval, and `path` narrows any of them to a file glob |
+| `find_definition` / `find_references` | Locate a known symbol's definitions, or its usages as real graph edges, with a path and a line for each |
+| `read_file` / `list_files` / `glob` | Page through a known source file, inspect one directory, or find files by path pattern. Browsing hides vendored trees; `glob` does not, because a caller who writes `vendor/**` asked for them |
 | `query_graph` | Architecture, dependency, call/data-flow, and cross-file relationship questions |
 | `get_node` / `get_neighbors` / `get_community` | Node-level inspection |
 | `god_nodes` / `graph_stats` / `shortest_path` | Graph-level analysis |
+| `list_refs` / `git_log` / `git_diff` / `git_blame` | Repository history: tags and branches, commits, what a revision changed, who last touched a line |
 | `search_docs` / `list_docs` / `get_doc` | Search generated or synced Markdown with semantic (default), hybrid, or lexical retrieval |
 | `list_namespaces` | Discover repository groups, counts, and human descriptions before broad search |
 | `list_sources` / `get_source` | Discover web collections and their exact `web:<name>` scope keys; inspect bounded item-title samples |
 | `register_source_page` / `import_source_pages` / `import_source_sitemap` / `delete_source_page` | Admin: manage individual `pages` source items |
+| `source_types` / `get_source_config` / `add_source` / `update_source` / `delete_source` / `refresh_source` | Admin: manage web sources (`pages`, `confluence`, `jira`) |
+| `queue_status` / `bump_task` / `cancel_task` / `set_task_concurrency` / `cancel_repo_job` | Admin: inspect and steer the background work queue |
+| `set_repo_namespace` / `set_repo_overrides` / `set_namespace_description` / `delete_namespace` | Admin: namespaces and per-repository overrides |
 | `list_api_groups` / `list_api_services` / `list_api_endpoints` / `get_api_endpoint` | API: walk the catalog from domain to service to endpoint to its full request shape |
 | `call_api_endpoint` | API: send a real request to a catalogued HTTP or gRPC endpoint |
 | `api_service_kinds` / `add_api_service` / `update_api_service` / `delete_api_service` / `refresh_api_service` / `get_api_service_config` | Admin: manage catalogued APIs |
@@ -167,7 +178,7 @@ Because each endpoint publishes only its own catalog, a client pays the
 | --- | --- |
 | `GET /healthz` | Liveness — unauthenticated, this is what a health check should target |
 | `GET /api/v1/repos` | List repos |
-| `POST /api/v1/repos` `{"url","branch"}` | Track a repo; an already tracked url just queues a refresh, so it takes the same optional `skip` |
+| `POST /api/v1/repos` `{"url","branch"}` | Track a repo; an already tracked url just queues a refresh, so it takes the same optional `skip`. Overrides named in the body are applied to a tracked repo (ones left out are kept); `branch` and `namespace` are not |
 | `GET /api/v1/repos/{full-path...}` | Repo status |
 | `DELETE /api/v1/repos/{full-path...}` | Untrack + delete clone |
 | `POST /api/v1/repos/{full-path...}/-/refresh` | "This repo changed" trigger; optional `{"skip":["docs"]}` drops stages for that run |
@@ -191,7 +202,8 @@ Because each endpoint publishes only its own catalog, a client pays the
 | `GET /api/v1/apis/services/{name}/operation?id=` | One endpoint's full structured detail |
 | `GET /api/v1/browser-extension.zip` | Download the browser importer matched to the running Krabby version |
 | `GET /api/v1/docs/search?q=&mode=&scope=&repo=&top=` | Docs search; `mode=hybrid|semantic|lexical`, `scope=all|repos|sources|apis`, `repo=web:<name>` or `api:<name>` |
-| `GET /api/v1/code/search?q=&repo=&top=` | Semantic source-code snippet search |
+| `GET /api/v1/code/search?q=&mode=&repo=&namespace=&path=&page=&per_page=&top=` | Source-code search; `mode=normal` (BM25, default), `mode=regex` (RE2, extra `case_sensitive`, `context_lines`, `max_matches`) or `mode=semantic` (vectors, `top`); `path` is a file glob applied to every mode |
+| `GET /api/v1/repos/{full-path...}/-/glob?pattern=&limit=&snapshot=` | Find files in a clone by path pattern |
 | `GET/PUT /api/v1/docs/config` | Read/update docs and code RAG settings |
 | `GET /api/v1/credentials` | List credential patterns (secrets never returned) |
 | `PUT /api/v1/credentials` `{"pattern","secret","kind","username"}` | Store a credential |
@@ -222,6 +234,147 @@ with a small JSON descriptor instead. Nothing that a client uses is affected —
 `POST`, `DELETE`, and any `GET` carrying a session id go straight to the
 transport — because a request without that header could only ever have received
 an error.
+
+## Code search modes
+
+`search_code` (and `GET /api/v1/code/search`) exposes three retrievals over
+the same indexed chunks. They answer different questions and none of them
+subsumes another:
+
+| `mode` | Engine | Ask it for | Returns |
+| --- | --- | --- | --- |
+| `normal` (default) | BM25 over path, symbol and chunk text | an identifier, a literal, or a question in words | ranked chunks with a best-guess line |
+| `regex` | RE2 verified over trigram-selected chunks | a signature, punctuation, an anchored line, a case-sensitive name | files with exact line/column locations and optional context |
+| `semantic` | embeddings + HNSW (needs a code embedder) | a concept you cannot spell as a token | ranked chunks by cosine similarity |
+
+All three take `path`, a glob over the repo-relative source path. Without a
+slash it matches a file name at any depth (`*_test.go`); with one it is
+anchored at the repository root (`internal/**`). A trailing slash is the
+subtree shorthand (`internal/` means `internal/**`) and `..` is refused as a
+path segment. It is a structured argument rather than a `path:` token inside
+the query, so it cannot be mis-escaped and reads the same from an MCP client
+and from the UI's form. The `glob` tool normalizes a pattern with the same
+code, so one pattern means one thing in a search and in a file lookup.
+
+**`normal` takes a question.** bw ANDs a bare query's terms, so passing a
+sentence verbatim used to require all of its words inside one 3000-character
+chunk and reliably returned nothing. The query is rewritten first: prose words
+become an OR chain that BM25 ranks, while identifier-shaped words — anything
+containing a digit or one of `. - _ / + @`, so `bw.ErrNotFound` or `PAY-1842` —
+stay required. An exact lookup therefore keeps its precision while a question
+starts working. Operators are passed through untouched, so `"a phrase"`,
+`a OR b`, `-excluded` and `prefix*` remain available.
+
+Terms the indexed source itself shows to be ubiquitous are dropped from the OR
+chain. A source corpus is full of `func`, `return` and `error`: each costs a
+posting-list walk proportional to the whole index while contributing almost
+nothing to the ranking. The set is derived from the corpus by sampling, not
+from a word list, so it needs no knowledge of the language and adapts to the
+domain — the same mechanism the documentation index uses, sharing its
+threshold. Filtering is an optimisation and never allowed to cost a result: a
+filtered query that comes back empty is retried unfiltered.
+
+**Scoping is one key filter, not a fan-out.** Everything a scope needs is in
+the chunk id (`<repo>/<path>#<n>`), so the repository set and the path glob are
+string tests on a key the ranking already produced — a function call per hit
+instead of a point read and a decode. A namespace search is therefore a single
+pass whose `total` is a real count; it used to fan out per repository and merge
+the pages, which made the total a merged candidate count and left scores
+unranked across repositories. bw's corpus statistics are index-wide, so the
+scores were comparable all along.
+
+**Every page reports its index state.** `indexed[]` carries, per repository
+behind the page, the commit the index was built from, when it finished, and
+whether the clone has since moved past it (`stale`). A hit is only as current
+as the index it came from and nothing else in the result says so. When nothing
+matched, the repositories the search *looked at* are reported instead, because
+"no matches" and "nothing indexed yet" are answers a caller has to be able to
+tell apart.
+
+**`regex` is exact and located.** The pattern is RE2 (Go's `regexp`), matched
+in multi-line mode, so `^` and `$` are line anchors as they are in grep and
+`.` still stops at a newline. Matches are grouped per file and each carries
+the file line, the byte column within that line, the matching line's text
+and — with `context_lines` — the lines around it. Context comes from the
+chunk the match landed in, which is a symbol-sized window rather than the
+whole file; `read_file` is still the way to see more.
+
+`total` counts matching **files** and is exact, unless `exhaustive` is
+`false` — which means the search stopped at its file ceiling and there are
+more. Case is off by default (`case_sensitive`), matches per file are capped
+(`max_matches`, default 20) and a file that hit the cap says
+`truncated: true` rather than quietly dropping occurrences.
+
+### How regex search is answered
+
+Every source chunk carries a byte-trigram index in the same BadgerDB
+transaction as the chunk itself (`bw`'s `trigram` field tag), so the index is
+never out of step with the content and a backup carries it along.
+
+A pattern is planned into a boolean expression over trigrams that any match
+must satisfy — `errors\.Is\(` requires the trigrams of that literal run —
+and only the chunks satisfying it are read and matched. What the planner
+cannot constrain it widens to "no constraint": `[a-z]+` or `ab.cd` has no
+three-byte literal run, so those searches scan the scoped chunks instead.
+They are slower and return the same answer.
+
+Matching happens inside a chunk, which is visible twice: a match that straddles
+a chunk boundary is not found, and `context_lines` stop at the chunk's edge. A
+single source line longer than twice `coderag.chunk_size` is also indexed only
+up to that cap - the ceiling that keeps a minified bundle from filling the
+embedder's context window applies to every mode.
+
+A `repo` that names nothing tracked is an error in all three modes, not an
+empty page. An empty page from a code search reads as "this code does not
+exist", so a mistyped id must never produce one.
+
+One consequence worth knowing: **the index costs disk.** Trigram postings add
+roughly 3-4× the indexed source size to `state/`, driven by chunk granularity —
+a larger `coderag.chunk_size` amortises each posting over more source bytes.
+The index is built by the same `code_index` stage as BM25, from the same
+chunks, so it needs no extra pass over the clone and no model.
+
+Upgrading an existing install backfills it: the `code_search` bucket moves
+to schema v2 and every stored chunk is rewritten through the normal write
+path once, which is what emits its trigram postings. Nothing is re-chunked
+and no repository is re-read.
+
+## Symbol navigation
+
+`find_definition` and `find_references` answer "where is this defined" and
+"where is this used" from the knowledge graph rather than from text.
+
+That distinction is the point. A search-based implementation — the usual one —
+resolves a definition by looking for the symbol's name in a symbol index and
+its references by matching the name as a word, which counts comments, string
+literals and unrelated identifiers that happen to share it. Krabby already has
+the structure to do better: a graph node carries its `source_file` and
+`source_location`, and an edge carries the `context` in which one node used
+another (`call`, `import`, `field`, `parameter_type`, `return_type`,
+`generic_arg`, `attribute`, `export`). A definition is therefore a node and a
+reference is an incoming edge, each with a path and a line.
+
+- **Every definition, not a pick.** A symbol defined in three files returns
+  three definitions. Resolution is exact label, then prefix, then substring;
+  matches from weaker tiers are reported as `candidates` rather than mixed in,
+  so an ambiguous symbol is visible instead of silently narrowed.
+- **File, concept and JSON-key nodes are excluded**, since a `.json` noise key
+  is not a definition — and `note` says so when the exclusion is what emptied
+  the result.
+- **`context` narrows the question.** `context:['call']` answers "who calls
+  this" rather than "who mentions it". A filter matching none of the symbol's
+  actual edge contexts returns the vocabulary it does have, because the
+  dangerous failure here is concluding a function has no callers from a filter
+  that matched nothing.
+- **A symbol the graph does not know returns a `note`** naming `search_code`
+  with `mode='regex'` and a word-boundary pattern, not an empty list. There is
+  deliberately no text fallback inside the graph layer: the caller decides
+  whether to accept a text match in place of a structural one.
+
+The limit is the extractor's coverage. graphify is AST-based and needs no
+model, but a language it does not parse has no nodes, and locals and
+parameters have no nodes in any language — for those, regex search is the
+right tool and the `note` points at it.
 
 ## Data layout & external tools
 

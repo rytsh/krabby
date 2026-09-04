@@ -12,7 +12,9 @@ and understand relationships through MCP.
 ## Features
 
 - Repository indexing with automatic background refreshes
-- Fast code search and file access
+- Fast code search and file access: full-text, regular expression with exact line/column hits, or semantic, each narrowable by path glob
+- Symbol navigation: definitions and references read from the knowledge graph, not guessed from text
+- File discovery by path pattern
 - Architecture and relationship analysis with knowledge graphs
 - Optional generated documentation and semantic search
 - Web, Confluence, and Jira source indexing

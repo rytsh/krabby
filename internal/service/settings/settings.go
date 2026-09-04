@@ -926,4 +926,3 @@ func (s *Store) Set(ctx context.Context, patch Settings) (Settings, error) {
 
 	return next, nil
 }
-

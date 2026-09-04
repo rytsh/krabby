@@ -42,7 +42,7 @@ func walkV3(svc *apicatalog.Service, doc *v3.Document, emit apicatalog.Emit) (ap
 				continue
 			}
 
-			d, truncated := v3Detail(svc, doc, item, op, method, path, baseURL, schemes, globalSecurity)
+			d, truncated := v3Detail(svc, item, op, method, path, baseURL, schemes, globalSecurity)
 			if err := emitOperation(svc, d, op.OperationId, truncated, emit); err != nil {
 				return info, err
 			}
@@ -89,7 +89,6 @@ func v3Operations(item *v3.PathItem) map[string]*v3.Operation {
 
 func v3Detail(
 	svc *apicatalog.Service,
-	doc *v3.Document,
 	item *v3.PathItem,
 	op *v3.Operation,
 	method, path, baseURL string,
@@ -136,7 +135,6 @@ func v3Detail(
 			d.BaseURL = resolveBaseURL("", item.Servers[0].URL)
 		}
 	}
-	_ = doc
 
 	return d, f.truncated
 }

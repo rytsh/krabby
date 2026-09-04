@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/rakunlabs/bw"
 
@@ -35,6 +36,35 @@ func TestParseLine(t *testing.T) {
 		if got := parseLine(input); got != want {
 			t.Errorf("parseLine(%q) = %d, want %d", input, got, want)
 		}
+	}
+}
+
+// The chunk cap is a byte count applied to source that is not ASCII, so it
+// lands inside a rune whenever the arithmetic works out. A halved rune is
+// embedded as a byte sequence no tokenizer reads and reaches a search result
+// as U+FFFD, where it is indistinguishable from genuinely corrupt source.
+func TestCapTextCutsOnARuneBoundary(t *testing.T) {
+	t.Parallel()
+
+	// size 5 caps at 10 bytes; 3-byte runes put a cut at byte 10 inside the
+	// fourth one.
+	for _, size := range []int{5, 6, 7} {
+		got := capText(strings.Repeat("あ", 40), size)
+
+		if !utf8.ValidString(got) {
+			t.Errorf("size %d: capText produced invalid UTF-8: %q", size, got)
+		}
+		if len(got) > maxChunkChars(size) {
+			t.Errorf("size %d: capText returned %d bytes, cap is %d", size, len(got), maxChunkChars(size))
+		}
+		if got == "" {
+			t.Errorf("size %d: capText dropped everything", size)
+		}
+	}
+
+	// Text that fits is returned untouched, cap or no cap.
+	if got := capText("ünder", 100); got != "ünder" {
+		t.Errorf("capText returned %q for text under the cap", got)
 	}
 }
 
@@ -236,13 +266,13 @@ func TestIndexChangedIncremental(t *testing.T) {
 	}
 
 	// FTS: deleted file gone, old content gone, new file searchable.
-	if page, err := text.Search(ctx, "", "Add", 1, 20); err != nil || page.Total != 0 {
+	if page, err := text.Search(ctx, "Add", coderagOpts(1, 20, "")); err != nil || page.Total != 0 {
 		t.Fatalf("deleted file still searchable: %#v, %v", page, err)
 	}
-	if page, err := text.Search(ctx, "", "Authenticate", 1, 20); err != nil || page.Total != 0 {
+	if page, err := text.Search(ctx, "Authenticate", coderagOpts(1, 20, "")); err != nil || page.Total != 0 {
 		t.Fatalf("stale content still searchable: %#v, %v", page, err)
 	}
-	if page, err := text.Search(ctx, "", "Hello", 1, 20); err != nil || page.Total != 1 || page.Results[0].Path != "greet.go" {
+	if page, err := text.Search(ctx, "Hello", coderagOpts(1, 20, "")); err != nil || page.Total != 1 || page.Results[0].Path != "greet.go" {
 		t.Fatalf("new file not searchable: %#v, %v", page, err)
 	}
 }

@@ -344,7 +344,7 @@ func TestConfigureDisabledKeepsVectorsAsInactiveCache(t *testing.T) {
 	if m.docs.rag != nil || m.docs.codeStore != nil {
 		t.Fatal("disabled settings left a semantic service active")
 	}
-	if _, err := m.SearchCode(ctx, "owner/repo", "", "query", 1); !errors.Is(err, ErrCodeRAGDisabled) {
+	if _, err := m.SearchCode(ctx, "owner/repo", "", "query", coderag.SemanticOptions{TopK: 1}); !errors.Is(err, ErrCodeRAGDisabled) {
 		t.Fatalf("SearchCode error = %v, want ErrCodeRAGDisabled", err)
 	}
 	if _, _, err := m.retrieveSemanticCandidates(ctx, vectorstore.FilterKey("owner/repo"), "query", 1); err == nil {

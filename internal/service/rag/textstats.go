@@ -140,76 +140,27 @@ func (s *TextStore) RefreshStats(ctx context.Context) error {
 		return nil
 	}
 
-	if prev, err := s.statsBucket.Get(ctx, docsStatsRecordID); err == nil && prev != nil && prev.Total > 0 {
-		drift := math.Abs(float64(total-prev.Total)) / float64(prev.Total)
-		if drift < statsStaleRatio {
-			return nil
-		}
+	if prev, err := s.statsBucket.Get(ctx, docsStatsRecordID); err == nil && prev != nil && StatsFresh(prev.Total, total) {
+		return nil
 	}
 
 	// Sample evenly across the whole bucket. Keys are repo-prefixed, so taking
 	// a prefix of the walk would measure one repository's vocabulary instead of
 	// the corpus's.
-	stride := total / statsSampleSize
-	if stride < 1 {
-		stride = 1
-	}
+	sampler := NewFrequentTermSampler(total)
 
-	var (
-		seen    int
-		sampled int
-		counts  = map[string]int{}
-		terms   = map[string]struct{}{}
-	)
-
-	err = s.bucket.Walk(ctx, nil, func(record *textRecord) error {
-		defer func() { seen++ }()
-
-		if seen%stride != 0 {
-			return nil
-		}
-
-		sampled++
-
-		// Count each term once per document: document frequency, not term
-		// frequency, is what drives both query cost and IDF.
-		clear(terms)
-		for _, field := range []string{record.Title, record.Excerpt} {
-			for _, token := range statsTokenizer.Tokenize(field) {
-				terms[token] = struct{}{}
-			}
-		}
-
-		for term := range terms {
-			counts[term]++
-		}
+	if err := s.bucket.Walk(ctx, nil, func(record *textRecord) error {
+		sampler.Observe(record.Title, record.Excerpt)
 
 		return nil
-	})
-	if err != nil {
+	}); err != nil {
 		return fmt.Errorf("walk docs search chunks; %w", err)
 	}
 
+	frequent, sampled := sampler.Result()
 	if sampled == 0 {
 		return nil
 	}
-
-	minDocs := int(frequentTermRatio * float64(sampled))
-	frequent := make([]string, 0, 64)
-
-	for term, df := range counts {
-		if df >= minDocs {
-			frequent = append(frequent, term)
-		}
-	}
-
-	// Keep the most common ones when the corpus is unusually repetitive.
-	if len(frequent) > maxFrequentTerms {
-		slices.SortFunc(frequent, func(a, b string) int { return counts[b] - counts[a] })
-		frequent = frequent[:maxFrequentTerms]
-	}
-
-	slices.Sort(frequent)
 
 	rec := &textStats{
 		ID:        docsStatsRecordID,
@@ -228,6 +179,104 @@ func (s *TextStore) RefreshStats(ctx context.Context) error {
 		"chunks", total, "sampled", sampled, "frequent_terms", len(frequent))
 
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Reusable sampler
+// ---------------------------------------------------------------------------
+
+// FrequentTermSampler accumulates document frequencies over a strided sample
+// of a corpus and reports the terms too common to be worth searching.
+//
+// The bw plumbing around it — which bucket holds the record, which fields a
+// document contributes — is per-store and stays with each store. The rule for
+// deciding which terms are useless is not: it is the same threshold, the same
+// sample size and the same cap whether the documents are Markdown pages or
+// source chunks, and having two copies of it would let them drift.
+type FrequentTermSampler struct {
+	stride  int
+	seen    int
+	sampled int
+	counts  map[string]int
+	terms   map[string]struct{}
+}
+
+// NewFrequentTermSampler prepares a sampler for a corpus of total documents.
+// Documents must be offered in the corpus's own key order: the stride is what
+// keeps the sample spread across every partition rather than measuring the
+// vocabulary of whichever repository sorts first.
+func NewFrequentTermSampler(total int) *FrequentTermSampler {
+	stride := total / statsSampleSize
+	if stride < 1 {
+		stride = 1
+	}
+
+	return &FrequentTermSampler{
+		stride: stride,
+		counts: make(map[string]int),
+		terms:  make(map[string]struct{}),
+	}
+}
+
+// Observe offers one document's searchable fields. Every stride-th document is
+// tokenised; the rest only advance the counter.
+func (s *FrequentTermSampler) Observe(fields ...string) {
+	defer func() { s.seen++ }()
+
+	if s.seen%s.stride != 0 {
+		return
+	}
+
+	s.sampled++
+
+	// Count each term once per document: document frequency, not term
+	// frequency, is what drives both query cost and IDF.
+	clear(s.terms)
+	for _, field := range fields {
+		for _, token := range statsTokenizer.Tokenize(field) {
+			s.terms[token] = struct{}{}
+		}
+	}
+	for term := range s.terms {
+		s.counts[term]++
+	}
+}
+
+// Result returns the sorted frequent terms and how many documents were
+// inspected. A zero sample yields no terms, which simply means no filtering.
+func (s *FrequentTermSampler) Result() (frequent []string, sampled int) {
+	if s.sampled == 0 {
+		return nil, 0
+	}
+
+	minDocs := int(frequentTermRatio * float64(s.sampled))
+	frequent = make([]string, 0, 64)
+	for term, df := range s.counts {
+		if df >= minDocs {
+			frequent = append(frequent, term)
+		}
+	}
+
+	// Keep the most common ones when the corpus is unusually repetitive.
+	if len(frequent) > maxFrequentTerms {
+		slices.SortFunc(frequent, func(a, b string) int { return s.counts[b] - s.counts[a] })
+		frequent = frequent[:maxFrequentTerms]
+	}
+	slices.Sort(frequent)
+
+	return frequent, s.sampled
+}
+
+// StatsFresh reports whether a frequent-term set computed over prevTotal
+// documents is still close enough to a corpus of total documents to keep.
+// Which terms are corpus-wide is stable under small changes, so this is what
+// makes a refresh safe to call after every index without walking the bucket.
+func StatsFresh(prevTotal, total int) bool {
+	if prevTotal <= 0 {
+		return false
+	}
+
+	return math.Abs(float64(total-prevTotal))/float64(prevTotal) < statsStaleRatio
 }
 
 // statsTokenizer must match the tokenizer bw indexes with, otherwise the

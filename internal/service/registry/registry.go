@@ -158,14 +158,6 @@ func (o Overrides) SkipsStage(stage string) bool {
 	return slices.Contains(o.SkipStages, stage)
 }
 
-// Empty reports whether nothing is overridden.
-func (o Overrides) Empty() bool {
-	return len(o.Include) == 0 && len(o.IncludeExtra) == 0 && len(o.Exclude) == 0 &&
-		len(o.GraphExclude) == 0 && o.DocsPrompt == "" && o.DocsPromptExtra == "" &&
-		o.DocsMaxSourceBytes == 0 && o.DocsMaxGroupBytes == 0 && o.DocsMaxSynthesisBytes == 0 &&
-		len(o.SkipStages) == 0
-}
-
 // Repo is a tracked repository record.
 type Repo struct {
 	ID          string    `bw:"id,pk"        json:"id"` // full path: host/group/.../name

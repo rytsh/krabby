@@ -76,7 +76,7 @@ func TestFilteredSearchCostsNoMoreThanRanking(t *testing.T) {
 			const query = "handler context error"
 
 			unfiltered := peakDuring(t, func() {
-				if _, err := text.Search(t.Context(), "", query, 1, 20); err != nil {
+				if _, err := text.Search(t.Context(), query, coderagOpts(1, 20, "")); err != nil {
 					t.Fatal(err)
 				}
 			})
@@ -84,7 +84,7 @@ func TestFilteredSearchCostsNoMoreThanRanking(t *testing.T) {
 			var page SearchPage
 			filtered := peakDuring(t, func() {
 				var err error
-				page, err = text.Search(t.Context(), "acme/app", query, 1, 20)
+				page, err = text.Search(t.Context(), query, coderagOpts(1, 20, "acme/app"))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -122,7 +122,7 @@ func TestFilteredSearchCountsEveryMatch(t *testing.T) {
 			text := newTextStore(t)
 			indexCorpus(t, text, perRepo)
 
-			page, err := text.Search(t.Context(), "acme/app", "handler context error", 1, 20)
+			page, err := text.Search(t.Context(), "handler context error", coderagOpts(1, 20, "acme/app"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -143,11 +143,11 @@ func TestFilteredSearchPaginates(t *testing.T) {
 	text := newTextStore(t)
 	indexCorpus(t, text, 120)
 
-	first, err := text.Search(t.Context(), "acme/app", "handler context error", 1, 20)
+	first, err := text.Search(t.Context(), "handler context error", coderagOpts(1, 20, "acme/app"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := text.Search(t.Context(), "acme/app", "handler context error", 2, 20)
+	second, err := text.Search(t.Context(), "handler context error", coderagOpts(2, 20, "acme/app"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +176,7 @@ func TestFilteredSearchPaginates(t *testing.T) {
 	}
 
 	// Past the end must be empty rather than an error or a wrapped window.
-	beyond, err := text.Search(t.Context(), "acme/app", "handler context error", 99, 20)
+	beyond, err := text.Search(t.Context(), "handler context error", coderagOpts(99, 20, "acme/app"))
 	if err != nil {
 		t.Fatal(err)
 	}

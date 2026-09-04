@@ -215,7 +215,7 @@ func addAPITools(server *mcp.Server, mgr apiReadService) {
 
 		out := apiGroupListOutput{Groups: groups}
 
-		return jsonResult(out), out, nil
+		return nil, out, nil
 	})
 
 	addTool(server, &mcp.Tool{
@@ -244,7 +244,7 @@ func addAPITools(server *mcp.Server, mgr apiReadService) {
 			PerPage: perPage, HasMore: page*perPage < total,
 		}
 
-		return jsonResult(out), out, nil
+		return nil, out, nil
 	})
 
 	addTool(server, &mcp.Tool{
@@ -293,7 +293,7 @@ func addAPITools(server *mcp.Server, mgr apiReadService) {
 			}
 		}
 
-		return jsonResult(out), out, nil
+		return nil, out, nil
 	})
 
 	addTool(server, &mcp.Tool{
@@ -362,7 +362,7 @@ func addAPICallTool(server *mcp.Server, mgr apiReadService) {
 			return nil, nil, err
 		}
 
-		return jsonResult(res), res, nil
+		return nil, res, nil
 	})
 }
 
@@ -523,7 +523,7 @@ func addAPIAdminTools(server *mcp.Server, mgr apiAdminService) {
 			Running:           mgr.Activity(apicatalog.ScopeKey(name)),
 		}
 
-		return jsonResult(out), out, nil
+		return nil, out, nil
 	})
 }
 

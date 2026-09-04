@@ -174,7 +174,7 @@ func TestIndexTextStreams(t *testing.T) {
 
 	// A file from the middle of the tree, i.e. one that only a later batch can
 	// have written: a drain bug that dropped batches would show up here.
-	page, err := text.Search(t.Context(), "acme/app", "pkg60", 1, 10)
+	page, err := text.Search(t.Context(), "pkg60", coderagOpts(1, 10, "acme/app"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +205,7 @@ func TestIndexTextReplacesPriorChunks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	page, err := text.Search(t.Context(), "acme/app", "Handler3", 1, 10)
+	page, err := text.Search(t.Context(), "Handler3", coderagOpts(1, 10, "acme/app"))
 	if err != nil {
 		t.Fatal(err)
 	}

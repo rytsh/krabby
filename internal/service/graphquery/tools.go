@@ -8,20 +8,45 @@ import (
 	"strings"
 )
 
+// Traversal modes accepted by QueryGraph.
+const (
+	ModeBFS = "bfs"
+	ModeDFS = "dfs"
+)
+
 // QueryGraphOpts configures QueryGraph.
 type QueryGraphOpts struct {
-	Mode          string // "bfs" (default) or "dfs"
+	Mode          string // ModeBFS (default) or ModeDFS; see NormalizeTraversalMode
 	Depth         int    // clamped to 1..6, default 3
 	TokenBudget   int    // default 2000
 	ContextFilter []string
 }
 
+// NormalizeTraversalMode resolves a caller-supplied traversal mode. Empty means
+// the default, BFS. An unknown non-empty value is an error rather than a
+// fall-through to BFS: mode='depth-first' would otherwise return a perfectly
+// plausible breadth-first subgraph under a header naming the traversal the
+// caller asked for, and nothing in the answer would reveal that the trace they
+// requested never ran. Surfaces that can report a Go error should call this
+// before dispatching; QueryGraph repeats the check so no path reaches the
+// traversal with an unvalidated mode.
+func NormalizeTraversalMode(mode string) (string, error) {
+	switch mode {
+	case "":
+		return ModeBFS, nil
+	case ModeBFS, ModeDFS:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("mode must be %s or %s", ModeBFS, ModeDFS)
+	}
+}
+
 // QueryGraph searches the graph via BFS/DFS and renders the subgraph as text
 // (mirrors _query_graph_text + _tool_query_graph).
 func (g *Graph) QueryGraph(question string, opts QueryGraphOpts) string {
-	mode := opts.Mode
-	if mode == "" {
-		mode = "bfs"
+	mode, err := NormalizeTraversalMode(opts.Mode)
+	if err != nil {
+		return fmt.Sprintf("Invalid mode '%s': %v", sanitize(opts.Mode), err)
 	}
 
 	depth := opts.Depth
@@ -52,7 +77,7 @@ func (g *Graph) QueryGraph(question string, opts QueryGraphOpts) string {
 
 	var nodes map[string]bool
 	var edges []edgePair
-	if mode == "dfs" {
+	if mode == ModeDFS {
 		nodes, edges = g.dfs(start, depth, filterSet)
 	} else {
 		nodes, edges = g.bfs(start, depth, filterSet)
@@ -115,25 +140,17 @@ func (g *Graph) GetNode(label string) string {
 	return strings.Join(lines, "\n")
 }
 
-// GetNeighbors lists direct successors then predecessors of the first matching
-// node, optionally filtered by relation substring. A relation_filter that
-// matches none of the node's actual relations is reported as an error listing
-// the valid relations, instead of silently returning an empty list (which reads
-// as "no neighbours" and produces false negatives such as "this func has no
-// callers"). When the label was ambiguous it also hints to use the node ID.
-func (g *Graph) GetNeighbors(label, relationFilter string) string {
-	return g.getNeighbors(label, relationFilter, 0, 0)
-}
-
-// GetNeighborsPage returns one bounded page of direct neighbors.
+// GetNeighborsPage returns one bounded page of the direct successors then
+// predecessors of the first matching node, optionally filtered by relation
+// substring. A relation_filter that matches none of the node's actual relations
+// is reported as an error listing the valid relations, instead of silently
+// returning an empty list (which reads as "no neighbours" and produces false
+// negatives such as "this func has no callers"). When the label was ambiguous
+// it also hints to use the node ID.
+//
+// There is deliberately no unpaged variant: a hub node's neighbourhood is
+// unbounded, and dumping all of it is what the paging exists to prevent.
 func (g *Graph) GetNeighborsPage(label, relationFilter string, page, perPage int) string {
-	if page <= 0 {
-		page = 1
-	}
-	return g.getNeighbors(label, relationFilter, page, perPage)
-}
-
-func (g *Graph) getNeighbors(label, relationFilter string, page, perPage int) string {
 	matches := g.findNode(strings.ToLower(label))
 	if len(matches) == 0 {
 		return fmt.Sprintf("No node matching '%s' found.", strings.ToLower(label))
@@ -186,15 +203,12 @@ func (g *Graph) getNeighbors(label, relationFilter string, page, perPage int) st
 			sanitize(g.labelOf(r.other)), sanitize(rel), sanitize(r.edge.Confidence)))
 	}
 
-	lines := []string{"Neighbors of " + sanitize(g.labelOf(nid)) + ":"}
-	if page > 0 || perPage > 0 {
-		page, perPage, start, end := pageBounds(len(entries), page, perPage)
-		lines[0] = fmt.Sprintf("Neighbors of %s (%d total, page %d, per_page %d, has_more=%t):",
-			sanitize(g.labelOf(nid)), len(entries), page, perPage, end < len(entries))
-		lines = append(lines, entries[start:end]...)
-	} else {
-		lines = append(lines, entries...)
-	}
+	// pageBounds normalizes page and per_page, so the header always reports the
+	// values actually applied rather than what the caller asked for.
+	page, perPage, start, end := pageBounds(len(entries), page, perPage)
+	lines := []string{fmt.Sprintf("Neighbors of %s (%d total, page %d, per_page %d, has_more=%t):",
+		sanitize(g.labelOf(nid)), len(entries), page, perPage, end < len(entries))}
+	lines = append(lines, entries[start:end]...)
 
 	if hint := g.ambiguityHint(label, matches); hint != "" {
 		lines = append(lines, hint)
@@ -203,32 +217,18 @@ func (g *Graph) getNeighbors(label, relationFilter string, page, perPage int) st
 	return strings.Join(lines, "\n")
 }
 
-// GetCommunity lists nodes in a community (mirrors _tool_get_community).
-func (g *Graph) GetCommunity(cid int) string {
-	return g.getCommunity(cid, 0, 0)
-}
-
-// GetCommunityPage returns one bounded page of community nodes.
+// GetCommunityPage returns one bounded page of the nodes in a community
+// (mirrors _tool_get_community). Like GetNeighborsPage it has no unpaged
+// variant: a community can hold most of the graph.
 func (g *Graph) GetCommunityPage(cid, page, perPage int) string {
-	if page <= 0 {
-		page = 1
-	}
-	return g.getCommunity(cid, page, perPage)
-}
-
-func (g *Graph) getCommunity(cid, page, perPage int) string {
 	nodes := g.Community(cid)
 	if len(nodes) == 0 {
 		return fmt.Sprintf("Community %d not found.", cid)
 	}
 
-	start, end := 0, len(nodes)
-	header := fmt.Sprintf("Community %d (%d nodes):", cid, len(nodes))
-	if page > 0 || perPage > 0 {
-		page, perPage, start, end = pageBounds(len(nodes), page, perPage)
-		header = fmt.Sprintf("Community %d (%d nodes, page %d, per_page %d, has_more=%t):", cid, len(nodes), page, perPage, end < len(nodes))
-	}
-	lines := []string{header}
+	page, perPage, start, end := pageBounds(len(nodes), page, perPage)
+	lines := []string{fmt.Sprintf("Community %d (%d nodes, page %d, per_page %d, has_more=%t):",
+		cid, len(nodes), page, perPage, end < len(nodes))}
 	for _, n := range nodes[start:end] {
 		d := g.Nodes[n]
 		lines = append(lines, fmt.Sprintf("  %s [%s]", sanitize(g.labelOf(n)), sanitize(d.SourceFile)))
@@ -337,44 +337,37 @@ func (g *Graph) ShortestPath(source, target string, maxHops int) string {
 		}
 	}
 
-	pathNodes, ok := g.undirectedShortestPath(srcID, tgtID)
+	path, ok := g.undirectedShortestPath(srcID, tgtID)
 	if !ok {
 		return fmt.Sprintf("No path found between '%s' and '%s'.", g.labelOf(srcID), g.labelOf(tgtID))
 	}
 
-	hops := len(pathNodes) - 1
+	hops := len(path) - 1
 	if hops > maxHops {
 		return fmt.Sprintf("Path exceeds max_hops=%d (%d hops found).", maxHops, hops)
 	}
 
 	var segments []string
-	for i := range len(pathNodes) - 1 {
-		u, v := pathNodes[i], pathNodes[i+1]
-		var edge *Edge
-		forward := true
-		if e, has := g.Edge(u, v); has {
-			edge = e
-		} else if e, has := g.Edge(v, u); has {
-			edge = e
-			forward = false
+	for i, hop := range path {
+		if i == 0 {
+			segments = append(segments, g.labelOf(hop.node))
+
+			continue
 		}
 
 		rel, conf := "", ""
-		if edge != nil {
-			rel, conf = edge.Relation, edge.Confidence
+		if hop.edge != nil {
+			rel, conf = hop.edge.Relation, hop.edge.Confidence
 		}
 		confStr := ""
 		if conf != "" {
 			confStr = " [" + conf + "]"
 		}
 
-		if i == 0 {
-			segments = append(segments, g.labelOf(u))
-		}
-		if forward {
-			segments = append(segments, fmt.Sprintf("--%s%s--> %s", rel, confStr, g.labelOf(v)))
+		if hop.forward {
+			segments = append(segments, fmt.Sprintf("--%s%s--> %s", rel, confStr, g.labelOf(hop.node)))
 		} else {
-			segments = append(segments, fmt.Sprintf("<--%s%s-- %s", rel, confStr, g.labelOf(v)))
+			segments = append(segments, fmt.Sprintf("<--%s%s-- %s", rel, confStr, g.labelOf(hop.node)))
 		}
 	}
 
@@ -386,14 +379,31 @@ func (g *Graph) ShortestPath(source, target string, maxHops int) string {
 	return prefix + fmt.Sprintf("Shortest path (%d hops):\n  %s", hops, strings.Join(segments, " "))
 }
 
+// pathHop is one node on a shortest path, plus the edge traversed to reach it and
+// whether that edge was followed along its own direction. Carrying the edge here
+// keeps ShortestPath from re-scanning a node's adjacency once per hop.
+type pathHop struct {
+	node    string
+	edge    *Edge
+	forward bool
+}
+
 // undirectedShortestPath is BFS over the undirected view (successors +
-// predecessors), returning the node path and whether one exists.
-func (g *Graph) undirectedShortestPath(src, tgt string) ([]string, bool) {
+// predecessors), returning the hops of the path and whether one exists.
+func (g *Graph) undirectedShortestPath(src, tgt string) ([]pathHop, bool) {
 	if src == tgt {
-		return []string{src}, true
+		return []pathHop{{node: src}}, true
 	}
 
-	prev := map[string]string{src: ""}
+	// step records how a node was first reached, so the path can be rebuilt with
+	// its edges instead of looking them up again.
+	type step struct {
+		from    string
+		edge    *Edge
+		forward bool
+	}
+
+	prev := map[string]step{src: {}}
 	queue := []string{src}
 	for len(queue) > 0 {
 		cur := queue[0]
@@ -401,21 +411,23 @@ func (g *Graph) undirectedShortestPath(src, tgt string) ([]string, bool) {
 
 		if cur == tgt {
 			// Reconstruct.
-			var path []string
-			for n := tgt; n != ""; n = prev[n] {
-				path = append([]string{n}, path...)
+			var path []pathHop
+			for n := tgt; ; {
+				s := prev[n]
+				path = append([]pathHop{{node: n, edge: s.edge, forward: s.forward}}, path...)
 				if n == src {
 					break
 				}
+				n = s.from
 			}
 
 			return path, true
 		}
 
-		for _, nb := range g.undirectedNeighbors(cur) {
-			if _, seen := prev[nb]; !seen {
-				prev[nb] = cur
-				queue = append(queue, nb)
+		for _, nb := range g.undirectedEdges(cur) {
+			if _, seen := prev[nb.other]; !seen {
+				prev[nb.other] = step{from: cur, edge: nb.edge, forward: nb.forward}
+				queue = append(queue, nb.other)
 			}
 		}
 	}
@@ -423,20 +435,30 @@ func (g *Graph) undirectedShortestPath(src, tgt string) ([]string, bool) {
 	return nil, false
 }
 
-// undirectedNeighbors returns successor + predecessor node ids in a stable order.
-func (g *Graph) undirectedNeighbors(id string) []string {
+// undirectedEdge is a neighbour reachable in either direction: the linking edge
+// plus whether it points away from the queried node.
+type undirectedEdge struct {
+	other   string
+	edge    *Edge
+	forward bool
+}
+
+// undirectedEdges returns successor then predecessor neighbours in a stable
+// order, keeping only the first edge per neighbour (matching the single-edge
+// view graphify.build.edge_data exposes).
+func (g *Graph) undirectedEdges(id string) []undirectedEdge {
 	seen := map[string]bool{}
-	var out []string
+	var out []undirectedEdge
 	for _, r := range g.out[id] {
 		if !seen[r.other] {
 			seen[r.other] = true
-			out = append(out, r.other)
+			out = append(out, undirectedEdge{other: r.other, edge: r.edge, forward: true})
 		}
 	}
 	for _, r := range g.in[id] {
 		if !seen[r.other] {
 			seen[r.other] = true
-			out = append(out, r.other)
+			out = append(out, undirectedEdge{other: r.other, edge: r.edge})
 		}
 	}
 

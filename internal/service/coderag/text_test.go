@@ -36,7 +36,7 @@ func TestTextStoreSearchPaginationAndRepoFilter(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	first, err := store.Search(ctx, "", "retry", 1, 2)
+	first, err := store.Search(ctx, "retry", coderagOpts(1, 2, ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestTextStoreSearchPaginationAndRepoFilter(t *testing.T) {
 		t.Fatalf("first page = %#v, want total=3 and 2 results", first)
 	}
 
-	second, err := store.Search(ctx, "", "retry", 2, 2)
+	second, err := store.Search(ctx, "retry", coderagOpts(2, 2, ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestTextStoreSearchPaginationAndRepoFilter(t *testing.T) {
 		t.Fatalf("second page = %#v, want total=3 and 1 result", second)
 	}
 
-	filtered, err := store.Search(ctx, "acme/api", "retry", 1, 1)
+	filtered, err := store.Search(ctx, "retry", coderagOpts(1, 1, "acme/api"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestTextStoreSearchPaginationAndRepoFilter(t *testing.T) {
 		t.Fatalf("filtered page = %#v, want exact repo total=2", filtered)
 	}
 
-	bySymbol, err := store.Search(ctx, "", "RetryFetch", 1, 20)
+	bySymbol, err := store.Search(ctx, "RetryFetch", coderagOpts(1, 20, ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestTextStoreSearchPaginationAndRepoFilter(t *testing.T) {
 		t.Fatalf("symbol search = %#v", bySymbol)
 	}
 
-	exactLine, err := store.Search(ctx, "acme/api", "failed request", 1, 20)
+	exactLine, err := store.Search(ctx, "failed request", coderagOpts(1, 20, "acme/api"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestTextStoreReplaceAndDeleteRepo(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	old, err := store.Search(ctx, "", "legacy", 1, 20)
+	old, err := store.Search(ctx, "legacy", coderagOpts(1, 20, ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +119,7 @@ func TestTextStoreReplaceAndDeleteRepo(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	current, err := store.Search(ctx, "", "circuit", 1, 20)
+	current, err := store.Search(ctx, "circuit", coderagOpts(1, 20, ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func TestTextStoreDeletePaths(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dropped, err := store.Search(ctx, "", "dropper", 1, 20)
+	dropped, err := store.Search(ctx, "dropper", coderagOpts(1, 20, ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +162,7 @@ func TestTextStoreDeletePaths(t *testing.T) {
 		t.Fatalf("dropped path still searchable: %#v", dropped)
 	}
 
-	kept, err := store.Search(ctx, "", "keeper", 1, 20)
+	kept, err := store.Search(ctx, "keeper", coderagOpts(1, 20, ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,4 +183,19 @@ func textItem(repo, path, symbol string, line int, snippet string) vectorstore.I
 			Chunk:     snippet,
 		},
 	}
+}
+
+// coderagOpts builds search options for the tests, scoping to one repository
+// the same way the manager does: through the chunk-id key filter.
+func coderagOpts(page, perPage int, repo string) TextSearchOptions {
+	opts := TextSearchOptions{Page: page, PerPage: perPage}
+	if repo != "" {
+		filter, err := Scope{Repos: []string{repo}}.KeyFilter()
+		if err != nil {
+			panic(err)
+		}
+		opts.KeyFilter = filter
+	}
+
+	return opts
 }

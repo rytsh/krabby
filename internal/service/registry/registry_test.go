@@ -221,7 +221,7 @@ func TestSetOverridesReportsChange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !prev.Changed(repo.Overrides) || !repo.Overrides.Empty() {
+	if !prev.Changed(repo.Overrides) || (Overrides{}).Changed(repo.Overrides) {
 		t.Fatalf("blank globs should clear the overrides, got %+v", repo.Overrides)
 	}
 }

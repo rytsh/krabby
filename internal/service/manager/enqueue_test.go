@@ -54,6 +54,59 @@ func TestAddRepoMarksNewPendingRepoErrorWhenEnqueueSaveFails(t *testing.T) {
 	}
 }
 
+// Re-registering a tracked repository with overrides applies them. The old
+// behaviour returned the stored record unchanged and reported success, so an
+// agent that called add_repo with include_extra had every reason to believe
+// the repository was reconfigured.
+func TestRegisterRepoAppliesOverridesToATrackedRepo(t *testing.T) {
+	reg := newReindexRegistry(t)
+	m := &Manager{reg: reg, reposDir: t.TempDir()}
+	ctx := context.Background()
+
+	spec := RepoSpec{URL: "https://github.com/acme/widgets.git"}
+	id, _, existed, err := m.registerRepo(ctx, spec)
+	if err != nil || existed {
+		t.Fatalf("first registration: id = %q existed = %v err = %v", id, existed, err)
+	}
+
+	spec.Overrides = registry.Overrides{IncludeExtra: []string{"deploy/**/*.yaml"}}
+
+	_, repo, existed, err := m.registerRepo(ctx, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !existed {
+		t.Fatal("second registration did not report the repo as tracked")
+	}
+	if got := repo.Overrides.IncludeExtra; len(got) != 1 || got[0] != "deploy/**/*.yaml" {
+		t.Fatalf("returned overrides = %+v, want the requested include_extra", repo.Overrides)
+	}
+
+	stored, err := reg.Get(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.Overrides.IncludeExtra) != 1 {
+		t.Fatalf("stored overrides = %+v, want the requested include_extra", stored.Overrides)
+	}
+
+	// A later call that names nothing must not wipe them: add_repo is also the
+	// idempotent "make sure this is tracked" call, and every client that sends
+	// only a url would otherwise silently reset the repository's settings.
+	spec.Overrides = registry.Overrides{}
+	if _, _, _, err := m.registerRepo(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+
+	stored, err = reg.Get(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.Overrides.IncludeExtra) != 1 {
+		t.Fatalf("overrides after a bare re-registration = %+v, want them kept", stored.Overrides)
+	}
+}
+
 func TestAddRepoWaitMarksNewPendingRepoErrorWhenEnqueueSaveFails(t *testing.T) {
 	wantErr := errors.New("task store unavailable")
 	reg := newReindexRegistry(t)

@@ -73,7 +73,8 @@ func TestImportWebPagesWritesAndIndexesClientContent(t *testing.T) {
 	if result.Imported != 2 || result.Changed != 0 || result.Unchanged != 2 {
 		t.Fatalf("second import = %+v", result)
 	}
-	docs, err := m.SearchDocs(ctx, ScopeSources, websource.ScopeKey("offline"), "", DocsSearchLexical, "recovery", 5)
+	page, err := m.SearchDocs(ctx, ScopeSources, websource.ScopeKey("offline"), "", DocsSearchLexical, "recovery", 5)
+	docs := page.Results
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"time"
 
 	"github.com/rakunlabs/bw"
 	"github.com/rakunlabs/query"
@@ -28,7 +29,24 @@ type textRecord struct {
 	Symbol    string `bw:"symbol,fts"`
 	StartLine int    `bw:"start_line"`
 	EndLine   int    `bw:"end_line"`
-	Snippet   string `bw:"snippet,fts"`
+	// Snippet carries two indexes over the same bytes: BM25 for term
+	// queries and a byte-trigram index for regular-expression search.
+	Snippet string `bw:"snippet,fts,trigram"`
+}
+
+// RepoIndex reports the state of one repository's code index at the moment a
+// search read it.
+//
+// A hit is only ever as current as the index it came from, and nothing else in
+// the result says so: an agent that reads a chunk indexed three commits ago
+// has no way to tell it apart from one indexed a second ago. Stale is the
+// actionable bit — the clone has moved past what was indexed, so a refresh is
+// pending or was skipped.
+type RepoIndex struct {
+	Repo      string    `json:"repo"`
+	Commit    string    `json:"commit,omitempty"`
+	IndexedAt time.Time `json:"indexed_at,omitzero"`
+	Stale     bool      `json:"stale,omitempty"`
 }
 
 // SearchPage is one page of exact full-text code-search results.
@@ -37,6 +55,22 @@ type SearchPage struct {
 	Total   uint64    `json:"total"`
 	Page    int       `json:"page"`
 	PerPage int       `json:"per_page"`
+	// Indexed reports the index state of the repositories behind this page.
+	Indexed []RepoIndex `json:"indexed,omitempty"`
+}
+
+// TextSearchOptions configures a full-text code search.
+type TextSearchOptions struct {
+	Page    int
+	PerPage int
+	// Path is an optional glob over the repo-relative source path, applied by
+	// the caller through Scope.
+	Path string
+	// KeyFilter, when non-nil, rejects a hit by its chunk id before the record
+	// is read. It carries both the repository scope and any path filter, which
+	// are one thing at this level: the chunk id is "<repo>/<path>#<n>", so both
+	// are prefix or glob tests on a string the ranking already produced.
+	KeyFilter func(id string) bool
 }
 
 // TextStore keeps the normal code-search index in Krabby's state database.
@@ -50,19 +84,39 @@ type TextStore struct {
 	// records fit in one Badger transaction is discovered rather than assumed.
 	writes  *storage.Batcher
 	deletes *storage.Batcher
+
+	// statsBucket holds the corpus-derived frequent-term set; stats memoises
+	// it because search reads it on every query.
+	statsBucket *bw.Bucket[codeStats]
+	stats       statsCache
 }
 
 func NewTextStore(db *bw.DB) (*TextStore, error) {
-	bucket, err := bw.RegisterBucket[textRecord](db, textBucketName, bw.WithVersion[textRecord](1))
+	bucket, err := bw.RegisterBucket[textRecord](db, textBucketName,
+		// v2 added the trigram index on Snippet. The stored shape is
+		// unchanged, so the step is an identity rewrite: bw routes a
+		// migration through the ordinary write path, and that is what
+		// emits the trigram postings a chunk indexed under v1 never had.
+		// Nothing is re-chunked and no clone is read.
+		bw.WithTypedMigration[textRecord, textRecord](1, 2,
+			func(_ context.Context, old *textRecord) (*textRecord, error) { return old, nil },
+		),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("register code search bucket; %w", err)
 	}
 
+	statsBucket, err := registerStatsBucket(db)
+	if err != nil {
+		return nil, err
+	}
+
 	return &TextStore{
-		db:      db,
-		bucket:  bucket,
-		writes:  storage.NewBatcher(textBatchSize),
-		deletes: storage.NewBatcher(textBatchSize),
+		db:          db,
+		bucket:      bucket,
+		writes:      storage.NewBatcher(textBatchSize),
+		deletes:     storage.NewBatcher(textBatchSize),
+		statsBucket: statsBucket,
 	}, nil
 }
 
@@ -125,8 +179,29 @@ func (s *TextStore) DeletePaths(ctx context.Context, repo string, paths []string
 }
 
 // Search performs BM25 full-text search over paths, symbols and source chunks.
-// A repository filter is applied before pagination so Total stays exact.
-func (s *TextStore) Search(ctx context.Context, repo, search string, page, perPage int) (SearchPage, error) {
+// The scope filter is applied before pagination so Total stays exact.
+//
+// A filtered search used to be served by asking bw for every ranked hit at
+// once, building a second slice of the ones that matched, and taking twenty
+// rows out of it. Nothing leaked — both slices were garbage by the time the
+// caller saw the result — but while the call ran the live heap grew with the
+// corpus, and a few concurrent searches on a common term could take a
+// container down.
+//
+// Paging is pushed all the way down instead: bw hydrates only the page and
+// reports how many hits matched without decoding the ones outside it. The
+// total therefore stays exact, which a paged search needs — a count that
+// stopped at some ceiling would make the pager lie about how deep the results
+// go — while the cost of a search follows the page, not the index.
+//
+// The filter is on the key rather than on indexed fields because everything it
+// needs is in the chunk id: the repository is its first segment and the path
+// its middle (see the id built in coderag.streamItems). Judging a hit by its
+// key costs a string compare; judging it by its fields costs a point read and
+// a partial decode, per hit, which is the difference between an exact total
+// being free and costing the whole repository.
+func (s *TextStore) Search(ctx context.Context, search string, opts TextSearchOptions) (SearchPage, error) {
+	page, perPage := opts.Page, opts.PerPage
 	if page < 1 {
 		page = 1
 	}
@@ -138,45 +213,9 @@ func (s *TextStore) Search(ctx context.Context, repo, search string, page, perPa
 	}
 
 	result := SearchPage{Results: []Snippet{}, Page: page, PerPage: perPage}
-	offset64 := uint64(page-1) * uint64(perPage)
 
-	if repo == "" {
-		offset := math.MaxInt
-		if offset64 <= math.MaxInt {
-			offset = int(offset64)
-		}
-		hits, total, err := s.bucket.Search(ctx, search, perPage, offset)
-		if err != nil {
-			return result, err
-		}
-
-		result.Total = total
-		result.Results = textSnippets(hits, search)
-
-		return result, nil
-	}
-
-	// A repository filter used to be applied by asking bw for every ranked hit
-	// at once, building a second slice of the ones that matched, and taking
-	// twenty rows out of it. Nothing leaked — both slices were garbage by the
-	// time the caller saw the result — but while the call ran the live heap
-	// grew with the corpus, and a few concurrent searches on a common term
-	// could take a container down.
-	//
-	// Paging is pushed all the way down instead: bw hydrates only the page and
-	// reports how many hits matched without decoding the ones outside it. The
-	// total therefore stays exact, which a paged search needs — a count that
-	// stopped at some ceiling would make the pager lie about how deep the
-	// results go — while the cost of a search follows the page, not the index.
-	//
-	// The filter is on the key rather than the indexed repo field because the
-	// repository is the first segment of every chunk id (see the id built in
-	// coderag.streamItems). Judging a hit by its key costs a string compare;
-	// judging it by its field costs a point read and a partial decode, per hit,
-	// which is the difference between an exact total being free and costing
-	// the whole repository.
 	offset := math.MaxInt
-	if offset64 <= math.MaxInt {
+	if offset64 := uint64(page-1) * uint64(perPage); offset64 <= math.MaxInt {
 		offset = int(offset64)
 	}
 
@@ -187,7 +226,7 @@ func (s *TextStore) Search(ctx context.Context, repo, search string, page, perPa
 
 	if _, err := s.bucket.SearchWalk(ctx, search,
 		bw.SearchOptions{
-			KeyFilter: repoKeyPrefix(repo),
+			KeyFilter: opts.KeyFilter,
 			Offset:    offset,
 			Limit:     perPage,
 			Matched:   &matched,
@@ -207,15 +246,6 @@ func (s *TextStore) Search(ctx context.Context, repo, search string, page, perPa
 	result.Results = textSnippets(window, search)
 
 	return result, nil
-}
-
-// repoKeyPrefix matches the chunk ids belonging to one repository. The
-// trailing separator matters: without it "acme/app" would also claim
-// "acme/apple"'s chunks.
-func repoKeyPrefix(repo string) func(string) bool {
-	prefix := repo + "/"
-
-	return func(id string) bool { return strings.HasPrefix(id, prefix) }
 }
 
 func textSnippets(hits []bw.SearchResult[textRecord], search string) []Snippet {

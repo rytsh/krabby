@@ -28,15 +28,34 @@ const (
 	MaxTopDocs      = 20
 	MaxExcerptRunes = 4000
 
-	// MaxCandidates bounds RetrieveCandidates. It mirrors the lexical index's
-	// own candidate ceiling so hybrid fusion can request the same depth from
-	// both rankers instead of silently starving the semantic side.
+	// MaxCandidates bounds RetrieveCandidatesTimed. It mirrors the lexical
+	// index's own candidate ceiling so hybrid fusion can request the same
+	// depth from both rankers instead of silently starving the semantic side.
 	MaxCandidates = 40
 	// maxCandidateChunks bounds how many chunk matches a candidate retrieval
 	// fetches before grouping. Grouping collapses several chunks into one
 	// document, so the chunk budget must exceed the wanted document count.
 	maxCandidateChunks = 60
 )
+
+// DocsPage is one documentation-search result set.
+//
+// The envelope exists because a bare array cannot say why it is empty, and
+// almost every reason it can be empty is one the caller could act on: the
+// namespace it scoped to holds nothing indexed, the vector index was never
+// built so semantic retrieval has nothing to rank, or the key it passed names
+// a source that has never synced. Without it every fruitless search reads as
+// "the documentation does not cover this".
+type DocsPage struct {
+	Results []Doc `json:"results"`
+	// Mode is the retrieval that actually ran, which is not always the one
+	// asked for: an install with no embedder answers a semantic request
+	// lexically.
+	Mode string `json:"mode"`
+	// Note explains an empty result when the reason is actionable, and is
+	// empty otherwise.
+	Note string `json:"note,omitempty"`
+}
 
 // Doc is a ranked documentation excerpt returned by retrieval.
 type Doc struct {
@@ -462,40 +481,6 @@ func (s *Service) IndexedPaths(ctx context.Context, repo string) (map[string]str
 	return s.store.IndexedPaths(ctx, repo)
 }
 
-// Retrieve returns up to topDocs bounded excerpts most relevant to the
-// question. The filter selects which keys (repos, web-source collections or
-// both) are searched; a zero filter searches everything. topDocs <= 0 uses
-// the configured default (RAG.TopDocs). The result is capped at MaxTopDocs
-// because it is served directly to callers.
-func (s *Service) Retrieve(ctx context.Context, filter vectorstore.Filter, question string, topDocs int) ([]Doc, error) {
-	if topDocs <= 0 {
-		topDocs = s.cfg.TopDocs
-	}
-	if topDocs <= 0 {
-		topDocs = DefaultTopDocs
-	}
-	if topDocs > MaxTopDocs {
-		topDocs = MaxTopDocs
-	}
-
-	topK := s.cfg.TopK
-	if topK <= 0 {
-		topK = 20
-	}
-
-	// Fetch more chunks than docs wanted so grouping has material to rank.
-	if topK < topDocs {
-		topK = topDocs * 4
-	}
-	if topK > 40 {
-		topK = 40
-	}
-
-	docs, _, err := s.retrieve(ctx, filter, question, topDocs, topK)
-
-	return docs, err
-}
-
 // RetrieveTiming splits retrieval latency into the two costs that have
 // nothing to do with each other: one network round trip to the embedder, and
 // the local vector search.
@@ -509,37 +494,15 @@ type RetrieveTiming struct {
 	Vector time.Duration
 }
 
-// RetrieveCandidates returns up to candidates ranked documents for rank
-// fusion. Unlike Retrieve it is not capped at MaxTopDocs: hybrid search must
-// be able to ask both rankers for the same candidate depth, otherwise the
-// shorter list contributes structurally less fused score. The returned docs
-// are ordered exactly like Retrieve's (recency-adjusted semantic score), so
-// only their rank is meaningful to the caller.
-func (s *Service) RetrieveCandidates(ctx context.Context, filter vectorstore.Filter, question string, candidates int) ([]Doc, error) {
-	if candidates <= 0 {
-		candidates = DefaultTopDocs
-	}
-	if candidates > MaxCandidates {
-		candidates = MaxCandidates
-	}
-
-	// Grouping collapses chunks into documents, so ask for several chunks per
-	// wanted document instead of the plain configured TopK.
-	topK := s.cfg.TopK
-	if topK < candidates*3 {
-		topK = candidates * 3
-	}
-	if topK > maxCandidateChunks {
-		topK = maxCandidateChunks
-	}
-
-	docs, _, err := s.retrieve(ctx, filter, question, candidates, topK)
-
-	return docs, err
-}
-
-// RetrieveCandidatesTimed is RetrieveCandidates with the latency split
-// reported, for callers that log where a slow search spent its time.
+// RetrieveCandidatesTimed returns up to candidates ranked documents for rank
+// fusion, with the latency split reported for callers that log where a slow
+// search spent its time.
+//
+// It is capped at MaxCandidates rather than MaxTopDocs: hybrid search must be
+// able to ask both rankers for the same candidate depth, otherwise the
+// shorter list contributes structurally less fused score. The docs are
+// ordered by recency-adjusted semantic score, so only their rank is
+// meaningful to the caller, which trims them to the wanted document count.
 func (s *Service) RetrieveCandidatesTimed(
 	ctx context.Context,
 	filter vectorstore.Filter,
@@ -553,6 +516,8 @@ func (s *Service) RetrieveCandidatesTimed(
 		candidates = MaxCandidates
 	}
 
+	// Grouping collapses chunks into documents, so ask for several chunks per
+	// wanted document instead of the plain configured TopK.
 	topK := s.cfg.TopK
 	if topK < candidates*3 {
 		topK = candidates * 3

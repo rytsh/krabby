@@ -40,6 +40,29 @@ type Snippet struct {
 	Line      int     `json:"line,omitempty"` // exact text match; semantic hits may omit it
 	Score     float32 `json:"score"`
 	Snippet   string  `json:"snippet"`
+	// Truncated reports that Snippet is a prefix of the chunk, cut to keep a
+	// page of results affordable. Without it an agent reads a body that stops
+	// mid-function as the whole function and reasons about the missing half.
+	Truncated bool `json:"truncated,omitempty"`
+}
+
+// SemanticOptions configures a vector code search.
+type SemanticOptions struct {
+	TopK int
+	// Path is an optional glob over the repo-relative source path, applied
+	// with the same anchoring rule as the other search modes.
+	Path string
+}
+
+// SemanticPage is one semantic code-search result set.
+//
+// It deliberately carries no total. Vector retrieval ranks a fixed number of
+// nearest chunks, so there is no corpus-wide count to report, and a field named
+// total whose value is the page size reads as an inventory — which is exactly
+// what the same field means in the other two modes.
+type SemanticPage struct {
+	Results []Snippet   `json:"results"`
+	Indexed []RepoIndex `json:"indexed,omitempty"`
 }
 
 // Service indexes source code and retrieves matching snippets.
@@ -51,7 +74,11 @@ type Service struct {
 	text   *TextStore
 }
 
-const maxSearchResults = 100
+// maxSearchResults bounds one vector query's candidate window. It matches the
+// widening a namespace-filtered search asks for (namespaceScope.fetch): a lower
+// cap here would silently discard the widening, and the filter it exists to
+// feed would starve on a large install.
+const maxSearchResults = 200
 
 // New builds the shared code indexing service. text provides normal BM25
 // search; emb and store may be nil when semantic search is disabled. engine may

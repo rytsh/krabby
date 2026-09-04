@@ -19,8 +19,41 @@ func TestGlobMatchDoublestar(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		if got := globMatch(tt.pattern, tt.name); got != tt.want {
-			t.Errorf("globMatch(%q, %q) = %v, want %v", tt.pattern, tt.name, got, tt.want)
+		if got := MatchGlob(tt.pattern, tt.name); got != tt.want {
+			t.Errorf("MatchGlob(%q, %q) = %v, want %v", tt.pattern, tt.name, got, tt.want)
+		}
+	}
+}
+
+// globCanDescend decides whether a glob walk may prune a subtree. A wrong
+// "false" loses matches silently, so both directions are pinned here rather
+// than only through GlobFiles' results.
+func TestGlobCanDescendPrunesOnlyUnreachableSubtrees(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		pattern string
+		dir     string
+		want    bool
+	}{
+		{"_ui/src/**", "_ui", true},
+		{"_ui/src/**", "_ui/src", true},
+		{"_ui/src/**", "_ui/src/lib", true},
+		{"_ui/src/**", "internal", false},
+		{"_ui/src/**", "_ui/build", false},
+		{"**/Makefile", "internal/service", true},
+		{"internal/*/*.go", "internal/service", true},
+		{"internal/*/*.go", "internal/service/repofs", false},
+		{"cmd/main.go", "cmd", true},
+		// The pattern is fully consumed by the directory path itself, so no
+		// file below it can match.
+		{"cmd/main.go", "cmd/main.go", false},
+		{"cmd/*/main.go", "cmd", true},
+	}
+
+	for _, tt := range tests {
+		if got := globCanDescend(tt.pattern, tt.dir); got != tt.want {
+			t.Errorf("globCanDescend(%q, %q) = %v, want %v", tt.pattern, tt.dir, got, tt.want)
 		}
 	}
 }

@@ -1,6 +1,7 @@
 <script>
-  // Code search supports local BM25 and semantic vectors. Docs search adds a
-  // hybrid mode that fuses BM25 and semantic document ranks.
+  // Code search supports local BM25, RE2 regular expressions and semantic
+  // vectors. Docs search adds a hybrid mode that fuses BM25 and semantic
+  // document ranks.
   import { onDestroy, onMount } from "svelte";
   import { api } from "../lib/api.js";
   import { fmtDate } from "../lib/format.js";
@@ -63,6 +64,11 @@
   let namespaceFilter = $state("");
   let scope = $state("code");
   let codeMode = $state("normal");
+  // Regex-only controls. Case-insensitive by default: the trigram index is
+  // folded either way, so the default costs nothing and is what a reader
+  // looking for a name usually wants.
+  let regexCase = $state(false);
+  const REGEX_CONTEXT = 3;
   // Semantic is the default: on a large single-domain collection the BM25
   // arm has to score most of the corpus, and hybrid waits for it.
   let docsMode = $state("semantic");
@@ -73,6 +79,19 @@
   let results = $state(null); // null = not searched yet
   let total = $state(0);
   let page = $state(1);
+  // Regex search reports whether it saw the whole corpus or stopped at its
+  // file ceiling, so the count can say "or more" instead of implying it is
+  // the total.
+  let resultsExhaustive = $state(true);
+  // pathFilter narrows any code-search mode to a glob over the source path.
+  // It is a field rather than a query-string prefix: the query box is where
+  // identifiers and patterns are typed, and a 'path:' token in it would have
+  // to be parsed back out of them.
+  let pathFilter = $state("");
+  // indexed carries the per-repository index state a code-search page
+  // reports, so a stale or unbuilt index is visible instead of looking like
+  // an absence of matches.
+  let indexed = $state([]);
   const perPage = 20;
   const newline = "\n";
   let pageCount = $derived(Math.max(1, Math.ceil(total / perPage)));
@@ -121,11 +140,18 @@
       const response =
         searchScope === "docs"
           ? await api.searchDocs(query, key, docsTop, docsScope, namespaceFilter, searchMode, opts)
-          : await api.searchCode(query, repoFilter, searchMode, nextPage, perPage, 0, namespaceFilter, opts);
+          : await api.searchCode(query, repoFilter, searchMode, nextPage, perPage, 0, namespaceFilter, {
+              ...opts,
+              caseSensitive: regexCase,
+              contextLines: searchMode === "regex" ? REGEX_CONTEXT : 0,
+              path: pathFilter.trim(),
+            });
       if (seq !== searchSeq) return;
       results = searchScope === "docs" ? (Array.isArray(response) ? response : []) : response?.results || [];
       total = searchScope === "docs" ? results.length : response?.total || 0;
       page = searchScope === "docs" ? 1 : response?.page || nextPage;
+      resultsExhaustive = response?.exhaustive !== false;
+      indexed = searchScope === "docs" ? [] : response?.indexed || [];
     } catch (e) {
       // A cancelled request already restored the UI; it is not an error.
       if (seq !== searchSeq || e?.name === "AbortError") return;
@@ -164,13 +190,18 @@
       }
       return `#/repos/${r.repo}?doc=${encodeURIComponent(r.path)}`;
     }
-    return `#/repos/${r.repo}?file=${encodeURIComponent(r.path)}&line=${r.line || r.start_line || 1}`;
+    // A regex hit has no chunk of its own; it carries its matches, so the
+    // link opens the file at the first one.
+    const line = r.matches?.length ? r.matches[0].line : r.line || r.start_line || 1;
+
+    return `#/repos/${r.repo}?file=${encodeURIComponent(r.path)}&line=${line}`;
   }
 
   function resultKey(r) {
-    return scope === "docs"
-      ? `${r.repo}\0${r.path}`
-      : `${r.repo}\0${r.path}\0${r.line || r.start_line || r.end_line || 0}`;
+    if (scope === "docs") return `${r.repo}\0${r.path}`;
+    if (r.matches) return `${r.repo}\0${r.path}`;
+
+    return `${r.repo}\0${r.path}\0${r.line || r.start_line || r.end_line || 0}`;
   }
 
   function pct(score) {
@@ -220,11 +251,23 @@
 
   function searchPlaceholder() {
     if (scope === "code") {
-      return codeMode === "normal" ? "Search code, symbols or paths…" : "Describe the code you are looking for…";
+      if (codeMode === "normal") return "Search code, symbols or paths…";
+      if (codeMode === "regex") return "Regular expression, e.g. func \\(m \\*Manager\\)…";
+
+      return "Describe the code you are looking for…";
     }
     if (docsMode === "lexical") return "Search exact terms, Jira keys, error codes or titles…";
     if (docsMode === "semantic") return "Describe the documentation you are looking for…";
     return "Search documentation by meaning, terms or issue key…";
+  }
+
+  function codeModeHelp() {
+    if (codeMode === "normal")
+      return "BM25 over paths, symbols and source. Words are ORed and ranked; identifiers keep their precision. Quotes, OR and -exclude work.";
+    if (codeMode === "regex")
+      return "RE2 pattern matched line by line: ^ and $ are line anchors. Returns exact line and column per match.";
+
+    return "Embedding search over source chunks; best for concepts you cannot spell as a token.";
   }
 
   function docsModeHelp() {
@@ -350,8 +393,32 @@
       aria-label="Search mode"
     >
       <option value="normal">Normal</option>
+      <option value="regex">Regex</option>
       <option value="semantic">Semantic</option>
     </select>
+    <input
+      class="input sm:basis-[170px]"
+      placeholder="path glob (optional)"
+      title="Without a slash it matches a file name at any depth (*_test.go); with one it is anchored at the repository root (internal/**)"
+      aria-label="Path filter"
+      bind:value={pathFilter}
+      onkeydown={(e) => {
+        if (e.key === "Enter") search();
+      }}
+    />
+    {#if codeMode === "regex"}
+      <label class="inline-flex items-center gap-1.5 text-[12px] text-dim" title="Match upper and lower case exactly">
+        <input
+          type="checkbox"
+          checked={regexCase}
+          onchange={(e) => {
+            regexCase = e.currentTarget.checked;
+            resetResults();
+          }}
+        />
+        Aa
+      </label>
+    {/if}
   {:else}
     <select
       class="input sm:basis-[130px]"
@@ -393,17 +460,38 @@
   {/if}
 </div>
 
-{#if scope === "docs"}
-  <div class="-mt-2 mb-4 text-[11px] text-faint">{docsModeHelp()}</div>
-{/if}
+<div class="-mt-2 mb-4 text-[11px] text-faint">{scope === "docs" ? docsModeHelp() : codeModeHelp()}</div>
 
 {#if results !== null && !loading}
+  {#if scope === "code" && indexed.length}
+    <div class="-mt-3 mb-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-faint">
+      {#each indexed as ix (ix.repo)}
+        <span>
+          <span class="font-mono">{ix.repo}</span>
+          {#if !ix.indexed_at}
+            <span class="text-warn">not indexed yet</span>
+          {:else if ix.stale}
+            <span class="text-warn">index behind the clone</span>, built {fmtDate(ix.indexed_at)}
+          {:else}
+            indexed {fmtDate(ix.indexed_at)}
+          {/if}
+        </span>
+      {/each}
+    </div>
+  {/if}
   {#if results.length === 0 && !error}
     <div class="card p-6 text-center text-dim">No matches.</div>
   {:else}
     <div class="mb-2 flex items-center justify-between text-[12px] text-faint">
-      <span>{total} {total === 1 ? "match" : "matches"}</span>
-      {#if scope === "code" && codeMode === "normal" && pageCount > 1}
+      <span>
+        {total}
+        {#if scope === "code" && codeMode === "regex"}
+          {total === 1 ? "file" : "files"}{#if results.length && !resultsExhaustive}&nbsp;or more{/if}
+        {:else}
+          {total === 1 ? "match" : "matches"}
+        {/if}
+      </span>
+      {#if scope === "code" && codeMode !== "semantic" && pageCount > 1}
         <span>Page {page} of {pageCount}</span>
       {/if}
     </div>
@@ -424,6 +512,30 @@
               </span>
             </div>
             <pre class="m-0 max-h-56 overflow-hidden whitespace-pre-wrap px-3.5 py-2.5 font-mono text-[12px] leading-relaxed text-dim">{docExcerpt(r.excerpt)}</pre>
+          </a>
+        {:else if codeMode === "regex"}
+          <a class="card block w-full cursor-pointer overflow-hidden text-left transition-colors hover:border-accent" href={resultHref(r)}>
+            <div class="flex items-center gap-2 border-b border-line bg-surface-2/50 px-3.5 py-2">
+              <span class="font-mono text-[12.5px] text-fg">{r.repo}</span>
+              <span class="text-faint">/</span>
+              <span class="truncate font-mono text-[12.5px] text-dim">{r.path}</span>
+              <span class="ml-auto text-[11px] text-faint">
+                {r.matches.length}
+                {r.matches.length === 1 ? "match" : "matches"}{r.truncated ? "+" : ""}
+              </span>
+            </div>
+            <div class="flex flex-col divide-y divide-line">
+              {#each r.matches as m (m.line)}
+                <div>
+                  <div class="px-3.5 pt-1.5 font-mono text-[11px] text-faint">L{m.line}:{m.column}</div>
+                  <pre
+                    class="snippet-view m-0 overflow-auto px-3.5 pb-2 font-mono text-[12px] leading-relaxed text-dim"
+                    style={`counter-reset: line ${m.line - (m.before?.length || 0) - 1}`}
+                  ><code>{#each m.before || [] as b, bi (bi)}<span class="line">{b}</span>{newline}{/each}<span
+                        class="line line-target">{m.text}</span>{#each m.after || [] as a, ai (ai)}{newline}<span class="line">{a}</span>{/each}</code></pre>
+                </div>
+              {/each}
+            </div>
           </a>
         {:else}
           {@const snip = codeSnippet(r)}
@@ -451,7 +563,7 @@
         {/if}
       {/each}
     </div>
-    {#if scope === "code" && codeMode === "normal" && pageCount > 1}
+    {#if scope === "code" && codeMode !== "semantic" && pageCount > 1}
       <div class="mt-4 flex items-center justify-center gap-3">
         <button class="btn btn-sm" disabled={page <= 1} onclick={() => search(page - 1)}>Previous</button>
         <span class="text-[12px] text-dim">{page} / {pageCount}</span>

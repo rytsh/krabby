@@ -177,7 +177,8 @@ func TestSearchDocsLexicalWithoutSemanticIndex(t *testing.T) {
 
 		docs: &docsBundle{},
 	}
-	docs, err := m.SearchDocs(ctx, ScopeRepos, repo.ID, "", DocsSearchLexical, "PAY-1842", 5)
+	page, err := m.SearchDocs(ctx, ScopeRepos, repo.ID, "", DocsSearchLexical, "PAY-1842", 5)
+	docs := page.Results
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +193,8 @@ func TestSearchDocsLexicalWithoutSemanticIndex(t *testing.T) {
 
 	// With no embedder configured the default must resolve to lexical: it is
 	// the only mode this installation can serve.
-	docs, err = m.SearchDocs(ctx, ScopeRepos, repo.ID, "", "", "PAY-1842", 5)
+	page, err = m.SearchDocs(ctx, ScopeRepos, repo.ID, "", "", "PAY-1842", 5)
+	docs = page.Results
 	if err != nil {
 		t.Fatalf("default mode without an embedder: %v", err)
 	}
@@ -277,7 +279,8 @@ func TestSearchDocsRetriesWithoutFrequentTermFilter(t *testing.T) {
 		t.Fatalf("test premise broken: %q/%q are not corpus-wide here: %#v", "payment", "gateway", frequent)
 	}
 
-	docs, err := m.SearchDocs(ctx, ScopeRepos, repo.ID, "", DocsSearchLexical, "payment gateway", 5)
+	page, err := m.SearchDocs(ctx, ScopeRepos, repo.ID, "", DocsSearchLexical, "payment gateway", 5)
+	docs := page.Results
 	if err != nil {
 		t.Fatal(err)
 	}

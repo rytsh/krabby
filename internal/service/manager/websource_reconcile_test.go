@@ -345,12 +345,12 @@ func TestRefreshWebSourceReembedsMissingOnIncrementalSync(t *testing.T) {
 
 	// The source's recency date is carried onto the re-embedded vectors, taken
 	// from the persisted page record (the reconcile does not re-fetch).
-	docs, err := m.docs.rag.Retrieve(ctx, vectorstore.FilterKey(scope), "alpha", 1)
+	docs, _, err := m.docs.rag.RetrieveCandidatesTimed(ctx, vectorstore.FilterKey(scope), "alpha", 1)
 	if err != nil {
-		t.Fatalf("Retrieve: %v", err)
+		t.Fatalf("RetrieveCandidatesTimed: %v", err)
 	}
 	if len(docs) != 1 {
-		t.Fatalf("Retrieve returned %d docs, want 1", len(docs))
+		t.Fatalf("RetrieveCandidatesTimed returned %d docs, want 1", len(docs))
 	}
 	if !docs[0].UpdatedAt.Equal(updated) {
 		t.Fatalf("re-embedded doc UpdatedAt = %v, want %v", docs[0].UpdatedAt, updated)
@@ -437,7 +437,7 @@ func TestRefreshWebSourceRetriesDirtyPathAfterPartialVectorInsert(t *testing.T) 
 	if string(col.State) != `{"w":"2"}` {
 		t.Fatalf("watermark = %s, want retry state", col.State)
 	}
-	docs, err := m.docs.rag.Retrieve(ctx, vectorstore.FilterKey(websource.ScopeKey("wiki")), "gamma", 1)
+	docs, _, err := m.docs.rag.RetrieveCandidatesTimed(ctx, vectorstore.FilterKey(websource.ScopeKey("wiki")), "gamma", 1)
 	if err != nil {
 		t.Fatal(err)
 	}

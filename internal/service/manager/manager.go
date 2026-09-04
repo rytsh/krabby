@@ -1190,6 +1190,16 @@ func (m *Manager) submitRefresh(id string, skip []string) *queue.Handle {
 
 // registerRepo parses the url, upserts a pending record if the repo is new, and
 // reports whether it already existed. It performs no clone/build itself.
+//
+// A call naming overrides for a repository that is already tracked applies
+// them instead of dropping them. Dropping was the older behaviour and it
+// returned success: an agent asked to also index a repo's deployment YAML
+// called add_repo with include_extra, got the repo record back, and reported
+// the repository reconfigured while nothing had changed. Overrides the caller
+// did not name are left alone - an add_repo that omits them must not wipe what
+// set_repo_overrides put there - and an identical write is a no-op inside
+// SetOverrides, so a client that always sends the same block costs nothing.
+// The refresh AddRepo queues next is what rebuilds against the new rules.
 func (m *Manager) registerRepo(ctx context.Context, spec RepoSpec) (id string, repo *registry.Repo, existed bool, err error) {
 	id, err = gitops.ParseRepoID(spec.URL)
 	if err != nil {
@@ -1200,10 +1210,28 @@ func (m *Manager) registerRepo(ctx context.Context, spec RepoSpec) (id string, r
 		return "", nil, false, fmt.Errorf("namespace %q is reserved", registry.NamespaceAll)
 	}
 
-	if existing, gerr := m.reg.Get(ctx, id); gerr != nil {
+	existing, gerr := m.reg.Get(ctx, id)
+	if gerr != nil {
 		return "", nil, false, gerr
-	} else if existing != nil {
-		return id, existing, true, nil
+	}
+	if existing != nil {
+		if !spec.Overrides.Changed(registry.Overrides{}) {
+			return id, existing, true, nil
+		}
+
+		// Under the per-repo lock for the same reason SetRepoOverrides takes
+		// it: a build reads the overrides it started with, and a half-applied
+		// change is a build against rules nobody asked for.
+		updated, _, serr := func() (*registry.Repo, registry.Overrides, error) {
+			defer m.lockKey(id)()
+
+			return m.reg.SetOverrides(ctx, id, spec.Overrides)
+		}()
+		if serr != nil {
+			return "", nil, false, serr
+		}
+
+		return id, updated, true, nil
 	}
 
 	repo = &registry.Repo{
@@ -1642,6 +1670,13 @@ func (m *Manager) ensureCodeIndex(ctx context.Context, repoID, clonePath string)
 	}
 
 	m.clearCodeWarmPending(repoID)
+
+	// A warm pass grows the corpus like any other index run, so the tuning
+	// derived from it follows. Best-effort: it only ever costs query speed.
+	if err := m.codeText.RefreshStats(ctx); err != nil {
+		slog.Warn("refresh code search stats", "repo", repoID, "error", err)
+	}
+
 	return nil
 }
 
@@ -2311,6 +2346,15 @@ func (m *Manager) buildDocsAndIndex(
 
 				return d.codeRag.IndexProgress(ctx, repo.ID, repo.Path, repoFilters(repo), onProgress)
 			})
+
+			// Query tuning is derived from the corpus, so it follows the
+			// corpus. A failure here only costs lexical query speed, never
+			// correctness.
+			if m.codeText != nil {
+				if err := m.codeText.RefreshStats(ctx); err != nil {
+					slog.Warn("refresh code search stats", "repo", repo.ID, "error", err)
+				}
+			}
 		}()
 	}
 	defer wg.Wait()
@@ -3177,24 +3221,12 @@ func (m *Manager) GraphPathFor(ctx context.Context, repoID string) (string, erro
 // is empty the candidate graphs are restricted to namespace (empty or "default"
 // selects the default bucket; NamespaceAll searches every namespace).
 func (m *Manager) CallGraphTool(ctx context.Context, repoID, namespace, tool string, args map[string]any) (*mcp.CallToolResult, error) {
-	if repoID == "" && !m.mergeEnabled {
-		repoIDs, err := m.graphRepoIDs(ctx, namespace)
-		if err != nil {
-			return nil, err
-		}
-
-		switch len(repoIDs) {
-		case 0:
-			return nil, fmt.Errorf("no repository graph is ready in namespace %s; add a repository, wait for its build to finish, or retry with namespace \"*\"", displayNamespace(namespace))
-		case 1:
-			repoID = repoIDs[0]
-		default:
-			if inferred := inferRepoID(repoIDs, args); inferred != "" {
-				repoID = inferred
-			} else {
-				return graphRepoSelectionResult(tool, namespace, repoIDs), nil
-			}
-		}
+	repoID, selection, err := m.resolveGraphRepo(ctx, repoID, namespace, tool, args)
+	if err != nil {
+		return nil, err
+	}
+	if selection != "" {
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: selection}}}, nil
 	}
 
 	graphPath, err := m.GraphPathFor(ctx, repoID)
@@ -3294,7 +3326,11 @@ func normalizedMatchText(value string) string {
 	}, value)
 }
 
-func graphRepoSelectionResult(tool, namespace string, repoIDs []string) *mcp.CallToolResult {
+// graphRepoSelectionText explains that a graph query needs an explicit
+// repository, listing a bounded set of candidates plus the tools that narrow
+// them. Bounded because a namespace can hold hundreds of repos and the whole
+// list would crowd out the instruction.
+func graphRepoSelectionText(tool, namespace string, repoIDs []string) string {
 	const maxShown = 20
 	shown := repoIDs
 	if len(shown) > maxShown {
@@ -3309,7 +3345,7 @@ func graphRepoSelectionResult(tool, namespace string, repoIDs []string) *mcp.Cal
 	}
 	text += " If the question does not identify a repository, ask the user which one they mean; for symbol or source lookup, search_code can search across repositories first."
 
-	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}
+	return text
 }
 
 // GraphEngine exposes the native graph engine for in-process consumers (docgen).
@@ -3506,19 +3542,21 @@ func (m *Manager) ListRepoFilesAt(ctx context.Context, repoID, subdir, snapshot 
 	return entries, token, err
 }
 
-// ListRepoFilesPage returns a bounded page of a stable repository listing.
-func (m *Manager) ListRepoFilesPage(ctx context.Context, repoID, subdir string, recursive bool, page, perPage int) (repofs.EntryPage, error) {
-	return m.ListRepoFilesPageAt(ctx, repoID, subdir, "", recursive, page, perPage)
+// ListRepoFilesPage returns one cursor-paged page of a repository listing.
+func (m *Manager) ListRepoFilesPage(ctx context.Context, repoID, subdir string, recursive bool, cursor string, perPage int) (repofs.EntryPage, error) {
+	return m.ListRepoFilesPageAt(ctx, repoID, subdir, "", recursive, cursor, perPage)
 }
 
 // ListRepoFilesPageAt lists a specific immutable snapshot when snapshot is set.
-func (m *Manager) ListRepoFilesPageAt(ctx context.Context, repoID, subdir, snapshot string, recursive bool, page, perPage int) (repofs.EntryPage, error) {
+// Paging is by cursor: pass back the previous page's NextCursor to continue,
+// which is what makes entries past the old MaxListEntries cap reachable.
+func (m *Manager) ListRepoFilesPageAt(ctx context.Context, repoID, subdir, snapshot string, recursive bool, cursor string, perPage int) (repofs.EntryPage, error) {
 	dir, token, err := m.repoCloneDirAt(ctx, repoID, snapshot)
 	if err != nil {
 		return repofs.EntryPage{}, err
 	}
 
-	result, err := repofs.ListFilesPage(dir, subdir, recursive, page, perPage)
+	result, err := repofs.ListFilesCursor(dir, subdir, cursor, recursive, perPage)
 	if err != nil {
 		return repofs.EntryPage{}, err
 	}

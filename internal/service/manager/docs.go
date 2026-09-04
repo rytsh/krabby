@@ -1246,25 +1246,37 @@ func (m *Manager) ensureDocsTextKey(ctx context.Context, key, docsDir string) er
 // lexical retrieval. scope selects all/repos/sources; key restricts to one repo
 // or web:<collection> and wins over scope. Namespace scopes only repository
 // docs. topDocs <= 0 uses the default.
-func (m *Manager) SearchDocs(ctx context.Context, scope, key, namespace, mode, question string, topDocs int) ([]rag.Doc, error) {
+func (m *Manager) SearchDocs(ctx context.Context, scope, key, namespace, mode, question string, topDocs int) (rag.DocsPage, error) {
 	searchStarted := time.Now()
 	key = strings.TrimSpace(key)
 
 	mode, err := NormalizeDocsSearchMode(mode)
 	if err != nil {
-		return nil, err
+		return rag.DocsPage{}, err
 	}
 	mode = m.resolveDocsSearchMode(mode)
+	page := rag.DocsPage{Results: []rag.Doc{}, Mode: mode}
+
 	if err := m.validateDocsKey(ctx, key); err != nil {
-		return nil, err
+		return rag.DocsPage{}, err
 	}
 
 	filter, err := docsFilter(scope, key)
 	if err != nil {
-		return nil, err
+		return rag.DocsPage{}, err
 	}
 	if strings.TrimSpace(question) == "" {
-		return nil, errors.New("question is empty")
+		return rag.DocsPage{}, errors.New("question is empty")
+	}
+
+	ragCfg := m.ragConfigSnapshot()
+
+	// The configured default is what an operator set through Settings; falling
+	// straight to the package default would make that setting unreadable, so a
+	// caller who raised it and then omitted top_docs would silently keep
+	// getting three documents.
+	if topDocs <= 0 {
+		topDocs = ragCfg.TopDocs
 	}
 	if topDocs <= 0 {
 		topDocs = rag.DefaultTopDocs
@@ -1275,12 +1287,14 @@ func (m *Manager) SearchDocs(ctx context.Context, scope, key, namespace, mode, q
 
 	filter, emptyScope, err := m.docsNamespaceFilter(ctx, scope, key, namespace, filter)
 	if err != nil {
-		return nil, err
+		return rag.DocsPage{}, err
 	}
 	if emptyScope {
-		return []rag.Doc{}, nil
+		page.Note = fmt.Sprintf("namespace %s holds nothing indexed, so nothing was searched; retry with namespace \"*\" to search every namespace.",
+			displayNamespace(namespace))
+
+		return page, nil
 	}
-	ragCfg := m.ragConfigSnapshot()
 
 	// Both rankers are asked for the same candidate depth. An asymmetric depth
 	// silently weights the longer list higher in rank fusion, because every
@@ -1292,7 +1306,7 @@ func (m *Manager) SearchDocs(ctx context.Context, scope, key, namespace, mode, q
 
 	if mode != DocsSearchSemantic {
 		if m.docsText == nil {
-			return nil, errors.New("lexical docs search is not configured")
+			return rag.DocsPage{}, errors.New("lexical docs search is not configured")
 		}
 		// The lexical index is maintained by the indexing pipeline. The only
 		// case a query could have to repair is an installation upgraded from
@@ -1301,7 +1315,7 @@ func (m *Manager) SearchDocs(ctx context.Context, scope, key, namespace, mode, q
 		// in scope costs more than the search it guards.
 		if !m.docsTextWarmed.Load() {
 			if err := m.ensureDocsTextForSearch(ctx, scope, key, namespace); err != nil {
-				return nil, err
+				return rag.DocsPage{}, err
 			}
 		}
 	}
@@ -1339,7 +1353,7 @@ func (m *Manager) SearchDocs(ctx context.Context, scope, key, namespace, mode, q
 	}
 
 	if err := group.Wait(); err != nil {
-		return nil, err
+		return rag.DocsPage{}, err
 	}
 
 	var docs []rag.Doc
@@ -1356,7 +1370,44 @@ func (m *Manager) SearchDocs(ctx context.Context, scope, key, namespace, mode, q
 
 	logDocsSearch(mode, scope, key, time.Since(searchStarted), semanticTook, lexicalTook, semanticSplit, len(docs))
 
-	return docs, nil
+	if len(docs) > 0 {
+		page.Results = docs
+
+		return page, nil
+	}
+
+	page.Note = m.emptyDocsNote(mode, scope, key, namespace)
+
+	return page, nil
+}
+
+// emptyDocsNote explains a docs search that matched nothing.
+//
+// Every branch below is a state an agent can act on, and none of them is
+// distinguishable from "the documentation does not cover this" without being
+// said out loud. The mode is named because it is not always the one asked for,
+// and the scope because the default namespace is the easiest way to search a
+// fraction of the corpus by accident.
+func (m *Manager) emptyDocsNote(mode, scope, key, namespace string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "no document matched (mode %s", mode)
+	switch {
+	case key != "":
+		fmt.Fprintf(&b, ", scope_key %s", key)
+	case scope != "":
+		fmt.Fprintf(&b, ", scope %s", scope)
+	}
+	if namespace != "" {
+		fmt.Fprintf(&b, ", namespace %s", displayNamespace(namespace))
+	}
+	b.WriteString("). ")
+
+	if mode == DocsSearchSemantic {
+		b.WriteString("Semantic retrieval ranks the embedded documents, so a repository whose docs were generated but never embedded has nothing to rank: try mode 'lexical', or check the docs_index stage with repo_status. ")
+	}
+	b.WriteString("Widen with namespace \"*\", or use list_docs to see whether the scope holds any document at all.")
+
+	return b.String()
 }
 
 func (m *Manager) validateDocsKey(ctx context.Context, key string) error {
@@ -1892,25 +1943,46 @@ func (s namespaceScope) contains(repo string) bool {
 	return ok
 }
 
-// fetch enlarges the requested topK for a post-filtered multi-repo search so the
-// namespace filter does not starve the result set.
-func (s namespaceScope) fetch(topK int) int {
+// fetch enlarges the requested topK for a post-filtered search so the filters
+// applied after retrieval do not starve the result set. filtered says whether
+// anything will be dropped afterwards; without a post-filter the widening
+// would only pay for candidates nobody looks at.
+func (s namespaceScope) fetch(topK int, filtered bool) int {
 	if topK <= 0 {
 		topK = 10
 	}
-	scaled := topK * 4
-	if scaled > 200 {
-		scaled = 200
+	if !filtered {
+		return topK
 	}
 
-	return scaled
+	// The ceiling matches coderag.maxSearchResults; asking for more would be
+	// clamped one layer down and the widening would silently not happen.
+	return min(topK*4, 200)
 }
 
 // namespaceScope resolves a repoID/namespace pair. An explicit repoID or
 // NamespaceAll yields an unrestricted (all) scope; otherwise it lists the repos
 // in the namespace and reports whether it is empty, a single repo, or several.
+//
+// A named repository is checked against the registry. Without that check a
+// mistyped or untracked id scopes the search to a prefix nothing carries, and
+// the caller is handed an empty page that reads as "this code does not exist"
+// - the one answer a search must never invent. A namespace typo has always
+// been an error; the id is the more likely typo of the two.
 func (m *Manager) namespaceScope(ctx context.Context, repoID, namespace string) (namespaceScope, error) {
-	if repoID != "" || strings.EqualFold(strings.TrimSpace(namespace), registry.NamespaceAll) {
+	if repoID = strings.TrimSpace(repoID); repoID != "" {
+		repo, err := m.reg.Get(ctx, repoID)
+		if err != nil {
+			return namespaceScope{}, err
+		}
+		if repo == nil {
+			return namespaceScope{}, fmt.Errorf("repository %q is not tracked; list_repos names the tracked ids, and omitting repo searches the default namespace", repoID)
+		}
+
+		return namespaceScope{all: true}, nil
+	}
+
+	if strings.EqualFold(strings.TrimSpace(namespace), registry.NamespaceAll) {
 		return namespaceScope{all: true}, nil
 	}
 
@@ -1953,80 +2025,304 @@ func trimSnippets(snippets []coderag.Snippet, topK int) []coderag.Snippet {
 // searches across the repos in namespace (empty or "default" == the default
 // bucket; NamespaceAll searches every repo). topK <= 0 uses the code RAG
 // default.
-func (m *Manager) SearchCode(ctx context.Context, repoID, namespace, query string, topK int) ([]coderag.Snippet, error) {
+//
+// Like the other two modes it honours a path glob and reports the index state
+// of the repositories behind the page. Both matter more here than elsewhere: a
+// vector index is built separately from the text one, so an empty semantic
+// result on a repository whose embeddings were never built is otherwise
+// indistinguishable from "this concept is not in the code".
+func (m *Manager) SearchCode(
+	ctx context.Context,
+	repoID, namespace, query string,
+	opts coderag.SemanticOptions,
+) (coderag.SemanticPage, error) {
 	d, releaseDocs := m.acquireDocs()
 	defer releaseDocs()
 	if d.codeRag == nil || d.codeStore == nil {
-		return nil, ErrCodeRAGDisabled
+		return coderag.SemanticPage{}, ErrCodeRAGDisabled
 	}
 
 	scope, err := m.namespaceScope(ctx, repoID, namespace)
 	if err != nil {
-		return nil, err
+		return coderag.SemanticPage{}, err
+	}
+
+	matchPath, err := coderag.Scope{Path: opts.Path}.PathMatcher()
+	if err != nil {
+		return coderag.SemanticPage{}, err
 	}
 
 	searchStarted := time.Now()
 
+	byNamespace := scope.single == "" && !scope.all
 	searchRepo := repoID
-	fetch := scope.fetch(topK)
 	if scope.single != "" {
-		searchRepo, fetch = scope.single, topK
+		searchRepo = scope.single
 	}
+	fetch := scope.fetch(opts.TopK, byNamespace || matchPath != nil)
 
 	snippets, split, err := d.codeRag.RetrieveTimed(ctx, searchRepo, query, fetch)
 	if err != nil {
-		return nil, err
+		return coderag.SemanticPage{}, err
 	}
 
-	if scope.single == "" && !scope.all {
+	if byNamespace || matchPath != nil {
 		out := snippets[:0]
 		for _, s := range snippets {
-			if scope.contains(s.Repo) {
-				out = append(out, s)
+			if byNamespace && !scope.contains(s.Repo) {
+				continue
 			}
+			if matchPath != nil && !matchPath(s.Path) {
+				continue
+			}
+			out = append(out, s)
 		}
-		snippets = trimSnippets(out, topK)
+		snippets = trimSnippets(out, opts.TopK)
 	}
 
 	logCodeSearch(repoID, namespace, time.Since(searchStarted), split, len(snippets))
 
-	return snippets, nil
+	page := coderag.SemanticPage{Results: snippets}
+	page.Indexed = m.repoIndexStates(ctx, indexedRepos(snippetRepos(snippets), m.scopedRepoIDs(ctx, repoID, scope)))
+
+	return page, nil
 }
 
-// SearchCodeText performs normal BM25 full-text search over the local bw index,
-// scoped to namespace when repoID is empty.
+// scopedRepoIDs lists the repositories a scope covers, for reporting the index
+// state behind an empty result. A failure here costs the report, never the
+// search: the hits are already resolved by the time it runs.
+func (m *Manager) scopedRepoIDs(ctx context.Context, repoID string, scope namespaceScope) []string {
+	ids, err := m.codeScopeRepos(ctx, repoID, scope)
+	if err != nil {
+		return nil
+	}
+
+	return ids
+}
+
+// SearchCodeText performs BM25 full-text search over the local bw index,
+// scoped to a repository, a namespace or everything, and optionally to a path
+// glob.
+//
+// bw ANDs a bare query's terms, so the raw query is first rewritten into an OR
+// chain plus required identifiers — the same rewrite the documentation index
+// uses, and for the same reason: passing a question verbatim requires every
+// one of its words inside a single 3000-character chunk, which almost always
+// matched nothing. Identifier-shaped words (`bw.ErrNotFound`, `PAY-1842`) stay
+// required, so an exact lookup does not lose precision to the loosening.
+//
+// Terms the indexed source itself shows to be ubiquitous are dropped from that
+// chain: a source corpus is full of `func`, `return` and `error`, each costing
+// a posting-list walk proportional to the whole index while contributing
+// almost nothing to the ranking. Filtering is an optimisation and is never
+// allowed to cost a result, so a filtered query that comes back empty is
+// retried unfiltered.
 func (m *Manager) SearchCodeText(
 	ctx context.Context,
 	repoID, namespace, query string,
-	page, perPage int,
+	opts coderag.TextSearchOptions,
 ) (coderag.SearchPage, error) {
 	if m.codeText == nil {
 		return coderag.SearchPage{}, errors.New("normal code search is not configured")
 	}
 
-	scope, err := m.namespaceScope(ctx, repoID, namespace)
+	filter, repos, err := m.codeScope(ctx, repoID, namespace, opts.Path)
 	if err != nil {
 		return coderag.SearchPage{}, err
 	}
+	opts.KeyFilter = filter
 
-	// The normal index may still be warming in the background at startup. Build
-	// any in-scope repo's index on demand before searching so results are never
-	// partial. Cheap when nothing is pending.
-	if err := m.ensureCodeIndexForSearch(ctx, repoID, scope); err != nil {
-		return coderag.SearchPage{}, err
+	stop := m.codeText.FrequentTerms(ctx)
+	rewritten := rag.LexicalQuery(query, stop)
+
+	page, err := m.codeText.Search(ctx, rewritten, opts)
+	if err != nil {
+		return page, err
+	}
+	if page.Total == 0 {
+		if unfiltered := rag.LexicalQuery(query, nil); unfiltered != rewritten {
+			// The retry's failure must not be reported as an empty result: the
+			// docstring promises filtering never costs a result, and a store
+			// error presented as total=0 reads as a definitive "no such code".
+			retry, rerr := m.codeText.Search(ctx, unfiltered, opts)
+			if rerr != nil {
+				return page, rerr
+			}
+			page = retry
+		}
 	}
 
-	if scope.single != "" {
-		return m.codeText.Search(ctx, scope.single, query, page, perPage)
-	}
-	if scope.all {
-		return m.codeText.Search(ctx, repoID, query, page, perPage)
+	page.Indexed = m.repoIndexStates(ctx, indexedRepos(snippetRepos(page.Results), repos))
+
+	return page, nil
+}
+
+// SearchCodeRegex runs a regular-expression search over the local trigram
+// index, scoped the same way.
+func (m *Manager) SearchCodeRegex(
+	ctx context.Context,
+	repoID, namespace, pattern string,
+	opts coderag.RegexOptions,
+) (coderag.RegexPage, error) {
+	if m.codeText == nil {
+		return coderag.RegexPage{}, errors.New("regex code search is not configured")
 	}
 
-	// Namespace with several repos: BM25 search takes a single repo key, so fan
-	// out over the namespace's repos and merge by score. Results are already
-	// per-repo ranked; a stable score sort keeps the strongest hits on top.
-	return m.searchCodeTextNamespace(ctx, scope, query, page, perPage)
+	filter, repos, err := m.codeScope(ctx, repoID, namespace, opts.Path)
+	if err != nil {
+		return coderag.RegexPage{}, err
+	}
+
+	page, err := m.codeText.SearchRegex(ctx, filter, pattern, opts)
+	if err != nil {
+		return page, err
+	}
+
+	hitRepos := make([]string, 0, len(page.Results))
+	for _, hit := range page.Results {
+		hitRepos = append(hitRepos, hit.Repo)
+	}
+	page.Indexed = m.repoIndexStates(ctx, indexedRepos(hitRepos, repos))
+
+	return page, nil
+}
+
+// codeScope resolves a request's repo/namespace/path arguments into the chunk
+// key filter every search mode shares, plus the concrete repository ids the
+// search was scoped to.
+//
+// It also warms the index: the normal and trigram indexes may still be
+// building in the background at startup, so any in-scope repository whose
+// index is pending is built on demand before the search runs. Otherwise a
+// query issued during the warm pass would return a confidently partial answer.
+func (m *Manager) codeScope(
+	ctx context.Context,
+	repoID, namespace, pathGlob string,
+) (func(string) bool, []string, error) {
+	nsScope, err := m.namespaceScope(ctx, repoID, namespace)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if err := m.ensureCodeIndexForSearch(ctx, repoID, nsScope); err != nil {
+		return nil, nil, err
+	}
+
+	repos, err := m.codeScopeRepos(ctx, repoID, nsScope)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// An unconstrained scope passes no repository list: with every tracked
+	// repository in scope the prefix test can only ever succeed, so paying it
+	// per hit buys nothing. An anchored path pattern is the exception — it
+	// needs the list to know where the repository prefix ends.
+	scope := coderag.Scope{Repos: repos, Path: pathGlob}
+	if nsScope.all && repoID == "" && !strings.Contains(pathGlob, "/") {
+		scope.Repos = nil
+	}
+
+	filter, err := scope.KeyFilter()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return filter, repos, nil
+}
+
+// codeScopeRepos lists the repository ids a scope covers.
+func (m *Manager) codeScopeRepos(ctx context.Context, repoID string, scope namespaceScope) ([]string, error) {
+	switch {
+	case scope.single != "":
+		return []string{scope.single}, nil
+	case len(scope.repos) > 0:
+		return scope.repos, nil
+	case repoID != "":
+		return []string{repoID}, nil
+	}
+
+	repos, err := m.reg.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(repos))
+	for _, r := range repos {
+		ids = append(ids, r.ID)
+	}
+
+	return ids, nil
+}
+
+// repoIndexStatesLimit bounds how many repositories a result page reports the
+// index state of. A page carries at most PerPage distinct repositories, so the
+// cap only ever applies to the empty-result case, where the answer "which
+// repositories did this even look at" stops being useful long before it stops
+// being long.
+const repoIndexStatesLimit = 10
+
+// repoIndexStates reports each repository's code-index state.
+func (m *Manager) repoIndexStates(ctx context.Context, repos []string) []coderag.RepoIndex {
+	if len(repos) == 0 {
+		return nil
+	}
+
+	out := make([]coderag.RepoIndex, 0, len(repos))
+	for _, id := range repos {
+		repo, err := m.reg.Get(ctx, id)
+		if err != nil || repo == nil {
+			// A repository removed between the search and this read simply has
+			// no index state to report; the hits it produced stay valid.
+			continue
+		}
+		stage := repo.Stages.CodeIndex
+		out = append(out, coderag.RepoIndex{
+			Repo:      id,
+			Commit:    stage.Commit,
+			IndexedAt: stage.FinishedAt,
+			// The clone having moved past the indexed commit is the one thing
+			// a caller cannot infer from the hit itself.
+			Stale: stage.Commit != "" && repo.LastCommit != "" && stage.Commit != repo.LastCommit,
+		})
+	}
+
+	return out
+}
+
+// indexedRepos picks the repositories whose index state a page should report:
+// the ones that produced hits, or — when nothing matched — the ones the search
+// looked at, because "no matches" and "nothing indexed yet" are answers a
+// caller must be able to tell apart.
+func indexedRepos(hits, scoped []string) []string {
+	source := hits
+	limit := len(hits)
+	if len(hits) == 0 {
+		source = scoped
+		limit = min(len(scoped), repoIndexStatesLimit)
+	}
+
+	seen := make(map[string]struct{}, limit)
+	out := make([]string, 0, limit)
+	for _, id := range source {
+		if _, dup := seen[id]; dup || id == "" {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+		if len(out) >= limit {
+			break
+		}
+	}
+
+	return out
+}
+
+func snippetRepos(snippets []coderag.Snippet) []string {
+	out := make([]string, 0, len(snippets))
+	for _, s := range snippets {
+		out = append(out, s.Repo)
+	}
+
+	return out
 }
 
 // ensureCodeIndexForSearch warms the normal code index for every repo a
@@ -2082,49 +2378,6 @@ func (m *Manager) ensureCodeIndexForSearch(ctx context.Context, repoID string, s
 	return errors.Join(errs...)
 }
 
-func (m *Manager) searchCodeTextNamespace(
-	ctx context.Context,
-	scope namespaceScope,
-	query string,
-	page, perPage int,
-) (coderag.SearchPage, error) {
-	if perPage <= 0 {
-		perPage = 10
-	}
-	if page <= 0 {
-		page = 1
-	}
-
-	var all []coderag.Snippet
-	for _, id := range scope.repos {
-		// Pull enough from each repo to fill the requested page after merging.
-		res, err := m.codeText.Search(ctx, id, query, 1, page*perPage)
-		if err != nil {
-			return coderag.SearchPage{}, err
-		}
-		all = append(all, res.Results...)
-	}
-
-	sort.SliceStable(all, func(i, j int) bool { return all[i].Score > all[j].Score })
-
-	total := len(all)
-	start := (page - 1) * perPage
-	if start > total {
-		start = total
-	}
-	end := start + perPage
-	if end > total {
-		end = total
-	}
-
-	return coderag.SearchPage{
-		Results: all[start:end],
-		Total:   uint64(total),
-		Page:    page,
-		PerPage: perPage,
-	}, nil
-}
-
 // ListDocs returns the generated doc metadata for a repo from its manifest.
 func (m *Manager) ListDocs(ctx context.Context, repoID string) ([]docgen.DocMeta, error) {
 	if m.docsRootDir == "" {
@@ -2141,9 +2394,14 @@ func (m *Manager) ListDocs(ctx context.Context, repoID string) ([]docgen.DocMeta
 		return nil, err
 	}
 
+	// No manifest means documentation generation has never completed for this
+	// repository, which is a different answer from "this repository has no
+	// documents" and one the caller can act on — the stage may be pending,
+	// skipped through skip_stages, or have failed.
 	if man == nil {
-		return []docgen.DocMeta{}, nil
+		return nil, fmt.Errorf("no generated documentation for %s yet; check repo_status for the docs stage, or refresh_repo to build it", repoID)
 	}
+
 	if len(man.Docs) == 0 {
 		return []docgen.DocMeta{}, nil
 	}

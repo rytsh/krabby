@@ -27,30 +27,31 @@ type searchDocsArgs struct {
 	TopDocs   int    `json:"top_docs,omitempty" jsonschema:"number of ranked documents to return (default 3, max 20)"`
 }
 
-type searchDocsOutput struct {
-	Results []rag.Doc `json:"results"`
-}
-
 func (a searchDocsArgs) searchMode() (string, error) {
 	return manager.NormalizeDocsSearchMode(a.Mode)
 }
 
 type searchCodeArgs struct {
-	Query     string `json:"query" jsonschema:"text, symbol, path, natural-language or code query"`
+	Query     string `json:"query" jsonschema:"normal/semantic: text, symbol, path or natural-language query. regex: an RE2 regular expression"`
 	Repo      string `json:"repo,omitempty" jsonschema:"repository id (owner/name) to search; always provide when known, omit only for explicit cross-repository search"`
 	Namespace string `json:"namespace,omitempty" jsonschema:"when repo is omitted, scope the search to this namespace; empty means the 'default' namespace, '*' searches all namespaces"`
-	Mode      string `json:"mode,omitempty" jsonschema:"search mode: 'normal' for bw full-text search (default) or 'semantic' for vector search"`
-	Page      int    `json:"page,omitempty" jsonschema:"normal mode page number (default 1)"`
-	PerPage   int    `json:"per_page,omitempty" jsonschema:"normal mode results per page (default 10, max 50)"`
+	Mode      string `json:"mode,omitempty" jsonschema:"search mode: 'normal' for BM25 full-text search (default), 'regex' for an RE2 pattern matched line by line, or 'semantic' for vector search"`
+	Page      int    `json:"page,omitempty" jsonschema:"normal/regex mode page number (default 1)"`
+	PerPage   int    `json:"per_page,omitempty" jsonschema:"normal/regex mode results per page (default 10, max 50)"`
 	TopK      int    `json:"top_k,omitempty" jsonschema:"semantic mode source snippets to return (default 8, max 20)"`
+	Path      string `json:"path,omitempty" jsonschema:"glob over the repo-relative source path; without '/' it matches a file name at any depth ('*_test.go'), with '/' it is anchored at the repository root ('internal/**')"`
+
+	CaseSensitive bool `json:"case_sensitive,omitempty" jsonschema:"regex mode: match case exactly (default false)"`
+	ContextLines  int  `json:"context_lines,omitempty" jsonschema:"regex mode: source lines to return either side of each match (default 0, max 10)"`
+	MaxMatches    int  `json:"max_matches,omitempty" jsonschema:"regex mode: matches to report per file (default 20, max 100)"`
 }
 
 func (a searchCodeArgs) searchMode() (string, error) {
 	if a.Mode == "" {
 		return "normal", nil
 	}
-	if a.Mode != "normal" && a.Mode != "semantic" {
-		return "", fmt.Errorf("mode must be normal or semantic")
+	if a.Mode != "normal" && a.Mode != "regex" && a.Mode != "semantic" {
+		return "", fmt.Errorf("mode must be normal, regex or semantic")
 	}
 
 	return a.Mode, nil
@@ -340,25 +341,30 @@ func viewSourceMCP(mgr sourceAdminService, col *websource.Collection) sourceResu
 func addDocTools(server *mcp.Server, search docsSearchService, sources sourceReadService) {
 	addTool(server, &mcp.Tool{
 		Name:        "search_docs",
-		Description: "Search generated documentation and connected knowledge sources, including Confluence, Jira and pages. mode='semantic' (default) uses embedding retrieval and is the best general choice: its cost does not grow with how much of the collection shares the question's wording. mode='hybrid' combines semantic retrieval with local BM25 using weighted reciprocal rank fusion; it is the most thorough but waits for the BM25 arm, which on a large single-domain collection scores most of the corpus. A natural-language question is rewritten for BM25 into an OR of its words, so any shared product name or technical term contributes and the whole sentence is not required verbatim; words that look like keys, error codes, versions or paths (they contain a digit or . - _ / + @) stay required, so they still constrain the result. Semantic retrieval supplies paraphrase and conceptual recall. Use mode='lexical' for exact Jira keys, error codes, identifiers, quoted terms or page titles; it does not call an embedding model. Quote a phrase (\"gateway timeout\"), prefix a word with '-' to exclude it, or use OR/NOT explicitly to bypass the rewrite and control matching yourself. Use mode='semantic' for purely conceptual natural-language questions. Hybrid requires both indexes and does not silently fall back when semantic search is disabled. Scores are mode-specific and must not be compared across modes. Returns bounded ranked excerpts; use get_doc only when a result needs more context. Always scope with repo, web:<collection> or api:<service> when known. When repo is omitted the repo docs searched are limited to the 'default' namespace; pass namespace:'*' to search all namespaces (web sources and catalogued APIs always participate). Use list_sources only when the collection name is unknown.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args searchDocsArgs) (*mcp.CallToolResult, searchDocsOutput, error) {
+		Description: "Search generated documentation and connected knowledge sources, including Confluence, Jira and pages. mode='semantic' (default) uses embedding retrieval and is the best general choice: its cost does not grow with how much of the collection shares the question's wording. mode='hybrid' combines semantic retrieval with local BM25 using weighted reciprocal rank fusion; it is the most thorough but waits for the BM25 arm, which on a large single-domain collection scores most of the corpus. A natural-language question is rewritten for BM25 into an OR of its words, so any shared product name or technical term contributes and the whole sentence is not required verbatim; words that look like keys, error codes, versions or paths (they contain a digit or . - _ / + @) stay required, so they still constrain the result. The rewrite keeps at most 12 terms and fills them with the required ones first, so a long question is scored on a leading slice of its words and 12 or more identifiers leave no room for prose: send the terms that matter, not a whole paragraph. Semantic retrieval supplies paraphrase and conceptual recall. Use mode='lexical' for exact Jira keys, error codes, identifiers, quoted terms or page titles; it does not call an embedding model. Quote a phrase (\"gateway timeout\"), prefix a word with '-' to exclude it, or use OR/NOT explicitly to bypass the rewrite and control matching yourself. Use mode='semantic' for purely conceptual natural-language questions. Hybrid requires both indexes and does not silently fall back when semantic search is disabled. Scores are mode-specific and must not be compared across modes. Returns bounded ranked excerpts; use get_doc only when a result needs more context. Always scope with repo, web:<collection> or api:<service> when known. When repo is omitted the repo docs searched are limited to the 'default' namespace; pass namespace:'*' to search all namespaces (web sources and catalogued APIs always participate). Use list_sources only when the collection name is unknown.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args searchDocsArgs) (*mcp.CallToolResult, rag.DocsPage, error) {
 		mode, err := args.searchMode()
 		if err != nil {
-			return nil, searchDocsOutput{}, err
+			return nil, rag.DocsPage{}, err
 		}
 
-		docs, err := search.SearchDocs(ctx, args.Scope, args.Repo, args.Namespace, mode, args.Question, args.TopDocs)
+		page, err := search.SearchDocs(ctx, args.Scope, args.Repo, args.Namespace, mode, args.Question, args.TopDocs)
 		if err != nil {
-			return nil, searchDocsOutput{}, err
+			return nil, rag.DocsPage{}, err
 		}
 
-		out := searchDocsOutput{Results: docs}
-		return jsonResult(docs), out, nil
+		return nil, page, nil
 	})
 
 	addTool(server, &mcp.Tool{
-		Name:        "search_code",
-		Description: "Preferred first tool for symbols, paths, literals, definitions, usages, and implementation locations. Normal mode performs exact full-text search; semantic mode handles conceptual source queries. Returns located snippets; use read_file only for needed surrounding context. Always provide repo when known. When repo is omitted the search is scoped to the 'default' namespace; pass namespace:'*' to search all namespaces.",
+		Name: "search_code",
+		Description: "Preferred first tool for symbols, paths, literals, definitions, usages, and implementation locations. " +
+			"mode='normal' (default) is BM25 over source chunks: prose words are ORed and ranked, while identifier-shaped words (`bw.ErrNotFound`, `PAY-1842`) are required, so pass identifiers when you know them. The rewrite keeps at most 12 terms and fills them with the required ones first, so a long verbatim question is scored on a leading slice of its words: send the terms that matter, not a whole paragraph. Quote a phrase, use OR between alternatives, prefix a term with '-' to exclude it, or suffix with '*' for a prefix match. " +
+			"mode='regex' matches an RE2 pattern line by line and returns exact file/line/column locations with optional context - use it for signatures, punctuation, line anchors or case-sensitive lookups a term index cannot express (`func \\(m \\*Manager\\)`, `errors\\.Is\\(`, `^func`). " +
+			"mode='semantic' handles conceptual source queries. " +
+			"Narrow by file with path (`*_test.go` matches a name at any depth, `internal/**` is anchored at the repo root). " +
+			"Returns located snippets; use read_file only for needed surrounding context. Always provide repo when known. When repo is omitted the search is scoped to the 'default' namespace; pass namespace:'*' to search all namespaces. " +
+			"Every result page reports the index state of the repositories behind it, so a stale or unbuilt index is visible rather than looking like an absence of matches.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args searchCodeArgs) (*mcp.CallToolResult, any, error) {
 		mode, err := args.searchMode()
 		if err != nil {
@@ -366,7 +372,11 @@ func addDocTools(server *mcp.Server, search docsSearchService, sources sourceRea
 		}
 
 		if mode == "normal" {
-			result, err := search.SearchCodeText(ctx, args.Repo, args.Namespace, args.Query, args.Page, boundedCount(args.PerPage, 10, 50))
+			result, err := search.SearchCodeText(ctx, args.Repo, args.Namespace, args.Query, coderag.TextSearchOptions{
+				Page:    args.Page,
+				PerPage: boundedCount(args.PerPage, 10, 50),
+				Path:    args.Path,
+			})
 			if err != nil {
 				return nil, nil, err
 			}
@@ -375,18 +385,33 @@ func addDocTools(server *mcp.Server, search docsSearchService, sources sourceRea
 			return jsonResult(result), nil, nil
 		}
 
-		snippets, err := search.SearchCode(ctx, args.Repo, args.Namespace, args.Query, boundedCount(args.TopK, 8, 20))
+		if mode == "regex" {
+			result, err := search.SearchCodeRegex(ctx, args.Repo, args.Namespace, args.Query, coderag.RegexOptions{
+				CaseSensitive: args.CaseSensitive,
+				ContextLines:  args.ContextLines,
+				MaxMatches:    args.MaxMatches,
+				Path:          args.Path,
+				Page:          args.Page,
+				PerPage:       boundedCount(args.PerPage, 10, 50),
+			})
+			if err != nil {
+				return nil, nil, err
+			}
+
+			return jsonResult(result), nil, nil
+		}
+
+		page, err := search.SearchCode(ctx, args.Repo, args.Namespace, args.Query, coderag.SemanticOptions{
+			TopK: boundedCount(args.TopK, 8, 20),
+			Path: args.Path,
+		})
 		if err != nil {
 			return nil, nil, err
 		}
 
-		snippets = boundedCodeSnippets(snippets)
-		return jsonResult(map[string]any{
-			"results":  snippets,
-			"total":    len(snippets),
-			"page":     1,
-			"per_page": len(snippets),
-		}), nil, nil
+		page.Results = boundedCodeSnippets(page.Results)
+
+		return jsonResult(page), nil, nil
 	})
 
 	addTool(server, &mcp.Tool{
@@ -427,7 +452,7 @@ func addDocTools(server *mcp.Server, search docsSearchService, sources sourceRea
 			summaries = append(summaries, summarizeSource(col))
 		}
 		page := pageSlice(summaries, args.Page, args.PerPage, 50)
-		return jsonResult(page), page, nil
+		return nil, page, nil
 	})
 	addSourceInspectTool(server, sources)
 }
@@ -477,7 +502,7 @@ func addSourceInspectTool(server *mcp.Server, mgr sourceReadService) {
 				Items: items, Total: total, Page: page, PerPage: perPage, HasMore: page*perPage < total,
 			},
 		}
-		return jsonResult(out), out, nil
+		return nil, out, nil
 	})
 }
 
@@ -511,7 +536,7 @@ func addSourceAdminTools(server *mcp.Server, mgr sourceAdminService) {
 			return nil, sourceResult{}, fmt.Errorf("source %s not found", name)
 		}
 		out := viewSourceMCP(mgr, col)
-		return jsonResult(out), out, nil
+		return nil, out, nil
 	})
 
 	addTool(server, &mcp.Tool{
@@ -604,7 +629,7 @@ func addSourceAdminTools(server *mcp.Server, mgr sourceAdminService) {
 			return nil, registerSourcePageOutput{}, err
 		}
 		out := registerSourcePageOutput{Source: name, ScopeKey: websource.ScopeKey(name), Page: summarizeSourceItem(page)}
-		return jsonResult(out), out, nil
+		return nil, out, nil
 	})
 
 	addTool(server, &mcp.Tool{
@@ -624,7 +649,7 @@ func addSourceAdminTools(server *mcp.Server, mgr sourceAdminService) {
 			Source: name, ScopeKey: websource.ScopeKey(name), Imported: result.Imported,
 			Changed: result.Changed, Unchanged: result.Unchanged,
 		}
-		return jsonResult(out), out, nil
+		return nil, out, nil
 	})
 
 	addTool(server, &mcp.Tool{
@@ -640,7 +665,7 @@ func addSourceAdminTools(server *mcp.Server, mgr sourceAdminService) {
 			Source: name, ScopeKey: websource.ScopeKey(name), Discovered: result.Discovered,
 			Added: result.Added, Existing: result.Existing,
 		}
-		return jsonResult(out), out, nil
+		return nil, out, nil
 	})
 
 	addTool(server, &mcp.Tool{
@@ -653,18 +678,31 @@ func addSourceAdminTools(server *mcp.Server, mgr sourceAdminService) {
 			return nil, deleteSourcePageOutput{}, err
 		}
 		out := deleteSourcePageOutput{Status: "deleted", Source: name, Slug: slug, Path: slug + ".md"}
-		return jsonResult(out), out, nil
+		return nil, out, nil
 	})
 
 }
 
+// maxSnippetRunes bounds the source text one hit carries. A chunk is up to
+// twice the configured chunk size, and a page of them at full length is most
+// of a context window.
+const maxSnippetRunes = 4000
+
+// boundedCodeSnippets caps each hit's text and says so.
+//
+// The flag is the point: a body cut at four thousand runes lands mid-function,
+// and an agent that is not told reasons about the half it was shown as if it
+// were the whole — concluding a branch or a return is missing rather than
+// re-reading the file with read_file.
 func boundedCodeSnippets(snippets []coderag.Snippet) []coderag.Snippet {
 	for i := range snippets {
 		runes := []rune(snippets[i].Snippet)
-		if len(runes) > 4000 {
-			snippets[i].Snippet = string(runes[:4000])
+		if len(runes) > maxSnippetRunes {
+			snippets[i].Snippet = string(runes[:maxSnippetRunes])
+			snippets[i].Truncated = true
 		}
 	}
+
 	return snippets
 }
 
@@ -718,8 +756,8 @@ type setDocsConfigArgs struct {
 
 	RAGEnabled             bool `json:"rag_enabled,omitempty" jsonschema:"enable indexing + retrieval"`
 	RAGKeepMarkdownTargets bool `json:"rag_keep_markdown_targets,omitempty" jsonschema:"retain link and image URLs in search indexes; off by default so labels/alt text remain but targets are omitted"`
-	RAGChunkSize           int  `json:"rag_chunk_size,omitempty" jsonschema:"target chunk length in characters"`
-	RAGChunkOverlap        int  `json:"rag_chunk_overlap,omitempty" jsonschema:"character overlap between chunks"`
+	RAGChunkSize           int  `json:"rag_chunk_size,omitempty" jsonschema:"target chunk length in bytes; the chunker counts bytes, so a non-ASCII corpus yields shorter chunks than the number suggests"`
+	RAGChunkOverlap        int  `json:"rag_chunk_overlap,omitempty" jsonschema:"byte overlap between chunks"`
 	RAGTopK                int  `json:"rag_top_k,omitempty" jsonschema:"chunk matches fetched before grouping"`
 	RAGTopDocs             int  `json:"rag_top_docs,omitempty" jsonschema:"ranked document excerpts returned (max 20)"`
 
@@ -730,8 +768,8 @@ type setDocsConfigArgs struct {
 	RAGLexicalStopWords     []string `json:"rag_lexical_stop_words,omitempty" jsonschema:"words dropped from a question before BM25 search; empty by default. BM25 already scores corpus-wide terms near zero in any language, so this only reduces query latency on a large corpus and must match the corpus language"`
 
 	CodeRAGEnabled      bool     `json:"code_rag_enabled,omitempty" jsonschema:"enable source-code indexing and semantic search"`
-	CodeRAGChunkSize    int      `json:"code_rag_chunk_size,omitempty" jsonschema:"target code chunk length in characters"`
-	CodeRAGChunkOverlap int      `json:"code_rag_chunk_overlap,omitempty" jsonschema:"character overlap for fallback code chunks"`
+	CodeRAGChunkSize    int      `json:"code_rag_chunk_size,omitempty" jsonschema:"target code chunk length in bytes (the chunker counts bytes, not runes)"`
+	CodeRAGChunkOverlap int      `json:"code_rag_chunk_overlap,omitempty" jsonschema:"byte overlap for fallback code chunks"`
 	CodeRAGTopK         int      `json:"code_rag_top_k,omitempty" jsonschema:"source snippets returned by default"`
 	CodeRAGInclude      []string `json:"code_rag_include,omitempty" jsonschema:"source globs to index; replaces the built-in allowlist (empty uses it)"`
 	CodeRAGIncludeExtra []string `json:"code_rag_include_extra,omitempty" jsonschema:"source globs added to the built-in allowlist instead of replacing it, e.g. ['**/*.yaml']"`

@@ -158,7 +158,8 @@ func TestHybridRunsBothRankersConcurrently(t *testing.T) {
 		t.Helper()
 
 		started := time.Now()
-		docs, err := f.m.SearchDocs(ctx, ScopeRepos, f.repoID, registry.NamespaceAll, mode, "payment gateway timeout capture", 5)
+		page, err := f.m.SearchDocs(ctx, ScopeRepos, f.repoID, registry.NamespaceAll, mode, "payment gateway timeout capture", 5)
+		docs := page.Results
 		if err != nil {
 			t.Fatalf("%s: %v", mode, err)
 		}
@@ -238,7 +239,8 @@ func TestHybridReportsRankerFailure(t *testing.T) {
 	}
 
 	// The surviving ranker still answers on its own.
-	docs, err := m.SearchDocs(ctx, ScopeRepos, repo.ID, registry.NamespaceAll, DocsSearchLexical, "gateway timeout", 5)
+	page, err := m.SearchDocs(ctx, ScopeRepos, repo.ID, registry.NamespaceAll, DocsSearchLexical, "gateway timeout", 5)
+	docs := page.Results
 	if err != nil {
 		t.Fatal(err)
 	}

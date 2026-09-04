@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // chunk is one embeddable slice of a source file with its line range.
@@ -22,6 +23,13 @@ type symbol struct {
 
 // maxChunkChars hard-caps a single chunk so one pathological line (minified
 // bundles, embedded blobs) cannot blow the embedder's context window.
+//
+// The cap is a byte count, and it is a real ceiling: a single line longer than
+// it is indexed up to the cap and no further. That is deliberate for the
+// embedder, and it is why regex search documents itself as matching within a
+// chunk - a minified bundle is not searchable past this many bytes of any one
+// line. Every other file is unaffected, because a chunk otherwise ends at a
+// line boundary well before the cap.
 func maxChunkChars(size int) int { return 2 * size }
 
 // chunkFile splits a source file into chunks. When symbols (from the graphify
@@ -224,13 +232,23 @@ func joinLines(lines []string, start, end int) string {
 	return strings.Join(lines[start-1:end], "\n")
 }
 
-// capText hard-caps text at maxChunkChars(size).
+// capText hard-caps text at maxChunkChars(size), cutting on a rune boundary.
+//
+// The boundary matters twice: the cut text is embedded, where a half rune is a
+// byte sequence no tokenizer can read, and it is returned as a search snippet,
+// where it reaches the caller as U+FFFD and is indistinguishable from source
+// that is actually corrupt.
 func capText(text string, size int) string {
-	if maxLen := maxChunkChars(size); len(text) > maxLen {
-		return text[:maxLen]
+	maxLen := maxChunkChars(size)
+	if len(text) <= maxLen {
+		return text
 	}
 
-	return text
+	for maxLen > 0 && !utf8.RuneStart(text[maxLen]) {
+		maxLen--
+	}
+
+	return text[:maxLen]
 }
 
 // parseLine extracts the 1-based line number from a graphify source_location

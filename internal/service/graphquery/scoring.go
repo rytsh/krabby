@@ -156,12 +156,20 @@ func pickSeeds(scored []scoredNode) []string {
 // findNode returns node ids whose label/id matches the term, ordered by
 // exact > prefix > substring precedence (mirrors _find_node).
 func (g *Graph) findNode(label string) []string {
+	exact, prefix, substring := g.findNodeTiers(label)
+
+	return append(append(exact, prefix...), substring...)
+}
+
+// findNodeTiers is findNode's resolution split by match strength, so callers that
+// must not mix tiers (symbol navigation returns every strongest-tier node and
+// reports the rest as candidates) share one definition of precedence.
+func (g *Graph) findNodeTiers(label string) (exact, prefix, substring []string) {
 	term := strings.Join(searchTokens(label), " ")
 	if term == "" {
-		return nil
+		return nil, nil, nil
 	}
 
-	var exact, prefix, substring []string
 	for _, id := range g.nodeList {
 		d := g.Nodes[id]
 		normLabel := normLabelOf(d)
@@ -178,5 +186,5 @@ func (g *Graph) findNode(label string) []string {
 		}
 	}
 
-	return append(append(exact, prefix...), substring...)
+	return exact, prefix, substring
 }

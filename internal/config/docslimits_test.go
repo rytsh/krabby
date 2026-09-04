@@ -51,18 +51,3 @@ func TestDocsLimitsMergeDoesNotMutateReceiver(t *testing.T) {
 		t.Errorf("receiver mutated: %+v", global)
 	}
 }
-
-func TestDocsLimitsEmpty(t *testing.T) {
-	if !(DocsLimits{}).Empty() {
-		t.Error("zero DocsLimits should be empty")
-	}
-	if (DocsLimits{MaxGroupBytes: 1}).Empty() {
-		t.Error("a set field should make it non-empty")
-	}
-}
-
-func TestDocsOverrideEmptyAccountsForLimits(t *testing.T) {
-	if (DocsOverride{Limits: DocsLimits{MaxSourceBytes: 1}}).Empty() {
-		t.Error("an override carrying only a limit must not report empty, or it would be dropped")
-	}
-}

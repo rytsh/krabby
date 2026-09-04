@@ -66,10 +66,12 @@ type docsService interface {
 	ListRepoFilesAt(context.Context, string, string, string, bool) ([]repofs.Entry, string, error)
 	ReadRepoFileAt(context.Context, string, string, string, int64, int) (*repofs.FileContent, error)
 	ListDocs(context.Context, string) ([]docgen.DocMeta, error)
+	GlobRepoFiles(context.Context, string, string, string, int) (repofs.GlobPage, error)
 	GetDoc(context.Context, string, string, int64, int) (*repofs.FileContent, error)
-	SearchDocs(context.Context, string, string, string, string, string, int) ([]rag.Doc, error)
-	SearchCodeText(context.Context, string, string, string, int, int) (coderag.SearchPage, error)
-	SearchCode(context.Context, string, string, string, int) ([]coderag.Snippet, error)
+	SearchDocs(context.Context, string, string, string, string, string, int) (rag.DocsPage, error)
+	SearchCodeText(context.Context, string, string, string, coderag.TextSearchOptions) (coderag.SearchPage, error)
+	SearchCodeRegex(context.Context, string, string, string, coderag.RegexOptions) (coderag.RegexPage, error)
+	SearchCode(context.Context, string, string, string, coderag.SemanticOptions) (coderag.SemanticPage, error)
 	MergedPath() string
 }
 

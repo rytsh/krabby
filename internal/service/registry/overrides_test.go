@@ -25,8 +25,8 @@ func TestOverridesNormalizeDropsUnknownStagesEntirely(t *testing.T) {
 	if over.SkipStages != nil {
 		t.Fatalf("SkipStages = %v, want nil", over.SkipStages)
 	}
-	if !over.Empty() {
-		t.Fatal("an override left with nothing valid must report empty")
+	if (Overrides{}).Changed(over) {
+		t.Fatal("an override left with nothing valid must be indistinguishable from none")
 	}
 }
 
@@ -58,11 +58,14 @@ func TestOverridesGraphChangedOnSkipToggle(t *testing.T) {
 	}
 }
 
-func TestOverridesEmptyAccountsForNewFields(t *testing.T) {
-	if (Overrides{DocsMaxSourceBytes: 1}).Empty() {
+// Every field of an override set has to take part in the comparison that
+// decides whether a repository must be rebuilt; a field left out of it would
+// persist but never trigger the work it configures.
+func TestOverridesChangedAccountsForNewFields(t *testing.T) {
+	if !(Overrides{}).Changed(Overrides{DocsMaxSourceBytes: 1}) {
 		t.Error("a docs budget alone must count as an override")
 	}
-	if (Overrides{SkipStages: []string{StageDocs}}).Empty() {
+	if !(Overrides{}).Changed(Overrides{SkipStages: []string{StageDocs}}) {
 		t.Error("a skip list alone must count as an override")
 	}
 }

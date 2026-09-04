@@ -345,14 +345,6 @@ func (q *Queue) SetLimit(n int) {
 	q.wakeUp()
 }
 
-// Limit returns the current concurrency limit.
-func (q *Queue) Limit() int {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-
-	return q.limit
-}
-
 // Submit enqueues a task and returns a handle to wait for its completion. When
 // a pending task with the same Key already exists the call coalesces onto it
 // and returns that task's handle. When the queue is shutting down (or Run is

@@ -39,6 +39,7 @@ import (
 	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/rytsh/krabby/internal/config"
+	"github.com/rytsh/krabby/internal/strutil"
 )
 
 // TracesPath is the full path traces are posted to, appended to the configured
@@ -348,23 +349,20 @@ func (t *Tracer) text(s string) string {
 const truncatedBudget = 8 << 10
 
 // clip shortens s to limit bytes on a rune boundary, marking that it was cut.
-// limit <= 0 means no limit.
+// limit <= 0 means no limit, which is why the truncation is not delegated
+// wholesale: strutil.Truncate reads n <= 0 as "keep nothing".
 func clip(s string, limit int) string {
 	if limit <= 0 || len(s) <= limit {
 		return s
 	}
 
-	cut := limit
-	// Do not split a multi-byte rune: back up to the start of the last one.
-	for cut > 0 && !utf8Start(s[cut]) {
-		cut--
-	}
+	// Truncate marks the cut with its own ellipsis; this package's marker
+	// carries the byte counts instead, so drop the one it appended. Only that
+	// trailing marker is removed, never an ellipsis that was in s itself.
+	head := strings.TrimSuffix(strutil.Truncate(s, limit), strutil.Ellipsis)
 
-	return s[:cut] + fmt.Sprintf("\n…[truncated, %d of %d bytes]", cut, len(s))
+	return head + fmt.Sprintf("\n…[truncated, %d of %d bytes]", len(head), len(s))
 }
-
-// utf8Start reports whether b begins a UTF-8 encoded rune.
-func utf8Start(b byte) bool { return b&0xC0 != 0x80 }
 
 // jsonOr renders v as JSON, falling back to its Go representation so a span is
 // never dropped because of an unmarshalable value.

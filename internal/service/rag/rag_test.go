@@ -92,6 +92,31 @@ func writeDocs(t *testing.T, files map[string]string) string {
 	return dir
 }
 
+// retrieveDocs mirrors the production retrieval path: manager.SearchDocs
+// clamps topDocs itself and then calls RetrieveCandidatesTimed, the only
+// retrieval entry point on the way to a search_docs answer. The tests go
+// through the same two steps so they pin the clamp that actually runs
+// instead of a second copy living in the service.
+func retrieveDocs(
+	ctx context.Context,
+	s *Service,
+	filter vectorstore.Filter,
+	question string,
+	topDocs int,
+) ([]Doc, error) {
+	if topDocs <= 0 {
+		topDocs = DefaultTopDocs
+	}
+
+	if topDocs > MaxTopDocs {
+		topDocs = MaxTopDocs
+	}
+
+	docs, _, err := s.RetrieveCandidatesTimed(ctx, filter, question, topDocs)
+
+	return docs, err
+}
+
 func TestIndexAndRetrieveExcerpt(t *testing.T) {
 	ctx := context.Background()
 
@@ -107,9 +132,9 @@ func TestIndexAndRetrieveExcerpt(t *testing.T) {
 		t.Fatalf("Index: %v", err)
 	}
 
-	docs, err := s.Retrieve(ctx, vectorstore.FilterKey("o/r"), "tell me about beta", 1)
+	docs, err := retrieveDocs(ctx, s, vectorstore.FilterKey("o/r"), "tell me about beta", 1)
 	if err != nil {
-		t.Fatalf("Retrieve: %v", err)
+		t.Fatalf("retrieveDocs: %v", err)
 	}
 
 	if len(docs) != 1 {
@@ -130,9 +155,9 @@ func TestIndexAndRetrieveExcerpt(t *testing.T) {
 	}
 
 	// Nested docs are reachable too.
-	docs, err = s.Retrieve(ctx, vectorstore.FilterKey("o/r"), "gamma question", 1)
+	docs, err = retrieveDocs(ctx, s, vectorstore.FilterKey("o/r"), "gamma question", 1)
 	if err != nil {
-		t.Fatalf("Retrieve gamma: %v", err)
+		t.Fatalf("retrieveDocs gamma: %v", err)
 	}
 
 	if len(docs) != 1 || docs[0].Path != "sub/gamma.md" {
@@ -151,7 +176,7 @@ func TestIndexExcludesLinkAndImageDestinations(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	docs, err := s.Retrieve(ctx, vectorstore.FilterKey("web:docs"), "alpha", 1)
+	docs, err := retrieveDocs(ctx, s, vectorstore.FilterKey("web:docs"), "alpha", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +203,7 @@ func TestIndexCanKeepLinkAndImageDestinations(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	docs, err := s.Retrieve(ctx, vectorstore.FilterKey("web:docs"), "alpha", 1)
+	docs, err := retrieveDocs(ctx, s, vectorstore.FilterKey("web:docs"), "alpha", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +231,7 @@ func TestRetrieveClampsCountAndExcerpt(t *testing.T) {
 	if err := s.Index(ctx, "o/r", docsDir); err != nil {
 		t.Fatal(err)
 	}
-	docs, err := s.Retrieve(ctx, vectorstore.FilterKey("o/r"), "alpha", 1000)
+	docs, err := retrieveDocs(ctx, s, vectorstore.FilterKey("o/r"), "alpha", 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,9 +268,9 @@ func TestIndexRemovesStaleDocs(t *testing.T) {
 		t.Fatalf("re-Index: %v", err)
 	}
 
-	docs, err := s.Retrieve(ctx, vectorstore.FilterKey("o/r"), "beta beta beta", 5)
+	docs, err := retrieveDocs(ctx, s, vectorstore.FilterKey("o/r"), "beta beta beta", 5)
 	if err != nil {
-		t.Fatalf("Retrieve: %v", err)
+		t.Fatalf("retrieveDocs: %v", err)
 	}
 
 	for _, d := range docs {
@@ -272,9 +297,9 @@ func TestRetrieveAcrossRepos(t *testing.T) {
 	}
 
 	// repo == "" searches all repos.
-	docs, err := s.Retrieve(ctx, vectorstore.FilterKey(""), "beta", 1)
+	docs, err := retrieveDocs(ctx, s, vectorstore.FilterKey(""), "beta", 1)
 	if err != nil {
-		t.Fatalf("Retrieve: %v", err)
+		t.Fatalf("retrieveDocs: %v", err)
 	}
 
 	if len(docs) != 1 || docs[0].Repo != "o/b" {
@@ -285,7 +310,7 @@ func TestRetrieveAcrossRepos(t *testing.T) {
 func TestRetrieveEmptyQuestion(t *testing.T) {
 	s := newTestService(t, nil)
 
-	if _, err := s.Retrieve(context.Background(), vectorstore.FilterKey(""), "  ", 5); err == nil {
+	if _, err := retrieveDocs(context.Background(), s, vectorstore.FilterKey(""), "  ", 5); err == nil {
 		t.Fatal("expected error for empty question")
 	}
 }
