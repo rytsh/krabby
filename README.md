@@ -87,3 +87,23 @@ REST endpoints, MCP tools, memory tuning, and development instructions, see
 [DETAILS.md](DETAILS.md).
 
 </details>
+
+## Real usage
+
+Once a repository is ready, ask your agent a concrete question and require paths
+and lines in the answer:
+
+> Find where payment retries are configured, show which functions call that
+> implementation, and cite the exact files and lines.
+
+The normal read-only flow is:
+
+1. `search_code` locates the implementation in the selected repository.
+2. `find_definition` or `find_references` verifies the symbol and its real graph relationships.
+3. `read_file` reads only the source needed to explain the result.
+4. `git_blame` and `git_diff` can add change history when the question asks why the code exists.
+
+Normal and regex code search plus graph navigation do not require an LLM key.
+Configure models only when you want generated documentation or semantic search.
+Keep the read-only `krabby` catalog enabled for daily work; enable
+`krabby-api` or `krabby-admin` only for tasks that need those permissions.

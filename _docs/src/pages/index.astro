@@ -1,5 +1,7 @@
 ---
 import "../styles/global.css";
+
+const assetBase = `${import.meta.env.BASE_URL.replace(/\/$/, "")}/`;
 ---
 
 <!doctype html>
@@ -19,7 +21,7 @@ import "../styles/global.css";
       property="og:description"
       content="Code search, documentation retrieval and graph analysis over MCP. Point it at repositories — it clones, indexes and keeps them fresh."
     />
-    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href={`${assetBase}favicon.svg`} type="image/svg+xml" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -30,7 +32,7 @@ import "../styles/global.css";
   <body>
     <header class="hero wrap" id="top">
       <div class="cover">
-        <img src="./krabby.webp" alt="krabby" />
+        <img src={`${assetBase}krabby.webp`} alt="krabby" />
       </div>
 
       <div class="front-grid">
@@ -51,7 +53,7 @@ import "../styles/global.css";
             <span class="case-no">KRABBY INTELLIGENCE BUREAU · FILE 001</span>
             <span class="label">INDEX REPORT</span>
             <h3>THE REPO<br />HAS BEEN READ!</h3>
-            <p>A native Go engine, searchable docs and graph intelligence, delivered through one MCP endpoint.</p>
+            <p>A native Go engine, searchable docs and graph intelligence, split into three permission-focused MCP catalogs.</p>
           </div>
           <span class="stamp">MCP READY</span>
         </aside>
@@ -69,7 +71,7 @@ import "../styles/global.css";
           <div class="head reveal">
             <span class="caption">// what it does</span>
             <h2>Built for agents that <em>read code</em> all day.</h2>
-            <p>Every capability below is served straight to your LLM or agent over a single streamable-HTTP MCP endpoint.</p>
+            <p>Capabilities are served to your LLM or agent through separate read-only, API, and administration MCP catalogs.</p>
           </div>
 
           <div class="grid">
@@ -159,14 +161,16 @@ import "../styles/global.css";
             <div class="screen reveal">
               <div class="tbar"><i></i><i></i><i></i><span>krabby · pipeline</span></div>
               <pre><span class="d">+-----------------------------------------+</span>
-<span class="d">|</span> <span class="b">LLM/Agent</span>   --MCP--> <span class="a">krabby (Go)</span>        <span class="d">|</span>
+<span class="d">|</span> <span class="b">LLM/Agent</span>  --MCP---> <span class="a">krabby (Go)</span>        <span class="d">|</span>
 <span class="d">|</span> <span class="b">CI/webhook</span>  --HTTP-> <span class="a">krabby (Go)</span>        <span class="d">|</span>
 <span class="d">|</span>                                         <span class="d">|</span>
-<span class="d">|</span>  |- MCP tools (manage + query)          <span class="d">|</span>
+<span class="d">|</span>  |- /mcp       read-only code + docs   <span class="d">|</span>
+<span class="d">|</span>  |- /mcp/api   API discovery + calls   <span class="d">|</span>
+<span class="d">|</span>  |- /mcp/admin mutations + settings    <span class="d">|</span>
 <span class="d">|</span>  |- REST API + provider-neutral hook    <span class="d">|</span>
 <span class="d">|</span>  |- Registry (bw/BadgerDB)              <span class="d">|</span>
 <span class="d">|</span>  |- <span class="g">Native graph query engine (Go)</span>      <span class="d">|</span>
-<span class="d">|</span>  `- Scheduler (poll interval)           <span class="d">|</span>
+<span class="d">|</span>  `- Scheduler (cron + intervals)        <span class="d">|</span>
 <span class="d">+-----------------------------------------+</span></pre>
             </div>
 
@@ -179,12 +183,76 @@ import "../styles/global.css";
         </div>
       </section>
 
+      <section id="real-usage">
+        <div class="wrap">
+          <div class="head reveal">
+            <h2>What a real code question <em>looks like.</em></h2>
+            <p>Krabby does not replace your coding agent. It gives the agent a repeatable route from a question to the indexed source, structural relationships, and exact lines.</p>
+          </div>
+
+          <div class="case-file reveal">
+            <div class="case-question">
+              <span class="case-marker">USER QUESTION</span>
+              <blockquote>“Where is payment retry backoff implemented, and what calls it?”</blockquote>
+              <p>The repository is already indexed as <span class="mono">github.com/acme/payments</span>. No LLM or embedding model is required for this flow.</p>
+            </div>
+
+            <ol class="investigation">
+              <li>
+                <div class="step-no">1</div>
+                <div>
+                  <h3>Locate the implementation</h3>
+                  <p>The agent starts with ranked source search. It passes the full repository id so similarly named code in other repositories cannot leak into the answer.</p>
+                  <code>search_code &#123; repo: "github.com/acme/payments", query: "payment retry backoff" &#125;</code>
+                </div>
+              </li>
+              <li>
+                <div class="step-no">2</div>
+                <div>
+                  <h3>Prove the relationship</h3>
+                  <p>Once the exact symbol is known, graph-backed references answer who calls it. The <span class="mono">call</span> context excludes imports, field types, and unrelated name matches.</p>
+                  <code>find_references &#123; repo: "github.com/acme/payments", symbol: "retryWithBackoff", context: ["call"] &#125;</code>
+                </div>
+              </li>
+              <li>
+                <div class="step-no">3</div>
+                <div>
+                  <h3>Read only the evidence</h3>
+                  <p>The agent opens the matched file around the reported location, then answers with real paths and lines instead of pasting an entire repository into its context.</p>
+                  <code>read_file &#123; repo: "github.com/acme/payments", path: "internal/payment/retry.go" &#125;</code>
+                </div>
+              </li>
+            </ol>
+
+            <div class="case-result">
+              <span class="case-marker">WHAT YOU GET</span>
+              <p>A short explanation tied to the implementation file, the callers found through graph edges, and exact source locations your team can verify. For an architecture question, the agent switches to <span class="mono">query_graph</span>; for an exact pattern, it switches to regex search.</p>
+            </div>
+          </div>
+
+          <div class="usage-grid">
+            <article class="usage-note reveal">
+              <h3>Investigate a production error</h3>
+              <p>Search the error literal in regex mode, read its handling branch, then use <span class="mono">git_blame</span> and <span class="mono">git_diff</span> to explain when and why it changed.</p>
+            </article>
+            <article class="usage-note reveal">
+              <h3>Plan a safe refactor</h3>
+              <p>Find a definition, list only its call references, and ask the graph for dependencies before touching the implementation.</p>
+            </article>
+            <article class="usage-note reveal">
+              <h3>Understand an unfamiliar service</h3>
+              <p>Search generated docs for orientation, inspect the graph's core nodes, then read the source behind only the relevant result.</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
       <section id="quickstart">
         <div class="wrap">
           <div class="head reveal">
             <span class="caption">// get running</span>
-            <h2>From container to first query in a <em>minute</em>.</h2>
-            <p>The image includes Krabby, Graphify, git, and SSH. You only need Docker.</p>
+            <h2>From container to first answer in <em>three steps.</em></h2>
+            <p>The image includes Krabby, Graphify, git, and SSH. Start it, add a repository, then give your agent read-only access.</p>
           </div>
 
           <div class="qs">
@@ -203,28 +271,38 @@ http://localhost:8080</pre>
             </div>
 
             <div class="code reveal">
-              <div class="clabel"><span>LLM — MCP setup prompt</span><button class="copy" data-copy="prompt">copy</button></div>
-              <pre id="prompt">Set up Krabby as an MCP server for this repository.
-
-Start the latest Krabby Docker image, then connect
-the MCP client to:
-http://localhost:8080/mcp
-Use this header:
-X-Krabby-Tool-Profile: full
-
-After Krabby is running, configure its runtime model settings either
-through the Krabby web UI at http://localhost:8080 or through MCP tools:
-- LLM provider/model and API key for generated code documentation
-- General embedder for document/RAG search
-- Code embedder for code indexing and semantic code search
-Run test_llm, test_embedder, and test_code_embedder before adding or
-refreshing repositories so indexing and docs generation are verified.
-
-Verify that the MCP connection works, then use Krabby for this
-repository. For code questions, use graph-backed search first:
-find symbols, definitions, usages and dependencies through the
-repository graph, and always report exact file paths and lines.</pre>
+              <div class="clabel"><span>OpenCode — opencode.json</span><button class="copy" data-copy="prompt">copy</button></div>
+              <pre id="prompt">&#123;
+  <span class="k">"mcp"</span>: &#123;
+    <span class="k">"krabby"</span>: &#123;
+      <span class="k">"type"</span>: <span class="s">"remote"</span>,
+      <span class="k">"url"</span>: <span class="s">"http://localhost:8080/mcp"</span>
+    &#125;,
+    <span class="k">"krabby-api"</span>: &#123;
+      <span class="k">"type"</span>: <span class="s">"remote"</span>,
+      <span class="k">"url"</span>: <span class="s">"http://localhost:8080/mcp/api"</span>,
+      <span class="k">"enabled"</span>: false
+    &#125;,
+    <span class="k">"krabby-admin"</span>: &#123;
+      <span class="k">"type"</span>: <span class="s">"remote"</span>,
+      <span class="k">"url"</span>: <span class="s">"http://localhost:8080/mcp/admin"</span>,
+      <span class="k">"enabled"</span>: false
+    &#125;
+  &#125;
+&#125;</pre>
             </div>
+          </div>
+
+          <div class="after-start reveal">
+            <div><b>1. Add content.</b> Open <a href="http://localhost:8080">localhost:8080</a> and add a public repository. For a private repository, store its host credential first.</div>
+            <div><b>2. Wait for Ready.</b> Cloning, graph extraction, and source indexing run in the background. Generated docs and semantic search remain optional.</div>
+            <div><b>3. Ask a concrete question.</b> Try “Find where retries are configured, show every caller, and cite file paths and lines.” Keep <span class="mono">krabby-admin</span> disabled after setup.</div>
+          </div>
+
+          <div class="catalogs reveal">
+            <div><span class="catalog-path">/mcp</span><b>Everyday code work</b><p>Read-only code, graph, files, history, and docs. Keep this enabled.</p></div>
+            <div><span class="catalog-path">/mcp/api</span><b>Live API work</b><p>Discovers catalogued endpoints and can call them. Enable only when needed.</p></div>
+            <div><span class="catalog-path">/mcp/admin</span><b>Setup and changes</b><p>Adds, refreshes, or deletes managed resources. Disable it for normal analysis.</p></div>
           </div>
         </div>
       </section>
