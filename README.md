@@ -107,3 +107,24 @@ Normal and regex code search plus graph navigation do not require an LLM key.
 Configure models only when you want generated documentation or semantic search.
 Keep the read-only `krabby` catalog enabled for daily work; enable
 `krabby-api` or `krabby-admin` only for tasks that need those permissions.
+
+### Research alongside a Jira or Confluence MCP
+
+Krabby searches **indexed snapshots** for context and connections to code. A
+dedicated Jira/Confluence MCP is the right source for current issue status,
+assignees, latest comments, live queries and upstream changes. Search/read results
+identify generated summaries versus synced copies and carry original URLs for
+that handoff. Sync status is Krabby ingestion status, not Jira workflow status;
+an empty search does not prove an item is absent from the upstream system.
+
+For an unfamiliar repository, start with `repo_overview`. It reads the existing
+generated documentation without another model call and returns a short
+introduction, generation/commit metadata and section offsets. Use `get_doc` with
+one of those offsets, then `search_code` / `read_file` to verify relevant claims.
+The overview is a map built from selected, budget-limited summaries, not complete
+proof of repository behavior. If it is unavailable, investigate the source
+directly; no document does not mean no code.
+
+For example: search an incident key lexically in its `web:<collection>`, follow
+the original Jira URL through the live Jira MCP if current state matters, and
+use the repo overview plus code search to locate the affected implementation.

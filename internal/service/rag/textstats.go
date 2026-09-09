@@ -149,8 +149,8 @@ func (s *TextStore) RefreshStats(ctx context.Context) error {
 	// the corpus's.
 	sampler := NewFrequentTermSampler(total)
 
-	if err := s.bucket.Walk(ctx, nil, func(record *textRecord) error {
-		sampler.Observe(record.Title, record.Excerpt)
+	if err := s.bucket.WalkSample(ctx, sampler.Stride(), func(record *textRecord) error {
+		sampler.ObserveSample(record.Title, record.Excerpt)
 
 		return nil
 	}); err != nil {
@@ -226,7 +226,15 @@ func (s *FrequentTermSampler) Observe(fields ...string) {
 	if s.seen%s.stride != 0 {
 		return
 	}
+	s.ObserveSample(fields...)
+}
 
+// Stride is the record interval used by the sampler. Stores can apply it to
+// keys before decoding values and offer just the selected records below.
+func (s *FrequentTermSampler) Stride() int { return s.stride }
+
+// ObserveSample offers a record already selected at Stride intervals.
+func (s *FrequentTermSampler) ObserveSample(fields ...string) {
 	s.sampled++
 
 	// Count each term once per document: document frequency, not term

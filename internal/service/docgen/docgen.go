@@ -130,7 +130,15 @@ CRITICAL RULES:
 - Extract REAL values only from the summaries, config and graph context below
   (names, paths, routes, HTTP methods, topic names, table/column names, env
   vars, config keys, types, function names). Every claim must be traceable to
-  the input. Never invent behavior the input does not support.
+   the input. Never invent behavior the input does not support.
+- Make important behavior claims navigable: cite the exact repo-relative source
+  path and relevant symbol in backticks alongside the claim. Do not invent line
+  numbers. Distinguish an inference from behavior directly supported by the input.
+- For a substantial repo, include a compact "Where to investigate" table mapping
+  concrete questions or change areas to real entrypoint files/symbols and related
+  modules. Use only paths present in the input; omit it for trivial projects.
+  This document is a research map, not proof that unmentioned behavior is absent:
+  the source selection and summary input may be partial or truncated.
 - Prefer the non-obvious: the tricky control flow, the invariants, the ordering
   constraints, the failure/retry handling, the concurrency model, the edge cases
   the code actually handles. Skip the parts a reader could infer in five seconds.
@@ -199,6 +207,7 @@ FRONTEND sections (include only when you have real, specific content):
 
 Formatting rules:
 - Output GitHub-flavored Markdown only. Do not wrap the whole response in a code fence.
+- Use ATX headings (#, ##, ###) so readers can navigate document sections.
 - Be terse. Prefer tables and bullet lists of concrete facts over prose
   paragraphs. No filler sentences, no summaries of what you just said.
 - Mermaid labels may be wrapped in double quotes, for example A["Load config"].
@@ -994,6 +1003,12 @@ func joinSummaries(docsDir string, summaries []DocMeta, budget int) string {
 		}
 
 		c := strings.TrimSpace(string(b))
+		if s.SourcePath != "" {
+			// Preserve the authoritative file identity even when a cached or
+			// model-produced summary omitted its heading. Keep it before the
+			// body so budget truncation does not discard the navigation hint.
+			c = fmt.Sprintf("Source file: %q\n%s", s.SourcePath, c)
+		}
 		contents = append(contents, c)
 		total += len(c)
 	}

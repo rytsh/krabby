@@ -87,7 +87,8 @@ type docsSearchService interface {
 	SearchCodeRegex(context.Context, string, string, string, coderag.RegexOptions) (coderag.RegexPage, error)
 	SearchCode(context.Context, string, string, string, coderag.SemanticOptions) (coderag.SemanticPage, error)
 	ListDocs(context.Context, string) ([]docgen.DocMeta, error)
-	GetDoc(context.Context, string, string, int64, int) (*repofs.FileContent, error)
+	GetDocDetails(context.Context, string, string, int64, int) (manager.DocumentRead, error)
+	RepoOverview(context.Context, string) (manager.RepoOverview, error)
 }
 
 type sourceReadService interface {

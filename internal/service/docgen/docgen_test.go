@@ -572,6 +572,25 @@ func TestDefaultPromptFallback(t *testing.T) {
 	}
 }
 
+func TestDefaultPromptMakesDocumentationAResearchMap(t *testing.T) {
+	for _, phrase := range []string{"repo-relative source", "Do not invent line", "Where to investigate", "partial or truncated", "ATX headings"} {
+		if !strings.Contains(DefaultPrompt, phrase) {
+			t.Errorf("research grounding instruction missing %q", phrase)
+		}
+	}
+}
+
+func TestSynthesisKeepsSourceIdentityForHeaderlessSummaries(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "cached.sum"), []byte("Retries failed captures with bounded backoff."), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	input := joinSummaries(dir, []DocMeta{{Path: "cached.sum", SourcePath: "internal/payments/retry.go"}}, 1024)
+	if !strings.Contains(input, `Source file: "internal/payments/retry.go"`) || !strings.Contains(input, "Retries failed captures") {
+		t.Fatalf("synthesis input lost provenance: %s", input)
+	}
+}
+
 func TestDefaultPromptForbidsNestedMermaidDoubleQuotes(t *testing.T) {
 	if !strings.Contains(DefaultPrompt, "Never put another literal or escaped double quote inside an already quoted") {
 		t.Fatal("default prompt must prevent nested-quote Mermaid parse failures")

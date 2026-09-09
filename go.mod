@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	github.com/JohannesKaufmann/html-to-markdown/v2 v2.5.2
-	github.com/dgraph-io/badger/v4 v4.9.1
+	github.com/dgraph-io/badger/v4 v4.9.6
 	github.com/go-shiori/go-readability v0.0.0-20251205110129-5db1dc9836f0
 	github.com/goccy/go-yaml v1.18.0
 	github.com/google/jsonschema-go v0.4.3
@@ -18,13 +18,13 @@ require (
 	github.com/rakunlabs/ada/middleware/requestid v0.4.7
 	github.com/rakunlabs/ada/middleware/server v0.4.7
 	github.com/rakunlabs/ada/middleware/telemetry v0.4.7
-	github.com/rakunlabs/bw v0.4.0
+	github.com/rakunlabs/bw v0.4.1
 	github.com/rakunlabs/chu v0.4.7
 	github.com/rakunlabs/chu/loader/external/loaderconsul v0.0.0-20260529215824-15c48ce668ec
 	github.com/rakunlabs/chu/loader/external/loadervault v0.0.0-20260529215824-15c48ce668ec
 	github.com/rakunlabs/into v0.5.3
 	github.com/rakunlabs/logi v0.4.5
-	github.com/rakunlabs/query v0.4.6
+	github.com/rakunlabs/query v0.5.1
 	github.com/rakunlabs/tell v0.1.5
 	github.com/worldline-go/hardloop v0.3.2
 	github.com/worldline-go/types v0.6.1
@@ -37,7 +37,7 @@ require (
 	golang.org/x/sync v0.22.0
 	golang.org/x/text v0.40.0
 	google.golang.org/grpc v1.81.1
-	google.golang.org/protobuf v1.36.11
+	google.golang.org/protobuf v1.36.12
 )
 
 require (
@@ -51,7 +51,7 @@ require (
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/dgraph-io/ristretto/v2 v2.2.0 // indirect
+	github.com/dgraph-io/ristretto/v2 v2.4.2 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fatih/color v1.18.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect

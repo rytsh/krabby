@@ -129,8 +129,8 @@ func (s *TextStore) RefreshStats(ctx context.Context) error {
 	// path segment shared by most of a repository ("internal", "service") is
 	// exactly the term a path-scoped search needs, and dropping it would make
 	// that search impossible rather than merely slower.
-	if err := s.bucket.Walk(ctx, nil, func(record *textRecord) error {
-		sampler.Observe(record.Snippet)
+	if err := s.bucket.WalkSample(ctx, sampler.Stride(), func(record *textRecord) error {
+		sampler.ObserveSample(record.Snippet)
 
 		return nil
 	}); err != nil {

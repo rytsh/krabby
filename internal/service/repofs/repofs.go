@@ -271,22 +271,52 @@ func ReadFile(rootDir, rel string, offset int64, maxBytes int) (*FileContent, er
 		}
 	}
 
-	buf := make([]byte, maxBytes)
-
-	n, err := io.ReadFull(f, buf)
-	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+	buf, err := readFileBytes(f, maxBytes, info.Size()-offset)
+	if err != nil {
 		return nil, fmt.Errorf("read %s; %w", cleaned, err)
 	}
+	n := len(buf)
 
 	truncated := offset+int64(n) < info.Size()
 
 	return &FileContent{
 		Path:      cleaned,
-		Content:   string(buf[:n]),
+		Content:   string(buf),
 		Bytes:     n,
 		TotalSize: info.Size(),
 		Truncated: truncated,
 	}, nil
+}
+
+// readFileBytes sizes the initial allocation to the expected remaining bytes,
+// not the 512 KiB read ceiling. Indexing reads many small source files. The
+// stat is only a hint: a file that grows after Stat (or reports size zero) is
+// still read up to the limit, and one that shrinks is returned at its new size.
+func readFileBytes(r io.Reader, limit int, sizeHint int64) ([]byte, error) {
+	buf := make([]byte, int(min(int64(limit), max(sizeHint, 0))))
+	n, err := io.ReadFull(r, buf)
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return buf[:n], nil
+	}
+	if err != nil || len(buf) == limit {
+		return buf, err
+	}
+
+	// Usually this is EOF. Probe one byte before growing the buffer so a
+	// correctly sized file never pays for spare read-ahead capacity.
+	var probe [1]byte
+	if _, err := io.ReadFull(r, probe[:]); err != nil {
+		if errors.Is(err, io.EOF) {
+			return buf, nil
+		}
+		return nil, err
+	}
+	buf = append(buf, probe[0])
+	rest, err := io.ReadAll(io.LimitReader(r, int64(limit-len(buf))))
+	if err != nil {
+		return nil, err
+	}
+	return append(buf, rest...), nil
 }
 
 // ListFiles returns entries under subdir (repo-relative; "" = root). When

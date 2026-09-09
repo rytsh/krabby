@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"math/rand"
 	"net/http"
 	"strconv"
@@ -18,6 +19,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/sync/semaphore"
 
 	"github.com/rytsh/krabby/internal/config"
 	"github.com/rytsh/krabby/internal/observability/langfuse"
@@ -60,6 +63,9 @@ type Client struct {
 	batch   int
 	conc    int
 	http    *http.Client
+	// Shared by all calls using this client. Retries release their permit
+	// before sleeping so a throttled batch does not occupy request capacity.
+	requests *semaphore.Weighted
 
 	// noDims latches when the endpoint has rejected the "dimensions"
 	// parameter, so the remaining requests of a run stop sending it.
@@ -105,7 +111,7 @@ func New(cfg config.Embedder, opts ...Option) (*Client, error) {
 	}
 
 	timeout := cfg.Timeout
-	if timeout == 0 {
+	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
 
@@ -130,16 +136,17 @@ func New(cfg config.Embedder, opts ...Option) (*Client, error) {
 	}
 
 	c := &Client{
-		baseURL: strings.TrimRight(cfg.BaseURL, "/"),
-		apiKey:  cfg.APIKey,
-		model:   cfg.Model,
-		outDim:  cfg.Dim,
-		dim:     cfg.Dim,
-		batch:   batch,
-		conc:    conc,
-		http:    &http.Client{Timeout: timeout},
-		tracer:  langfuse.Disabled(),
-		system:  langfuse.SystemFromBaseURL(cfg.BaseURL),
+		baseURL:  strings.TrimRight(cfg.BaseURL, "/"),
+		apiKey:   cfg.APIKey,
+		model:    cfg.Model,
+		outDim:   cfg.Dim,
+		dim:      cfg.Dim,
+		batch:    batch,
+		conc:     conc,
+		http:     &http.Client{Timeout: timeout},
+		requests: semaphore.NewWeighted(int64(conc)),
+		tracer:   langfuse.Disabled(),
+		system:   langfuse.SystemFromBaseURL(cfg.BaseURL),
 	}
 
 	for _, opt := range opts {
@@ -232,6 +239,22 @@ type apiError struct {
 // already set.
 func (c *Client) Embed(ctx context.Context, texts []string) ([][]float32, error) {
 	return c.EmbedWithProgress(ctx, texts, nil)
+}
+
+// EmbedQuery embeds an interactive search query. The configured timeout bounds
+// the whole operation, including capacity waits, retries and backoff, rather
+// than restarting for each attempt as it does for background indexing batches.
+func (c *Client) EmbedQuery(ctx context.Context, text string) ([]float32, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.http.Timeout)
+	defer cancel()
+	vecs, err := c.Embed(ctx, []string{text})
+	if err != nil {
+		return nil, err
+	}
+	if len(vecs) != 1 || len(vecs[0]) == 0 {
+		return nil, errors.New("embedder returned no vector for the query")
+	}
+	return vecs[0], nil
 }
 
 // EmbedWithMeta is EmbedWithProgress plus the token accounting summed over
@@ -392,35 +415,34 @@ func (c *Client) embed(ctx context.Context, texts []string, onProgress func(done
 func (c *Client) embedBatch(ctx context.Context, batch []string, meta *Meta) ([][]float32, error) {
 	var lastErr error
 	for attempt := 0; attempt <= maxEmbedRetries; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		sentDims := c.requestDim()
 
 		vecs, usage, retryAfter, err := c.embedBatchOnce(ctx, batch, sentDims)
+		var dimensionErr dimensionRejectedErr
+		if sentDims > 0 && errors.As(err, &dimensionErr) {
+			if c.noDims.CompareAndSwap(false, true) {
+				slog.Warn("embeddings endpoint rejected the dimensions parameter; retrying at the model's native width",
+					"model", c.model, "dim", sentDims, "error", err)
+			}
+			// Every in-flight request carrying the rejected parameter gets a
+			// replay. It is separate from the transient retry budget, including
+			// when rejection arrives on the last transient attempt.
+			vecs, usage, retryAfter, err = c.embedBatchOnce(ctx, batch, 0)
+		}
 		if err == nil {
 			meta.add(usage)
 
 			return vecs, nil
 		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 
 		var re retryableErr
 		if !errors.As(err, &re) {
-			// Every in-flight batch that carried the parameter retries, not
-			// just the one that latched the flag: batches run concurrently, so
-			// the others are failing for the same reason at the same moment
-			// and would otherwise abort the run. The replay carries no
-			// dimension, so this cannot loop.
-			if sentDims > 0 {
-				if c.noDims.CompareAndSwap(false, true) {
-					slog.Warn("embeddings endpoint rejected the requested output dimension; retrying at the model's native width",
-						"model", c.model, "dim", sentDims, "error", err)
-				}
-
-				// Keep the error in case this was the last attempt: the
-				// replay would otherwise exit the loop empty-handed.
-				lastErr = err
-
-				continue
-			}
-
 			return nil, err // non-retryable: fail fast
 		}
 		lastErr = err
@@ -449,9 +471,30 @@ type retryableErr struct{ err error }
 func (e retryableErr) Error() string { return e.err.Error() }
 func (e retryableErr) Unwrap() error { return e.err }
 
+type dimensionRejectedErr struct{ err error }
+
+func (e dimensionRejectedErr) Error() string { return e.err.Error() }
+func (e dimensionRejectedErr) Unwrap() error { return e.err }
+
+func rejectsDimensions(status int, message string) bool {
+	if status != http.StatusBadRequest && status != http.StatusUnprocessableEntity {
+		return false
+	}
+	message = strings.ToLower(message)
+	if !strings.Contains(message, "dimension") {
+		return false
+	}
+	for _, marker := range []string{"unknown", "unsupported", "not supported", "unrecognized", "unrecognised", "unexpected", "not allowed", "extra inputs are not permitted"} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // backoffDelay computes the wait before the next attempt: it honours a
 // server-provided retry hint when present, otherwise uses exponential backoff
-// with full jitter, capped at maxEmbedBackoff.
+// with jitter, capped at maxEmbedBackoff after jitter is applied.
 func backoffDelay(attempt int, retryAfter time.Duration) time.Duration {
 	if retryAfter > 0 {
 		if retryAfter > maxEmbedBackoff {
@@ -466,7 +509,7 @@ func backoffDelay(attempt int, retryAfter time.Duration) time.Duration {
 		backoff = maxEmbedBackoff
 	}
 
-	return time.Duration(rand.Int63n(int64(backoff)) + int64(backoff)/2) //nolint:gosec // jitter, not security-sensitive
+	return min(time.Duration(rand.Int63n(int64(backoff))+int64(backoff)/2), maxEmbedBackoff) //nolint:gosec // jitter, not security-sensitive
 }
 
 // requestDim is the output dimension to ask for, or 0 when none is configured
@@ -483,6 +526,10 @@ func (c *Client) requestDim() int {
 // it returns a retryableErr and, when the server advertised one, a retry delay.
 func (c *Client) embedBatchOnce(ctx context.Context, batch []string, dims int) ([][]float32, Usage, time.Duration, error) {
 	var usage Usage
+	if err := c.requests.Acquire(ctx, 1); err != nil {
+		return nil, usage, 0, err
+	}
+	defer c.requests.Release(1)
 
 	body, err := json.Marshal(embedRequest{Model: c.model, Input: batch, Dimensions: dims})
 	if err != nil {
@@ -514,15 +561,25 @@ func (c *Client) embedBatchOnce(ctx context.Context, batch []string, dims int) (
 
 	// Read one byte past the limit so an overrun is distinguishable from a
 	// body that merely ends there.
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxRespBytes+1))
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, maxRespBytes+1))
+	if readErr != nil {
+		if ctx.Err() != nil {
+			return nil, usage, 0, ctx.Err()
+		}
+		return nil, usage, 0, retryableErr{fmt.Errorf("read embed response; %w", readErr)}
+	}
 	if len(raw) > maxRespBytes {
 		return nil, usage, 0, fmt.Errorf("embed response exceeds %d bytes for %d inputs; lower the batch size or the embedding dimension", maxRespBytes, len(batch))
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		httpErr := fmt.Errorf("embed http %d; %s", resp.StatusCode, apiErrMsg(raw))
+		message := apiErrMsg(raw)
+		httpErr := fmt.Errorf("embed http %d; %s", resp.StatusCode, message)
 		if isRetryableStatus(resp.StatusCode) {
 			return nil, usage, retryAfterHint(resp, raw), retryableErr{httpErr}
+		}
+		if dims > 0 && rejectsDimensions(resp.StatusCode, message) {
+			return nil, usage, 0, dimensionRejectedErr{httpErr}
 		}
 
 		return nil, usage, 0, httpErr
@@ -588,12 +645,17 @@ func isRetryableStatus(code int) bool {
 }
 
 // retryAfterHint extracts a retry delay from the response: the standard
-// Retry-After header (seconds) first, then a provider "retry in 10.6s" / "retry
+// Retry-After header (seconds or HTTP-date) first, then a provider "retry in 10.6s" / "retry
 // after 10s" phrase in the error body. Zero means no hint was found.
 func retryAfterHint(resp *http.Response, raw []byte) time.Duration {
 	if v := strings.TrimSpace(resp.Header.Get("Retry-After")); v != "" {
-		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
-			return time.Duration(secs) * time.Second
+		if secs, err := strconv.ParseInt(v, 10, 64); err == nil && secs > 0 {
+			return time.Duration(min(secs, int64(maxEmbedBackoff/time.Second))) * time.Second
+		}
+		if date, err := http.ParseTime(v); err == nil {
+			if wait := time.Until(date); wait > 0 {
+				return min(wait, maxEmbedBackoff)
+			}
 		}
 	}
 
@@ -620,8 +682,9 @@ func parseRetryPhrase(body string) time.Duration {
 			break
 		}
 		if secs, err := strconv.ParseFloat(num.String(), 64); err == nil && secs > 0 {
-			// Round up so we wait at least as long as advertised.
-			return time.Duration((secs + 0.999) * float64(time.Second))
+			// Round to whole seconds, bounded before converting to Duration
+			// so a very large provider hint cannot overflow into a negative wait.
+			return time.Duration(math.Ceil(min(secs, maxEmbedBackoff.Seconds()))) * time.Second
 		}
 	}
 
@@ -631,6 +694,8 @@ func parseRetryPhrase(body string) time.Duration {
 // Ping embeds a single short string to validate the endpoint, credentials and
 // model. On success the client's dimension is populated.
 func (c *Client) Ping(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, c.http.Timeout)
+	defer cancel()
 	vecs, err := c.embedBatch(ctx, []string{"ping"}, nil)
 	if err != nil {
 		return err

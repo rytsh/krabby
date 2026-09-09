@@ -442,9 +442,10 @@ type Embedder struct {
 	Dim int `cfg:"dim"`
 	// Batch bounds how many inputs are sent per embeddings request.
 	Batch int `cfg:"batch" default:"64"`
-	// Concurrency bounds how many embedding batch requests run in parallel.
+	// Concurrency bounds embedding requests across all calls sharing a client.
 	Concurrency int `cfg:"concurrency" default:"4"`
-	// Timeout bounds a single embeddings request.
+	// Timeout bounds a single indexing request, and the entire query/Ping
+	// operation including retries and waiting for request capacity.
 	Timeout time.Duration `cfg:"timeout" default:"30s"`
 }
 

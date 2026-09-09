@@ -3,6 +3,7 @@ package coderag
 import (
 	"context"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 
@@ -141,17 +142,18 @@ func (s *TextStore) SearchRegex(
 	contextLines := min(max(opts.ContextLines, 0), regexMaxContextLines)
 
 	result := RegexPage{Results: []RegexHit{}, Page: page, PerPage: perPage, Exhaustive: true}
-
-	// Chunk ids sort as "<repo>/<path>#<n>", so a file's chunks arrive
-	// together — but "#10" sorts before "#2", so the matches of one file
-	// are collected first and ordered afterwards.
-	type fileAcc struct {
-		hit  RegexHit
-		seen map[[2]int]struct{}
+	offset := math.MaxInt
+	if page-1 <= math.MaxInt/perPage {
+		offset = (page - 1) * perPage
 	}
+
+	// Chunk ids sort as "<repo>/<path>#<n>", but "#10" precedes "#2".
+	// Keep each page file's earliest matches ordered as chunks arrive.
 	var (
 		order []string
-		files = make(map[string]*fileAcc)
+		// Off-page files have a nil value: they contribute to the exact
+		// count, but never retain match text or surrounding source lines.
+		files = make(map[string]*RegexHit)
 	)
 
 	if _, err := s.bucket.RegexWalk(ctx, "(?m)"+pattern, bw.RegexOptions{
@@ -176,12 +178,15 @@ func (s *TextStore) SearchRegex(
 
 				return false, nil
 			}
-			acc = &fileAcc{
-				hit:  RegexHit{Repo: record.Repo, Path: record.Path},
-				seen: make(map[[2]int]struct{}),
+			index := len(order)
+			if index >= offset && index-offset < perPage {
+				acc = &RegexHit{Repo: record.Repo, Path: record.Path}
 			}
 			files[key] = acc
 			order = append(order, key)
+		}
+		if acc == nil {
+			return true, nil
 		}
 
 		for _, m := range chunkMatches(record, hit.Matches, contextLines) {
@@ -190,15 +195,10 @@ func (s *TextStore) SearchRegex(
 			// alone is not the identity: several matches on one line are
 			// distinct occurrences and dropping them undercounts silently,
 			// while a genuine duplicate repeats the column too.
-			loc := [2]int{m.Line, m.Column}
-			if _, dup := acc.seen[loc]; dup {
-				continue
-			}
-			acc.seen[loc] = struct{}{}
-			acc.hit.Matches = append(acc.hit.Matches, m)
+			acc.addMatch(m, maxMatches)
 		}
 		if hit.Truncated {
-			acc.hit.Truncated = true
+			acc.Truncated = true
 		}
 
 		return true, nil
@@ -208,25 +208,40 @@ func (s *TextStore) SearchRegex(
 
 	result.Total = uint64(len(order))
 
-	start := min((page-1)*perPage, len(order))
-	end := min(start+perPage, len(order))
+	start := min(offset, len(order))
+	end := start + min(perPage, len(order)-start)
 	for _, key := range order[start:end] {
 		acc := files[key]
-		slices.SortFunc(acc.hit.Matches, func(a, b RegexMatch) int {
-			if a.Line != b.Line {
-				return a.Line - b.Line
-			}
-
-			return a.Column - b.Column
-		})
-		if len(acc.hit.Matches) > maxMatches {
-			acc.hit.Matches = acc.hit.Matches[:maxMatches]
-			acc.hit.Truncated = true
-		}
-		result.Results = append(result.Results, acc.hit)
+		result.Results = append(result.Results, *acc)
 	}
 
 	return result, nil
+}
+
+// addMatch retains only the earliest limit distinct locations. Chunk key order
+// is not source-line order (#10 precedes #2), so merely stopping at the cap
+// would return the wrong occurrences. Binary insertion keeps memory bounded
+// while allowing a later chunk to replace the furthest retained match.
+func (h *RegexHit) addMatch(m RegexMatch, limit int) {
+	i, duplicate := slices.BinarySearchFunc(h.Matches, m, func(a, b RegexMatch) int {
+		if a.Line != b.Line {
+			return a.Line - b.Line
+		}
+		return a.Column - b.Column
+	})
+	if duplicate {
+		return
+	}
+	if len(h.Matches) == limit {
+		h.Truncated = true
+		if i == limit {
+			return
+		}
+		copy(h.Matches[i+1:], h.Matches[i:limit-1])
+		h.Matches[i] = m
+		return
+	}
+	h.Matches = slices.Insert(h.Matches, i, m)
 }
 
 // chunkMatches converts bw's chunk-relative offsets into file-relative

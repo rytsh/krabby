@@ -2,6 +2,7 @@ package coderag
 
 import (
 	"context"
+	"math"
 	"strings"
 	"testing"
 
@@ -25,6 +26,60 @@ func newRegexStore(t *testing.T) (*TextStore, context.Context) {
 	}
 
 	return store, context.Background()
+}
+
+func TestSearchRegexBoundedMatchesKeepEarliestLocations(t *testing.T) {
+	store, ctx := newRegexStore(t)
+	if err := store.InsertItems(ctx, []vectorstore.Item{
+		chunkItem("repo", "a.go", "", 1, 0, "needle\n"),
+		chunkItem("repo", "b.go", "", 50, 0, "needle needle\n"),
+		chunkItem("repo", "b.go", "", 100, 10, "needle\n"),
+		chunkItem("repo", "b.go", "", 1, 2, "needle needle\n"),
+		// Overlap duplicates should not consume the cap or replace context.
+		chunkItem("repo", "b.go", "", 1, 3, "needle needle\n"),
+		chunkItem("repo", "c.go", "", 1, 0, "needle\n"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := store.SearchRegex(ctx, nil, "needle", RegexOptions{Page: 2, PerPage: 1, MaxMatches: 2, ContextLines: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 3 || !page.Exhaustive || len(page.Results) != 1 {
+		t.Fatalf("page=%+v", page)
+	}
+	hit := page.Results[0]
+	if hit.Path != "b.go" || !hit.Truncated || len(hit.Matches) != 2 {
+		t.Fatalf("hit=%+v", hit)
+	}
+	if hit.Matches[0].Line != 1 || hit.Matches[0].Column != 1 || hit.Matches[1].Line != 1 || hit.Matches[1].Column != 8 {
+		t.Fatalf("matches=%+v", hit.Matches)
+	}
+	// An overflowing page offset is an empty page, not a negative slice index.
+	page, err = store.SearchRegex(ctx, nil, "needle", RegexOptions{Page: math.MaxInt, PerPage: 100})
+	if err != nil || page.Total != 3 || len(page.Results) != 0 {
+		t.Fatalf("huge page=%+v err=%v", page, err)
+	}
+}
+
+func TestRegexMatchAccumulatorBoundsMemory(t *testing.T) {
+	var hit RegexHit
+	for line := 10000; line > 0; line-- {
+		m := RegexMatch{Line: line, Column: 1}
+		hit.addMatch(m, 3)
+		hit.addMatch(m, 3)
+		if len(hit.Matches) > 3 {
+			t.Fatal("match accumulator exceeded cap")
+		}
+	}
+	if !hit.Truncated || len(hit.Matches) != 3 {
+		t.Fatalf("hit=%+v", hit)
+	}
+	for i, m := range hit.Matches {
+		if m.Line != i+1 {
+			t.Fatalf("matches=%+v", hit.Matches)
+		}
+	}
 }
 
 // managerSource is a chunk whose text looks like the code a regex search is

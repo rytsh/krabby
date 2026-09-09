@@ -527,22 +527,18 @@ func (s *Service) RetrieveTimed(
 	}
 
 	embedStarted := time.Now()
-	vecs, err := s.emb.Embed(ctx, []string{query})
+	vec, err := s.emb.EmbedQuery(ctx, query)
 	timing.Embed = time.Since(embedStarted)
 
 	if err != nil {
 		return nil, timing, fmt.Errorf("embed query; %w", err)
 	}
 
-	if len(vecs) != 1 {
-		return nil, timing, fmt.Errorf("embedder returned %d vectors for the query", len(vecs))
-	}
-
 	// Fetch extra candidates because fallback chunks overlap and are deduplicated
 	// below; this keeps the final result useful without returning near-identical
 	// snippets from the same file region.
 	searchStarted := time.Now()
-	matches, err := s.store.Search(ctx, vectorstore.FilterKey(repo), vecs[0], topK*3)
+	matches, err := s.store.Search(ctx, vectorstore.FilterKey(repo), vec, topK*3)
 	timing.Vector = time.Since(searchStarted)
 
 	if err != nil {

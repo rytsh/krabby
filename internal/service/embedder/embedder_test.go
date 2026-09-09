@@ -3,6 +3,7 @@ package embedder
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -313,7 +314,9 @@ func TestEmbedHTTPError(t *testing.T) {
 
 	c, _ := New(config.Embedder{BaseURL: srv.URL, Model: "m"})
 
-	if err := c.Ping(context.Background()); err == nil {
-		t.Fatal("expected error on 500")
+	_, _, _, err := c.embedBatchOnce(context.Background(), []string{"ping"}, 0)
+	var transient retryableErr
+	if !errors.As(err, &transient) || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("expected retryable HTTP 500, got %v", err)
 	}
 }

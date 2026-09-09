@@ -59,14 +59,15 @@ type DocsPage struct {
 
 // Doc is a ranked documentation excerpt returned by retrieval.
 type Doc struct {
-	Repo       string  `json:"repo"`
-	ScopeKey   string  `json:"scope_key"`
-	SourceKind string  `json:"source_kind"` // "repository", "web" or "api"
-	Path       string  `json:"path"`        // path relative to the repo's docs directory
-	Title      string  `json:"title"`
-	Score      float32 `json:"score"` // mode-specific score used for ranking
-	Excerpt    string  `json:"excerpt"`
-	Truncated  bool    `json:"truncated,omitempty"`
+	Repo       string      `json:"repo"`
+	ScopeKey   string      `json:"scope_key"`
+	SourceKind string      `json:"source_kind"` // "repository", "web" or "api"
+	Path       string      `json:"path"`        // path relative to the repo's docs directory
+	Title      string      `json:"title"`
+	Score      float32     `json:"score"` // mode-specific score used for ranking
+	Excerpt    string      `json:"excerpt"`
+	Truncated  bool        `json:"truncated,omitempty"`
+	Evidence   DocEvidence `json:"evidence"`
 
 	// UpdatedAt is the source document's last-modified time, when known, so the
 	// model can judge how current a hit is (a decade-old ticket vs. a fresh
@@ -91,6 +92,16 @@ type Doc struct {
 	ServiceGroup       string `json:"service_group,omitempty"`
 	ServiceDescription string `json:"service_description,omitempty"`
 	ServiceBaseURL     string `json:"service_base_url,omitempty"`
+}
+
+// DocEvidence distinguishes derived/synced material from an upstream live read.
+// Sync fields describe Krabby's ingestion, never a Jira issue's workflow state.
+type DocEvidence struct {
+	Kind                  string    `json:"kind" jsonschema:"generated_summary, synced_snapshot or catalog_snapshot; none is a live upstream read"`
+	CollectionRefreshedAt time.Time `json:"collection_refreshed_at,omitzero" jsonschema:"last recorded collection refresh; not a guarantee every item is current"`
+	SyncStatus            string    `json:"sync_status,omitempty" jsonschema:"Krabby collection sync status, not upstream issue/page status"`
+	ItemStatus            string    `json:"item_status,omitempty" jsonschema:"Krabby item ingestion status, not Jira workflow status"`
+	IndexPending          bool      `json:"index_pending,omitempty" jsonschema:"stored content and search index may differ while indexing is pending"`
 }
 
 // Service indexes generated docs and retrieves bounded excerpts for a question.
@@ -544,19 +555,15 @@ func (s *Service) retrieve(
 	}
 
 	embedStarted := time.Now()
-	vecs, err := s.emb.Embed(ctx, []string{question})
+	vec, err := s.emb.EmbedQuery(ctx, question)
 	timing.Embed = time.Since(embedStarted)
 
 	if err != nil {
 		return nil, timing, fmt.Errorf("embed question; %w", err)
 	}
 
-	if len(vecs) != 1 {
-		return nil, timing, fmt.Errorf("embedder returned %d vectors for the question", len(vecs))
-	}
-
 	searchStarted := time.Now()
-	matches, err := s.store.Search(ctx, filter, vecs[0], topK)
+	matches, err := s.store.Search(ctx, filter, vec, topK)
 	timing.Vector = time.Since(searchStarted)
 
 	if err != nil {

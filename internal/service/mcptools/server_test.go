@@ -56,8 +56,8 @@ func TestToolCatalogs(t *testing.T) {
 		absent  []string
 	}{
 		{
-			name: "core", server: func() *mcp.Server { return NewCore(nil, "test") }, count: 25,
-			present: []string{"list_repos", "repo_status", "search_code", "query_graph", "find_definition", "find_references", "search_docs", "list_files", "glob", "get_source"},
+			name: "core", server: func() *mcp.Server { return NewCore(nil, "test") }, count: 26,
+			present: []string{"list_repos", "repo_status", "repo_overview", "search_code", "query_graph", "find_definition", "find_references", "search_docs", "list_files", "glob", "get_source"},
 			absent:  []string{"add_repo", "remove_repo", "refresh_repo", "queue_status", "call_api_endpoint", "set_docs_config"},
 		},
 		{
@@ -104,6 +104,7 @@ func TestToolCatalogs(t *testing.T) {
 					t.Fatalf("standard tools/list payload grew to %d bytes (~%d tokens), budget %d",
 						len(raw), len(raw)/bytesPerToken, toolsPayloadBudget)
 				}
+				t.Logf("core tools/list: %d bytes (~%d tokens), %d tools", len(raw), len(raw)/bytesPerToken, len(result.Tools))
 			}
 
 			names := map[string]bool{}
@@ -165,8 +166,8 @@ func TestToolCatalogs(t *testing.T) {
 			}
 		})
 	}
-	if len(allNames) != 68 {
-		t.Fatalf("catalog union has %d tools, want 68", len(allNames))
+	if len(allNames) != 69 {
+		t.Fatalf("catalog union has %d tools, want 69", len(allNames))
 	}
 }
 

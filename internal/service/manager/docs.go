@@ -1405,7 +1405,11 @@ func (m *Manager) emptyDocsNote(mode, scope, key, namespace string) string {
 	if mode == DocsSearchSemantic {
 		b.WriteString("Semantic retrieval ranks the embedded documents, so a repository whose docs were generated but never embedded has nothing to rank: try mode 'lexical', or check the docs_index stage with repo_status. ")
 	}
-	b.WriteString("Widen with namespace \"*\", or use list_docs to see whether the scope holds any document at all.")
+	if strings.HasPrefix(key, websource.ScopePrefix) || scope == ScopeSources {
+		b.WriteString("This searched Krabby's indexed collection, not live Jira/Confluence. A missing hit does not prove the upstream item is absent: the collection may be filtered, incomplete or not synced. Use list_sources/get_source to inspect coverage, or the provider's live MCP when available.")
+	} else {
+		b.WriteString("Widen with namespace \"*\", or use list_docs to see whether the scope holds any document at all. Indexed source collections are not exhaustive live Jira/Confluence results.")
+	}
 
 	return b.String()
 }
@@ -1837,6 +1841,7 @@ func (m *Manager) enrichDocSources(ctx context.Context, docs []rag.Doc) {
 		name := websource.CollectionName(docs[i].Repo)
 		if name == "" {
 			docs[i].SourceKind = "repository"
+			docs[i].Evidence = rag.DocEvidence{Kind: "generated_summary"}
 			if m.reg != nil {
 				repo, err := m.reg.Get(ctx, docs[i].Repo)
 				if err == nil && repo != nil {
@@ -1849,6 +1854,7 @@ func (m *Manager) enrichDocSources(ctx context.Context, docs []rag.Doc) {
 			continue
 		}
 		docs[i].SourceKind = "web"
+		docs[i].Evidence = rag.DocEvidence{Kind: "synced_snapshot"}
 		docs[i].CollectionName = name
 		if m.webStore == nil {
 			continue
@@ -1869,6 +1875,8 @@ func (m *Manager) enrichDocSources(ctx context.Context, docs []rag.Doc) {
 		if col != nil {
 			docs[i].CollectionType = col.Type
 			docs[i].CollectionDescription = col.Description
+			docs[i].Evidence.CollectionRefreshedAt = col.LastRefreshAt
+			docs[i].Evidence.SyncStatus = col.Status
 		}
 
 		slug := docSlug(docs[i].Path)
@@ -1887,6 +1895,8 @@ func (m *Manager) enrichDocSources(ctx context.Context, docs []rag.Doc) {
 
 		docs[i].URL = page.URL
 		docs[i].Teams = page.Teams
+		docs[i].Evidence.ItemStatus = page.Status
+		docs[i].Evidence.IndexPending = page.IndexDirty
 	}
 }
 
@@ -1895,6 +1905,7 @@ func (m *Manager) enrichDocSources(ctx context.Context, docs []rag.Doc) {
 // the record once rather than per endpoint.
 func (m *Manager) enrichAPIDoc(ctx context.Context, doc *rag.Doc, service string, cache map[string]*apicatalog.Service) {
 	doc.SourceKind = "api"
+	doc.Evidence = rag.DocEvidence{Kind: "catalog_snapshot"}
 	doc.ServiceName = service
 
 	if m.apiStore == nil {
@@ -2121,26 +2132,34 @@ func (m *Manager) SearchCodeText(
 	ctx context.Context,
 	repoID, namespace, query string,
 	opts coderag.TextSearchOptions,
-) (coderag.SearchPage, error) {
+) (page coderag.SearchPage, err error) {
+	timing := newCodeSearchTiming()
+	defer func() {
+		timing.finish(ctx, slog.Default(), "text", repoID, namespace, len(page.Results), page.Total, err)
+	}()
 	if m.codeText == nil {
 		return coderag.SearchPage{}, errors.New("normal code search is not configured")
 	}
 
-	filter, repos, err := m.codeScope(ctx, repoID, namespace, opts.Path)
+	filter, repos, err := m.codeScope(ctx, repoID, namespace, opts.Path, timing)
 	if err != nil {
 		return coderag.SearchPage{}, err
 	}
 	opts.KeyFilter = filter
 
+	timing.enter("prepare")
 	stop := m.codeText.FrequentTerms(ctx)
 	rewritten := rag.LexicalQuery(query, stop)
 
-	page, err := m.codeText.Search(ctx, rewritten, opts)
+	timing.enter("index")
+	page, err = m.codeText.Search(ctx, rewritten, opts)
 	if err != nil {
 		return page, err
 	}
 	if page.Total == 0 {
 		if unfiltered := rag.LexicalQuery(query, nil); unfiltered != rewritten {
+			timing.enter("retry")
+			timing.retried = true
 			// The retry's failure must not be reported as an empty result: the
 			// docstring promises filtering never costs a result, and a store
 			// error presented as total=0 reads as a definitive "no such code".
@@ -2152,6 +2171,7 @@ func (m *Manager) SearchCodeText(
 		}
 	}
 
+	timing.enter("metadata")
 	page.Indexed = m.repoIndexStates(ctx, indexedRepos(snippetRepos(page.Results), repos))
 
 	return page, nil
@@ -2163,21 +2183,27 @@ func (m *Manager) SearchCodeRegex(
 	ctx context.Context,
 	repoID, namespace, pattern string,
 	opts coderag.RegexOptions,
-) (coderag.RegexPage, error) {
+) (page coderag.RegexPage, err error) {
+	timing := newCodeSearchTiming()
+	defer func() {
+		timing.finish(ctx, slog.Default(), "regex", repoID, namespace, len(page.Results), page.Total, err)
+	}()
 	if m.codeText == nil {
 		return coderag.RegexPage{}, errors.New("regex code search is not configured")
 	}
 
-	filter, repos, err := m.codeScope(ctx, repoID, namespace, opts.Path)
+	filter, repos, err := m.codeScope(ctx, repoID, namespace, opts.Path, timing)
 	if err != nil {
 		return coderag.RegexPage{}, err
 	}
 
-	page, err := m.codeText.SearchRegex(ctx, filter, pattern, opts)
+	timing.enter("index")
+	page, err = m.codeText.SearchRegex(ctx, filter, pattern, opts)
 	if err != nil {
 		return page, err
 	}
 
+	timing.enter("metadata")
 	hitRepos := make([]string, 0, len(page.Results))
 	for _, hit := range page.Results {
 		hitRepos = append(hitRepos, hit.Repo)
@@ -2198,16 +2224,20 @@ func (m *Manager) SearchCodeRegex(
 func (m *Manager) codeScope(
 	ctx context.Context,
 	repoID, namespace, pathGlob string,
+	timing *codeSearchTiming,
 ) (func(string) bool, []string, error) {
+	timing.enter("scope")
 	nsScope, err := m.namespaceScope(ctx, repoID, namespace)
 	if err != nil {
 		return nil, nil, err
 	}
 
+	timing.enter("warm")
 	if err := m.ensureCodeIndexForSearch(ctx, repoID, nsScope); err != nil {
 		return nil, nil, err
 	}
 
+	timing.enter("scope")
 	repos, err := m.codeScopeRepos(ctx, repoID, nsScope)
 	if err != nil {
 		return nil, nil, err
@@ -2412,7 +2442,7 @@ func (m *Manager) ListDocs(ctx context.Context, repoID string) ([]docgen.DocMeta
 // GetDoc returns one generated markdown doc. Path is relative to that repo's
 // external docs directory and access is sandboxed to it.
 func (m *Manager) GetDoc(ctx context.Context, repoID, docPath string, offset int64, maxBytes int) (*repofs.FileContent, error) {
-	if m.docsRootDir == "" {
+	if m.docsRootDir == "" && !strings.HasPrefix(repoID, websource.ScopePrefix) && !strings.HasPrefix(repoID, apicatalog.ScopePrefix) {
 		return nil, ErrDocsDisabled
 	}
 

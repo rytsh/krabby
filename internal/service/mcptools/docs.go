@@ -63,9 +63,13 @@ type listDocsArgs struct {
 	PerPage int    `json:"per_page,omitempty" jsonschema:"documents per page (default 50, max 200)"`
 }
 
+type repoOverviewArgs struct {
+	Repo string `json:"repo" jsonschema:"exact repository id from list_repos; use for generated orientation, not web:/api: sources"`
+}
+
 type getDocArgs struct {
 	Repo     string `json:"repo" jsonschema:"exact repository id, web:<collection> or api:<service> scope_key, as returned by search_docs.repo/search_docs.scope_key"`
-	Path     string `json:"path" jsonschema:"document path exactly as returned by search_docs.path or list_docs"`
+	Path     string `json:"path" jsonschema:"document path returned by search_docs, list_docs or repo_overview"`
 	Offset   int64  `json:"offset,omitempty" jsonschema:"byte offset to start reading from (default 0)"`
 	MaxBytes int    `json:"max_bytes,omitempty" jsonschema:"max bytes to return (default 32768, max 131072)"`
 }
@@ -246,9 +250,10 @@ type sourceSummary struct {
 	ScopeKey      string    `json:"scope_key"`
 	Type          string    `json:"type"`
 	Description   string    `json:"description,omitempty"`
-	Status        string    `json:"status"`
+	Status        string    `json:"status" jsonschema:"Krabby collection ingestion status, not upstream issue/page status"`
 	AnalyzeImages bool      `json:"analyze_images"`
 	LastRefreshAt time.Time `json:"last_refresh_at,omitzero"`
+	EvidenceKind  string    `json:"evidence_kind"`
 }
 
 type sourceInspectSummary struct {
@@ -264,13 +269,14 @@ type sourceItemSummary struct {
 	URL       string    `json:"url"`
 	Teams     []string  `json:"teams,omitempty"`
 	UpdatedAt time.Time `json:"updated_at,omitzero"`
-	Status    string    `json:"status,omitempty"`
+	Status    string    `json:"status,omitempty" jsonschema:"Krabby ingestion status, not Jira workflow status"`
 }
 
 type sourceInspectOutput struct {
 	Source sourceInspectSummary          `json:"source"`
 	Count  int                           `json:"count"`
 	Items  pageResult[sourceItemSummary] `json:"items"`
+	Note   string                        `json:"note"`
 }
 
 type registerSourcePageOutput struct {
@@ -314,6 +320,7 @@ func summarizeSource(col *websource.Collection) sourceSummary {
 		Name: col.Name, ScopeKey: websource.ScopeKey(col.Name), Type: col.Type,
 		Description: col.Description, Status: col.Status, AnalyzeImages: col.AnalyzeImages,
 		LastRefreshAt: col.LastRefreshAt,
+		EvidenceKind:  "synced_snapshot",
 	}
 }
 
@@ -341,7 +348,8 @@ func viewSourceMCP(mgr sourceAdminService, col *websource.Collection) sourceResu
 func addDocTools(server *mcp.Server, search docsSearchService, sources sourceReadService) {
 	addTool(server, &mcp.Tool{
 		Name:        "search_docs",
-		Description: "Search generated documentation and connected knowledge sources, including Confluence, Jira and pages. mode='semantic' (default) uses embedding retrieval and is the best general choice: its cost does not grow with how much of the collection shares the question's wording. mode='hybrid' combines semantic retrieval with local BM25 using weighted reciprocal rank fusion; it is the most thorough but waits for the BM25 arm, which on a large single-domain collection scores most of the corpus. A natural-language question is rewritten for BM25 into an OR of its words, so any shared product name or technical term contributes and the whole sentence is not required verbatim; words that look like keys, error codes, versions or paths (they contain a digit or . - _ / + @) stay required, so they still constrain the result. The rewrite keeps at most 12 terms and fills them with the required ones first, so a long question is scored on a leading slice of its words and 12 or more identifiers leave no room for prose: send the terms that matter, not a whole paragraph. Semantic retrieval supplies paraphrase and conceptual recall. Use mode='lexical' for exact Jira keys, error codes, identifiers, quoted terms or page titles; it does not call an embedding model. Quote a phrase (\"gateway timeout\"), prefix a word with '-' to exclude it, or use OR/NOT explicitly to bypass the rewrite and control matching yourself. Use mode='semantic' for purely conceptual natural-language questions. Hybrid requires both indexes and does not silently fall back when semantic search is disabled. Scores are mode-specific and must not be compared across modes. Returns bounded ranked excerpts; use get_doc only when a result needs more context. Always scope with repo, web:<collection> or api:<service> when known. When repo is omitted the repo docs searched are limited to the 'default' namespace; pass namespace:'*' to search all namespaces (web sources and catalogued APIs always participate). Use list_sources only when the collection name is unknown.",
+		Description: "Search Krabby's generated repo documentation and indexed Jira/Confluence/pages/API snapshots, not live providers. Use for research and cross-source context; use a dedicated provider MCP for current issue/page state or upstream changes. An empty result is not proof an upstream item is absent. Returns bounded excerpts with evidence kind, original URL and sync metadata; get_doc reads more of a found document. Semantic is the default when configured; lexical makes no embedding call and suits exact keys/titles/identifiers; hybrid combines both indexes and requires semantic search. BM25 ORs prose and requires identifiers, keeping at most 12 terms; send focused terms. Quotes, OR/NOT, '-' exclusions and '*' prefixes control lexical matching. Scores are mode-specific. Pass repo or web:<collection>/api:<service> when known; list_sources discovers collection scope_key. namespace:'*' broadens repo coverage; web/API sources are not namespaced.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args searchDocsArgs) (*mcp.CallToolResult, rag.DocsPage, error) {
 		mode, err := args.searchMode()
 		if err != nil {
@@ -365,6 +373,7 @@ func addDocTools(server *mcp.Server, search docsSearchService, sources sourceRea
 			"Narrow by file with path (`*_test.go` matches a name at any depth, `internal/**` is anchored at the repo root). " +
 			"Returns located snippets; use read_file only for needed surrounding context. Always provide repo when known. When repo is omitted the search is scoped to the 'default' namespace; pass namespace:'*' to search all namespaces. " +
 			"Every result page reports the index state of the repositories behind it, so a stale or unbuilt index is visible rather than looking like an absence of matches.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args searchCodeArgs) (*mcp.CallToolResult, any, error) {
 		mode, err := args.searchMode()
 		if err != nil {
@@ -415,8 +424,18 @@ func addDocTools(server *mcp.Server, search docsSearchService, sources sourceRea
 	})
 
 	addTool(server, &mcp.Tool{
+		Name:        "repo_overview",
+		Description: "Orient yourself in a known repository using Krabby's existing generated documentation, without an LLM or embedding call. Returns a short introduction, section offsets for get_doc, generation/commit metadata and coverage limits. Use it for purpose and architecture before drilling into code; verify claims with search_code/read_file. available=false means no synthesis is available, not an empty repo.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args repoOverviewArgs) (*mcp.CallToolResult, manager.RepoOverview, error) {
+		out, err := search.RepoOverview(ctx, args.Repo)
+		return nil, out, err
+	})
+
+	addTool(server, &mcp.Tool{
 		Name:        "list_docs",
-		Description: "Discover generated document paths only when search_docs did not identify one or the user requests an inventory. Returns a bounded page, not document content.",
+		Description: "Discover generated document paths when search_docs did not identify one or an inventory was requested. For repo orientation use repo_overview. Returns a bounded page, not document content.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args listDocsArgs) (*mcp.CallToolResult, any, error) {
 		docs, err := search.ListDocs(ctx, args.Repo)
 		if err != nil {
@@ -428,19 +447,17 @@ func addDocTools(server *mcp.Server, search docsSearchService, sources sourceRea
 
 	addTool(server, &mcp.Tool{
 		Name:        "get_doc",
-		Description: "Read a known generated or synced Markdown document in bounded pages. Pass repo/scope_key and path exactly as returned by search_docs. Prefer search_docs first and continue with offset only while more context is needed.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args getDocArgs) (*mcp.CallToolResult, any, error) {
-		doc, err := search.GetDoc(ctx, args.Repo, args.Path, args.Offset, mcpReadSize(args.MaxBytes))
-		if err != nil {
-			return nil, nil, err
-		}
-
-		return jsonResult(doc), nil, nil
+		Description: "Read a known Krabby generated document or stored snapshot in bounded pages; this does not fetch live Jira/Confluence content. Pass repo/scope_key and path from search_docs/list_docs/repo_overview, and use a section's offset for targeted reading. Returns provenance and the original URL for provider-MCP handoff. Verify generated claims in source.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args getDocArgs) (*mcp.CallToolResult, manager.DocumentRead, error) {
+		doc, err := search.GetDocDetails(ctx, args.Repo, args.Path, args.Offset, mcpReadSize(args.MaxBytes))
+		return nil, doc, err
 	})
 
 	addTool(server, &mcp.Tool{
 		Name:        "list_sources",
-		Description: "List web sources with exact scope_key, type, status and description. Use it when the matching source is unknown; pass scope_key to search_docs.repo.",
+		Description: "Discover Krabby's indexed source collections, not all projects/spaces on a live Jira/Confluence server. Returns scope_key, provider type, description and ingestion status; collections may be filtered subsets. Pass scope_key to search_docs.repo.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args listSourcesArgs) (*mcp.CallToolResult, pageResult[sourceSummary], error) {
 		cols, err := sources.ListWebCollections(ctx)
 		if err != nil {
@@ -463,7 +480,8 @@ func addDocTools(server *mcp.Server, search docsSearchService, sources sourceRea
 func addSourceInspectTool(server *mcp.Server, mgr sourceReadService) {
 	addTool(server, &mcp.Tool{
 		Name:        "get_source",
-		Description: "Inspect one source's status and a bounded list of item titles and links when list_sources metadata is insufficient.",
+		Description: "Inspect a Krabby collection's sync/index status and a bounded list of cached item titles and original URLs. Status fields describe ingestion, not Jira issue workflow. Use when list_sources metadata is insufficient; for live state use the provider MCP with the returned URL.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args getSourceArgs) (*mcp.CallToolResult, sourceInspectOutput, error) {
 		name := strings.TrimSpace(strings.ToLower(args.Name))
 		col, err := mgr.WebCollection(ctx, name)
@@ -494,6 +512,7 @@ func addSourceInspectTool(server *mcp.Server, mgr sourceReadService) {
 		scope := websource.ScopeKey(name)
 		progress, _ := mgr.Progress(scope)
 		out := sourceInspectOutput{
+			Note: "This is a bounded Krabby snapshot inventory, not a live provider query. Status fields describe local ingestion. Use original URLs with the provider MCP for current state; missing items may be outside this collection's configured coverage.",
 			Source: sourceInspectSummary{
 				sourceSummary: summarizeSource(col), Running: mgr.Activity(scope), Progress: progress,
 			},
@@ -541,7 +560,7 @@ func addSourceAdminTools(server *mcp.Server, mgr sourceAdminService) {
 
 	addTool(server, &mcp.Tool{
 		Name: "add_source",
-		Description: "Create a web source (pages, confluence or jira) to index into the docs RAG index " +
+		Description: "Create a Krabby indexing collection for existing pages, Confluence content or Jira issues; this does not create upstream projects, spaces or issues. Index into the docs RAG index " +
 			"under scope web:<name>, then trigger its first background sync. Config is provider-owned; for " +
 			"jira set base_url + (project or jql), and optionally exclude_labels (skip labels) and team_fields " +
 			"(custom field ids holding team/squad). API tokens are write-only. Poll get_source until status is ready.",
@@ -559,7 +578,7 @@ func addSourceAdminTools(server *mcp.Server, mgr sourceAdminService) {
 
 	addTool(server, &mcp.Tool{
 		Name: "update_source",
-		Description: "Update a web source's description, schedule and/or provider config. This is a partial update: " +
+		Description: "Update a Krabby collection's description, sync schedule and/or provider config, not upstream issues or pages. This is a partial update: " +
 			"properties you omit keep their stored value, so changing one setting never disturbs the others. " +
 			"Send a property with an empty value to clear it (e.g. schedule:'' removes the cron schedule). " +
 			"The type is immutable. A blank api_token in config keeps the stored secret. " +
@@ -590,7 +609,7 @@ func addSourceAdminTools(server *mcp.Server, mgr sourceAdminService) {
 
 	addTool(server, &mcp.Tool{
 		Name:        "delete_source",
-		Description: "Stop tracking a web source: removes its collection, pages, synced markdown and vectors.",
+		Description: "Stop tracking a Krabby source: removes its local collection, stored pages, Markdown and indexes. Does not delete upstream Jira issues or Confluence pages.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args sourceNameArgs) (*mcp.CallToolResult, any, error) {
 		if err := mgr.DeleteWebCollection(ctx, strings.TrimSpace(strings.ToLower(args.Name))); err != nil {
 			return nil, nil, err
@@ -601,8 +620,8 @@ func addSourceAdminTools(server *mcp.Server, mgr sourceAdminService) {
 
 	addTool(server, &mcp.Tool{
 		Name: "refresh_source",
-		Description: "Queue a background re-sync of a web source: fetches current items, re-embeds changed " +
-			"ones and prunes items that vanished. Poll get_source until status is ready.",
+		Description: "Queue a background refresh of Krabby's stored source snapshot: fetches current items, re-embeds changed " +
+			"ones and prunes items that vanished. This is not a live item lookup. Poll get_source for ingestion status; use a provider MCP for immediate upstream state.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args sourceNameArgs) (*mcp.CallToolResult, any, error) {
 		name := strings.TrimSpace(strings.ToLower(args.Name))
 		col, err := mgr.WebCollection(ctx, name)
@@ -670,7 +689,7 @@ func addSourceAdminTools(server *mcp.Server, mgr sourceAdminService) {
 
 	addTool(server, &mcp.Tool{
 		Name:        "delete_source_page",
-		Description: "Delete one manually managed item from a pages source, including its Markdown, image-analysis cache and search-index entries. Pass the exact slug returned by get_source and use only on explicit user request.",
+		Description: "Delete one manually managed item from a Krabby pages collection (local stored copy only), including its Markdown, image-analysis cache and search-index entries. Pass the exact slug returned by get_source and use only on explicit user request.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args deleteSourcePageArgs) (*mcp.CallToolResult, deleteSourcePageOutput, error) {
 		name := strings.TrimSpace(strings.ToLower(args.Name))
 		slug := strings.TrimSpace(args.Slug)

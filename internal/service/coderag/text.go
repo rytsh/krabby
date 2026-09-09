@@ -25,7 +25,7 @@ const (
 type textRecord struct {
 	ID        string `bw:"id,pk"`
 	Repo      string `bw:"repo,index"`
-	Path      string `bw:"path,fts"`
+	Path      string `bw:"path,fts,index"`
 	Symbol    string `bw:"symbol,fts"`
 	StartLine int    `bw:"start_line"`
 	EndLine   int    `bw:"end_line"`
@@ -70,6 +70,8 @@ type TextSearchOptions struct {
 	// is read. It carries both the repository scope and any path filter, which
 	// are one thing at this level: the chunk id is "<repo>/<path>#<n>", so both
 	// are prefix or glob tests on a string the ranking already produced.
+	// It must be pure: bw may evaluate it before ranking to skip scoring
+	// out-of-scope chunks while preserving corpus-wide BM25 statistics.
 	KeyFilter func(id string) bool
 }
 
@@ -101,6 +103,8 @@ func NewTextStore(db *bw.DB) (*TextStore, error) {
 		bw.WithTypedMigration[textRecord, textRecord](1, 2,
 			func(_ context.Context, old *textRecord) (*textRecord, error) { return old, nil },
 		),
+		// v3 backfills only the path index, preserving FTS/trigram storage.
+		bw.WithAddedIndexes[textRecord](2, 3),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("register code search bucket; %w", err)
@@ -166,7 +170,17 @@ func (s *TextStore) DeletePaths(ctx context.Context, repo string, paths []string
 	}
 
 	var ids []string
-	if err := s.bucket.Walk(ctx, textRepoQuery(repo), func(record *textRecord) error {
+	q := query.New()
+	// Put the path predicate first so bw chooses this index rather than the
+	// repo index; repo remains an exact residual guard across repositories.
+	unique := make([]string, 0, len(set))
+	for p := range set {
+		unique = append(unique, p)
+	}
+	q.Where = append(q.Where,
+		query.NewExpressionCmp(query.OperatorIn, "path", unique).Expression(),
+		query.NewExpressionCmp(query.OperatorEq, "repo", repo).Expression())
+	if err := s.bucket.Walk(ctx, q, func(record *textRecord) error {
 		if _, ok := set[record.Path]; ok {
 			ids = append(ids, record.ID)
 		}
@@ -192,7 +206,9 @@ func (s *TextStore) DeletePaths(ctx context.Context, repo string, paths []string
 // reports how many hits matched without decoding the ones outside it. The
 // total therefore stays exact, which a paged search needs — a count that
 // stopped at some ceiling would make the pager lie about how deep the results
-// go — while the cost of a search follows the page, not the index.
+// go — while record hydration follows the page. Ranking still reads global
+// postings to preserve BM25 statistics and exact counts; the pure scope filter
+// lets it skip document-length reads and scoring outside the requested scope.
 //
 // The filter is on the key rather than on indexed fields because everything it
 // needs is in the chunk id: the repository is its first segment and the path
@@ -226,10 +242,10 @@ func (s *TextStore) Search(ctx context.Context, search string, opts TextSearchOp
 
 	if _, err := s.bucket.SearchWalk(ctx, search,
 		bw.SearchOptions{
-			KeyFilter: opts.KeyFilter,
-			Offset:    offset,
-			Limit:     perPage,
-			Matched:   &matched,
+			ScopeFilter: opts.KeyFilter,
+			Offset:      offset,
+			Limit:       perPage,
+			Matched:     &matched,
 		},
 		func(hit bw.SearchResult[textRecord]) (bool, error) {
 			if hit.Record != nil {

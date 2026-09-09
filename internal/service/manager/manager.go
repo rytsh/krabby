@@ -21,6 +21,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/worldline-go/types"
+	"golang.org/x/sync/semaphore"
 
 	"github.com/rytsh/krabby/internal/config"
 	"github.com/rytsh/krabby/internal/observability/langfuse"
@@ -145,7 +146,7 @@ type Manager struct {
 	// races the background pass never returns partial results. See
 	// WarmCodeSearch and ensureCodeIndex.
 	codeWarmMu sync.Mutex
-	codeWarm   map[string]*sync.Mutex
+	codeWarm   map[string]*semaphore.Weighted
 }
 
 // docsBundle is an immutable snapshot of the docs/RAG clients. A nil field means
@@ -232,7 +233,7 @@ func New(
 		activity: map[string]map[string]struct{}{},
 		progress: map[string]map[string]Progress{},
 		jobs:     map[string]*job{},
-		codeWarm: map[string]*sync.Mutex{},
+		codeWarm: map[string]*semaphore.Weighted{},
 	}
 	// The queue's limit is updated from persisted settings at startup and on
 	// every settings change (see SetTaskConcurrency); it starts at the default.
@@ -1601,14 +1602,14 @@ func (m *Manager) markCodeWarmPending(repoID string) {
 	m.codeWarmMu.Lock()
 	defer m.codeWarmMu.Unlock()
 	if _, ok := m.codeWarm[repoID]; !ok {
-		m.codeWarm[repoID] = &sync.Mutex{}
+		m.codeWarm[repoID] = semaphore.NewWeighted(1)
 	}
 }
 
 // codeWarmLock returns the per-repo warm lock and whether repo is pending. When
 // not pending, the index is already built (or was never scheduled) and callers
 // need not warm it.
-func (m *Manager) codeWarmLock(repoID string) (*sync.Mutex, bool) {
+func (m *Manager) codeWarmLock(repoID string) (*semaphore.Weighted, bool) {
 	m.codeWarmMu.Lock()
 	defer m.codeWarmMu.Unlock()
 	lk, ok := m.codeWarm[repoID]
@@ -1636,8 +1637,12 @@ func (m *Manager) ensureCodeIndex(ctx context.Context, repoID, clonePath string)
 		return nil
 	}
 
-	lk.Lock()
-	defer lk.Unlock()
+	// A search waiting for a background build must stop when its request is
+	// cancelled, without cancelling the build that owns the permit.
+	if err := lk.Acquire(ctx, 1); err != nil {
+		return err
+	}
+	defer lk.Release(1)
 
 	// Re-check under the lock: another caller may have finished warming while we
 	// waited, in which case the repo is no longer pending.

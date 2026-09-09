@@ -49,7 +49,7 @@ type chunkRecord struct {
 	ID        string    `bw:"id,pk"`
 	Repo      string    `bw:"repo,index"`
 	Kind      string    `bw:"kind,index"`
-	DocPath   string    `bw:"doc_path"`
+	DocPath   string    `bw:"doc_path,index"`
 	Title     string    `bw:"title"`
 	Chunk     string    `bw:"chunk"`
 	UpdatedAt time.Time `bw:"updated_at"`
@@ -63,14 +63,14 @@ type chunkRecord struct {
 const bucketName = "chunks"
 
 // bucketVersion is bumped whenever chunkRecord changes shape so bw performs a
-// migration instead of refusing to open on a schema-fingerprint mismatch. The
-// vector index is derived data (rebuilt from the docs on disk), so a version
-// bump that drops incompatible rows is acceptable; sources re-embed on their
-// next sync.
+// migration instead of refusing to open on a schema-fingerprint mismatch.
+// Index-only changes must preserve the external embeddings; rewriting a v3+
+// record with its empty inline vector would delete its stored embedding.
 //   - v2: added UpdatedAt for recency-aware retrieval.
 //   - v3: added the indexed Kind discriminator, and stopped storing the
 //     embedding inside the record.
-const bucketVersion = 3
+//   - v4: indexed DocPath for incremental updates; existing vectors are kept.
+const bucketVersion = 4
 
 // deleteBatch and upsertBatch are the starting points for the adaptive
 // batchers below, not hard limits. Each vector record carries a full embedding
@@ -128,6 +128,7 @@ func newEmbedded(dir string) (*embedded, error) {
 		bw.WithVersion[chunkRecord](bucketVersion),
 		bw.WithMigrationProgress[chunkRecord](storage.MigrationProgress()),
 		migrateChunksV2ToV3(),
+		bw.WithAddedIndexes[chunkRecord](3, 4),
 	)
 	if err != nil {
 		_ = db.Close()
@@ -327,7 +328,17 @@ func (s *embedded) deleteWhere(ctx context.Context, repo string, paths map[strin
 
 	var ids []string
 
-	err := s.h.bucket.Walk(ctx, repoQuery(repo), func(r *chunkRecord) error {
+	q := repoQuery(repo)
+	if paths != nil {
+		unique := make([]string, 0, len(paths))
+		for p := range paths {
+			unique = append(unique, p)
+		}
+		q.Where = append([]query.Expression{
+			query.NewExpressionCmp(query.OperatorIn, "doc_path", unique).Expression(),
+		}, q.Where...)
+	}
+	err := s.h.bucket.Walk(ctx, q, func(r *chunkRecord) error {
 		if paths != nil {
 			if _, ok := paths[r.DocPath]; !ok {
 				return nil

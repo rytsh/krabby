@@ -127,6 +127,7 @@ Example OpenCode config with core and admin registered separately:
 | Tool | Purpose |
 | --- | --- |
 | `list_repos` / `repo_status` | Core: discover tracked repositories and inspect build state |
+| `repo_overview` | Core: read a bounded introduction and section map from existing generated repo documentation, with generation and local-clone commit metadata; no model call |
 | `add_repo` / `remove_repo` / `refresh_repo` | Admin: manage tracked repositories and rebuilds |
 | `set_credential` / `list_credentials` / `remove_credential` | Admin: per-host / per-org git credentials |
 | `search_code` | First choice for symbols, literals, usages and implementation locations; `mode` selects term (`normal`), regular-expression (`regex`) or vector (`semantic`) retrieval, and `path` narrows any of them to a file glob |
@@ -136,11 +137,11 @@ Example OpenCode config with core and admin registered separately:
 | `get_node` / `get_neighbors` / `get_community` | Node-level inspection |
 | `god_nodes` / `graph_stats` / `shortest_path` | Graph-level analysis |
 | `list_refs` / `git_log` / `git_diff` / `git_blame` | Repository history: tags and branches, commits, what a revision changed, who last touched a line |
-| `search_docs` / `list_docs` / `get_doc` | Search generated or synced Markdown with semantic (default), hybrid, or lexical retrieval |
+| `search_docs` / `list_docs` / `get_doc` | Search generated or synced Markdown, with evidence kind and source metadata; these are stored/indexed copies, not live Jira/Confluence queries |
 | `list_namespaces` | Discover repository groups, counts, and human descriptions before broad search |
 | `list_sources` / `get_source` | Discover web collections and their exact `web:<name>` scope keys; inspect bounded item-title samples |
 | `register_source_page` / `import_source_pages` / `import_source_sitemap` / `delete_source_page` | Admin: manage individual `pages` source items |
-| `source_types` / `get_source_config` / `add_source` / `update_source` / `delete_source` / `refresh_source` | Admin: manage web sources (`pages`, `confluence`, `jira`) |
+| `source_types` / `get_source_config` / `add_source` / `update_source` / `delete_source` / `refresh_source` | Admin: manage Krabby collections and sync jobs (`pages`, `confluence`, `jira`), not upstream issues or pages |
 | `queue_status` / `bump_task` / `cancel_task` / `set_task_concurrency` / `cancel_repo_job` | Admin: inspect and steer the background work queue |
 | `set_repo_namespace` / `set_repo_overrides` / `set_namespace_description` / `delete_namespace` | Admin: namespaces and per-repository overrides |
 | `list_api_groups` / `list_api_services` / `list_api_endpoints` / `get_api_endpoint` | API: walk the catalog from domain to service to endpoint to its full request shape |
@@ -156,10 +157,29 @@ only for an intentional cross-repository search or merged-graph analysis.
 requests; responses are paginated and agents should not exhaust every page by
 default. Source and document reads are also bounded and expose continuation
 metadata for large files.
-`search_docs`, `list_sources`, and `list_namespaces` expose MCP output schemas
+`repo_overview`, `get_doc`, `search_docs`, `list_sources`, and `list_namespaces` expose MCP output schemas
 and structured content. Search hits identify `source_kind` and `scope_key`, plus
 the repository namespace or web collection metadata, so clients do not need to
 infer source identity from an overloaded id string.
+
+With a dedicated Jira/Confluence MCP also enabled, use that provider for current
+state, live queries and upstream changes. Use Krabby for indexed context and
+connections to code, handing off the original result URL when live verification
+is needed. `evidence.kind` distinguishes `generated_summary`, `synced_snapshot`
+and `catalog_snapshot`. Collection refresh time and sync/item status describe
+Krabby ingestion, not Jira workflow status or a guarantee of complete coverage.
+An empty local result does not prove the upstream item is absent.
+
+For repo orientation, call `repo_overview` with a known repo id. Its introduction
+is capped at 4 KiB; up to 30 section offsets are extracted from the first 128 KiB
+of the document, with explicit truncation flags. Pass a section's byte offset and
+the returned document path to `get_doc`, then verify relevant files/symbols with
+`search_code` and `read_file`. The overview reuses existing documentation even
+without an embedder; `available:false` means no repository synthesis is available.
+Generated docs describe selected, budget-limited inputs and are navigation aids,
+not primary source evidence. New generations include source-file identities and
+instructions for a concrete investigation map.
+
 `read_file` and paginated `list_files` responses include a `snapshot` token;
 pass it back on continuation calls so every page stays on the same immutable
 repository version even if a refresh activates meanwhile. The token is a soft
