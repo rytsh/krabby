@@ -261,8 +261,8 @@ github.com/rakunlabs/ada/middleware/server v0.5.3 h1:WiGIYhD05/z7hLyvCEwQK6E1IdX
 github.com/rakunlabs/ada/middleware/server v0.5.3/go.mod h1:nAN0tmc1/sBvOywH/QIlGSNpcyGbvEhmawkHGtqcxxI=
 github.com/rakunlabs/ada/middleware/telemetry v0.5.3 h1:CGdvI7Uvn2EwUXDvVZ9jfWXEVj4lWsbIgjoMzh8ygUw=
 github.com/rakunlabs/ada/middleware/telemetry v0.5.3/go.mod h1:6PriIUWb9WmDnECCETJwHTzr5hS0w98q7nV9fk0e0hg=
-github.com/rakunlabs/bw v0.4.2 h1:BBzFThveWJLszpuEWCqmPx4DiSKtkmDFMPJSHYFyE2c=
-github.com/rakunlabs/bw v0.4.2/go.mod h1:sQCQQhOR98zURjaBEVDIpGkEAKziI4uHuoDeJQyMuz4=
+github.com/rakunlabs/bw v0.4.3 h1:Uek8ull+U/HkWQ5sdU71knSTMfJZGkxDKNy5UZvikm8=
+github.com/rakunlabs/bw v0.4.3/go.mod h1:sQCQQhOR98zURjaBEVDIpGkEAKziI4uHuoDeJQyMuz4=
 github.com/rakunlabs/chu v0.5.0 h1:7ZgebT5VB3N6xmOGYZCb2lUczXy+jTXA5DJif3DphkI=
 github.com/rakunlabs/chu v0.5.0/go.mod h1:9cyoYo930jeubqmzBIz6U7/wlSb16v1VZxCDR3x6Qe8=
 github.com/rakunlabs/chu/loader/external/loaderconsul v0.0.0-20260831101252-0c6a77e06f7f h1:uVDxweF0rn+YNDx8wNVoC5bEFbT5V6C96J5az1sfV5E=

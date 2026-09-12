@@ -18,7 +18,7 @@ require (
 	github.com/rakunlabs/ada/middleware/requestid v0.5.3
 	github.com/rakunlabs/ada/middleware/server v0.5.3
 	github.com/rakunlabs/ada/middleware/telemetry v0.5.3
-	github.com/rakunlabs/bw v0.4.2
+	github.com/rakunlabs/bw v0.4.3
 	github.com/rakunlabs/chu v0.5.0
 	github.com/rakunlabs/chu/loader/external/loaderconsul v0.0.0-20260831101252-0c6a77e06f7f
 	github.com/rakunlabs/chu/loader/external/loadervault v0.0.0-20260831101252-0c6a77e06f7f

@@ -197,11 +197,20 @@
     return `#/repos/${r.repo}?file=${encodeURIComponent(r.path)}&line=${line}`;
   }
 
+  // resultKey must be unique across a page: Svelte throws on a duplicate key in
+  // a keyed each, and that error aborts the render mid-update — the results
+  // never appear and the button stays on "Searching…", which reads as a request
+  // that never came back.
+  //
+  // A file is chunked with overlap, so consecutive chunks share lines. Two hits
+  // from one file whose best-matching line falls in that shared region report
+  // the same line, which is why the line alone cannot identify a hit. start_line
+  // is the chunk's identity.
   function resultKey(r) {
     if (scope === "docs") return `${r.repo}\0${r.path}`;
     if (r.matches) return `${r.repo}\0${r.path}`;
 
-    return `${r.repo}\0${r.path}\0${r.line || r.start_line || r.end_line || 0}`;
+    return `${r.repo}\0${r.path}\0${r.start_line ?? 0}\0${r.end_line ?? 0}\0${r.line ?? 0}`;
   }
 
   function pct(score) {

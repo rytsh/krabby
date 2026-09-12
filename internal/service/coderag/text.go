@@ -101,6 +101,11 @@ type TextStore struct {
 
 func NewTextStore(db *bw.DB) (*TextStore, error) {
 	bucket, err := bw.RegisterBucket[textRecord](db, textBucketName,
+		// Registration happens before the server starts listening, and this
+		// is the largest bucket in the database — a migration over it is the
+		// one startup step that can take long enough to look like a hang.
+		// Report it.
+		bw.WithMigrationProgress[textRecord](storage.MigrationProgress()),
 		// v2 added the trigram index on Snippet. The stored shape is
 		// unchanged, so the step is an identity rewrite: bw routes a
 		// migration through the ordinary write path, and that is what
