@@ -1250,6 +1250,9 @@ func (m *Manager) SearchDocs(ctx context.Context, scope, key, namespace, mode, q
 	searchStarted := time.Now()
 	key = strings.TrimSpace(key)
 
+	ctx, cancel := withSearchTimeout(ctx, semanticSearchTimeout)
+	defer cancel()
+
 	mode, err := NormalizeDocsSearchMode(mode)
 	if err != nil {
 		return rag.DocsPage{}, err
@@ -2053,6 +2056,9 @@ func (m *Manager) SearchCode(
 		return coderag.SemanticPage{}, ErrCodeRAGDisabled
 	}
 
+	ctx, cancel := withSearchTimeout(ctx, semanticSearchTimeout)
+	defer cancel()
+
 	scope, err := m.namespaceScope(ctx, repoID, namespace)
 	if err != nil {
 		return coderag.SemanticPage{}, err
@@ -2094,7 +2100,7 @@ func (m *Manager) SearchCode(
 	logCodeSearch(repoID, namespace, time.Since(searchStarted), split, len(snippets))
 
 	page := coderag.SemanticPage{Results: snippets}
-	page.Indexed = m.repoIndexStates(ctx, indexedRepos(snippetRepos(snippets), m.scopedRepoIDs(ctx, repoID, scope)))
+	page.Indexed = m.repoIndexStates(ctx, m.indexedRepos(snippetRepos(snippets), m.scopedRepoIDs(ctx, repoID, scope)))
 
 	return page, nil
 }
@@ -2141,6 +2147,9 @@ func (m *Manager) SearchCodeText(
 		return coderag.SearchPage{}, errors.New("normal code search is not configured")
 	}
 
+	ctx, cancel := withSearchTimeout(ctx, searchTimeout)
+	defer cancel()
+
 	filter, repos, err := m.codeScope(ctx, repoID, namespace, opts.Path, timing)
 	if err != nil {
 		return coderag.SearchPage{}, err
@@ -2172,7 +2181,7 @@ func (m *Manager) SearchCodeText(
 	}
 
 	timing.enter("metadata")
-	page.Indexed = m.repoIndexStates(ctx, indexedRepos(snippetRepos(page.Results), repos))
+	page.Indexed = m.repoIndexStates(ctx, m.indexedRepos(snippetRepos(page.Results), repos))
 
 	return page, nil
 }
@@ -2192,6 +2201,9 @@ func (m *Manager) SearchCodeRegex(
 		return coderag.RegexPage{}, errors.New("regex code search is not configured")
 	}
 
+	ctx, cancel := withSearchTimeout(ctx, searchTimeout)
+	defer cancel()
+
 	filter, repos, err := m.codeScope(ctx, repoID, namespace, opts.Path, timing)
 	if err != nil {
 		return coderag.RegexPage{}, err
@@ -2208,7 +2220,7 @@ func (m *Manager) SearchCodeRegex(
 	for _, hit := range page.Results {
 		hitRepos = append(hitRepos, hit.Repo)
 	}
-	page.Indexed = m.repoIndexStates(ctx, indexedRepos(hitRepos, repos))
+	page.Indexed = m.repoIndexStates(ctx, m.indexedRepos(hitRepos, repos))
 
 	return page, nil
 }
@@ -2217,10 +2229,10 @@ func (m *Manager) SearchCodeRegex(
 // key filter every search mode shares, plus the concrete repository ids the
 // search was scoped to.
 //
-// It also warms the index: the normal and trigram indexes may still be
-// building in the background at startup, so any in-scope repository whose
-// index is pending is built on demand before the search runs. Otherwise a
-// query issued during the warm pass would return a confidently partial answer.
+// It also warms the index when the request named a single repository: that
+// repo's index may still be building in the background at startup, and a query
+// about one repo answered from a half-built index is a wrong answer. A
+// cross-repo scope is not warmed here — see ensureCodeIndexForSearch.
 func (m *Manager) codeScope(
 	ctx context.Context,
 	repoID, namespace, pathGlob string,
@@ -2284,10 +2296,11 @@ func (m *Manager) codeScopeRepos(ctx context.Context, repoID string, scope names
 }
 
 // repoIndexStatesLimit bounds how many repositories a result page reports the
-// index state of. A page carries at most PerPage distinct repositories, so the
-// cap only ever applies to the empty-result case, where the answer "which
-// repositories did this even look at" stops being useful long before it stops
-// being long.
+// index state of beyond the ones that produced hits. A page carries at most
+// PerPage distinct repositories, so the cap applies to the two cases that are
+// scope-sized rather than page-sized: an empty result, and the list of repos
+// still building. In both, "which repositories did this even look at" stops
+// being useful long before it stops being long.
 const repoIndexStatesLimit = 10
 
 // repoIndexStates reports each repository's code-index state.
@@ -2305,6 +2318,7 @@ func (m *Manager) repoIndexStates(ctx context.Context, repos []string) []coderag
 			continue
 		}
 		stage := repo.Stages.CodeIndex
+		_, pending := m.codeWarmLock(id)
 		out = append(out, coderag.RepoIndex{
 			Repo:      id,
 			Commit:    stage.Commit,
@@ -2312,34 +2326,63 @@ func (m *Manager) repoIndexStates(ctx context.Context, repos []string) []coderag
 			// The clone having moved past the indexed commit is the one thing
 			// a caller cannot infer from the hit itself.
 			Stale: stage.Commit != "" && repo.LastCommit != "" && stage.Commit != repo.LastCommit,
+			// A cross-repo search no longer blocks on a first build, so the
+			// page has to say which repos it could not read yet.
+			Pending: pending,
 		})
 	}
 
 	return out
 }
 
-// indexedRepos picks the repositories whose index state a page should report:
-// the ones that produced hits, or — when nothing matched — the ones the search
-// looked at, because "no matches" and "nothing indexed yet" are answers a
-// caller must be able to tell apart.
-func indexedRepos(hits, scoped []string) []string {
-	source := hits
-	limit := len(hits)
-	if len(hits) == 0 {
-		source = scoped
-		limit = min(len(scoped), repoIndexStatesLimit)
-	}
+// indexedRepos picks the repositories whose index state a page should report.
+//
+// Always the ones that produced hits. Plus any repository in scope whose first
+// index is still being built: a cross-repo search does not wait for those, so
+// leaving them out would present "not searched yet" as "nothing matched here",
+// which is the one thing the caller cannot recover from the results. When
+// nothing matched at all the scope itself is reported, for the same reason.
+func (m *Manager) indexedRepos(hits, scoped []string) []string {
+	seen := make(map[string]struct{}, len(hits))
+	out := make([]string, 0, len(hits))
 
-	seen := make(map[string]struct{}, limit)
-	out := make([]string, 0, limit)
-	for _, id := range source {
-		if _, dup := seen[id]; dup || id == "" {
-			continue
+	add := func(id string) bool {
+		if id == "" {
+			return false
+		}
+		if _, dup := seen[id]; dup {
+			return false
 		}
 		seen[id] = struct{}{}
 		out = append(out, id)
-		if len(out) >= limit {
+
+		return true
+	}
+
+	if len(hits) == 0 {
+		for _, id := range scoped {
+			if len(out) >= repoIndexStatesLimit {
+				break
+			}
+			add(id)
+		}
+
+		return out
+	}
+
+	for _, id := range hits {
+		add(id)
+	}
+
+	// The cap counts only the repositories added for being unbuilt; the hits
+	// are already bounded by PerPage.
+	unbuilt := 0
+	for _, id := range scoped {
+		if unbuilt >= repoIndexStatesLimit {
 			break
+		}
+		if _, building := m.codeWarmLock(id); building && add(id) {
+			unbuilt++
 		}
 	}
 
@@ -2355,57 +2398,55 @@ func snippetRepos(snippets []coderag.Snippet) []string {
 	return out
 }
 
-// ensureCodeIndexForSearch warms the normal code index for every repo a
-// SearchCodeText call will read, so a search issued while the background warm
-// pass is still running blocks on the exact repos it needs instead of returning
-// partial results. It resolves the in-scope repo ids from repoID/scope, skips
-// any that are not pending, and builds the rest on demand (serialized per repo
-// by ensureCodeIndex).
+// ensureCodeIndexForSearch warms the normal code index on demand, but only for
+// a search that named one repository.
+//
+// Waiting is the right answer for a single repo: the question is about that
+// repo, so an index that is still building makes a partial result a wrong
+// answer rather than an incomplete one, and the wait is bounded by one clone.
+//
+// A scope spanning many repositories is the opposite. Warming every one of them
+// here puts a full chunk-and-index pass per repo inside the request, in series,
+// behind the same per-repo permits the background warm holds — so the first
+// cross-repo query after a bulk import waits for the entire corpus to be built
+// and reads as a hang. Nothing about that wait is load-bearing: those repos are
+// already being warmed in the background, and a page reports what is still
+// pending (repoIndexStates), so the caller can tell "no matches" apart from
+// "not indexed yet" without the request paying for the difference.
+//
+// This mirrors ensureDocsTextKey, which resolved the same problem on the
+// lexical docs path.
 func (m *Manager) ensureCodeIndexForSearch(ctx context.Context, repoID string, scope namespaceScope) error {
-	var ids []string
-	switch {
-	case scope.single != "":
-		ids = []string{scope.single}
-	case len(scope.repos) > 0:
-		ids = scope.repos
-	case scope.all && repoID != "":
+	target := scope.single
+	if target == "" && scope.all && repoID != "" {
 		// Explicit single repo.
-		ids = []string{repoID}
-	case scope.all:
-		// Cross-repo search ("*" or empty): every tracked repo participates.
-		repos, err := m.reg.List(ctx)
-		if err != nil {
-			return err
-		}
-		ids = make([]string, 0, len(repos))
-		for _, r := range repos {
-			ids = append(ids, r.ID)
-		}
+		target = repoID
+	}
+	if target == "" {
+		// Cross-repo search: report, do not block. See above.
+		return nil
 	}
 
-	var errs []error
-	for _, id := range ids {
-		if _, pending := m.codeWarmLock(id); !pending {
-			continue
-		}
-
-		repo, err := m.reg.Get(ctx, id)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("load repo %s for code index warmup: %w", id, err))
-			continue
-		}
-		if repo == nil {
-			// A repository can be removed after namespace resolution or the
-			// startup list. It no longer participates in this search.
-			m.clearCodeWarmPending(id)
-			continue
-		}
-		if err := m.ensureCodeIndex(ctx, id, repo.Path); err != nil {
-			errs = append(errs, fmt.Errorf("warm code index for %s: %w", id, err))
-		}
+	if _, pending := m.codeWarmLock(target); !pending {
+		return nil
 	}
 
-	return errors.Join(errs...)
+	repo, err := m.reg.Get(ctx, target)
+	if err != nil {
+		return fmt.Errorf("load repo %s for code index warmup: %w", target, err)
+	}
+	if repo == nil {
+		// A repository can be removed after namespace resolution or the
+		// startup list. It no longer participates in this search.
+		m.clearCodeWarmPending(target)
+
+		return nil
+	}
+	if err := m.ensureCodeIndex(ctx, target, repo.Path); err != nil {
+		return fmt.Errorf("warm code index for %s: %w", target, err)
+	}
+
+	return nil
 }
 
 // ListDocs returns the generated doc metadata for a repo from its manifest.

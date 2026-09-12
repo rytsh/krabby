@@ -48,9 +48,25 @@ type textRecordV1 struct {
 	UpdatedAt time.Time `bw:"updated_at"`
 }
 
-// docsTextBucketVersion is bumped whenever textRecord changes shape.
+// docsTextBucketVersion is bumped whenever textRecord changes shape, or
+// whenever the stored full-text postings need regenerating.
 //   - v2: added the indexed Kind discriminator.
-const docsTextBucketVersion = 2
+//   - v3: bw's tokenizer began emitting adjacent sub-compounds, so a search
+//     for "batch_count" matches text that only ever writes it inside a longer
+//     chain ("metrics.batch_count.Inc()"). The records are unchanged; the
+//     postings derived from them are not.
+const docsTextBucketVersion = 3
+
+// migrateDocsTextV2ToV3 regenerates the full-text postings.
+//
+// The stored shape is identical, so this is an identity rewrite: bw routes a
+// migration through the ordinary write path, and that is what re-tokenises
+// every document. Nothing is re-read from disk or re-chunked.
+func migrateDocsTextV2ToV3() bw.BucketOption[textRecord] {
+	return bw.WithTypedMigration(2, 3,
+		func(_ context.Context, old *textRecord) (*textRecord, error) { return old, nil },
+	)
+}
 
 // migrateDocsTextV1ToV2 backfills Kind on records indexed before it existed.
 //
@@ -93,6 +109,7 @@ func NewTextStore(db *bw.DB) (*TextStore, error) {
 		bw.WithVersion[textRecord](docsTextBucketVersion),
 		bw.WithMigrationProgress[textRecord](storage.MigrationProgress()),
 		migrateDocsTextV1ToV2(),
+		migrateDocsTextV2ToV3(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("register docs search bucket; %w", err)

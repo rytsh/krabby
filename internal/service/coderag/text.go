@@ -42,11 +42,17 @@ type textRecord struct {
 // has no way to tell it apart from one indexed a second ago. Stale is the
 // actionable bit — the clone has moved past what was indexed, so a refresh is
 // pending or was skipped.
+//
+// Pending is the stronger form of the same warning: the repository has no
+// usable index yet because its first build is still running. A cross-repo
+// search does not wait for it, so without this the repo would look like it
+// simply had no matches.
 type RepoIndex struct {
 	Repo      string    `json:"repo"`
 	Commit    string    `json:"commit,omitempty"`
 	IndexedAt time.Time `json:"indexed_at,omitzero"`
 	Stale     bool      `json:"stale,omitempty"`
+	Pending   bool      `json:"pending,omitempty"`
 }
 
 // SearchPage is one page of exact full-text code-search results.
@@ -105,6 +111,13 @@ func NewTextStore(db *bw.DB) (*TextStore, error) {
 		),
 		// v3 backfills only the path index, preserving FTS/trigram storage.
 		bw.WithAddedIndexes[textRecord](2, 3),
+		// v4 regenerates the full-text postings: bw's tokenizer now emits
+		// adjacent sub-compounds, so searching "batch_count" matches code that
+		// only ever writes it inside a longer chain ("metrics.batch_count.Inc()").
+		// Another identity rewrite — the chunks themselves do not change.
+		bw.WithTypedMigration[textRecord, textRecord](3, 4,
+			func(_ context.Context, old *textRecord) (*textRecord, error) { return old, nil },
+		),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("register code search bucket; %w", err)
