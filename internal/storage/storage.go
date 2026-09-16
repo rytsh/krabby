@@ -39,6 +39,15 @@ func Open(path string) (*bw.DB, error) {
 	return db, nil
 }
 
+// OpenReadOnly refuses database creation, recovery writes and schema migrations.
+// A replica must be imported from a clean, compatible publisher first.
+func OpenReadOnly(path string) (*bw.DB, error) {
+	opts := append(TuneOptions(memlimit.Current()), bw.WithBadgerTune(func(o *badger.Options) {
+		o.ReadOnly = true
+	}))
+	return bw.Open(path, opts...)
+}
+
 // OpenTuned opens a bw database under the given memory budget.
 //
 // Badger allocates a full skiplist arena (MemTableSize plus ~30% headroom) for

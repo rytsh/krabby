@@ -361,3 +361,7 @@ html.theme-anim * {
   color: #6e7681;
   user-select: none;
 }
+/* Backend capabilities also remove mutation controls from the reader UI. */
+[data-read-only="true"] [data-mutation] {
+  display: none !important;
+}

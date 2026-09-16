@@ -191,7 +191,7 @@
 
 <p class="text-dim">Tracked repositories and their knowledge-graph build status.</p>
 
-<div class="card my-4 flex flex-col gap-2 p-3">
+<div data-mutation class="card my-4 flex flex-col gap-2 p-3">
   <div class="flex gap-2">
     <input
       class="input flex-1"
@@ -315,11 +315,11 @@
             <td class="border-b border-line px-3 py-2.5 text-[13px] text-faint">{fmtDate(r.last_build_at)}</td>
             <td class="whitespace-nowrap border-b border-line px-3 py-2.5 text-right">
               {#if r.running}
-                <button class="btn btn-sm btn-danger ml-1.5" onclick={(e) => cancel(r.id, e)}>Cancel</button>
+                <button data-mutation class="btn btn-sm btn-danger ml-1.5" onclick={(e) => cancel(r.id, e)}>Cancel</button>
               {:else}
-                <button class="btn btn-sm ml-1.5" onclick={(e) => refresh(r.id, e)}>Refresh</button>
+                <button data-mutation class="btn btn-sm ml-1.5" onclick={(e) => refresh(r.id, e)}>Refresh</button>
               {/if}
-              <button class="btn btn-sm btn-danger ml-1.5" onclick={(e) => remove(r.id, e)}>Remove</button>
+              <button data-mutation class="btn btn-sm btn-danger ml-1.5" onclick={(e) => remove(r.id, e)}>Remove</button>
             </td>
           </tr>
         {/each}

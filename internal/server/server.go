@@ -43,6 +43,7 @@ import (
 func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpServer, mcpAPIServer, mcpAdminServer *mcp.Server) error {
 	server := ada.New()
 	server.Use(
+		readOnlyMiddleware(cfg),
 		mrecover.Middleware(),
 		mserver.Middleware(config.ServiceName+":"+config.Version),
 		mcors.Middleware(),
@@ -86,6 +87,9 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	// Each path owns a disjoint tool catalog. Clients add only the capabilities
 	// they need and can enable or disable API and administration independently.
 	for path, catalog := range mcpCatalogRoutes(cfg.MCP.Path, mcpServer, mcpAPIServer, mcpAdminServer) {
+		if cfg.ReadOnly && path == cfg.MCP.Path+"/admin" {
+			continue
+		}
 		handler := mcp.NewStreamableHTTPHandler(
 			func(_ *http.Request) *mcp.Server { return catalog },
 			&mcp.StreamableHTTPOptions{},
@@ -102,6 +106,7 @@ func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpSer
 	// A liveness probe every ten seconds is 8.6k observations a day of nothing.
 	api := base.Group("/api/v1", langfuseMiddleware(mgr))
 	api.GET("/settings", server.Wrap(getSettings(cfg, mgr)))
+	api.GET("/sync/status", server.Wrap(syncStatus(cfg)))
 	api.GET("/browser-extension.zip", server.Wrap(downloadBrowserExtension()))
 	api.GET("/mcp/api-key", server.Wrap(getMCPKey(mgr)))
 	api.PUT("/mcp/api-key", server.Wrap(setMCPKey(mgr)))
@@ -271,6 +276,7 @@ func apiKeyMiddleware(getKey func() string) func(next http.Handler) http.Handler
 // (MCP api key, webhook secret) are deliberately omitted; booleans indicate
 // only whether they are configured.
 type settingsResponse struct {
+	ReadOnly  bool   `json:"read_only"`
 	Version   string `json:"version"`
 	Commit    string `json:"commit"`
 	BuildDate string `json:"build_date"`
@@ -305,6 +311,7 @@ func getSettings(cfg *config.Config, mgr *manager.Manager) ada.HandlerFunc {
 		s.BuildDate = config.Date
 		s.LogLevel = cfg.LogLevel
 		s.DataDir = cfg.DataDir
+		s.ReadOnly = cfg.ReadOnly
 
 		s.Server.Host = cfg.Server.Host
 		s.Server.Port = cfg.Server.Port

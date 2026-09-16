@@ -39,6 +39,11 @@ type Config struct {
 	LogLevel string `cfg:"log_level" default:"info"`
 	// DataDir holds clones, merged graph and registry state. "~" is expanded.
 	DataDir string `cfg:"data_dir" default:"~/.krabby"`
+	// ReadOnly serves existing indexes without administration or background builds.
+	ReadOnly bool `cfg:"read_only"`
+	// Query overrides only reader-side embedding connections, never the model
+	// or dimensions that produced the published index.
+	Query QueryConnections `cfg:"query"`
 
 	Server   Server   `cfg:"server"`
 	MCP      MCP      `cfg:"mcp"`
@@ -46,6 +51,16 @@ type Config struct {
 	Memory   Memory   `cfg:"memory"`
 
 	Telemetry tell.Config `cfg:"telemetry"`
+}
+
+type QueryConnections struct {
+	DocsEmbedder QueryEndpoint `cfg:"docs_embedder"`
+	CodeEmbedder QueryEndpoint `cfg:"code_embedder"`
+}
+
+type QueryEndpoint struct {
+	BaseURL string `cfg:"base_url"`
+	APIKey  string `cfg:"api_key" log:"-"`
 }
 
 // Memory bounds the process footprint. krabby holds three embedded Badger

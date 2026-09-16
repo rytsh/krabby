@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -196,8 +197,44 @@ type NamespaceRecord struct {
 
 // Registry stores Repo records.
 type Registry struct {
-	bucket   *bw.Bucket[Repo]
-	nsBucket *bw.Bucket[NamespaceRecord]
+	bucket           *bw.Bucket[Repo]
+	nsBucket         *bw.Bucket[NamespaceRecord]
+	sourceRoot       string
+	localRoot        string
+	sourceWorkingDir string
+}
+
+// Relocate maps the publisher's absolute clone paths on reads, without writing
+// local paths into replicated records (which would diverge the bw version line).
+// Configure once, before serving any queries.
+func (r *Registry) Relocate(sourceRoot, localRoot string, sourceWorkingDir ...string) {
+	r.sourceRoot, r.localRoot = sourceRoot, localRoot
+	if len(sourceWorkingDir) > 0 {
+		r.sourceWorkingDir = sourceWorkingDir[0]
+	}
+}
+
+func (r *Registry) relocate(repos ...*Repo) {
+	if r.sourceRoot == "" {
+		return
+	}
+	for _, repo := range repos {
+		if repo == nil {
+			continue
+		}
+		original := repo.Path
+		if original != "" && !filepath.IsAbs(original) && r.sourceWorkingDir != "" {
+			original = filepath.Join(r.sourceWorkingDir, original)
+		}
+		rel, err := filepath.Rel(r.sourceRoot, original)
+		if err == nil && filepath.IsLocal(rel) {
+			repo.Path = filepath.Join(r.localRoot, rel)
+		} else {
+			// Never let an imported record read the publisher's absolute path on
+			// this machine. Export validates paths, so this indicates corruption.
+			repo.Path = filepath.Join(r.localRoot, ".invalid-repository-path")
+		}
+	}
 }
 
 // repoSchemaVersion must be bumped whenever the Repo struct changes shape so
@@ -237,6 +274,7 @@ func (r *Registry) Get(ctx context.Context, id string) (*Repo, error) {
 		return nil, fmt.Errorf("get repo %s; %w", id, err)
 	}
 
+	r.relocate(repo)
 	return repo, nil
 }
 
@@ -256,6 +294,7 @@ func (r *Registry) List(ctx context.Context) ([]*Repo, error) {
 		repos = []*Repo{}
 	}
 
+	r.relocate(repos...)
 	return repos, nil
 }
 
@@ -376,6 +415,7 @@ func (r *Registry) ListPaged(ctx context.Context, opts ListOptions) (repos []*Re
 		repos = []*Repo{}
 	}
 
+	r.relocate(repos...)
 	return repos, total, nil
 }
 
@@ -397,6 +437,7 @@ func (r *Registry) ListNamespace(ctx context.Context, ns string) ([]*Repo, error
 		repos = []*Repo{}
 	}
 
+	r.relocate(repos...)
 	return repos, nil
 }
 

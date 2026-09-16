@@ -166,3 +166,6 @@ type Store interface {
 
 // New opens the embedded bw vector store at dir.
 func New(dir string) (Store, error) { return newEmbedded(dir) }
+
+// NewReadOnly opens an existing vector index without allowing writes/migrations.
+func NewReadOnly(dir string) (Store, error) { return newEmbeddedMode(dir, true) }

@@ -440,7 +440,7 @@
       created by naming one on a service; this only sets the description.
     </p>
 
-    <div class="mt-3 flex flex-col gap-2 sm:flex-row">
+    <div data-mutation class="mt-3 flex flex-col gap-2 sm:flex-row">
       <input class="input sm:w-52" placeholder="group name, e.g. finance" bind:value={groupForm.name} />
       <input
         class="input flex-1"
@@ -457,10 +457,10 @@
             <span class="font-mono font-medium">{g.name}</span>
             <span class="text-faint">({g.service_count})</span>
             <span class="min-w-0 flex-1 truncate text-dim">{g.description || "—"}</span>
-            <button class="icon-btn" title="Edit description" onclick={() => editGroup(g)}>
+            <button data-mutation class="icon-btn" title="Edit description" onclick={() => editGroup(g)}>
               <Icon name="settings" size={13} />
             </button>
-            <button class="icon-btn" title="Delete description" onclick={() => removeGroup(g.name)}>
+            <button data-mutation class="icon-btn" title="Delete description" onclick={() => removeGroup(g.name)}>
               <Icon name="trash" size={13} />
             </button>
           </div>
@@ -470,7 +470,7 @@
   </div>
 
   <!-- Add / edit a service -->
-  <div>
+  <div data-mutation>
     {#if !showAdd}
       <button class="btn btn-primary" onclick={() => (showAdd = true)}>Add API service</button>
     {:else}
@@ -693,7 +693,7 @@
                       {/if}
                     </div>
 
-                    <div class="mb-3 flex flex-wrap gap-2">
+                    <div data-mutation class="mb-3 flex flex-wrap gap-2">
                       <button class="btn btn-sm" onclick={() => refresh(s.name, false)}>Sync</button>
                       <button
                         class="btn btn-sm"
@@ -825,7 +825,7 @@
         {/if}
 
         <!-- Try it -->
-        <div class="mb-3 rounded-md border border-line">
+        <div data-mutation class="mb-3 rounded-md border border-line">
           <button
             class="flex w-full items-center justify-between px-3 py-2 text-[13px] font-medium"
             onclick={() => (tryOpen = !tryOpen)}

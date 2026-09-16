@@ -84,7 +84,7 @@
   know what each namespace holds and can pick the right scope.
 </p>
 
-<div class="card mb-4 grid grid-cols-1 gap-2 p-3 sm:grid-cols-[240px_1fr_auto]">
+<div data-mutation class="card mb-4 grid grid-cols-1 gap-2 p-3 sm:grid-cols-[240px_1fr_auto]">
   <input
     class="input"
     placeholder="namespace name (e.g. payments)"
@@ -142,9 +142,9 @@
                 {ns.description || "—"}
               </td>
               <td class="border-b border-line px-4 py-2.5 text-right">
-                <button class="btn btn-sm" onclick={() => startEdit(ns)}>Edit</button>
+                <button data-mutation class="btn btn-sm" onclick={() => startEdit(ns)}>Edit</button>
                 {#if ns.namespace !== DEFAULT}
-                  <button class="btn btn-sm btn-danger" onclick={() => remove(ns)}>Delete</button>
+                  <button data-mutation class="btn btn-sm btn-danger" onclick={() => remove(ns)}>Delete</button>
                 {/if}
               </td>
             </tr>

@@ -2,6 +2,8 @@
   import { onMount, untrack } from "svelte";
   import { path, link } from "./lib/router.js";
   import { theme, toggleTheme } from "./lib/theme.js";
+  import { api } from "./lib/api.js";
+  import { readOnly } from "./lib/capabilities.js";
   import {
     owners,
     loadOwners,
@@ -199,6 +201,7 @@
   // Load the owner list once for the sidebar tree. Each owner's repos are
   // fetched lazily when its group is expanded (see toggleGroup/expandGroup).
   onMount(loadOwners);
+  onMount(() => { api.settings().catch(() => {}); });
 
   // Walk the owner tree and fetch repos for every group that is already
   // expanded. loadOwnerRepos is cached, so this is a no-op for groups whose
@@ -259,7 +262,7 @@
   });
 </script>
 
-<div class="flex min-h-screen">
+<div class="flex min-h-screen" data-read-only={$readOnly}>
   {#if sidebarOpen}
     <aside class="sticky top-0 flex h-screen flex-shrink-0 flex-col overflow-y-auto bg-surface p-3" style={`width:${sidebarW}px`}>
     <div class="flex items-center gap-2 px-2 pb-5 pt-2">
@@ -270,7 +273,7 @@
     </div>
 
     <nav class="flex flex-col gap-0.5">
-      {#each nav as item}
+      {#each nav.filter((item) => !$readOnly || !["/settings", "/activity"].includes(item.href)) as item}
         <a
           href={item.href}
           use:link
@@ -333,6 +336,9 @@
       </div>
 
       <div class="flex items-center gap-2">
+        {#if $readOnly}
+          <span class="rounded border border-line px-2 py-1 text-[11px] text-dim" title="Published dataset; updates are applied with krabby sync import">Read-only</span>
+        {/if}
         <button
           class="icon-btn"
           onclick={toggleTheme}
@@ -368,11 +374,11 @@
       {:else if view === "namespaces"}
         <Namespaces />
       {:else if view === "activity"}
-        <Activity />
+        {#if !$readOnly}<Activity />{:else}<p class="text-dim">Background jobs are disabled in read-only mode.</p>{/if}
       {:else if view === "search"}
         <Search />
       {:else if view === "settings"}
-        <Settings />
+        {#if !$readOnly}<Settings />{:else}<p class="text-dim">This instance is read-only. Configure connections through the deployment configuration.</p>{/if}
       {:else if view === "about"}
         <About />
       {/if}

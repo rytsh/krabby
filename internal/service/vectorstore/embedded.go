@@ -11,7 +11,6 @@ import (
 	"github.com/rakunlabs/bw"
 	"github.com/rakunlabs/query"
 
-	"github.com/rytsh/krabby/internal/memlimit"
 	"github.com/rytsh/krabby/internal/storage"
 )
 
@@ -86,10 +85,11 @@ const (
 // forbids two concurrent opens, so both bundles share one handle and the DB
 // closes only when the last reference is released.
 type sharedHandle struct {
-	dir    string
-	db     *bw.DB
-	bucket *bw.Bucket[chunkRecord]
-	refs   int
+	readOnly bool
+	dir      string
+	db       *bw.DB
+	bucket   *bw.Bucket[chunkRecord]
+	refs     int
 
 	// Batch sizes are per database, not per handle: they describe how wide
 	// this store's records are, which every handle sharing it observes.
@@ -108,10 +108,17 @@ var sharedDBs = struct {
 }{m: map[string]*sharedHandle{}}
 
 func newEmbedded(dir string) (*embedded, error) {
+	return newEmbeddedMode(dir, false)
+}
+
+func newEmbeddedMode(dir string, readOnly bool) (*embedded, error) {
 	sharedDBs.Lock()
 	defer sharedDBs.Unlock()
 
 	if h, ok := sharedDBs.m[dir]; ok {
+		if h.readOnly != readOnly {
+			return nil, fmt.Errorf("vector db %s already open in a different access mode", dir)
+		}
 		h.refs++
 
 		return &embedded{h: h}, nil
@@ -119,7 +126,11 @@ func newEmbedded(dir string) (*embedded, error) {
 
 	// Vector databases are the largest of krabby's three Badger stores, so the
 	// shared tuning (bounded caches, small memtables) matters most here.
-	db, err := storage.OpenTuned(dir, memlimit.Current())
+	open := storage.Open
+	if readOnly {
+		open = storage.OpenReadOnly
+	}
+	db, err := open(dir)
 	if err != nil {
 		return nil, fmt.Errorf("open vector db %s; %w", dir, err)
 	}
@@ -136,7 +147,8 @@ func newEmbedded(dir string) (*embedded, error) {
 	}
 
 	h := &sharedHandle{
-		dir: dir, db: db, bucket: bucket, refs: 1,
+		readOnly: readOnly,
+		dir:      dir, db: db, bucket: bucket, refs: 1,
 		upserts: storage.NewBatcher(upsertBatch),
 		deletes: storage.NewBatcher(deleteBatch),
 	}

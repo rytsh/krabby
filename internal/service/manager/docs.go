@@ -57,7 +57,7 @@ func (m *Manager) SetSettingsStore(s *settings.Store) {
 func (m *Manager) InitMCPKey(ctx context.Context, configKey string) {
 	key := configKey
 
-	if m.settings != nil {
+	if m.settings != nil && !m.readOnly {
 		if rec, err := m.settings.MCPKey(ctx); err != nil {
 			slog.Error("load mcp key override", "error", err)
 		} else if rec != nil {
@@ -471,6 +471,10 @@ func (m *Manager) Tracer() *langfuse.Tracer {
 // leave the previous live bundle active.
 func (m *Manager) buildBundle(s settings.Settings) (*docsBundle, error) {
 	b := &docsBundle{ragCfg: ragConfig(s), imageCfg: webImageConfig(s), tracer: m.tracerFor(s)}
+	openVectors := vectorstore.New
+	if m.readOnly {
+		openVectors = vectorstore.NewReadOnly
+	}
 
 	var (
 		codeEmb   *embedder.Client
@@ -478,7 +482,7 @@ func (m *Manager) buildBundle(s settings.Settings) (*docsBundle, error) {
 	)
 
 	// Doc generation needs a chat LLM.
-	if s.DocsEnabled {
+	if s.DocsEnabled && !m.readOnly {
 		chat, err := llm.New(llmConfig(s), llm.WithTracer(b.tracer))
 		switch {
 		case errors.Is(err, llm.ErrNotConfigured):
@@ -497,7 +501,7 @@ func (m *Manager) buildBundle(s settings.Settings) (*docsBundle, error) {
 		}
 	}
 
-	if s.WebImageAnalysisEnabled {
+	if s.WebImageAnalysisEnabled && !m.readOnly {
 		vision, err := llm.New(visionLLMConfig(s), llm.WithTracer(b.tracer))
 		switch {
 		case errors.Is(err, llm.ErrNotConfigured):
@@ -518,7 +522,7 @@ func (m *Manager) buildBundle(s settings.Settings) (*docsBundle, error) {
 		case err != nil:
 			return nil, fmt.Errorf("build embedder client; %w", err)
 		default:
-			store, serr := vectorstore.New(m.docsVectorsDir)
+			store, serr := openVectors(m.docsVectorsDir)
 			if serr != nil {
 				return nil, fmt.Errorf("build vector store; %w", serr)
 			}
@@ -541,7 +545,7 @@ func (m *Manager) buildBundle(s settings.Settings) (*docsBundle, error) {
 		case err != nil:
 			return nil, fmt.Errorf("build code embedder client; %w", err)
 		default:
-			store, serr := vectorstore.New(m.codeVectorsDir)
+			store, serr := openVectors(m.codeVectorsDir)
 			if serr != nil {
 				if b.store != nil {
 					_ = b.store.Close()
@@ -1112,6 +1116,9 @@ func (m *Manager) WarmDocsSearch(ctx context.Context) error {
 // with markdown created before the docs_search bucket existed are indexed on
 // demand for exactly the keys participating in this query.
 func (m *Manager) ensureDocsTextForSearch(ctx context.Context, scope, key, namespace string) error {
+	if m.readOnly {
+		return nil
+	}
 	if m.docsText == nil {
 		return nil
 	}

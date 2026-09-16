@@ -749,6 +749,7 @@
               class="btn btn-sm btn-danger ml-auto !px-2 !py-0.5 text-[12px]"
               title="Abort the running job"
               onclick={cancelJob}
+              data-mutation
             >
               Cancel
             </button>
@@ -757,6 +758,7 @@
               class="btn btn-sm ml-auto inline-flex items-center gap-1.5 !px-2 !py-0.5 text-[12px]"
               disabled={repo.running}
               onclick={refresh}
+              data-mutation
               title="Pull remote changes and rebuild the repository"
             >
               <Icon name="refresh" size={13} />
@@ -802,11 +804,12 @@
                     class="btn btn-sm btn-danger ml-auto !px-2 !py-0.5 text-[12px]"
                     title="Abort the running job"
                     onclick={cancelJob}
+                    data-mutation
                   >
                     Cancel
                   </button>
                 {:else}
-                  <div class="ml-auto flex gap-1">
+                  <div data-mutation class="ml-auto flex gap-1">
                     {#if forceable.has(s.key)}
                       <button
                         class="btn btn-sm !px-2 !py-0.5 text-[12px]"
@@ -894,7 +897,7 @@
       <div class="card shrink-0 flex flex-col gap-2.5 p-4 text-[13px]">
         <div class="flex items-center justify-between gap-2">
           <span class="text-dim">Build settings</span>
-          <button class="btn btn-sm" onclick={() => (showOverrides ? (showOverrides = false) : openOverrides())}>
+          <button data-mutation class="btn btn-sm" onclick={() => (showOverrides ? (showOverrides = false) : openOverrides())}>
             {showOverrides ? "Close" : "Edit"}
           </button>
         </div>

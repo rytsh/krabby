@@ -261,6 +261,147 @@ is retained, and older versions receive a short grace period (5m by default) for
 readers that resolved an earlier path; a read replaying a reaped snapshot token
 transparently falls back to the current version instead of failing.
 
+## Read-only replicas and transfers
+
+Run indexing and generation in a publisher (for example, sandbox), then transfer
+its data to another environment running the same Krabby version. The replica
+serves code, files, history, graphs, docs, lexical search and semantic search.
+
+Configure the replica with a **separate data directory**:
+
+```yaml
+data_dir: /data/krabby-reader
+read_only: true
+mcp:
+  api_key: reader-mcp-key
+```
+
+`KRABBY_READ_ONLY=true` is equivalent. Read-only mode disables REST mutations,
+the admin MCP endpoint, live API calls, webhooks, scheduled refreshes, restored
+background jobs, generation and startup/on-demand index backfills. The core MCP
+catalog stays available; the API catalog offers its four discovery tools. The
+UI hides mutation controls. State and vector databases are opened **physically
+read-only**, so a missing/incompatible schema fails instead of migrating data.
+Prepare the indexes on the publisher before exporting.
+
+### First transfer
+
+Stop the publisher before export and the replica before import. Commands and
+the server share a process lock; export/import will fail if the directory is
+in use. Other programs must also leave these directories untouched during a
+transfer. Commands use the same file/env configuration as the server.
+
+```sh
+# Publisher: full snapshot. The archive must be outside data_dir.
+KRABBY_DATA_DIR=/data/krabby-publisher \
+  krabby sync export --output /transfer/full.krabby > /transfer/published.json
+
+# Copy full.krabby to the destination environment, then import there.
+KRABBY_DATA_DIR=/data/krabby-reader KRABBY_READ_ONLY=true \
+  krabby sync import --input /transfer/full.krabby
+
+# Start the reader after import.
+KRABBY_DATA_DIR=/data/krabby-reader KRABBY_READ_ONLY=true krabby
+```
+
+Export, import and status print a small JSON cursor to stdout. Operational logs
+go to stderr. The cursor contains a dataset ID, snapshot ID and **one bw version
+per database** (`state`, `docs-vectors`, `code-vectors`), rather than one ambiguous
+DB version number.
+
+### Incremental updates
+
+Get the destination's cursor while it is running:
+
+```sh
+curl -fsS http://reader:8080/api/v1/sync/status > /transfer/reader-status.json
+
+# Or locally, with the reader's data_dir configured:
+krabby sync status > /transfer/reader-status.json
+```
+
+Bring that JSON to the publisher. After stopping the publisher:
+
+```sh
+KRABBY_DATA_DIR=/data/krabby-publisher \
+  krabby sync export --since /transfer/reader-status.json \
+  --output /transfer/update.krabby > /transfer/published.json
+```
+
+Copy `update.krabby` to the reader, stop it, run the same `sync import --input`
+command against that file, and restart it. Intermediate snapshots do not have
+to be imported: a retained checkpoint can be used as the base of a direct jump.
+
+Database changes are generated with `bw.Backup(since, true)` and applied with
+`bw.ApplyBackup`; full streams use `bw.Restore`. This includes FTS/HNSW indexes
+and delete markers. No application-level record diff or re-embedding is needed.
+The exporter verifies each delta against its retained full checkpoint using bw
+and a streaming keyspace checksum. If compaction, a wipe or a migration removed
+the necessary history, it automatically sends a **full stream for that DB**.
+If the checkpoint is no longer retained, export produces a full snapshot.
+
+**Filesystem artifacts are complete snapshots in every archive**, including git
+clones/history, graph files, generated Markdown, source pages and API projections.
+They are not all stored in bw today. This keeps file reads and graph queries
+working immediately, and propagates file deletions. Database transfer is
+incremental; filesystem transfer currently is not. Package size therefore also
+depends on the size of the clones and documents.
+
+### Applying and retaining snapshots
+
+The importer checks the dataset/base IDs, format/application version, complete
+archive checksums, restored DB checksums and read-only schema compatibility.
+It prepares a private directory under `data_dir/.replica/`, then atomically
+replaces `current.json`. A failed/interrupted import leaves the active dataset
+unchanged. Retrying an already active package is a no-op. Absolute repo paths
+are relocated at read time, without writing into replicated registry records.
+Imported directories can only be served with `read_only: true`.
+
+The publisher retains full bw checkpoints under
+`data_dir/.transfer/checkpoints/<snapshot-id>/`. Export verification uses extra
+temporary disk space and reads the full live DB keyspace even when sending a
+small delta. Old checkpoint directories may be removed while the publisher is
+stopped; readers on those snapshots will receive a full export next time.
+Keep `.transfer/source.json`: it identifies this publisher's version lineage.
+
+The reader retains previous generations under `.replica/<snapshot-id>/`.
+After a successful rollout, old inactive generations may be removed while the
+reader is stopped. Keep the directory referenced by `.replica/current.json`.
+Importing into a publisher's existing `state/` directory is refused.
+
+### Reader-side model connections
+
+Semantic queries call the embedder for the **query only**; documents and code
+vectors are transferred ready to search. A connected LLM agent can use the
+read-only MCP tools to retrieve context and answer questions.
+
+If the reader uses another gateway or API key, override the connections locally:
+
+```yaml
+read_only: true
+query:
+  docs_embedder:
+    base_url: https://reader-embeddings.example/v1
+    api_key: reader-embedding-key
+  code_embedder:
+    base_url: https://reader-code-embeddings.example/v1
+    api_key: reader-code-key
+```
+
+These overrides are in memory only. Model names, dimensions and retrieval
+settings remain those of the published indexes. The replacement endpoint must
+serve the same embedding model/version. When code inherits the docs embedder,
+it also inherits the reader's docs connection unless a separate code connection
+is supplied. The reader's MCP authentication comes from file/env config, not
+from the publisher's persisted MCP-key override.
+
+**Archive contents:** these are direct bw backups of the publisher, so persisted
+settings and credentials, including secrets, are included in the state stream.
+Archives and checkpoint directories are created with owner-only permissions;
+transport/store them accordingly. Materialized `keys/` files, deployment config,
+locks and other unrelated files outside the listed artifact directories are
+not archived. Local `query` and `mcp` settings are never overwritten by import.
+
 ## Git credentials
 
 Credentials are stored per **pattern** — a host or host/path prefix — and the

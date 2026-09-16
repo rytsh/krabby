@@ -56,8 +56,15 @@ func NewCore(mgr *manager.Manager, version string) *mcp.Server {
 
 // NewAPI builds the API discovery and call MCP catalog.
 func NewAPI(mgr *manager.Manager, version string) *mcp.Server {
-	server := newServer(mgr, "krabby-api", "Krabby API catalog", version, apiInstructions)
+	instructions := apiInstructions
+	if mgr.ReadOnly() {
+		instructions = "Read-only API catalog. Discover services and inspect endpoint schemas. Live API calls are disabled."
+	}
+	server := newServer(mgr, "krabby-api", "Krabby API catalog", version, instructions)
 	addAPITools(server, mgr)
+	if mgr.ReadOnly() {
+		server.RemoveTools("call_api_endpoint")
+	}
 
 	return server
 }
@@ -66,6 +73,9 @@ func NewAPI(mgr *manager.Manager, version string) *mcp.Server {
 // caps wait=true repository operations; <=0 means no server-side cap.
 func NewAdmin(mgr *manager.Manager, version string, waitTimeout time.Duration) *mcp.Server {
 	server := newServer(mgr, "krabby-admin", "Krabby administration", version, adminInstructions)
+	if mgr.ReadOnly() {
+		return server
+	}
 	addManagementTools(server, mgr, waitTimeout, true)
 	addCredentialTools(server, mgr)
 	addDocAdminTools(server, mgr)

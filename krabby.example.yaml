@@ -8,6 +8,22 @@ log_level: info
 # Clones, graphs and state live here.
 data_dir: ~/.krabby
 
+# Serve published data without mutations, scheduled work, generation or index
+# backfills. State and vector databases are opened physically read-only.
+# Import first with: krabby sync import --input /transfer/full.krabby
+# Env: KRABBY_READ_ONLY=true
+read_only: false
+
+# Optional reader-only embedding connection overrides. Model and dimensions
+# always come from the publisher's settings; only the connection changes.
+# query:
+#   docs_embedder:
+#     base_url: https://embeddings.reader.example/v1
+#     api_key: reader-key
+#   code_embedder:
+#     base_url: https://code-embeddings.reader.example/v1
+#     api_key: reader-key
+
 server:
   host: ""
   port: "8080"

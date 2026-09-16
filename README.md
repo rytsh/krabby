@@ -18,6 +18,7 @@ and understand relationships through MCP.
 - Web, Confluence, and Jira source indexing
 - API catalog: OpenAPI/Swagger and gRPC endpoints, browsable and searchable, with per-service overrides
 - Web UI, REST API, and MCP support
+- Read-only replicas with full/incremental bw transfers between environments
 
 ## Run with Docker
 
@@ -53,6 +54,9 @@ the UI. The `krabby-data` volume (or directory when using `docker run`) keeps
 repositories, indexes, and settings between container restarts.
 
 > For base path use **KRABBY_SERVER_BASE_PATH** environment variable, e.g. `-e KRABBY_SERVER_BASE_PATH=/krabby` to run behind a reverse proxy.
+
+For publishing sandbox data to a read-only environment, see
+[Read-only replicas and transfers](DETAILS.md#read-only-replicas-and-transfers).
 
 ## Add MCP
 

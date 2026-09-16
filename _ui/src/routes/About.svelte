@@ -1,6 +1,7 @@
 <script>
   import { onMount } from "svelte";
   import { api } from "../lib/api.js";
+  import { readOnly } from "../lib/capabilities.js";
 
   let settings = $state(null);
 
@@ -56,7 +57,7 @@
 Server name: ${mcpName}
 Transport: streamable HTTP
 URL: ${mcpUrl}
-Tool catalog: ${mcpCatalog} (${mcpCatalog === "core" ? "read-only code, graph, files and docs" : mcpCatalog === "api" ? "API discovery and live endpoint calls" : "Krabby administration and mutations"})
+Tool catalog: ${mcpCatalog} (${mcpCatalog === "core" ? "read-only code, graph, files and docs" : mcpCatalog === "api" ? ($readOnly ? "read-only API discovery" : "API discovery and live endpoint calls") : "Krabby administration and mutations"})
 ${apiKeySet ? "Authentication: send the API key in the X-Api-Key header. Ask me for the key before editing the configuration." : "Authentication: none"}
 
 Detect this client's MCP configuration format and update the appropriate project or user configuration. Preserve all existing settings and other MCP servers. After configuring it, verify the connection and confirm that the Krabby tools are available.`);
@@ -197,7 +198,7 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
     toolGroups
       .map((group) => ({
         ...group,
-        tools: group.tools.filter(([, , catalog]) => (catalog || "core") === mcpCatalog),
+        tools: group.tools.filter(([name, , catalog]) => (catalog || "core") === mcpCatalog && (!$readOnly || (catalog !== "admin" && name !== "call_api_endpoint"))),
       }))
       .filter((group) => group.tools.length > 0),
   );
@@ -213,7 +214,7 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
 
 <p class="max-w-[720px] text-dim">
   krabby tracks git repositories, builds a knowledge graph for each one and generates docs and semantic
-  indexes on top. Its tools are available to AI agents through three independent
+  indexes on top. Its tools are available to AI agents through independent
   <span class="text-fg">Model Context Protocol</span> catalogs, split by capability so each client sees
   only what it needs.
 </p>
@@ -244,13 +245,14 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
     >
       <div class="text-[13px] font-medium">API</div>
       <code class="mt-1 block break-all font-mono text-[11px] text-fg">{mcpRoot}/api</code>
-      <div class="mt-1 text-[12px] text-dim">API catalog discovery plus <code class="font-mono">call_api_endpoint</code>, which sends real requests.</div>
-      <div class="mt-2 text-[11px] font-medium text-accent">5 tools · view below</div>
+      <div class="mt-1 text-[12px] text-dim">{$readOnly ? "Read-only API catalog discovery. Live calls are disabled." : "API catalog discovery and live endpoint calls."}</div>
+      <div class="mt-2 text-[11px] font-medium text-accent">{$readOnly ? 4 : 5} tools · view below</div>
     </button>
     <button
       class={`rounded-md border p-3 text-left transition-colors hover:border-accent/60 ${mcpCatalog === "admin" ? "border-accent bg-accent/5" : "border-line"}`}
       aria-pressed={mcpCatalog === "admin"}
       onclick={() => (mcpCatalog = "admin")}
+      data-mutation
     >
       <div class="text-[13px] font-medium">Admin</div>
       <code class="mt-1 block break-all font-mono text-[11px] text-fg">{mcpRoot}/admin</code>
@@ -373,7 +375,7 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
   </div>
 </div>
 
-<div class="card my-4 p-4">
+<div data-mutation class="card my-4 p-4">
   <h2 class="mb-1 text-[15px] font-semibold">Track a repository</h2>
   <p class="mt-0 text-[13px] text-faint">
     Enable both Core and Admin, then hand a git URL — HTTPS or SSH — to your agent. Admin performs the

@@ -800,7 +800,7 @@
       Content is discovered by the {selectedSource.type} provider and cannot be added manually.
     </div>
   {:else}
-    <div class="card overflow-hidden">
+    <div data-mutation class="card overflow-hidden">
       <div class="border-b border-line bg-surface-2 px-4 py-3">
         <div class="flex items-center gap-2">
           <Icon name="plus" size={16} />
@@ -972,7 +972,7 @@
           </a>
         {/if}
         {#if selectedSource?.type === "pages"}
-          <button class="btn btn-sm btn-danger" onclick={removeCurrentDoc} disabled={deletingDoc}>
+          <button data-mutation class="btn btn-sm btn-danger" onclick={removeCurrentDoc} disabled={deletingDoc}>
             {deletingDoc ? "Deleting…" : "Delete"}
           </button>
         {/if}
@@ -998,7 +998,7 @@
     <div class="mt-3 rounded-md border border-err bg-err/10 px-3 py-2.5 text-[13px] text-err">{error}</div>
   {/if}
 
-  <div class="my-4">
+  <div data-mutation class="my-4">
     {#if !showAdd}
       <button class="btn btn-primary" onclick={() => (showAdd = true)}>Add source</button>
     {:else}
@@ -1272,6 +1272,7 @@
               <button
                 class="btn btn-sm mr-3 shrink-0"
                 onclick={() => navigate(`/sources/${encodeURIComponent(s.name)}?add=1`)}
+                data-mutation
               >
                 Add content
               </button>
@@ -1314,15 +1315,16 @@
                     <button
                       class="btn btn-sm btn-danger"
                       onclick={(e) => cancel(s.name, e)}
+                      data-mutation
                       disabled={canceling[s.name]}
                     >
                       {canceling[s.name] ? "Stopping…" : "Stop"}
                     </button>
                   {:else}
-                    <button class="btn btn-sm" onclick={(e) => refresh(s.name, e)}>Sync now</button>
+                    <button data-mutation class="btn btn-sm" onclick={(e) => refresh(s.name, e)}>Sync now</button>
                   {/if}
-                  <button class="btn btn-sm" onclick={(e) => editSource(s, e)}>Edit</button>
-                  <button class="btn btn-sm btn-danger" onclick={(e) => remove(s.name, e)}>Delete</button>
+                  <button data-mutation class="btn btn-sm" onclick={(e) => editSource(s, e)}>Edit</button>
+                  <button data-mutation class="btn btn-sm btn-danger" onclick={(e) => remove(s.name, e)}>Delete</button>
                 </span>
               </div>
 
@@ -1405,7 +1407,7 @@
                             <a class="mr-1 text-[11px] text-dim hover:text-fg" href={p.url} target="_blank" rel="noreferrer noopener">open</a>
                           {/if}
                           {#if s.type === "pages"}
-                            <button class="btn btn-sm btn-danger" onclick={() => removePage(s.name, p.slug)}>Remove</button>
+                            <button data-mutation class="btn btn-sm btn-danger" onclick={() => removePage(s.name, p.slug)}>Remove</button>
                           {/if}
                         </td>
                       </tr>

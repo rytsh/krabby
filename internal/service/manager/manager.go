@@ -46,6 +46,7 @@ import (
 // Manager coordinates registry, git, graphify builds and the native graph
 // query engine.
 type Manager struct {
+	readOnly bool // immutable after startup
 	reg      *registry.Registry
 	git      *gitops.Git
 	gfy      *graphify.Client
@@ -1506,6 +1507,9 @@ func (m *Manager) clearCodeWarmPending(repoID string) {
 // on-demand warm triggered by a search never index the same repo twice. A
 // no-op once the index exists.
 func (m *Manager) ensureCodeIndex(ctx context.Context, repoID, clonePath string) error {
+	if m.readOnly {
+		return nil
+	}
 	if m.codeText == nil {
 		return nil
 	}
@@ -2536,6 +2540,12 @@ func (m *Manager) docsDirForRepo(repo *registry.Repo) (string, error) {
 	}
 
 	legacy := filepath.Join(repo.Path, "krabby-docs")
+	if m.readOnly {
+		if !fileExists(dir) && fileExists(legacy) {
+			return legacy, nil
+		}
+		return dir, nil
+	}
 	if err := migrateLegacyDocs(legacy, dir); err != nil {
 		return "", fmt.Errorf("move %s to %s: %w", legacy, rel, err)
 	}

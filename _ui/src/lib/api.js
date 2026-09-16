@@ -3,12 +3,17 @@
 // at the server base path (e.g. /krabby/). The same build therefore works at
 // the root or under any prefix, and via the dev proxy.
 import { errorToast } from "./toast.js";
+import { get } from "svelte/store";
+import { readOnly } from "./capabilities.js";
 
 const BASE = "api/v1";
 
 async function req(path, opts = {}) {
   try {
     const { responseMeta = false, ...fetchOpts } = opts;
+    if (get(readOnly) && !["GET", "HEAD", "OPTIONS"].includes((fetchOpts.method || "GET").toUpperCase())) {
+      throw new Error("Krabby is read-only");
+    }
     // path starts with "/"; joining onto the relative BASE keeps it relative.
     const res = await fetch(BASE + path, {
       headers: { "Content-Type": "application/json" },
@@ -41,7 +46,12 @@ async function req(path, opts = {}) {
 }
 
 export const api = {
-  settings: () => req("/settings"),
+  settings: async () => {
+    const settings = await req("/settings");
+    readOnly.set(settings.read_only === true);
+    return settings;
+  },
+  syncStatus: () => req("/sync/status"),
   // repos returns a paginated envelope: { items, total, page, per_page }.
   // opts: { page, perPage, q, owner, status }.
   repos: ({ page = 1, perPage = 20, q = "", owner = "", status = "", namespace = "" } = {}) => {
