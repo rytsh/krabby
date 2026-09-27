@@ -12,6 +12,13 @@
   let mcpUrl = $derived(`${mcpRoot}${mcpCatalog === "core" ? "" : `/${mcpCatalog}`}`);
   let mcpName = $derived(`krabby${mcpCatalog === "core" ? "" : `-${mcpCatalog}`}`);
   let copied = $state("");
+  const clients = [
+    { id: "opencode", label: "OpenCode" },
+    { id: "claude", label: "Claude Code" },
+    { id: "generic", label: "Cursor / VS Code / other" },
+    { id: "prompt", label: "AI-assisted setup" },
+  ];
+  let client = $state("opencode");
   async function copy(text, key) {
     try {
       await navigator.clipboard.writeText(text);
@@ -262,23 +269,21 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
 <div class="card my-4 p-4">
   <h2 class="mb-3 text-[15px] font-semibold">Connect a client</h2>
 
-  <div class="mb-5 rounded-md border border-accent/40 bg-accent/5 p-3">
-    <div class="mb-1.5 flex items-center gap-2">
-      <div>
-        <div class="text-[13px] font-medium">AI-assisted setup prompt</div>
-        <div class="text-[11px] text-faint">Paste this into your LLM and let it configure the current client.</div>
-      </div>
-      <button class="btn btn-sm ml-auto" onclick={() => copy(installPrompt, "prompt")}>
-        {copied === "prompt" ? "Copied" : "Copy"}
-      </button>
+  <div class="mb-3 flex flex-wrap items-end gap-2 border-b border-line">
+    <div class="flex flex-wrap gap-1" role="tablist" aria-label="MCP client">
+      {#each clients as c (c.id)}
+        <button
+          type="button"
+          role="tab"
+          aria-selected={client === c.id}
+          class="-mb-px border-b-2 px-3 py-2 text-[13px] transition-colors {client === c.id
+            ? 'border-accent font-medium text-fg'
+            : 'border-transparent text-dim hover:text-fg'}"
+          onclick={() => (client = c.id)}>{c.label}</button
+        >
+      {/each}
     </div>
-    <pre class="m-0 max-h-64 overflow-auto whitespace-pre-wrap rounded-md border border-line bg-bg p-3 font-mono text-[12.5px] leading-relaxed">{installPrompt}</pre>
-  </div>
-
-  <div class="mb-4">
-    <div class="mb-1.5 flex flex-wrap items-center gap-2">
-      <span class="text-[13px] text-dim">opencode — <code class="font-mono text-[12px]">opencode.json</code></span>
-      <div class="ml-auto flex items-center rounded-md border border-line bg-bg p-0.5" aria-label="OpenCode MCP catalog">
+    <div class="mb-1.5 ml-auto flex items-center rounded-md border border-line bg-bg p-0.5" aria-label="MCP catalog">
         <button
           class="rounded px-2.5 py-1 text-[11px] text-dim transition-colors hover:text-fg"
           class:!bg-surface-2={mcpCatalog === "core"}
@@ -300,38 +305,50 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
           aria-pressed={mcpCatalog === "admin"}
           onclick={() => (mcpCatalog = "admin")}
         >Admin</button>
-      </div>
-      <button class="btn btn-sm" onclick={() => copy(opencodeConfig, "oc")}>{copied === "oc" ? "Copied" : "Copy"}</button>
+    </div>
+  </div>
+
+  {#if client === "prompt"}
+    <div class="mb-1.5 flex items-center gap-2">
+      <span class="text-[13px] text-dim">Paste this into your LLM and let it configure the current client.</span>
+      <button class="btn btn-sm ml-auto" onclick={() => copy(installPrompt, "prompt")}>
+        {copied === "prompt" ? "Copied" : "Copy"}
+      </button>
+    </div>
+    <pre class="m-0 max-h-64 overflow-auto whitespace-pre-wrap rounded-md border border-line bg-bg p-3 font-mono text-[12.5px] leading-relaxed">{installPrompt}</pre>
+  {:else if client === "opencode"}
+    <div class="mb-1.5 flex items-center gap-2">
+      <span class="text-[13px] text-dim"><code class="font-mono text-[12px]">opencode.json</code></span>
+      <button class="btn btn-sm ml-auto" onclick={() => copy(opencodeConfig, "oc")}>{copied === "oc" ? "Copied" : "Copy"}</button>
     </div>
     <pre class="m-0 overflow-x-auto rounded-md border border-line bg-bg p-3 font-mono text-[12.5px] leading-relaxed">{opencodeConfig}</pre>
     <p class="mb-0 mt-1.5 text-[11px] text-faint">
-      {#if mcpCatalog === "admin"}
-        Admin uses <code class="font-mono">{mcpPath}/admin</code> and exposes only mutation and configuration tools. Add Core or API separately when the same client also needs their read tools.
-      {:else if mcpCatalog === "api"}
-        API uses <code class="font-mono">{mcpPath}/api</code> and exposes only catalog discovery and <code class="font-mono">call_api_endpoint</code>.
-      {:else}
-        Core uses <code class="font-mono">{mcpPath}</code> and exposes only read-only codebase and documentation tools.
-      {/if}
       Add this to project or user <code class="font-mono">opencode.json</code>, restart the client, then verify with <code class="font-mono">opencode mcp list</code>.
     </p>
-  </div>
-
-  <div class="mb-4">
+  {:else if client === "claude"}
     <div class="mb-1.5 flex items-center gap-2">
-      <span class="text-[13px] text-dim">Claude Code — CLI</span>
+      <span class="text-[13px] text-dim">CLI</span>
       <button class="btn btn-sm ml-auto" onclick={() => copy(claudeCmd, "cc")}>{copied === "cc" ? "Copied" : "Copy"}</button>
     </div>
     <pre class="m-0 overflow-x-auto rounded-md border border-line bg-bg p-3 font-mono text-[12.5px] leading-relaxed">{claudeCmd}</pre>
     <p class="mb-0 mt-1.5 text-[11px] text-faint">Claude Code stores this in local project scope by default. Use <code class="font-mono">--scope user</code> for all projects, then verify with <code class="font-mono">claude mcp list</code>.</p>
-  </div>
-
-  <div>
+  {:else}
     <div class="mb-1.5 flex items-center gap-2">
-      <span class="text-[13px] text-dim">Cursor / VS Code / other — <code class="font-mono text-[12px]">mcpServers</code></span>
+      <span class="text-[13px] text-dim"><code class="font-mono text-[12px]">mcpServers</code></span>
       <button class="btn btn-sm ml-auto" onclick={() => copy(genericConfig, "gen")}>{copied === "gen" ? "Copied" : "Copy"}</button>
     </div>
     <pre class="m-0 overflow-x-auto rounded-md border border-line bg-bg p-3 font-mono text-[12.5px] leading-relaxed">{genericConfig}</pre>
-  </div>
+  {/if}
+
+  <p class="mb-0 mt-3 text-[11px] text-faint">
+    {#if mcpCatalog === "admin"}
+      Admin uses <code class="font-mono">{mcpPath}/admin</code> and exposes only mutation and configuration tools. Add Core or API separately when the same client also needs their read tools.
+    {:else if mcpCatalog === "api"}
+      API uses <code class="font-mono">{mcpPath}/api</code> and exposes only catalog discovery and <code class="font-mono">call_api_endpoint</code>.
+    {:else}
+      Core uses <code class="font-mono">{mcpPath}</code> and exposes only read-only codebase and documentation tools.
+    {/if}
+  </p>
 </div>
 
 <div class="card my-4 p-4">

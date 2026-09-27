@@ -12,7 +12,7 @@
   } = $props();
 </script>
 
-<h2 class="mb-1 mt-10 text-[15px] font-semibold">LLM observability</h2>
+<h2 class="mb-1 text-[15px] font-semibold">LLM observability</h2>
 <p class="mb-3 text-[13px] text-dim">
   Export every model call to Langfuse as a trace: model, latency, time to first token, token
   usage and cost. Traces are sent over OTLP/HTTP on a tracer provider separate from the

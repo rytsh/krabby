@@ -3,6 +3,7 @@
   import { api } from "../lib/api.js";
   import { successToast } from "../lib/toast.js";
   import { sidebarPathMode } from "../lib/paths.js";
+  import { replace } from "svelte-spa-router";
   import RuntimeSettings from "../components/settings/RuntimeSettings.svelte";
   import LangfuseSettings from "../components/settings/LangfuseSettings.svelte";
   import {
@@ -14,6 +15,8 @@
     createRuntimeDraft,
     normalizeSettingsSnapshot,
   } from "../lib/settings-config.js";
+
+  let { tab: tabParam = "" } = $props();
 
   let settings = $state(null);
   let creds = $state([]);
@@ -255,6 +258,23 @@
 
   onMount(load);
 
+  const tabs = [
+    { id: "config", label: "Configuration" },
+    { id: "credentials", label: "Credentials" },
+    { id: "appearance", label: "Appearance" },
+    { id: "runtime", label: "Runtime" },
+    { id: "docs", label: "Docs & RAG" },
+    { id: "observability", label: "Observability" },
+  ];
+  // The active tab lives in the path (/settings/docs) so a reload keeps it and
+  // a section can be linked directly. The default tab keeps a bare /settings.
+  let tab = $derived(tabs.some((t) => t.id === tabParam) ? tabParam : tabs[0].id);
+
+  function selectTab(id) {
+    if (id === tab) return;
+    replace(id === tabs[0].id ? "/settings" : `/settings/${id}`);
+  }
+
   // Rows rendered as [label, value] with an optional boolean "set" style.
   function rows(s) {
     return [
@@ -275,6 +295,21 @@
   }
 </script>
 
+<div class="mb-6 flex flex-wrap gap-1 border-b border-line" role="tablist" aria-label="Settings sections">
+  {#each tabs as t (t.id)}
+    <button
+      type="button"
+      role="tab"
+      aria-selected={tab === t.id}
+      class="-mb-px border-b-2 px-3 py-2 text-[13px] transition-colors {tab === t.id
+        ? 'border-accent font-medium text-fg'
+        : 'border-transparent text-dim hover:text-fg'}"
+      onclick={() => selectTab(t.id)}>{t.label}</button
+    >
+  {/each}
+</div>
+
+{#if tab === "config"}
 <p class="text-dim">Read-only view of the running configuration. Secrets are never shown.</p>
 
 {#if settings}
@@ -296,8 +331,13 @@
       </tbody>
     </table>
   </div>
+{:else if !error}
+  <div class="mt-4 text-dim">Loading…</div>
+{/if}
 
-  <h2 class="mb-3 mt-8 text-[15px] font-semibold">Git credentials</h2>
+{:else if tab === "credentials"}
+{#if settings}
+  <h2 class="mb-3 text-[15px] font-semibold">Git credentials</h2>
   <p class="mb-3 text-dim">
     Host or host/path credentials for private git repositories and custom web pages. The most
     specific pattern wins; secrets are write-only.
@@ -358,7 +398,8 @@
   <div class="mt-4 text-dim">Loading…</div>
 {/if}
 
-<h2 class="mb-1 mt-10 text-[15px] font-semibold">Appearance</h2>
+{:else if tab === "appearance"}
+<h2 class="mb-1 text-[15px] font-semibold">Appearance</h2>
 <p class="text-dim">Display preferences, stored in this browser only.</p>
 
 <div class="card mt-3 p-4">
@@ -391,7 +432,8 @@
   </div>
 </div>
 
-<h2 class="mb-1 mt-10 text-[15px] font-semibold">Runtime</h2>
+{:else if tab === "runtime"}
+<h2 class="mb-1 text-[15px] font-semibold">Runtime</h2>
 <p class="text-dim">
   Repository polling, background task concurrency and webhook security. Changes apply without a restart.
 </p>
@@ -406,9 +448,12 @@
     error={runtimeErr}
     onSave={saveRuntime}
   />
+{:else if !docsErr}
+  <div class="mt-4 text-dim">Loading…</div>
 {/if}
 
-<h2 class="mb-1 mt-10 text-[15px] font-semibold">Docs &amp; RAG</h2>
+{:else if tab === "docs"}
+<h2 class="mb-1 text-[15px] font-semibold">Docs &amp; RAG</h2>
 <p class="text-dim">
   Generate markdown docs per repo, embed them into a vector store, and expose retrieval over
   MCP/REST. Changes rebuild the clients live. API keys are write-only — leave blank to keep the
@@ -752,7 +797,12 @@
       </button>
     </div>
   </div>
+{:else if !docsErr}
+  <div class="mt-4 text-dim">Loading…</div>
+{/if}
 
+{:else if tab === "observability"}
+{#if serverCfg && langfuseDraft}
   <LangfuseSettings
     bind:draft={langfuseDraft}
     bind:secretKey={langfuseKey}
@@ -766,4 +816,5 @@
   />
 {:else if !docsErr}
   <div class="mt-4 text-dim">Loading…</div>
+{/if}
 {/if}

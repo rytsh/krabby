@@ -44,6 +44,7 @@
     if (p === "/search") return { view: "search" };
     if (p === "/activity") return { view: "activity" };
     if (p === "/settings") return { view: "settings" };
+    if (p.startsWith("/settings/")) return { view: "settings", settingsTab: p.slice("/settings/".length) };
     if (p === "/about") return { view: "about" };
     return { view: "repos" };
   });
@@ -372,7 +373,7 @@
       {:else if view === "search"}
         <Search />
       {:else if view === "settings"}
-        <Settings />
+        <Settings tab={route.settingsTab || ""} />
       {:else if view === "about"}
         <About />
       {/if}
