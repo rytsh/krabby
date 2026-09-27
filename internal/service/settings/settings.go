@@ -811,7 +811,9 @@ type Store struct {
 	bucket *bw.Bucket[Settings]
 }
 
-// settingsSchemaVersion v15 adds docs_prompt_extra and the docs_max_*_bytes
+// settingsSchemaVersion v16 adds embed_input_mode and code_embed_input_mode;
+// an empty value behaves as "batch", so records migrated from v15 need no
+// backfill. v15 adds docs_prompt_extra and the docs_max_*_bytes
 // input budgets; zero numeric values mean "use the built-in default", so
 // records migrated from v14 need no backfill. v14 adds the web_image_* vision-analysis fields; zero
 // numeric values use effective defaults for records migrated from v13. v13
@@ -831,7 +833,7 @@ type Store struct {
 // docs_summary_model; v4 docs_max_groups; v3 embed_concurrency /
 // code_embed_concurrency. Bumping the version lets bw migrate existing settings
 // records in place.
-const settingsSchemaVersion = 15
+const settingsSchemaVersion = 16
 
 // New opens the settings bucket. If no record exists yet, seed is persisted as
 // the initial configuration (seeded from file/env config by the caller).
