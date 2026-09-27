@@ -320,3 +320,60 @@ func TestEmbedHTTPError(t *testing.T) {
 		t.Fatalf("expected retryable HTTP 500, got %v", err)
 	}
 }
+
+func TestEmbedFallsBackToSingleInput(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		sizes []int
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req embedRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+
+		mu.Lock()
+		sizes = append(sizes, len(req.Input))
+		mu.Unlock()
+
+		// Mimic a proxy that embeds only the first input of a batch.
+		var resp embedResponse
+		resp.Data = append(resp.Data, struct {
+			Embedding []float32 `json:"embedding"`
+		}{Embedding: []float32{float32(len(req.Input[0]))}})
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	c, err := New(config.Embedder{BaseURL: srv.URL, Model: "m", Batch: 4})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	inputs := []string{"a", "bb", "ccc", "dddd", "eeeee", "ffffff"}
+	out, err := c.Embed(context.Background(), inputs)
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if len(out) != len(inputs) {
+		t.Fatalf("got %d vectors want %d", len(out), len(inputs))
+	}
+	for i, v := range out {
+		if len(v) != 1 || int(v[0]) != len(inputs[i]) {
+			t.Fatalf("vector %d = %v, want [%d]", i, v, len(inputs[i]))
+		}
+	}
+
+	mu.Lock()
+	sizes = nil
+	mu.Unlock()
+
+	if _, err := c.Embed(context.Background(), inputs[:3]); err != nil {
+		t.Fatalf("Embed after fallback: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, n := range sizes {
+		if n != 1 {
+			t.Fatalf("request with %d inputs after fallback latched, want 1", n)
+		}
+	}
+}

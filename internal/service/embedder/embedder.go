@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 
 	"github.com/rytsh/krabby/internal/config"
@@ -70,6 +71,11 @@ type Client struct {
 	// noDims latches when the endpoint has rejected the "dimensions"
 	// parameter, so the remaining requests of a run stop sending it.
 	noDims atomic.Bool
+
+	// singleInput latches when the endpoint answered a multi-input request
+	// with fewer vectors than inputs (some LiteLLM-proxied backends embed only
+	// the first input), so the remaining requests send one input each.
+	singleInput atomic.Bool
 
 	dimMu     sync.Mutex
 	dim       int
@@ -413,6 +419,10 @@ func (c *Client) embed(ctx context.Context, texts []string, onProgress func(done
 // The parameter is dropped for the rest of the client's life and the request
 // is replayed; if it still fails, the real error surfaces.
 func (c *Client) embedBatch(ctx context.Context, batch []string, meta *Meta) ([][]float32, error) {
+	if len(batch) > 1 && c.singleInput.Load() {
+		return c.embedEach(ctx, batch, meta)
+	}
+
 	var lastErr error
 	for attempt := 0; attempt <= maxEmbedRetries; attempt++ {
 		if err := ctx.Err(); err != nil {
@@ -441,6 +451,16 @@ func (c *Client) embedBatch(ctx context.Context, batch []string, meta *Meta) ([]
 			return nil, ctx.Err()
 		}
 
+		var countErr countMismatchErr
+		if len(batch) > 1 && errors.As(err, &countErr) {
+			if c.singleInput.CompareAndSwap(false, true) {
+				slog.Warn("embeddings endpoint does not support batched input; sending one input per request",
+					"model", c.model, "error", err)
+			}
+
+			return c.embedEach(ctx, batch, meta)
+		}
+
 		var re retryableErr
 		if !errors.As(err, &re) {
 			return nil, err // non-retryable: fail fast
@@ -464,6 +484,38 @@ func (c *Client) embedBatch(ctx context.Context, batch []string, meta *Meta) ([]
 
 	return nil, fmt.Errorf("embed batch failed after %d retries; %w", maxEmbedRetries, lastErr)
 }
+
+// embedEach embeds a batch one input per request, for endpoints that return a
+// single vector for a multi-input request. Total in-flight requests stay
+// bounded by the shared request semaphore.
+func (c *Client) embedEach(ctx context.Context, batch []string, meta *Meta) ([][]float32, error) {
+	out := make([][]float32, len(batch))
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(c.conc)
+	for i, text := range batch {
+		g.Go(func() error {
+			vecs, err := c.embedBatch(gctx, []string{text}, meta)
+			if err != nil {
+				return err
+			}
+			out[i] = vecs[0]
+
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+
+	return out, nil
+}
+
+// countMismatchErr marks a response carrying a different number of vectors
+// than inputs were sent.
+type countMismatchErr struct{ err error }
+
+func (e countMismatchErr) Error() string { return e.err.Error() }
+func (e countMismatchErr) Unwrap() error { return e.err }
 
 // retryableErr marks a transient embed failure worth retrying.
 type retryableErr struct{ err error }
@@ -595,7 +647,7 @@ func (c *Client) embedBatchOnce(ctx context.Context, batch []string, dims int) (
 	}
 
 	if len(out.Data) != len(batch) {
-		return nil, usage, 0, fmt.Errorf("embed response count mismatch: got %d for %d inputs", len(out.Data), len(batch))
+		return nil, usage, 0, countMismatchErr{fmt.Errorf("embed response count mismatch: got %d for %d inputs", len(out.Data), len(batch))}
 	}
 
 	if out.Usage != nil {
