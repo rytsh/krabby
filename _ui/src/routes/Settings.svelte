@@ -594,12 +594,21 @@
         Embedding dim (0 = model default)
         <input class="input" type="number" bind:value={docsDraft.embed_dim} />
       </label>
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Input mode
+        <select class="input" bind:value={docsDraft.embed_input_mode}>
+          <option value="batch">batch — many inputs per request</option>
+          <option value="single">single — one input per request</option>
+        </select>
+      </label>
     </div>
     <p class="mt-2 text-[12px] text-faint">
       The dim is requested from the provider. On a Matryoshka model (Gemini Embedding 2 accepts
       128–3072, text-embedding-3 likewise) a narrower vector keeps most of its accuracy and cuts
       vector memory proportionally. Providers that do not support it stay at their native width —
       test the embedder and check the reported dim. Changing the dim rebuilds the index.
+      Use the single input mode if embedding fails with a count mismatch: some endpoints (e.g.
+      certain LiteLLM-proxied backends) return one vector for a batched request.
     </p>
 
     <!-- Source-code embeddings -->
@@ -644,6 +653,13 @@
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Code embedding dim (0 = model default)
         <input class="input" type="number" bind:value={docsDraft.code_embed_dim} />
+      </label>
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Code input mode
+        <select class="input" bind:value={docsDraft.code_embed_input_mode}>
+          <option value="batch">batch — many inputs per request</option>
+          <option value="single">single — one input per request</option>
+        </select>
       </label>
       <label class="flex flex-col gap-1 text-[13px] text-dim">
         Code chunk size (chars)

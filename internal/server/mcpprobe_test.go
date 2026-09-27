@@ -227,4 +227,3 @@ func TestMCPProbeSessionHeaderCasing(t *testing.T) {
 		}
 	}
 }
-

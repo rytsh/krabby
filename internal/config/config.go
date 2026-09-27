@@ -424,6 +424,26 @@ type Langfuse struct {
 	TraceHTTP  bool `cfg:"trace_http"`
 }
 
+// EmbedInputMode selects how an embedder sends its inputs; see
+// Embedder.InputMode.
+type EmbedInputMode string
+
+const (
+	EmbedInputBatch  EmbedInputMode = "batch"
+	EmbedInputSingle EmbedInputMode = "single"
+)
+
+// ParseEmbedInputMode normalizes an input mode, defaulting to EmbedInputBatch
+// for an unrecognized or empty value so records written before the setting
+// existed keep working.
+func ParseEmbedInputMode(s string) EmbedInputMode {
+	if EmbedInputMode(strings.ToLower(strings.TrimSpace(s))) == EmbedInputSingle {
+		return EmbedInputSingle
+	}
+
+	return EmbedInputBatch
+}
+
 // Embedder configures an OpenAI-compatible embeddings endpoint.
 type Embedder struct {
 	// BaseURL is the API root, e.g. "http://localhost:11434/v1" (Ollama).
@@ -442,6 +462,10 @@ type Embedder struct {
 	Dim int `cfg:"dim"`
 	// Batch bounds how many inputs are sent per embeddings request.
 	Batch int `cfg:"batch" default:"64"`
+	// InputMode selects how inputs are sent: "batch" sends up to Batch inputs
+	// per request, "single" sends one input per request for endpoints that
+	// embed only the first input of a list (some LiteLLM-proxied backends).
+	InputMode string `cfg:"input_mode" default:"batch"`
 	// Concurrency bounds embedding requests across all calls sharing a client.
 	Concurrency int `cfg:"concurrency" default:"4"`
 	// Timeout bounds a single indexing request, and the entire query/Ping

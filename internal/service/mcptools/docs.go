@@ -762,6 +762,7 @@ type setDocsConfigArgs struct {
 	EmbedModel       string `json:"embed_model,omitempty" jsonschema:"embedding model name"`
 	EmbedDim         int    `json:"embed_dim,omitempty" jsonschema:"requested output dimension, sent to the provider; 0 uses the model's native width. Narrowing a Matryoshka model (Gemini Embedding 2: 128-3072, text-embedding-3) cuts vector memory proportionally at little accuracy cost. Changing it re-indexes from scratch"`
 	EmbedBatch       int    `json:"embed_batch,omitempty" jsonschema:"inputs per embeddings request"`
+	EmbedInputMode   string `json:"embed_input_mode,omitempty" jsonschema:"how inputs are sent: batch (default; up to embed_batch per request) or single (one per request, for endpoints like some LiteLLM backends that embed only the first input of a list and fail with a count mismatch)"`
 	EmbedConcurrency int    `json:"embed_concurrency,omitempty" jsonschema:"parallel embedding batch requests (default 4)"`
 	EmbedTimeout     string `json:"embed_timeout,omitempty" jsonschema:"embeddings request timeout as a Go duration, e.g. 30s"`
 
@@ -770,6 +771,7 @@ type setDocsConfigArgs struct {
 	CodeEmbedModel       string `json:"code_embed_model,omitempty" jsonschema:"code embedding model, e.g. codestral-embed-2505"`
 	CodeEmbedDim         int    `json:"code_embed_dim,omitempty" jsonschema:"requested code output dimension, sent to the provider; 0 uses the model's native width. Changing it re-indexes the code store from scratch"`
 	CodeEmbedBatch       int    `json:"code_embed_batch,omitempty" jsonschema:"code inputs per embeddings request"`
+	CodeEmbedInputMode   string `json:"code_embed_input_mode,omitempty" jsonschema:"how code inputs are sent: batch (default) or single; see embed_input_mode"`
 	CodeEmbedConcurrency int    `json:"code_embed_concurrency,omitempty" jsonschema:"parallel code embedding batch requests (default 4)"`
 	CodeEmbedTimeout     string `json:"code_embed_timeout,omitempty" jsonschema:"code embeddings request timeout as a Go duration, e.g. 30s"`
 
@@ -825,12 +827,13 @@ type testEmbedderArgs struct {
 	Model       string `json:"embed_model,omitempty" jsonschema:"embedding model name; blank uses the stored value"`
 	Dimension   int    `json:"embed_dim,omitempty" jsonschema:"requested output dimension; 0 uses the model's native width. The reported dim is the width actually returned, so this is how to check whether a provider honours the request"`
 	Batch       int    `json:"embed_batch,omitempty" jsonschema:"inputs per request"`
+	InputMode   string `json:"embed_input_mode,omitempty" jsonschema:"batch or single"`
 	Concurrency int    `json:"embed_concurrency,omitempty" jsonschema:"parallel requests"`
 	Timeout     string `json:"embed_timeout,omitempty" jsonschema:"request timeout as a Go duration, e.g. 30s"`
 }
 
 func (a testEmbedderArgs) settingsArgs() setDocsConfigArgs {
-	return setDocsConfigArgs{EmbedBaseURL: a.BaseURL, EmbedAPIKey: a.APIKey, EmbedModel: a.Model, EmbedDim: a.Dimension, EmbedBatch: a.Batch, EmbedConcurrency: a.Concurrency, EmbedTimeout: a.Timeout}
+	return setDocsConfigArgs{EmbedBaseURL: a.BaseURL, EmbedAPIKey: a.APIKey, EmbedModel: a.Model, EmbedDim: a.Dimension, EmbedBatch: a.Batch, EmbedInputMode: a.InputMode, EmbedConcurrency: a.Concurrency, EmbedTimeout: a.Timeout}
 }
 
 type testCodeEmbedderArgs struct {
@@ -839,12 +842,13 @@ type testCodeEmbedderArgs struct {
 	Model       string `json:"code_embed_model,omitempty" jsonschema:"code embedding model; blank uses the stored value"`
 	Dimension   int    `json:"code_embed_dim,omitempty" jsonschema:"requested output dimension; 0 uses the model's native width. The reported dim is the width actually returned"`
 	Batch       int    `json:"code_embed_batch,omitempty" jsonschema:"inputs per request"`
+	InputMode   string `json:"code_embed_input_mode,omitempty" jsonschema:"batch or single"`
 	Concurrency int    `json:"code_embed_concurrency,omitempty" jsonschema:"parallel requests"`
 	Timeout     string `json:"code_embed_timeout,omitempty" jsonschema:"request timeout as a Go duration, e.g. 30s"`
 }
 
 func (a testCodeEmbedderArgs) settingsArgs() setDocsConfigArgs {
-	return setDocsConfigArgs{CodeEmbedBaseURL: a.BaseURL, CodeEmbedAPIKey: a.APIKey, CodeEmbedModel: a.Model, CodeEmbedDim: a.Dimension, CodeEmbedBatch: a.Batch, CodeEmbedConcurrency: a.Concurrency, CodeEmbedTimeout: a.Timeout}
+	return setDocsConfigArgs{CodeEmbedBaseURL: a.BaseURL, CodeEmbedAPIKey: a.APIKey, CodeEmbedModel: a.Model, CodeEmbedDim: a.Dimension, CodeEmbedBatch: a.Batch, CodeEmbedInputMode: a.InputMode, CodeEmbedConcurrency: a.Concurrency, CodeEmbedTimeout: a.Timeout}
 }
 
 // merge overlays only JSON properties actually sent by the MCP client. The

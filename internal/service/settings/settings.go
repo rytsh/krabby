@@ -70,11 +70,14 @@ type Settings struct {
 	WebImageAllowAuthenticated bool   `bw:"web_image_allow_authenticated" json:"web_image_allow_authenticated"`
 
 	// Embedder (embeddings) for RAG.
-	EmbedBaseURL     string        `bw:"embed_base_url"    json:"embed_base_url"`
-	EmbedAPIKey      string        `bw:"embed_api_key"     json:"-"` // write-only
-	EmbedModel       string        `bw:"embed_model"       json:"embed_model"`
-	EmbedDim         int           `bw:"embed_dim"         json:"embed_dim"`
-	EmbedBatch       int           `bw:"embed_batch"       json:"embed_batch"`
+	EmbedBaseURL string `bw:"embed_base_url"    json:"embed_base_url"`
+	EmbedAPIKey  string `bw:"embed_api_key"     json:"-"` // write-only
+	EmbedModel   string `bw:"embed_model"       json:"embed_model"`
+	EmbedDim     int    `bw:"embed_dim"         json:"embed_dim"`
+	EmbedBatch   int    `bw:"embed_batch"       json:"embed_batch"`
+	// EmbedInputMode is "batch" or "single"; see config.Embedder.InputMode.
+	// Empty (records written before the field existed) behaves as "batch".
+	EmbedInputMode   string        `bw:"embed_input_mode"  json:"embed_input_mode"`
 	EmbedConcurrency int           `bw:"embed_concurrency" json:"embed_concurrency"`
 	EmbedTimeout     time.Duration `bw:"embed_timeout"     json:"embed_timeout"`
 
@@ -108,6 +111,7 @@ type Settings struct {
 	CodeEmbedModel       string        `bw:"code_embed_model"       json:"code_embed_model"`
 	CodeEmbedDim         int           `bw:"code_embed_dim"         json:"code_embed_dim"`
 	CodeEmbedBatch       int           `bw:"code_embed_batch"       json:"code_embed_batch"`
+	CodeEmbedInputMode   string        `bw:"code_embed_input_mode"  json:"code_embed_input_mode"`
 	CodeEmbedConcurrency int           `bw:"code_embed_concurrency" json:"code_embed_concurrency"`
 	CodeEmbedTimeout     time.Duration `bw:"code_embed_timeout"     json:"code_embed_timeout"`
 
@@ -204,6 +208,7 @@ func Defaults() Settings {
 		WebImageMaxPixels:  config.DefaultWebImageMaxPixels,
 
 		EmbedBatch:       64,
+		EmbedInputMode:   string(config.EmbedInputBatch),
 		EmbedConcurrency: 4,
 		EmbedTimeout:     30 * time.Second,
 
@@ -218,6 +223,7 @@ func Defaults() Settings {
 		RAGHybridWeightSemantic: 1,
 
 		CodeEmbedBatch:       64,
+		CodeEmbedInputMode:   string(config.EmbedInputBatch),
 		CodeEmbedConcurrency: 4,
 		CodeEmbedTimeout:     30 * time.Second,
 
@@ -457,6 +463,7 @@ type Patch struct {
 	EmbedModel       *string        `json:"embed_model"`
 	EmbedDim         *int           `json:"embed_dim"`
 	EmbedBatch       *int           `json:"embed_batch"`
+	EmbedInputMode   *string        `json:"embed_input_mode"`
 	EmbedConcurrency *int           `json:"embed_concurrency"`
 	EmbedTimeout     *time.Duration `json:"embed_timeout"`
 
@@ -478,6 +485,7 @@ type Patch struct {
 	CodeEmbedModel       *string        `json:"code_embed_model"`
 	CodeEmbedDim         *int           `json:"code_embed_dim"`
 	CodeEmbedBatch       *int           `json:"code_embed_batch"`
+	CodeEmbedInputMode   *string        `json:"code_embed_input_mode"`
 	CodeEmbedConcurrency *int           `json:"code_embed_concurrency"`
 	CodeEmbedTimeout     *time.Duration `json:"code_embed_timeout"`
 
@@ -533,14 +541,14 @@ func (p Patch) RuntimeOnly() bool {
 		p.WebImageAnalysisEnabled == nil && p.WebImageModel == nil && p.WebImageMaxPerPage == nil &&
 		p.WebImageMaxBytes == nil && p.WebImageMaxPixels == nil && p.WebImageAllowAuthenticated == nil &&
 		p.EmbedBaseURL == nil && p.EmbedAPIKey == nil && p.EmbedModel == nil &&
-		p.EmbedDim == nil && p.EmbedBatch == nil && p.EmbedConcurrency == nil && p.EmbedTimeout == nil &&
+		p.EmbedDim == nil && p.EmbedBatch == nil && p.EmbedInputMode == nil && p.EmbedConcurrency == nil && p.EmbedTimeout == nil &&
 		p.RAGEnabled == nil && p.RAGKeepMarkdownTargets == nil && p.RAGChunkSize == nil && p.RAGChunkOverlap == nil &&
 		p.RAGTopK == nil && p.RAGTopDocs == nil &&
 		p.RAGHybridCandidates == nil && p.RAGHybridRRFK == nil &&
 		p.RAGHybridWeightLexical == nil && p.RAGHybridWeightSemantic == nil &&
 		p.RAGLexicalStopWords == nil &&
 		p.CodeEmbedBaseURL == nil && p.CodeEmbedAPIKey == nil && p.CodeEmbedModel == nil &&
-		p.CodeEmbedDim == nil && p.CodeEmbedBatch == nil && p.CodeEmbedConcurrency == nil &&
+		p.CodeEmbedDim == nil && p.CodeEmbedBatch == nil && p.CodeEmbedInputMode == nil && p.CodeEmbedConcurrency == nil &&
 		p.CodeEmbedTimeout == nil && p.CodeRAGEnabled == nil && p.CodeRAGChunkSize == nil &&
 		p.CodeRAGChunkOverlap == nil && p.CodeRAGTopK == nil &&
 		p.CodeRAGInclude == nil && p.CodeRAGIncludeExtra == nil && p.CodeRAGExclude == nil &&
@@ -659,6 +667,9 @@ func (p Patch) Apply(base Settings) Settings {
 	if p.EmbedBatch != nil {
 		base.EmbedBatch = *p.EmbedBatch
 	}
+	if p.EmbedInputMode != nil {
+		base.EmbedInputMode = *p.EmbedInputMode
+	}
 	if p.EmbedConcurrency != nil {
 		base.EmbedConcurrency = *p.EmbedConcurrency
 	}
@@ -712,6 +723,9 @@ func (p Patch) Apply(base Settings) Settings {
 	}
 	if p.CodeEmbedBatch != nil {
 		base.CodeEmbedBatch = *p.CodeEmbedBatch
+	}
+	if p.CodeEmbedInputMode != nil {
+		base.CodeEmbedInputMode = *p.CodeEmbedInputMode
 	}
 	if p.CodeEmbedConcurrency != nil {
 		base.CodeEmbedConcurrency = *p.CodeEmbedConcurrency

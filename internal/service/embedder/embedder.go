@@ -72,10 +72,9 @@ type Client struct {
 	// parameter, so the remaining requests of a run stop sending it.
 	noDims atomic.Bool
 
-	// singleInput latches when the endpoint answered a multi-input request
-	// with fewer vectors than inputs (some LiteLLM-proxied backends embed only
-	// the first input), so the remaining requests send one input each.
-	singleInput atomic.Bool
+	// singleInput sends one input per request, for endpoints that return a
+	// single vector for a multi-input request.
+	singleInput bool
 
 	dimMu     sync.Mutex
 	dim       int
@@ -142,17 +141,18 @@ func New(cfg config.Embedder, opts ...Option) (*Client, error) {
 	}
 
 	c := &Client{
-		baseURL:  strings.TrimRight(cfg.BaseURL, "/"),
-		apiKey:   cfg.APIKey,
-		model:    cfg.Model,
-		outDim:   cfg.Dim,
-		dim:      cfg.Dim,
-		batch:    batch,
-		conc:     conc,
-		http:     &http.Client{Timeout: timeout},
-		requests: semaphore.NewWeighted(int64(conc)),
-		tracer:   langfuse.Disabled(),
-		system:   langfuse.SystemFromBaseURL(cfg.BaseURL),
+		baseURL:     strings.TrimRight(cfg.BaseURL, "/"),
+		apiKey:      cfg.APIKey,
+		model:       cfg.Model,
+		outDim:      cfg.Dim,
+		singleInput: config.ParseEmbedInputMode(cfg.InputMode) == config.EmbedInputSingle,
+		dim:         cfg.Dim,
+		batch:       batch,
+		conc:        conc,
+		http:        &http.Client{Timeout: timeout},
+		requests:    semaphore.NewWeighted(int64(conc)),
+		tracer:      langfuse.Disabled(),
+		system:      langfuse.SystemFromBaseURL(cfg.BaseURL),
 	}
 
 	for _, opt := range opts {
@@ -419,7 +419,7 @@ func (c *Client) embed(ctx context.Context, texts []string, onProgress func(done
 // The parameter is dropped for the rest of the client's life and the request
 // is replayed; if it still fails, the real error surfaces.
 func (c *Client) embedBatch(ctx context.Context, batch []string, meta *Meta) ([][]float32, error) {
-	if len(batch) > 1 && c.singleInput.Load() {
+	if len(batch) > 1 && c.singleInput {
 		return c.embedEach(ctx, batch, meta)
 	}
 
@@ -451,16 +451,6 @@ func (c *Client) embedBatch(ctx context.Context, batch []string, meta *Meta) ([]
 			return nil, ctx.Err()
 		}
 
-		var countErr countMismatchErr
-		if len(batch) > 1 && errors.As(err, &countErr) {
-			if c.singleInput.CompareAndSwap(false, true) {
-				slog.Warn("embeddings endpoint does not support batched input; sending one input per request",
-					"model", c.model, "error", err)
-			}
-
-			return c.embedEach(ctx, batch, meta)
-		}
-
 		var re retryableErr
 		if !errors.As(err, &re) {
 			return nil, err // non-retryable: fail fast
@@ -485,9 +475,8 @@ func (c *Client) embedBatch(ctx context.Context, batch []string, meta *Meta) ([]
 	return nil, fmt.Errorf("embed batch failed after %d retries; %w", maxEmbedRetries, lastErr)
 }
 
-// embedEach embeds a batch one input per request, for endpoints that return a
-// single vector for a multi-input request. Total in-flight requests stay
-// bounded by the shared request semaphore.
+// embedEach embeds a batch one input per request (the "single" input mode).
+// Total in-flight requests stay bounded by the shared request semaphore.
 func (c *Client) embedEach(ctx context.Context, batch []string, meta *Meta) ([][]float32, error) {
 	out := make([][]float32, len(batch))
 	g, gctx := errgroup.WithContext(ctx)
@@ -509,13 +498,6 @@ func (c *Client) embedEach(ctx context.Context, batch []string, meta *Meta) ([][
 
 	return out, nil
 }
-
-// countMismatchErr marks a response carrying a different number of vectors
-// than inputs were sent.
-type countMismatchErr struct{ err error }
-
-func (e countMismatchErr) Error() string { return e.err.Error() }
-func (e countMismatchErr) Unwrap() error { return e.err }
 
 // retryableErr marks a transient embed failure worth retrying.
 type retryableErr struct{ err error }
@@ -647,7 +629,12 @@ func (c *Client) embedBatchOnce(ctx context.Context, batch []string, dims int) (
 	}
 
 	if len(out.Data) != len(batch) {
-		return nil, usage, 0, countMismatchErr{fmt.Errorf("embed response count mismatch: got %d for %d inputs", len(out.Data), len(batch))}
+		err := fmt.Errorf("embed response count mismatch: got %d for %d inputs", len(out.Data), len(batch))
+		if len(batch) > 1 {
+			err = fmt.Errorf("%w; the endpoint may not support batched input, set the embedder input mode to single", err)
+		}
+
+		return nil, usage, 0, err
 	}
 
 	if out.Usage != nil {

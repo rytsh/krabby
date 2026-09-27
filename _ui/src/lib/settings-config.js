@@ -26,6 +26,7 @@ const DOCS_FIELDS = [
   "embed_model",
   "embed_dim",
   "embed_batch",
+  "embed_input_mode",
   "embed_concurrency",
   "embed_timeout",
   "rag_enabled",
@@ -43,6 +44,7 @@ const DOCS_FIELDS = [
   "code_embed_model",
   "code_embed_dim",
   "code_embed_batch",
+  "code_embed_input_mode",
   "code_embed_concurrency",
   "code_embed_timeout",
   "code_rag_enabled",
@@ -102,6 +104,8 @@ export function normalizeSettingsSnapshot(config) {
   if (typeof snapshot.rag_keep_markdown_targets !== "boolean") snapshot.rag_keep_markdown_targets = false;
   if (typeof snapshot.web_image_analysis_enabled !== "boolean") snapshot.web_image_analysis_enabled = false;
   if (typeof snapshot.web_image_allow_authenticated !== "boolean") snapshot.web_image_allow_authenticated = false;
+  if (!snapshot.embed_input_mode) snapshot.embed_input_mode = "batch";
+  if (!snapshot.code_embed_input_mode) snapshot.code_embed_input_mode = "batch";
   if (!snapshot.web_image_max_per_page) snapshot.web_image_max_per_page = 3;
   if (!snapshot.web_image_max_bytes) snapshot.web_image_max_bytes = 4 * 1024 * 1024;
   if (!snapshot.web_image_max_pixels) snapshot.web_image_max_pixels = 16000000;

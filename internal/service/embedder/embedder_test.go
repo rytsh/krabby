@@ -321,40 +321,71 @@ func TestEmbedHTTPError(t *testing.T) {
 	}
 }
 
-func TestEmbedFallsBackToSingleInput(t *testing.T) {
-	var (
-		mu    sync.Mutex
-		sizes []int
-	)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// firstInputOnlyServer mimics a proxy that embeds only the first input of a
+// batch, recording the size of every request it receives.
+func firstInputOnlyServer(t *testing.T, sizes *[]int, mu *sync.Mutex) *httptest.Server {
+	t.Helper()
+
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req embedRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
 
 		mu.Lock()
-		sizes = append(sizes, len(req.Input))
+		*sizes = append(*sizes, len(req.Input))
 		mu.Unlock()
 
-		// Mimic a proxy that embeds only the first input of a batch.
 		var resp embedResponse
 		resp.Data = append(resp.Data, struct {
 			Embedding []float32 `json:"embedding"`
 		}{Embedding: []float32{float32(len(req.Input[0]))}})
 		_ = json.NewEncoder(w).Encode(resp)
 	}))
+}
+
+func TestEmbedDefaultBatchModeReportsMismatch(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		sizes []int
+	)
+	srv := firstInputOnlyServer(t, &sizes, &mu)
 	defer srv.Close()
 
+	// No InputMode: the default is batch, which must fail loudly on a count
+	// mismatch and point at the setting rather than silently degrade.
 	c, err := New(config.Embedder{BaseURL: srv.URL, Model: "m", Batch: 4})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 
-	inputs := []string{"a", "bb", "ccc", "dddd", "eeeee", "ffffff"}
+	_, err = c.Embed(context.Background(), []string{"a", "bb", "ccc"})
+	if err == nil || !strings.Contains(err.Error(), "input mode to single") {
+		t.Fatalf("Embed error = %v, want count mismatch naming the single input mode", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sizes) != 1 || sizes[0] != 3 {
+		t.Fatalf("requests = %v, want one batched request of 3", sizes)
+	}
+}
+
+func TestEmbedInputModeSingle(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		sizes []int
+	)
+	srv := firstInputOnlyServer(t, &sizes, &mu)
+	defer srv.Close()
+
+	c, err := New(config.Embedder{BaseURL: srv.URL, Model: "m", Batch: 4, InputMode: "single"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	inputs := []string{"a", "bb", "ccc", "dddd", "eeeee"}
 	out, err := c.Embed(context.Background(), inputs)
 	if err != nil {
 		t.Fatalf("Embed: %v", err)
-	}
-	if len(out) != len(inputs) {
-		t.Fatalf("got %d vectors want %d", len(out), len(inputs))
 	}
 	for i, v := range out {
 		if len(v) != 1 || int(v[0]) != len(inputs[i]) {
@@ -363,17 +394,13 @@ func TestEmbedFallsBackToSingleInput(t *testing.T) {
 	}
 
 	mu.Lock()
-	sizes = nil
-	mu.Unlock()
-
-	if _, err := c.Embed(context.Background(), inputs[:3]); err != nil {
-		t.Fatalf("Embed after fallback: %v", err)
-	}
-	mu.Lock()
 	defer mu.Unlock()
+	if len(sizes) != len(inputs) {
+		t.Fatalf("requests = %d, want %d", len(sizes), len(inputs))
+	}
 	for _, n := range sizes {
 		if n != 1 {
-			t.Fatalf("request with %d inputs after fallback latched, want 1", n)
+			t.Fatalf("request carried %d inputs, want 1", n)
 		}
 	}
 }

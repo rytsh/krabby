@@ -234,7 +234,6 @@ func TestGitWebhookDoesNotAcceptFailedRefreshEnqueue(t *testing.T) {
 	}
 }
 
-
 func TestValidateStages(t *testing.T) {
 	tests := []struct {
 		name    string

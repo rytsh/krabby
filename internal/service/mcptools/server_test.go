@@ -354,8 +354,8 @@ func TestProbeSchemasContainOnlyRelevantFields(t *testing.T) {
 		max       int
 	}{
 		{"test_llm", jsonschema.For[testLLMArgs], 4},
-		{"test_embedder", jsonschema.For[testEmbedderArgs], 7},
-		{"test_code_embedder", jsonschema.For[testCodeEmbedderArgs], 7},
+		{"test_embedder", jsonschema.For[testEmbedderArgs], 8},
+		{"test_code_embedder", jsonschema.For[testCodeEmbedderArgs], 8},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
