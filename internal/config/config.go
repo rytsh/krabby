@@ -49,8 +49,8 @@ type Config struct {
 }
 
 // Memory bounds the process footprint. krabby holds three embedded Badger
-// databases, a parsed-graph cache and transient indexing buffers, and shells
-// out to the graphify CLI inside the same container; left untuned those add up
+// databases, a parsed-graph cache and transient indexing/graph-build buffers;
+// left untuned those add up
 // to more than a typical few-gigabyte limit and the container is OOM-killed.
 // Every derived cache size comes from the single limit below.
 type Memory struct {
@@ -60,8 +60,8 @@ type Memory struct {
 	// krabby must share its cgroup with another workload.
 	LimitBytes int64 `cfg:"limit_bytes"`
 	// Ratio is the fraction of LimitBytes handed to the Go runtime as its soft
-	// heap limit (GOMEMLIMIT). The remainder covers the graphify subprocess,
-	// git, mmap'd database tables and runtime overhead outside the heap. An
+	// heap limit (GOMEMLIMIT). The remainder covers git, mmap'd database tables
+	// and runtime overhead outside the heap. An
 	// explicit GOMEMLIMIT environment variable overrides this.
 	Ratio float64 `cfg:"ratio" default:"0.75"`
 	// VectorCacheBytes overrides the per-vector-index cache of decoded
@@ -111,14 +111,9 @@ type MCP struct {
 	WaitTimeout time.Duration `cfg:"wait_timeout" default:"300s"`
 }
 
-// Graphify configures the graphify CLI integration.
+// Graphify configures Graphify-compatible graph construction through bag.
 type Graphify struct {
-	// Bin is the graphify CLI binary (PATH lookup allowed).
-	Bin string `cfg:"bin" default:"graphify"`
-	// Python is the interpreter that can `import graphify`. Empty = derive
-	// from the graphify binary shebang, falling back to python3.
-	Python string `cfg:"python"`
-	// BuildTimeout bounds a single extract/update/merge run.
+	// BuildTimeout bounds a single in-process extract/update/merge run.
 	BuildTimeout time.Duration `cfg:"build_timeout" default:"30m"`
 	// Exclude lists extra gitignore-style patterns krabby writes into a managed
 	// section of the clone's .graphifyignore before each build, so the graph

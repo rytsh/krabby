@@ -3,7 +3,6 @@ package graphify_test
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -13,17 +12,9 @@ import (
 )
 
 func TestClientReportsVersion(t *testing.T) {
-	bin := filepath.Join(t.TempDir(), "graphify-test")
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\necho 'graphify 0.9.26'\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-
-	client, err := graphify.New(bin, "sh", time.Minute, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := client.Version(); got != "0.9.26" {
-		t.Fatalf("Version() = %q, want 0.9.26", got)
+	client := graphify.New(time.Minute, nil)
+	if got := client.Version(); got != graphify.TestedVersion {
+		t.Fatalf("Version() = %q, want %q", got, graphify.TestedVersion)
 	}
 	if client.GraphBuiltWithCurrentVersion(t.TempDir()) {
 		t.Fatal("missing graph version marker reported as current")
@@ -40,21 +31,10 @@ func TestClientReportsVersion(t *testing.T) {
 	}
 }
 
-func TestInstalledCLICompatibility(t *testing.T) {
-	if os.Getenv("KRABBY_GRAPHIFY_INTEGRATION") != "1" {
-		t.Skip("set KRABBY_GRAPHIFY_INTEGRATION=1 to test the installed Graphify CLI")
-	}
-
-	bin, err := exec.LookPath("graphify")
-	if err != nil {
-		t.Fatal("graphify CLI is not installed")
-	}
-	client, err := graphify.New(bin, "", 2*time.Minute, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+func TestBagLibraryCompatibility(t *testing.T) {
+	client := graphify.New(2*time.Minute, nil)
 	if got := client.Version(); got != graphify.TestedVersion {
-		t.Fatalf("graphify version = %q, tested version is %q", got, graphify.TestedVersion)
+		t.Fatalf("bag engine version = %q, tested version is %q", got, graphify.TestedVersion)
 	}
 
 	ctx := context.Background()
@@ -69,7 +49,7 @@ func TestInstalledCLICompatibility(t *testing.T) {
 			t.Fatal(err)
 		}
 		if err := client.Update(ctx, repo, nil); err != nil {
-			t.Fatalf("graphify update %s: %v", name, err)
+			t.Fatalf("bag build %s: %v", name, err)
 		}
 		graphPath := graphify.GraphPath(repo)
 		if err := graphquery.Validate(graphPath); err != nil {
@@ -80,7 +60,7 @@ func TestInstalledCLICompatibility(t *testing.T) {
 
 	merged := filepath.Join(t.TempDir(), "merged.json")
 	if err := client.MergeGraphs(ctx, merged, graphs...); err != nil {
-		t.Fatalf("graphify merge-graphs: %v", err)
+		t.Fatalf("bag merge graphs: %v", err)
 	}
 	if err := graphquery.Validate(merged); err != nil {
 		t.Fatalf("validate merged graph: %v", err)

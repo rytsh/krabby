@@ -21,13 +21,12 @@ import (
 	"sync/atomic"
 )
 
-// Defaults for the budget split. They are deliberately conservative: krabby
-// also shells out to the graphify CLI (a Python process) which lives in the
-// same cgroup, so the Go heap must not be allowed to claim the whole limit.
+// Defaults for the budget split. They are deliberately conservative: native
+// libraries, git and mmap'd tables share the same cgroup with the Go heap.
 const (
 	// DefaultRatio is the fraction of the detected limit handed to the Go
-	// runtime as GOMEMLIMIT. The remainder covers the graphify subprocess,
-	// git, mmap'd Badger tables and runtime overhead outside the heap.
+	// runtime as GOMEMLIMIT. The remainder covers git, mmap'd Badger tables and
+	// runtime overhead outside the heap.
 	DefaultRatio = 0.75
 
 	// minLimit guards against a nonsensically small detected limit (or a

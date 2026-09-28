@@ -1,67 +1,45 @@
-// Package graphify wraps the graphify CLI (build/update/merge) and python discovery.
+// Package graphify provides the Graphify-compatible graph paths and build
+// adapter used by Krabby. Graph construction runs in-process through bag.
 package graphify
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/rytsh/krabby/internal/strutil"
+	"github.com/rytsh/bag"
 )
 
-// Client shells out to the graphify CLI.
+// Client builds Graphify-compatible graphs in-process.
 type Client struct {
-	bin          string
-	python       string
 	version      string
 	buildTimeout time.Duration
 	exclude      []string
 }
 
-// TestedVersion is the Graphify release exercised by Krabby's integration test
-// and installed in the published container image.
-const TestedVersion = "0.9.26"
+// TestedVersion is the linked bag extraction contract.
+const TestedVersion = bag.EngineVersion
 
-const versionFileName = ".krabby-graphify-version"
+const versionFileName = ".krabby-bag-version"
 
-// New creates a graphify CLI client. python may be empty; it is derived from
-// the graphify binary shebang, falling back to python3. exclude carries extra
-// gitignore-style patterns written into each clone's managed .graphifyignore
-// block before a build so the graph skips test fixtures and other noise.
-func New(bin, python string, buildTimeout time.Duration, exclude []string) (*Client, error) {
-	binPath, err := exec.LookPath(bin)
-	if err != nil {
-		return nil, fmt.Errorf("graphify binary %q not found; install with `uv tool install graphifyy`; %w", bin, err)
-	}
-
-	if python == "" {
-		python = pythonFromShebang(binPath)
-	}
-
+// New creates an in-process graph builder. exclude carries extra gitignore-style
+// patterns written into each clone's managed .graphifyignore block.
+func New(buildTimeout time.Duration, exclude []string) *Client {
 	return &Client{
-		bin:          binPath,
-		python:       python,
-		version:      detectVersion(binPath),
+		version:      bag.EngineVersion,
 		buildTimeout: buildTimeout,
-		exclude:      exclude,
-	}, nil
+		exclude:      append([]string(nil), exclude...),
+	}
 }
 
-// Python returns the interpreter able to `import graphify`.
-func (c *Client) Python() string { return c.python }
-
-// Version returns the installed Graphify version, or "unknown" when the CLI
-// does not support version discovery.
+// Version returns the linked bag extraction contract.
 func (c *Client) Version() string { return c.version }
 
-// GraphBuiltWithCurrentVersion reports whether Krabby recorded this CLI version
+// GraphBuiltWithCurrentVersion reports whether Krabby recorded this engine version
 // after validating the repository's active graph.
 func (c *Client) GraphBuiltWithCurrentVersion(repoPath string) bool {
 	b, err := os.ReadFile(filepath.Join(repoPath, "graphify-out", versionFileName))
@@ -73,30 +51,10 @@ func (c *Client) GraphBuiltWithCurrentVersion(repoPath string) bool {
 func (c *Client) RecordGraphVersion(repoPath string) error {
 	path := filepath.Join(repoPath, "graphify-out", versionFileName)
 	if err := os.WriteFile(path, []byte(c.version+"\n"), 0o644); err != nil {
-		return fmt.Errorf("record graphify version; %w", err)
+		return fmt.Errorf("record graph engine version; %w", err)
 	}
 
 	return nil
-}
-
-func detectVersion(binPath string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	out, err := exec.CommandContext(ctx, binPath, "--version").CombinedOutput()
-	if err != nil {
-		return "unknown"
-	}
-
-	fields := strings.Fields(string(out))
-	if len(fields) >= 2 && strings.EqualFold(fields[0], "graphify") {
-		return fields[1]
-	}
-	if len(fields) == 0 {
-		return "unknown"
-	}
-
-	return strutil.TruncateSpace(strings.Join(fields, " "), 128)
 }
 
 // Exclude returns the install-wide graph ignore patterns, for surfacing the
@@ -122,50 +80,9 @@ func (c *Client) ignorePatterns(extra []string) []string {
 	return MergeExclude(c.exclude, extra)
 }
 
-func pythonFromShebang(binPath string) string {
-	f, err := os.Open(binPath)
-	if err != nil {
-		return "python3"
-	}
-	defer func() { _ = f.Close() }()
-
-	line, err := bufio.NewReader(f).ReadString('\n')
-	if err != nil && line == "" {
-		return "python3"
-	}
-
-	line = strings.TrimSpace(strings.TrimPrefix(line, "#!"))
-	if line == "" || strings.ContainsAny(line, " \t") || !filepath.IsAbs(line) {
-		return "python3"
-	}
-
-	return line
-}
-
-func (c *Client) run(ctx context.Context, dir string, args ...string) error {
+func (c *Client) timeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithTimeout(ctx, c.buildTimeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, c.bin, args...)
-	cmd.Dir = dir
-
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-
-	start := time.Now()
-	err := cmd.Run()
-	slog.Debug("graphify run",
-		"args", strings.Join(args, " "),
-		"took", time.Since(start).String(),
-		"output", strutil.TruncateSpace(out.String(), 2000),
-	)
-
-	if err != nil {
-		return fmt.Errorf("graphify %s; %w; %s", strings.Join(args, " "), err, strutil.TruncateSpace(out.String(), 2000))
-	}
-
-	return nil
+	return ctx, cancel
 }
 
 // Update runs an incremental (or initial) AST-only build for repoPath.
@@ -186,24 +103,36 @@ func (c *Client) Update(ctx context.Context, repoPath string, extra []string) er
 		slog.Warn("graphify: could not update .graphifyignore", "path", repoPath, "error", err)
 	}
 
-	args := []string{"update", repoPath}
-	if HasManagedIgnore(repoPath) {
-		args = append(args, "--force")
+	ctx, cancel := c.timeout(ctx)
+	defer cancel()
+
+	start := time.Now()
+	result, err := bag.Build(ctx, repoPath, bag.BuildOptions{
+		Force: HasManagedIgnore(repoPath),
+	})
+	if err != nil {
+		return fmt.Errorf("build graph; %w", err)
 	}
 
-	return c.run(ctx, repoPath, args...)
+	slog.Debug("bag graph build", "path", repoPath, "nodes", result.Nodes,
+		"edges", result.Edges, "took", time.Since(start).String())
+	return nil
 }
 
 // MergeGraphs merges graph files into out. Requires at least two inputs.
 func (c *Client) MergeGraphs(ctx context.Context, out string, graphs ...string) error {
-	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
-		return fmt.Errorf("mkdir merged dir; %w", err)
+	ctx, cancel := c.timeout(ctx)
+	defer cancel()
+
+	start := time.Now()
+	result, err := bag.MergeGraphs(ctx, out, graphs...)
+	if err != nil {
+		return fmt.Errorf("merge graphs; %w", err)
 	}
 
-	args := append([]string{"merge-graphs"}, graphs...)
-	args = append(args, "--out", out)
-
-	return c.run(ctx, "", args...)
+	slog.Debug("bag graph merge", "path", out, "nodes", result.Nodes,
+		"edges", result.Edges, "took", time.Since(start).String())
+	return nil
 }
 
 // GraphPath returns the graph.json path for a scanned repository path.

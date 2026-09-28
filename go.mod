@@ -1,6 +1,6 @@
 module github.com/rytsh/krabby
 
-go 1.27
+go 1.27.0
 
 require (
 	github.com/JohannesKaufmann/html-to-markdown/v2 v2.5.2
@@ -8,7 +8,7 @@ require (
 	github.com/go-shiori/go-readability v0.0.0-20251205110129-5db1dc9836f0
 	github.com/goccy/go-yaml v1.19.2
 	github.com/google/jsonschema-go v0.4.3
-	github.com/modelcontextprotocol/go-sdk v1.7.0
+	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/pb33f/libopenapi v0.38.7
 	github.com/rakunlabs/ada v0.5.3
 	github.com/rakunlabs/ada/handler/folder v0.5.3
@@ -22,10 +22,11 @@ require (
 	github.com/rakunlabs/chu v0.5.0
 	github.com/rakunlabs/chu/loader/external/loaderconsul v0.0.0-20260831101252-0c6a77e06f7f
 	github.com/rakunlabs/chu/loader/external/loadervault v0.0.0-20260831101252-0c6a77e06f7f
-	github.com/rakunlabs/into v0.5.3
+	github.com/rakunlabs/into v0.6.0
 	github.com/rakunlabs/logi v0.4.6
 	github.com/rakunlabs/query v0.5.1
 	github.com/rakunlabs/tell v0.1.6
+	github.com/rytsh/bag v0.0.0-20260928102413-90a41fc3ac51
 	github.com/worldline-go/hardloop v0.3.2
 	github.com/worldline-go/types v0.6.1
 	go.opentelemetry.io/otel v1.46.0
@@ -34,8 +35,8 @@ require (
 	go.opentelemetry.io/otel/trace v1.46.0
 	go.yaml.in/yaml/v4 v4.0.0-rc.6
 	golang.org/x/net v0.58.0
-	golang.org/x/sync v0.22.0
-	golang.org/x/text v0.41.0
+	golang.org/x/sync v0.23.0
+	golang.org/x/text v0.42.0
 	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12
 )
@@ -82,11 +83,13 @@ require (
 	github.com/hashicorp/serf v0.10.1 // indirect
 	github.com/hashicorp/vault/api v1.22.0 // indirect
 	github.com/klauspost/compress v1.18.0 // indirect
+	github.com/ledongthuc/pdf v0.0.0-20260907135840-6c8c28e0e8a0 // indirect
 	github.com/lmittmann/tint v1.1.2 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.22 // indirect
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
+	github.com/odvcencio/gotreesitter v0.55.1 // indirect
 	github.com/oklog/ulid/v2 v2.1.1 // indirect
 	github.com/pb33f/jsonpath v0.8.2 // indirect
 	github.com/pb33f/ordered-map/v2 v2.3.1 // indirect

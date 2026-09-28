@@ -28,9 +28,7 @@ mcp:
   # authenticates every request before it reaches these paths.
 
 graphify:
-  bin: graphify              # graphify CLI (uv tool install graphifyy==0.9.26)
-  # python: /path/to/python  # interpreter that can `import graphify` (auto-detected)
-  build_timeout: 30m         # graph queries are answered in-process (no serve subprocess)
+  build_timeout: 30m         # bag builds Graphify-compatible graphs in-process
   # exclude:                 # extra gitignore-style patterns kept out of the graph
   #   - "testdata/"          # (defaults already skip testdata/, fixtures/, *.min.js, …)
   #   - "examples/"
@@ -49,16 +47,15 @@ graphify:
 
 memory:
   # krabby holds three embedded databases, a parsed-graph cache and transient
-  # indexing buffers, and runs the graphify CLI inside the same container. Left
-  # untuned those add up to more than a small container limit, so every cache is
-  # derived from one number.
+  # indexing/graph-building buffers. Left untuned those add up to more than a
+  # small container limit, so every cache is derived from one number.
   #
   # limit_bytes: 0     # total budget. 0 (default) auto-detects the cgroup limit,
                        # falling back to total system memory — correct in almost
                        # every deployment. Set it only when krabby shares its
                        # cgroup with another workload.
   ratio: 0.75          # fraction of the limit handed to Go as GOMEMLIMIT. The
-                       # rest covers the graphify subprocess, git, mmap'd database
+                       # rest covers git, mmap'd database
                        # tables and runtime overhead outside the heap. An explicit
                        # GOMEMLIMIT environment variable overrides this.
   # vector_cache_bytes: 0  # per-vector-index cache of decoded embeddings.

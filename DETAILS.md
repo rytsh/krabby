@@ -18,8 +18,8 @@ keeps those indexes fresh in the background.
                      ┌───────────────────────────────────────┐
  LLM/Agent ──MCP───► │ krabby (Go)                           │
  (streamable HTTP)   │  ├─ MCP tools (manage + query)        │──► git clone/pull
-                     │  ├─ REST API + provider-neutral hook  │──► graphify update
- CI/webhook ──HTTP─► │  ├─ Registry (bw/BadgerDB)            │──► graphify merge-graphs
+                     │  ├─ REST API + provider-neutral hook  │──► bag.Build
+  CI/webhook ──HTTP─► │  ├─ Registry (bw/BadgerDB)            │──► bag.MergeGraphs
                      │  ├─ Native graph query engine (Go)    │
                      │  └─ Scheduler (cron schedules)        │
                      └───────────────────────────────────────┘
@@ -30,7 +30,7 @@ keeps those indexes fresh in the background.
   are answered **in-process by a native Go engine** that reads `graph.json`
   directly and hot-reloads it on rebuild — no per-graph subprocess is spawned.
 - **Builds are cheap**: code extraction is AST-based — no LLM key needed. The
-  graphify CLI is only invoked to build/merge graphs.
+  Graphify-compatible graphs are built and merged in-process through bag.
 - **Docs & RAG (optional)**: with an LLM configured, krabby generates per-file
   Markdown documentation (prompt is configurable in Settings) plus a repo
   overview, browsable in the UI.
@@ -71,12 +71,12 @@ pnpm dev
 
 ## Requirements
 
-- Go 1.26+ (build), git, ssh (for private repos)
-- graphify CLI for building graphs: `uv tool install graphifyy==0.9.26`
-  (or `pip install graphifyy==0.9.26`). This tested version is pinned in the
-  container image; upgrade it together with the compatibility test. The MCP
-  extra is **no longer required** — graph
-  queries are answered in-process by krabby's native Go engine.
+- Go 1.27+ (build), git, ssh (for private repos). Python and the Graphify CLI
+  are not required.
+- [bag](https://github.com/rytsh/bag) is linked as a Go library for graph
+  extraction and merging. Its tested engine contract is pinned in `go.mod`;
+  upgrade it together with the compatibility test. Graph queries are answered
+  in-process by krabby's native Go engine.
 
 ## Quick start
 
@@ -537,8 +537,8 @@ security boundary is who can access the admin MCP endpoint, not the network.
 ```
 webhook / poll / refresh_repo
   → git fetch (new commits?) → git pull
-  → graphify update <repo>          # incremental, AST-only, no LLM
-  → graphify merge-graphs → merged/graph.json
+  → bag.Build(repo)                 # incremental/cache-backed, AST-only, no LLM
+  → bag.MergeGraphs(...) → merged/graph.json
   → code RAG index (when enabled)
   → generated docs + docs RAG index (when enabled)
 ```
@@ -553,7 +553,7 @@ override alone. Skipping
 run's Markdown at full cost. A run that skips the graph still promotes the new
 clone, so the next unskipped refresh rebuilds the graph even at the same commit.
 
-Krabby records the Graphify version beside each validated graph. On startup it
+Krabby records the bag engine contract beside each validated graph. On startup it
 queues a one-time rebuild for graphs produced by another version (or predating
 the marker), so extractor upgrades also refresh repositories with no new commit.
 

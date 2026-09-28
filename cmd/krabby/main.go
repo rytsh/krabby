@@ -128,14 +128,10 @@ func run(ctx context.Context) error {
 		return err
 	}
 
-	// graphify CLI + python discovery.
-	gfy, err := graphify.New(cfg.Graphify.Bin, cfg.Graphify.Python, cfg.Graphify.BuildTimeout, cfg.Graphify.Exclude)
-	if err != nil {
-		return err
-	}
-
-	slog.Info("graphify resolved", "version", gfy.Version(), "tested_version", graphify.TestedVersion,
-		"python", gfy.Python())
+	// Graphify-compatible graph construction runs in-process through bag.
+	gfy := graphify.New(cfg.Graphify.BuildTimeout, cfg.Graphify.Exclude)
+	slog.Info("graph engine ready", "engine", "bag", "version", gfy.Version(),
+		"tested_version", graphify.TestedVersion)
 
 	// Native in-process graph query engine (replaces the python serve pool).
 	// Bounded by an estimated-memory budget so tracking many repos cannot pin

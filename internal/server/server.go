@@ -276,7 +276,6 @@ type settingsResponse struct {
 
 	Graphify struct {
 		Bin          string `json:"bin"`
-		Python       string `json:"python,omitempty"`
 		Version      string `json:"version"`
 		BuildTimeout string `json:"build_timeout"`
 	} `json:"graphify"`
@@ -298,8 +297,7 @@ func getSettings(cfg *config.Config, system systemInfoService) ada.HandlerFunc {
 
 		s.MCP.Path = cfg.MCP.Path
 
-		s.Graphify.Bin = cfg.Graphify.Bin
-		s.Graphify.Python = cfg.Graphify.Python
+		s.Graphify.Bin = "embedded bag"
 		s.Graphify.Version = system.GraphifyVersion()
 		s.Graphify.BuildTimeout = cfg.Graphify.BuildTimeout.String()
 

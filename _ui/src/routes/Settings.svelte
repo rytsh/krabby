@@ -288,9 +288,8 @@
       ["MCP core path", s.mcp.path],
       ["MCP API path", `${s.mcp.path}/api`],
       ["MCP admin path", `${s.mcp.path}/admin`],
-      ["Graphify bin", s.graphify.bin],
-      ["Graphify version", s.graphify.version || "unknown"],
-      ["Graphify python", s.graphify.python || "auto (shebang)"],
+      ["Graph engine", s.graphify.bin],
+      ["Engine version", s.graphify.version || "unknown"],
       ["Build timeout", s.graphify.build_timeout],
     ];
   }
