@@ -2,6 +2,7 @@
   import { onMount, untrack } from "svelte";
   import { path, link } from "./lib/router.js";
   import { theme, toggleTheme } from "./lib/theme.js";
+  import { showGithubLink, loadUIPreferences } from "./lib/header.js";
   import {
     owners,
     loadOwners,
@@ -46,6 +47,7 @@
     if (p === "/settings") return { view: "settings" };
     if (p.startsWith("/settings/")) return { view: "settings", settingsTab: p.slice("/settings/".length) };
     if (p === "/about") return { view: "about" };
+    if (p.startsWith("/about/")) return { view: "about", aboutTab: p.slice("/about/".length) };
     return { view: "repos" };
   });
   let view = $derived(route.view);
@@ -200,6 +202,7 @@
   // Load the owner list once for the sidebar tree. Each owner's repos are
   // fetched lazily when its group is expanded (see toggleGroup/expandGroup).
   onMount(loadOwners);
+  onMount(loadUIPreferences);
 
   // Walk the owner tree and fetch repos for every group that is already
   // expanded. loadOwnerRepos is cached, so this is a no-op for groups whose
@@ -342,16 +345,18 @@
         >
           <Icon name={$theme === "dark" ? "sun" : "moon"} />
         </button>
-        <a
-          class="icon-btn"
-          href="https://github.com/rytsh/krabby"
-          target="_blank"
-          rel="noreferrer noopener"
-          title="View krabby on GitHub"
-          aria-label="GitHub repository"
-        >
-          <BrandIcon name="github" />
-        </a>
+        {#if $showGithubLink}
+          <a
+            class="icon-btn"
+            href="https://github.com/rytsh/krabby"
+            target="_blank"
+            rel="noreferrer noopener"
+            title="View krabby on GitHub"
+            aria-label="GitHub repository"
+          >
+            <BrandIcon name="github" />
+          </a>
+        {/if}
       </div>
     </header>
 
@@ -375,7 +380,7 @@
       {:else if view === "settings"}
         <Settings tab={route.settingsTab || ""} />
       {:else if view === "about"}
-        <About />
+        <About tab={route.aboutTab || ""} />
       {/if}
     </main>
   </div>

@@ -1,6 +1,23 @@
 <script>
   import { onMount } from "svelte";
+  import { replace } from "svelte-spa-router";
   import { api } from "../lib/api.js";
+
+  let { tab: tabParam = "" } = $props();
+
+  // The active tab lives in the path (/about/mcp) like Settings; the default
+  // tab keeps a bare /about.
+  const tabs = [
+    { id: "about", label: "About" },
+    { id: "mcp", label: "MCP" },
+    { id: "tools", label: "Tool catalogs" },
+  ];
+  let tab = $derived(tabs.some((t) => t.id === tabParam) ? tabParam : tabs[0].id);
+
+  function selectTab(id) {
+    if (id === tab) return;
+    replace(id === tabs[0].id ? "/about" : `/about/${id}`);
+  }
 
   let settings = $state(null);
 
@@ -213,6 +230,21 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
   });
 </script>
 
+<div class="mb-6 flex flex-wrap gap-1 border-b border-line" role="tablist" aria-label="About sections">
+  {#each tabs as t (t.id)}
+    <button
+      type="button"
+      role="tab"
+      aria-selected={tab === t.id}
+      class="-mb-px cursor-pointer border-b-2 px-3 py-2 text-[13px] transition-colors {tab === t.id
+        ? 'border-accent font-medium text-fg'
+        : 'border-transparent text-dim hover:text-fg'}"
+      onclick={() => selectTab(t.id)}>{t.label}</button
+    >
+  {/each}
+</div>
+
+{#if tab === "about"}
 <p class="max-w-[720px] text-dim">
   krabby tracks git repositories, builds a knowledge graph for each one and generates docs and semantic
   indexes on top. Its tools are available to AI agents through three independent
@@ -221,6 +253,111 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
 </p>
 
 <div class="card my-4 p-4">
+  <div class="mb-3 flex flex-wrap items-center gap-2">
+    <h2 class="text-[15px] font-semibold">Repository refresh pipeline</h2>
+    <div class="ml-auto flex flex-wrap gap-1.5 text-[10px]">
+      <span class="rounded border border-line px-1.5 py-0.5 text-faint">dependency path</span>
+      <span class="rounded border border-accent/40 px-1.5 py-0.5 text-accent">independent branches</span>
+    </div>
+  </div>
+
+  <div class="overflow-x-auto">
+    <div class="flex min-w-[700px] items-center">
+      <div class="w-28 flex-shrink-0 rounded border border-line bg-surface-2 px-3 py-2">
+        <div class="font-mono text-[10px] uppercase tracking-wide text-faint">Git</div>
+        <div class="mt-0.5 text-[12px] font-medium">Sync</div>
+      </div>
+
+      <div class="w-10 flex-shrink-0 border-t border-line"></div>
+
+      <div class="w-28 flex-shrink-0 rounded border border-line bg-surface-2 px-3 py-2">
+        <div class="font-mono text-[10px] uppercase tracking-wide text-faint">Graph</div>
+        <div class="mt-0.5 text-[12px] font-medium">Build graph</div>
+      </div>
+
+      <div class="relative h-[94px] w-12 flex-shrink-0">
+        <span class="absolute left-0 top-1/2 w-4 border-t border-line"></span>
+        <span class="absolute bottom-[19px] left-4 top-[19px] border-l border-accent/60"></span>
+        <span class="absolute left-4 top-[19px] w-8 border-t border-accent/60"></span>
+        <span class="absolute bottom-[19px] left-4 w-8 border-t border-accent/60"></span>
+      </div>
+
+      <div class="flex flex-col gap-3">
+        <div
+          class="w-32 rounded border border-accent/40 bg-surface-2 px-3 py-2"
+          title="Uses graph symbols for chunk boundaries; falls back to line windows when unavailable"
+        >
+          <div class="font-mono text-[10px] uppercase tracking-wide text-faint">Embeddings</div>
+          <div class="mt-0.5 text-[12px] font-medium">Code index</div>
+        </div>
+
+        <div class="flex items-center">
+          <div class="w-32 rounded border border-accent/40 bg-surface-2 px-3 py-2">
+            <div class="font-mono text-[10px] uppercase tracking-wide text-faint">LLM</div>
+            <div class="mt-0.5 text-[12px] font-medium">Docs</div>
+          </div>
+          <div class="w-10 flex-shrink-0 border-t border-line"></div>
+          <div class="w-32 rounded border border-line bg-surface-2 px-3 py-2">
+            <div class="font-mono text-[10px] uppercase tracking-wide text-faint">Embeddings</div>
+            <div class="mt-0.5 text-[12px] font-medium">Docs index</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="mt-4 grid gap-2 border-t border-line pt-3 text-[11px] text-faint sm:grid-cols-2">
+      <div>
+        <span class="font-medium text-dim">New or changed repository:</span>
+        Sync and Graph finish first. Code index then runs independently while Docs generates; Docs index waits only for
+        Docs.
+      </div>
+      <div>
+        <span class="font-medium text-dim">Unchanged repository:</span>
+        Refresh stops after Sync and reuses existing artifacts. A settings reindex skips Git and Graph entirely.
+      </div>
+      <div>
+        <span class="font-medium text-dim">Queue concurrency:</span>
+        Caps top-level repository and source tasks. Extra work waits FIFO until a slot is free.
+      </div>
+      <div>
+        <span class="font-medium text-dim">Docs concurrency:</span>
+        Separately caps parallel LLM summary groups inside one Docs stage; configure both limits in Settings.
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card my-4 p-4">
+  <h2 class="mb-1 text-[15px] font-semibold">How changes are picked up</h2>
+  <p class="mt-0 text-[13px] text-faint">
+    MCP tool changes and changes inside a catalogued API follow different update paths.
+  </p>
+
+  <div class="mt-3 grid gap-3 sm:grid-cols-2">
+    <div class="rounded-md border border-line p-3">
+      <h3 class="m-0 text-[13px] font-medium">Krabby / MCP updates</h3>
+      <p class="mb-0 mt-1.5 text-[12px] text-dim">
+        Each catalog keeps a stable endpoint URL across Krabby upgrades. MCP clients usually cache
+        the tool list and its schemas for a session, so reconnect or restart the client after upgrading Krabby
+        to discover added tools or changed arguments.
+      </p>
+    </div>
+
+    <div class="rounded-md border border-line p-3">
+      <h3 class="m-0 text-[13px] font-medium">Catalogued API updates</h3>
+      <p class="mb-0 mt-1.5 text-[12px] text-dim">
+        OpenAPI and gRPC definitions are refreshed manually with
+        <code class="font-mono">refresh_api_service</code> or automatically on the service schedule. Krabby
+        detects unchanged definitions, re-renders and reindexes changed or removed endpoints, then serves the
+        current catalog through MCP immediately. Editing a base URL, spec patch, or operation override forces a
+        full re-render even when the upstream definition did not change.
+      </p>
+    </div>
+  </div>
+</div>
+
+{:else if tab === "mcp"}
+<div class="card mb-4 p-4">
   <div class="mb-2 flex items-center gap-2">
     <h2 class="text-[15px] font-semibold">MCP endpoints</h2>
     <span class="rounded border border-line px-1.5 py-0.5 text-[11px] text-faint">streamable HTTP</span>
@@ -230,34 +367,34 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
   </p>
   <div class="mt-3 grid gap-2 sm:grid-cols-3">
     <button
-      class={`rounded-md border p-3 text-left transition-colors hover:border-accent/60 ${mcpCatalog === "core" ? "border-accent bg-accent/5" : "border-line"}`}
+      class={`cursor-pointer rounded-md border p-3 text-left transition-colors hover:border-accent/60 ${mcpCatalog === "core" ? "border-accent bg-accent/5" : "border-line"}`}
       aria-pressed={mcpCatalog === "core"}
       onclick={() => (mcpCatalog = "core")}
     >
       <div class="text-[13px] font-medium">Core</div>
       <code class="mt-1 block break-all font-mono text-[11px] text-fg">{mcpRoot}</code>
       <div class="mt-1 text-[12px] text-dim">Read-only repository, graph, file, history, and documentation tools.</div>
-      <div class="mt-2 text-[11px] font-medium text-accent">22 tools · view below</div>
+      <div class="mt-2 text-[11px] font-medium text-accent">22 tools</div>
     </button>
     <button
-      class={`rounded-md border p-3 text-left transition-colors hover:border-accent/60 ${mcpCatalog === "api" ? "border-accent bg-accent/5" : "border-line"}`}
+      class={`cursor-pointer rounded-md border p-3 text-left transition-colors hover:border-accent/60 ${mcpCatalog === "api" ? "border-accent bg-accent/5" : "border-line"}`}
       aria-pressed={mcpCatalog === "api"}
       onclick={() => (mcpCatalog = "api")}
     >
       <div class="text-[13px] font-medium">API</div>
       <code class="mt-1 block break-all font-mono text-[11px] text-fg">{mcpRoot}/api</code>
       <div class="mt-1 text-[12px] text-dim">API catalog discovery plus <code class="font-mono">call_api_endpoint</code>, which sends real requests.</div>
-      <div class="mt-2 text-[11px] font-medium text-accent">5 tools · view below</div>
+      <div class="mt-2 text-[11px] font-medium text-accent">5 tools</div>
     </button>
     <button
-      class={`rounded-md border p-3 text-left transition-colors hover:border-accent/60 ${mcpCatalog === "admin" ? "border-accent bg-accent/5" : "border-line"}`}
+      class={`cursor-pointer rounded-md border p-3 text-left transition-colors hover:border-accent/60 ${mcpCatalog === "admin" ? "border-accent bg-accent/5" : "border-line"}`}
       aria-pressed={mcpCatalog === "admin"}
       onclick={() => (mcpCatalog = "admin")}
     >
       <div class="text-[13px] font-medium">Admin</div>
       <code class="mt-1 block break-all font-mono text-[11px] text-fg">{mcpRoot}/admin</code>
       <div class="mt-1 text-[12px] text-dim">All create, update, refresh, cancel, delete, credential, queue, and configuration tools.</div>
-      <div class="mt-2 text-[11px] font-medium text-accent">38 tools · view below</div>
+      <div class="mt-2 text-[11px] font-medium text-accent">38 tools</div>
     </button>
   </div>
   <p class="mb-0 mt-2 text-[13px] text-faint">
@@ -276,7 +413,7 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
           type="button"
           role="tab"
           aria-selected={client === c.id}
-          class="-mb-px border-b-2 px-3 py-2 text-[13px] transition-colors {client === c.id
+          class="-mb-px cursor-pointer border-b-2 px-3 py-2 text-[13px] transition-colors {client === c.id
             ? 'border-accent font-medium text-fg'
             : 'border-transparent text-dim hover:text-fg'}"
           onclick={() => (client = c.id)}>{c.label}</button
@@ -285,21 +422,21 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
     </div>
     <div class="mb-1.5 ml-auto flex items-center rounded-md border border-line bg-bg p-0.5" aria-label="MCP catalog">
         <button
-          class="rounded px-2.5 py-1 text-[11px] text-dim transition-colors hover:text-fg"
+          class="cursor-pointer rounded px-2.5 py-1 text-[11px] text-dim transition-colors hover:text-fg"
           class:!bg-surface-2={mcpCatalog === "core"}
           class:!text-fg={mcpCatalog === "core"}
           aria-pressed={mcpCatalog === "core"}
           onclick={() => (mcpCatalog = "core")}
         >Core</button>
         <button
-          class="rounded px-2.5 py-1 text-[11px] text-dim transition-colors hover:text-fg"
+          class="cursor-pointer rounded px-2.5 py-1 text-[11px] text-dim transition-colors hover:text-fg"
           class:!bg-surface-2={mcpCatalog === "api"}
           class:!text-fg={mcpCatalog === "api"}
           aria-pressed={mcpCatalog === "api"}
           onclick={() => (mcpCatalog = "api")}
         >API</button>
         <button
-          class="rounded px-2.5 py-1 text-[11px] text-dim transition-colors hover:text-fg"
+          class="cursor-pointer rounded px-2.5 py-1 text-[11px] text-dim transition-colors hover:text-fg"
           class:!bg-surface-2={mcpCatalog === "admin"}
           class:!text-fg={mcpCatalog === "admin"}
           aria-pressed={mcpCatalog === "admin"}
@@ -349,35 +486,6 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
       Core uses <code class="font-mono">{mcpPath}</code> and exposes only read-only codebase and documentation tools.
     {/if}
   </p>
-</div>
-
-<div class="card my-4 p-4">
-  <h2 class="mb-1 text-[15px] font-semibold">How changes are picked up</h2>
-  <p class="mt-0 text-[13px] text-faint">
-    MCP tool changes and changes inside a catalogued API follow different update paths.
-  </p>
-
-  <div class="mt-3 grid gap-3 sm:grid-cols-2">
-    <div class="rounded-md border border-line p-3">
-      <h3 class="m-0 text-[13px] font-medium">Krabby / MCP updates</h3>
-      <p class="mb-0 mt-1.5 text-[12px] text-dim">
-        Each catalog keeps a stable endpoint URL across Krabby upgrades. MCP clients usually cache
-        the tool list and its schemas for a session, so reconnect or restart the client after upgrading Krabby
-        to discover added tools or changed arguments.
-      </p>
-    </div>
-
-    <div class="rounded-md border border-line p-3">
-      <h3 class="m-0 text-[13px] font-medium">Catalogued API updates</h3>
-      <p class="mb-0 mt-1.5 text-[12px] text-dim">
-        OpenAPI and gRPC definitions are refreshed manually with
-        <code class="font-mono">refresh_api_service</code> or automatically on the service schedule. Krabby
-        detects unchanged definitions, re-renders and reindexes changed or removed endpoints, then serves the
-        current catalog through MCP immediately. Editing a base URL, spec patch, or operation override forces a
-        full re-render even when the upstream definition did not change.
-      </p>
-    </div>
-  </div>
 </div>
 
 <div class="card my-4 p-4">
@@ -441,7 +549,8 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
   </div>
 </div>
 
-<div class="card my-4 p-4">
+{:else}
+<div class="card mb-4 p-4">
   <div class="flex flex-wrap items-start gap-3">
     <div>
       <h2 class="mb-1 text-[15px] font-semibold">Tool catalogs</h2>
@@ -452,7 +561,7 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
     <div class="ml-auto flex items-center rounded-md border border-line bg-bg p-0.5" aria-label="Published MCP tool catalog">
       {#each [["core", 22], ["api", 5], ["admin", 38]] as [catalog, count] (catalog)}
         <button
-          class="rounded px-2.5 py-1 text-[11px] capitalize text-dim transition-colors hover:text-fg"
+          class="cursor-pointer rounded px-2.5 py-1 text-[11px] capitalize text-dim transition-colors hover:text-fg"
           class:!bg-surface-2={mcpCatalog === catalog}
           class:!text-fg={mcpCatalog === catalog}
           aria-pressed={mcpCatalog === catalog}
@@ -482,3 +591,4 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
     </div>
   {/each}
 </div>
+{/if}

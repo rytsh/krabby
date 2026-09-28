@@ -431,3 +431,32 @@ func TestRedactNormalizationPreservesSemantics(t *testing.T) {
 		t.Errorf("empty schedules changed EffectiveSchedules (%d entries)", got)
 	}
 }
+
+func TestUIOnly(t *testing.T) {
+	t.Parallel()
+
+	var patch Patch
+	if err := json.Unmarshal([]byte(`{"ui_hide_github_link":true}`), &patch); err != nil {
+		t.Fatal(err)
+	}
+	if !patch.UIOnly() {
+		t.Fatal("a UI-only patch was not recognized")
+	}
+	if patch.RuntimeOnly() || patch.ObservabilityOnly() {
+		t.Fatal("a UI-only patch must not be classified as runtime or observability")
+	}
+
+	got := patch.Apply(Settings{RAGTopK: 20})
+	if !got.UIHideGithubLink || got.RAGTopK != 20 {
+		t.Fatalf("ui patch result = %#v", got)
+	}
+
+	model := "gpt-4o"
+	mixed := Patch{UIHideGithubLink: patch.UIHideGithubLink, LLMModel: &model}
+	if mixed.UIOnly() {
+		t.Fatal("a patch that also changes the model is not UI-only")
+	}
+	if (Patch{}).UIOnly() {
+		t.Fatal("an empty patch is not UI-only")
+	}
+}

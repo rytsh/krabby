@@ -6,6 +6,7 @@
   import { api } from "../lib/api.js";
   import { fmtDate } from "../lib/format.js";
   import Icon from "../lib/Icon.svelte";
+  import InfoTip from "../lib/InfoTip.svelte";
 
   // Repo ids for the filter dropdown, loaded once. Capped so a huge fleet does
   // not build an enormous native <select>; beyond the cap the user searches all
@@ -92,6 +93,7 @@
   // reports, so a stale or unbuilt index is visible instead of looking like
   // an absence of matches.
   let indexed = $state([]);
+  let indexByRepo = $derived(new Map(indexed.map((ix) => [ix.repo, ix])));
   const perPage = 20;
   const newline = "\n";
   let pageCount = $derived(Math.max(1, Math.ceil(total / perPage)));
@@ -471,23 +473,24 @@
 
 <div class="-mt-2 mb-4 text-[11px] text-faint">{scope === "docs" ? docsModeHelp() : codeModeHelp()}</div>
 
-{#if results !== null && !loading}
-  {#if scope === "code" && indexed.length}
-    <div class="-mt-3 mb-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-faint">
-      {#each indexed as ix (ix.repo)}
-        <span>
-          <span class="font-mono">{ix.repo}</span>
-          {#if !ix.indexed_at}
-            <span class="text-warn">not indexed yet</span>
-          {:else if ix.stale}
-            <span class="text-warn">index behind the clone</span>, built {fmtDate(ix.indexed_at)}
-          {:else}
-            indexed {fmtDate(ix.indexed_at)}
-          {/if}
-        </span>
-      {/each}
-    </div>
+{#snippet indexTip(repo)}
+  {@const ix = indexByRepo.get(repo)}
+  {#if ix}
+    <InfoTip label="Index status" tone={!ix.indexed_at || ix.stale ? "warn" : ""}>
+      <div class="font-mono text-fg">{ix.repo}</div>
+      {#if !ix.indexed_at}
+        <div class="text-warn">Not indexed yet</div>
+      {:else if ix.stale}
+        <div class="text-warn">Index is behind the clone</div>
+        <div>Built {fmtDate(ix.indexed_at)}</div>
+      {:else}
+        <div>Indexed {fmtDate(ix.indexed_at)}</div>
+      {/if}
+    </InfoTip>
   {/if}
+{/snippet}
+
+{#if results !== null && !loading}
   {#if results.length === 0 && !error}
     <div class="card p-6 text-center text-dim">No matches.</div>
   {:else}
@@ -528,7 +531,8 @@
               <span class="font-mono text-[12.5px] text-fg">{r.repo}</span>
               <span class="text-faint">/</span>
               <span class="truncate font-mono text-[12.5px] text-dim">{r.path}</span>
-              <span class="ml-auto text-[11px] text-faint">
+              <span class="ml-auto flex items-center gap-2 text-[11px] text-faint">
+                {@render indexTip(r.repo)}
                 {r.matches.length}
                 {r.matches.length === 1 ? "match" : "matches"}{r.truncated ? "+" : ""}
               </span>
@@ -559,7 +563,8 @@
               {#if r.symbol}
                 <span class="rounded border border-line px-1.5 text-[11px] text-dim">{r.symbol}</span>
               {/if}
-              <span class="ml-auto text-[11px] text-faint">
+              <span class="ml-auto flex items-center gap-2 text-[11px] text-faint">
+                {@render indexTip(r.repo)}
                 {codeMode === "semantic" ? pct(r.score) : `BM25 ${r.score.toFixed(2)}`}
               </span>
             </div>

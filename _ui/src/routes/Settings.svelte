@@ -1,8 +1,9 @@
 <script>
   import { onMount } from "svelte";
   import { api } from "../lib/api.js";
-  import { successToast } from "../lib/toast.js";
+  import { errorToast, successToast } from "../lib/toast.js";
   import { sidebarPathMode } from "../lib/paths.js";
+  import { showGithubLink, setShowGithubLink } from "../lib/header.js";
   import { replace } from "svelte-spa-router";
   import RuntimeSettings from "../components/settings/RuntimeSettings.svelte";
   import LangfuseSettings from "../components/settings/LangfuseSettings.svelte";
@@ -301,7 +302,7 @@
       type="button"
       role="tab"
       aria-selected={tab === t.id}
-      class="-mb-px border-b-2 px-3 py-2 text-[13px] transition-colors {tab === t.id
+      class="-mb-px cursor-pointer border-b-2 px-3 py-2 text-[13px] transition-colors {tab === t.id
         ? 'border-accent font-medium text-fg'
         : 'border-transparent text-dim hover:text-fg'}"
       onclick={() => selectTab(t.id)}>{t.label}</button
@@ -400,7 +401,7 @@
 
 {:else if tab === "appearance"}
 <h2 class="mb-1 text-[15px] font-semibold">Appearance</h2>
-<p class="text-dim">Display preferences, stored in this browser only.</p>
+<p class="text-dim">Display preferences. Sidebar paths are stored in this browser; the GitHub link applies to everyone.</p>
 
 <div class="card mt-3 p-4">
   <div class="flex flex-wrap items-center justify-between gap-3 text-[13px]">
@@ -429,6 +430,32 @@
         onclick={() => sidebarPathMode.set("full")}>Full path</button
       >
     </div>
+  </div>
+
+  <div class="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-line pt-4 text-[13px]">
+    <div class="flex min-w-0 flex-col gap-0.5">
+      <span id="github-link-label">GitHub link in header</span>
+      <span class="text-[12px] text-faint">
+        Show the link to the krabby repository in the top-right corner. Saved on the server and applies to
+        everyone.
+      </span>
+    </div>
+    <button
+      type="button"
+      role="switch"
+      aria-checked={$showGithubLink}
+      aria-labelledby="github-link-label"
+      class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border transition-colors {$showGithubLink
+        ? 'border-accent bg-accent'
+        : 'border-line-strong bg-surface-3'}"
+      onclick={() => setShowGithubLink(!$showGithubLink).catch(errorToast)}
+    >
+      <span
+        class="inline-block h-3.5 w-3.5 rounded-full bg-fg shadow transition-transform {$showGithubLink
+          ? 'translate-x-[18px] !bg-accent-fg'
+          : 'translate-x-[2px]'}"
+      ></span>
+    </button>
   </div>
 </div>
 

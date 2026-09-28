@@ -178,6 +178,16 @@ func (m *Manager) PatchDocsConfig(ctx context.Context, patch settings.Patch) (se
 	}
 
 	next := patch.Apply(current)
+	if patch.UIOnly() {
+		// UI preferences are read only by the browser: nothing to rebuild.
+		saved, err := m.settings.Set(ctx, next)
+		if err != nil {
+			return settings.Redacted{}, err
+		}
+
+		return redactSettings(saved), nil
+	}
+
 	if patch.RuntimeOnly() {
 		saved, err := m.settings.Set(ctx, next)
 		if err != nil {

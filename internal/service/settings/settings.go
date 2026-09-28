@@ -171,6 +171,11 @@ type Settings struct {
 	// GitPollInterval. See EffectiveSchedules.
 	RepoSchedules []RepoSchedule `bw:"repo_schedules" json:"repo_schedules"`
 
+	// UI: instance-wide web UI preferences, shared by every visitor. Fields
+	// are phrased so their zero value is the default, which lets records
+	// persisted before a field existed migrate without a backfill.
+	UIHideGithubLink bool `bw:"ui_hide_github_link" json:"ui_hide_github_link"`
+
 	UpdatedAt time.Time `bw:"updated_at" json:"updated_at,omitzero"`
 }
 
@@ -514,6 +519,8 @@ type Patch struct {
 	GitPollInterval *time.Duration  `json:"git_poll_interval"`
 	RepoSchedules   *[]RepoSchedule `json:"repo_schedules"`
 	WebhookSecret   *string         `json:"webhook_secret"`
+
+	UIHideGithubLink *bool `json:"ui_hide_github_link"`
 }
 
 // langfuseTouched reports whether the patch changes any observability field.
@@ -524,6 +531,25 @@ func (p Patch) langfuseTouched() bool {
 		p.LangfuseCapture != nil || p.LangfuseMaxContentBytes != nil ||
 		p.LangfuseTraceDocs != nil || p.LangfuseTraceEmbed != nil ||
 		p.LangfuseTraceMCP != nil || p.LangfuseTraceHTTP != nil
+}
+
+// uiTouched reports whether the patch changes any web UI preference.
+func (p Patch) uiTouched() bool {
+	return p.UIHideGithubLink != nil
+}
+
+// UIOnly reports whether a patch changes nothing but web UI preferences. They
+// are read only by the browser, so callers persist them without rebuilding
+// clients or reindexing.
+func (p Patch) UIOnly() bool {
+	if !p.uiTouched() {
+		return false
+	}
+
+	rest := p
+	rest.UIHideGithubLink = nil
+
+	return rest.empty()
 }
 
 // RuntimeOnly reports whether a patch changes only scheduler/webhook/queue
@@ -802,6 +828,9 @@ func (p Patch) Apply(base Settings) Settings {
 	if p.LangfuseTraceHTTP != nil {
 		base.LangfuseTraceHTTP = *p.LangfuseTraceHTTP
 	}
+	if p.UIHideGithubLink != nil {
+		base.UIHideGithubLink = *p.UIHideGithubLink
+	}
 
 	return base
 }
@@ -811,7 +840,8 @@ type Store struct {
 	bucket *bw.Bucket[Settings]
 }
 
-// settingsSchemaVersion v16 adds embed_input_mode and code_embed_input_mode;
+// settingsSchemaVersion v17 adds ui_hide_github_link; its zero value keeps the
+// link visible, so records migrated from v16 need no backfill. v16 adds embed_input_mode and code_embed_input_mode;
 // an empty value behaves as "batch", so records migrated from v15 need no
 // backfill. v15 adds docs_prompt_extra and the docs_max_*_bytes
 // input budgets; zero numeric values mean "use the built-in default", so
@@ -833,7 +863,7 @@ type Store struct {
 // docs_summary_model; v4 docs_max_groups; v3 embed_concurrency /
 // code_embed_concurrency. Bumping the version lets bw migrate existing settings
 // records in place.
-const settingsSchemaVersion = 16
+const settingsSchemaVersion = 17
 
 // New opens the settings bucket. If no record exists yet, seed is persisted as
 // the initial configuration (seeded from file/env config by the caller).
