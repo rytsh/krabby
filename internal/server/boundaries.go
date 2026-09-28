@@ -21,7 +21,7 @@ import (
 )
 
 type systemInfoService interface {
-	GraphifyVersion() string
+	GraphEngineVersion() string
 }
 
 type repoReader interface {

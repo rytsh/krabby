@@ -29,7 +29,7 @@ import (
 
 	"github.com/rytsh/krabby/internal/config"
 	"github.com/rytsh/krabby/internal/observability/langfuse"
-	"github.com/rytsh/krabby/internal/service/graphify"
+	"github.com/rytsh/krabby/internal/service/graphbuilder"
 	"github.com/rytsh/krabby/internal/service/graphquery"
 	"github.com/rytsh/krabby/internal/service/llm"
 	"github.com/rytsh/krabby/internal/service/progress"
@@ -352,7 +352,7 @@ func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir st
 	}
 
 	// Group related files so one LLM call summarizes a whole cluster instead of
-	// one call per file. The graphify communities drive the grouping; files the
+	// one call per file. The graph communities drive the grouping; files the
 	// graph does not cover fall back to size-bounded batches.
 	groups := g.buildGroups(files, graph)
 
@@ -507,7 +507,7 @@ const defaultMaxGroups = 40
 const maxFilesPerGroup = 24
 
 // buildGroups partitions files into clusters for grouped summarization. When a
-// graph is available, files are grouped by their graphify community (majority
+// graph is available, files are grouped by their graph community (majority
 // vote per file); files the graph does not cover are batched by count. Without
 // a graph, every file becomes its own group, preserving the original per-file
 // behavior.
@@ -1193,7 +1193,7 @@ func (g *llmGenerator) loadGraph(clonePath string) *graphquery.Graph {
 		return nil
 	}
 
-	graphPath := graphify.GraphPath(clonePath)
+	graphPath := graphbuilder.GraphPath(clonePath)
 	graph, err := g.engine.Graph(graphPath)
 	if err != nil {
 		slog.Warn("docgen: graph unavailable, generating without graph context", "path", graphPath, "error", err)

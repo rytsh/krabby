@@ -34,7 +34,7 @@ const (
 	MaxListPerPage = 200
 )
 
-// Dir excluded from listings; graphify output, VCS metadata and vendored
+// Dir excluded from listings; graph output, VCS metadata and vendored
 // third-party trees are noise when browsing a repository.
 var skipDirs = map[string]bool{
 	".git":         true,
@@ -46,7 +46,7 @@ var skipDirs = map[string]bool{
 // A glob is a question the caller wrote: "vendor/**" can only mean vendored
 // code, and answering it with an empty page would be a wrong answer, not a
 // tidier one. What stays pruned is what is not repository content at all -
-// git's object store and krabby's own graphify output, both of which would
+// git's object store and krabby's own graph output, both of which would
 // otherwise flood a "**/*.json" with artefacts the caller never committed.
 var globSkipDirs = map[string]bool{
 	".git":         true,

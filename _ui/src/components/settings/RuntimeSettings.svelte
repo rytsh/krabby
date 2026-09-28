@@ -128,7 +128,7 @@
       <input class="input" type="number" min="1" max="64" bind:value={draft.task_concurrency} />
       <span class="text-[12px] text-faint">
         How many background tasks (refresh, generate, web sync, reindex) run at once. Lower to protect
-        git/graphify/LLM/embedder backends; raise to process more repositories in parallel.
+        git/graph-build/LLM/embedder backends; raise to process more repositories in parallel.
       </span>
     </label>
     <label class="flex flex-col gap-1 text-[13px] text-dim">

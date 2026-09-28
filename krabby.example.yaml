@@ -27,8 +27,8 @@ mcp:
   # Krabby authenticates nothing itself. Run it behind a proxy that
   # authenticates every request before it reaches these paths.
 
-graphify:
-  build_timeout: 30m         # bag builds Graphify-compatible graphs in-process
+bag:
+  build_timeout: 30m         # embedded graph builder
   # exclude:                 # extra gitignore-style patterns kept out of the graph
   #   - "testdata/"          # (defaults already skip testdata/, fixtures/, *.min.js, …)
   #   - "examples/"

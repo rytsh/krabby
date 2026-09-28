@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rytsh/krabby/internal/service/graphify"
+	"github.com/rytsh/krabby/internal/service/graphbuilder"
 	"github.com/rytsh/krabby/internal/service/graphquery"
 	"github.com/rytsh/krabby/internal/service/registry"
 	"github.com/rytsh/krabby/internal/storage"
@@ -41,7 +41,7 @@ func codeNavManager(t *testing.T, repoIDs ...string) *Manager {
 
 	for i, id := range repoIDs {
 		path := filepath.Join(dataDir, "repos", "r"+string(rune('a'+i)))
-		mustWriteManagerTest(t, graphify.GraphPath(path), codeNavGraph)
+		mustWriteManagerTest(t, graphbuilder.GraphPath(path), codeNavGraph)
 		if err := reg.Upsert(context.Background(), &registry.Repo{
 			ID: id, URL: "https://" + id, Branch: "main", Path: path, Status: registry.StatusReady,
 		}); err != nil {

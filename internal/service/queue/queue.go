@@ -3,7 +3,7 @@
 //
 // Previously every trigger spawned its own unbounded goroutine, so enqueuing
 // many repositories at once launched an unbounded number of concurrent git
-// clones, graphify builds, LLM calls and embedder requests — overloading the
+// clones, bag builds, LLM calls and embedder requests — overloading the
 // host and "clogging" the pipeline. This package funnels all of that work
 // through a single queue whose concurrency is governed by one runtime-mutable
 // limit (exposed in the settings UI): at most Limit tasks run at a time and the

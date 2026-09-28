@@ -1,4 +1,4 @@
-package graphify
+package graphbuilder
 
 import (
 	"encoding/json"
@@ -11,7 +11,7 @@ import (
 // DefaultGraphIgnore lists gitignore-style patterns krabby always excludes from
 // the knowledge graph. These are test fixtures, generated assets and other
 // files that carry no architectural meaning but would otherwise flood the graph
-// with nodes (for example parsed JSON fixtures under testdata/). graphify's own
+// with nodes (for example parsed JSON fixtures under testdata/). bag's own
 // built-in skip list already covers dependency and build dirs (node_modules,
 // dist, __pycache__, ...), so this list only adds what it misses.
 var DefaultGraphIgnore = []string{
@@ -23,7 +23,7 @@ var DefaultGraphIgnore = []string{
 	"testfixtures/",
 	"mocks/",
 	"__mocks__/",
-	// Vendored dependency trees not covered by graphify's built-in skip list
+	// Vendored dependency trees not covered by bag's built-in skip list
 	// (Go's vendor/ can hold thousands of third-party source files that stall
 	// the graph build).
 	"vendor/",
@@ -40,10 +40,9 @@ var DefaultGraphIgnore = []string{
 }
 
 const (
-	// ignoreFileName is the file graphify reads for exclusion patterns. It sits
-	// at the clone root so graphify's VCS-bounded resolver (which stops at .git)
-	// always finds it.
-	ignoreFileName = ".graphifyignore"
+	// legacyIgnoreFileName was written before Krabby passed excludes directly to
+	// bag. It remains here only so the managed block can be removed.
+	legacyIgnoreFileName = ".graphifyignore"
 
 	// managedBegin/managedEnd delimit the block krabby owns inside the file.
 	// Anything outside the markers (a user's own patterns) is preserved.
@@ -51,57 +50,36 @@ const (
 	managedEnd   = "# <<< krabby managed <<<"
 )
 
-// WriteIgnore refreshes the krabby-managed block in the clone's .graphifyignore
-// so the next graph build skips DefaultGraphIgnore plus the given extra
-// patterns. Any content the user placed outside the managed markers is kept
-// verbatim. When the resulting managed block matches what is already on disk,
-// the file is left untouched and changed is false. changed is true when the
-// file was created or rewritten, signalling the caller to force a full graph
-// rebuild (the new exclusions shrink the node count, which graphify otherwise
-// refuses to overwrite).
-func WriteIgnore(clonePath string, extra []string) (changed bool, err error) {
-	path := filepath.Join(clonePath, ignoreFileName)
-
+// RemoveLegacyManagedIgnore removes only the block older Krabby versions added
+// to .graphifyignore. User-authored content outside the markers is preserved.
+// If the generated block was the file's only content, the file is removed.
+func RemoveLegacyManagedIgnore(clonePath string) (changed bool, err error) {
+	path := filepath.Join(clonePath, legacyIgnoreFileName)
 	existing, err := os.ReadFile(path) //nolint:gosec // path is a tracked clone root
-	if err != nil && !os.IsNotExist(err) {
-		return false, fmt.Errorf("read %s; %w", ignoreFileName, err)
+	if os.IsNotExist(err) {
+		return false, nil
 	}
-
-	preserved := stripManagedBlock(string(existing))
-	block := buildManagedBlock(extra)
-
-	var b strings.Builder
-	if preserved != "" {
-		b.WriteString(preserved)
-		if !strings.HasSuffix(preserved, "\n") {
-			b.WriteString("\n")
-		}
-		b.WriteString("\n")
+	if err != nil {
+		return false, fmt.Errorf("read %s; %w", legacyIgnoreFileName, err)
 	}
-	b.WriteString(block)
-
-	next := b.String()
-	if string(existing) == next {
+	if !strings.Contains(string(existing), managedBegin) {
 		return false, nil
 	}
 
-	if err := os.WriteFile(path, []byte(next), 0o644); err != nil { //nolint:gosec // ignore file is non-secret
-		return false, fmt.Errorf("write %s; %w", ignoreFileName, err)
+	preserved := stripManagedBlock(string(existing))
+	if strings.TrimSpace(preserved) == "" {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return false, fmt.Errorf("remove %s; %w", legacyIgnoreFileName, err)
+		}
+		return true, nil
+	}
+
+	preserved = strings.TrimRight(preserved, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(preserved), 0o644); err != nil { //nolint:gosec // ignore file is non-secret
+		return false, fmt.Errorf("rewrite %s; %w", legacyIgnoreFileName, err)
 	}
 
 	return true, nil
-}
-
-// HasManagedIgnore reports whether the clone's .graphifyignore currently holds a
-// krabby-managed block. Callers force a full graph rebuild in that case so the
-// shrink guard cannot preserve stale nodes for now-excluded files.
-func HasManagedIgnore(clonePath string) bool {
-	b, err := os.ReadFile(filepath.Join(clonePath, ignoreFileName)) //nolint:gosec // clone root
-	if err != nil {
-		return false
-	}
-
-	return strings.Contains(string(b), managedBegin)
 }
 
 // GraphHasExcludedNodes reports whether the built graph at clonePath still
@@ -152,7 +130,7 @@ func mergedPatterns(extra []string) []string {
 }
 
 // matchesExcluded reports whether a repo-relative slash path matches any exclude
-// pattern, mirroring graphify's gitignore semantics: a bare pattern matches at
+// pattern, mirroring bag's gitignore semantics: a bare pattern matches at
 // any path depth (each segment and each cumulative prefix is tested), so
 // "testdata" matches "a/b/testdata/c.json".
 func matchesExcluded(rel string, patterns []string) bool {
@@ -178,41 +156,6 @@ func matchesExcluded(rel string, patterns []string) bool {
 	}
 
 	return false
-}
-
-// buildManagedBlock renders the managed section: the default patterns followed
-// by the deduplicated extra patterns, wrapped in the begin/end markers.
-func buildManagedBlock(extra []string) string {
-	seen := make(map[string]bool, len(DefaultGraphIgnore)+len(extra))
-	patterns := make([]string, 0, len(DefaultGraphIgnore)+len(extra))
-
-	add := func(p string) {
-		p = strings.TrimSpace(p)
-		if p == "" || seen[p] {
-			return
-		}
-		seen[p] = true
-		patterns = append(patterns, p)
-	}
-
-	for _, p := range DefaultGraphIgnore {
-		add(p)
-	}
-	for _, p := range extra {
-		add(p)
-	}
-
-	var b strings.Builder
-	b.WriteString(managedBegin)
-	b.WriteString("\n")
-	for _, p := range patterns {
-		b.WriteString(p)
-		b.WriteString("\n")
-	}
-	b.WriteString(managedEnd)
-	b.WriteString("\n")
-
-	return b.String()
 }
 
 // stripManagedBlock removes a previously written managed block (and its

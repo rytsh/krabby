@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/rytsh/krabby/internal/service/gitops"
-	"github.com/rytsh/krabby/internal/service/graphify"
+	"github.com/rytsh/krabby/internal/service/graphbuilder"
 	"github.com/rytsh/krabby/internal/service/graphquery"
 	"github.com/rytsh/krabby/internal/service/registry"
 	"github.com/rytsh/krabby/internal/storage"
@@ -45,7 +45,7 @@ func TestSnapshotActivationLeavesActiveCloneUntouchedUntilPublish(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	gfy := graphify.New(time.Minute, nil)
+	graphBuilder := graphbuilder.New(time.Minute, nil)
 
 	repo := &registry.Repo{
 		ID:         "example.com/team/repo",
@@ -60,7 +60,7 @@ func TestSnapshotActivationLeavesActiveCloneUntouchedUntilPublish(t *testing.T) 
 	}
 
 	m := &Manager{
-		reg: reg, git: git, gfy: gfy, engine: graphquery.NewEngine(0), reposDir: reposDir,
+		reg: reg, git: git, graphBuilder: graphBuilder, engine: graphquery.NewEngine(0), reposDir: reposDir,
 		activity: map[string]map[string]struct{}{},
 	}
 	oldRead, err := m.ReadRepoFileAt(context.Background(), repo.ID, "version.txt", "", 0, 0)
@@ -98,10 +98,10 @@ func TestSnapshotActivationLeavesActiveCloneUntouchedUntilPublish(t *testing.T) 
 	if !strings.HasPrefix(persisted.Path, m.snapshotRoot(repo.ID)+string(filepath.Separator)) {
 		t.Fatalf("active path %q is outside snapshot root", persisted.Path)
 	}
-	if _, err := os.Stat(graphify.GraphPath(persisted.Path)); err != nil {
+	if _, err := os.Stat(graphbuilder.GraphPath(persisted.Path)); err != nil {
 		t.Fatalf("activated graph missing: %v", err)
 	}
-	if !gfy.GraphBuiltWithCurrentVersion(persisted.Path) {
+	if !graphBuilder.GraphBuiltWithCurrentVersion(persisted.Path) {
 		t.Fatal("activated graph is missing its bag engine version marker")
 	}
 
@@ -171,7 +171,7 @@ func TestSnapshotBuildFailureKeepsActivePathAndCleansStaging(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	gfy := graphify.New(time.Minute, nil)
+	graphBuilder := graphbuilder.New(time.Minute, nil)
 
 	activePath := filepath.Join(dataDir, "repos", "owner", "repo")
 	stagingPath := filepath.Join(dataDir, "repos", ".snapshots", "owner", "repo", ".staging-test")
@@ -183,7 +183,7 @@ func TestSnapshotBuildFailureKeepsActivePathAndCleansStaging(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m := &Manager{reg: reg, gfy: gfy, engine: graphquery.NewEngine(0), reposDir: filepath.Join(dataDir, "repos"), activity: map[string]map[string]struct{}{}}
+	m := &Manager{reg: reg, graphBuilder: graphBuilder, engine: graphquery.NewEngine(0), reposDir: filepath.Join(dataDir, "repos"), activity: map[string]map[string]struct{}{}}
 	snapshot := &preparedSnapshot{StagingPath: stagingPath, FinalPath: stagingPath + "-final", Commit: "new"}
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()

@@ -34,7 +34,7 @@ import (
 	"github.com/rytsh/krabby/internal/service/coderag"
 	"github.com/rytsh/krabby/internal/service/credentials"
 	"github.com/rytsh/krabby/internal/service/gitops"
-	"github.com/rytsh/krabby/internal/service/graphify"
+	"github.com/rytsh/krabby/internal/service/graphbuilder"
 	"github.com/rytsh/krabby/internal/service/manager"
 	"github.com/rytsh/krabby/internal/service/registry"
 	"github.com/rytsh/krabby/internal/service/settings"
@@ -125,9 +125,9 @@ func newRouter(ctx context.Context, cfg *config.Config, services routeServices, 
 	//   ...
 	api.GET("/repos/{ref...}", server.Wrap(dispatchRepo(services.repos, map[string]ada.HandlerFunc{
 		"":       getRepo(services.repos),
-		"graph":  repoArtifact(services.repos, graphify.GraphPath),
-		"report": repoArtifact(services.repos, graphify.ReportPath),
-		"html":   repoArtifact(services.repos, graphify.HTMLPath),
+		"graph":  repoArtifact(services.repos, graphbuilder.GraphPath),
+		"report": repoArtifact(services.repos, graphbuilder.ReportPath),
+		"html":   repoArtifact(services.repos, graphbuilder.HTMLPath),
 		"files":  listRepoFiles(services.docs),
 		"glob":   globRepoFiles(services.docs),
 		"file":   readRepoFile(services.docs),
@@ -274,11 +274,11 @@ type settingsResponse struct {
 		Path string `json:"path"`
 	} `json:"mcp"`
 
-	Graphify struct {
+	Bag struct {
 		Bin          string `json:"bin"`
 		Version      string `json:"version"`
 		BuildTimeout string `json:"build_timeout"`
-	} `json:"graphify"`
+	} `json:"bag"`
 }
 
 func getSettings(cfg *config.Config, system systemInfoService) ada.HandlerFunc {
@@ -297,9 +297,9 @@ func getSettings(cfg *config.Config, system systemInfoService) ada.HandlerFunc {
 
 		s.MCP.Path = cfg.MCP.Path
 
-		s.Graphify.Bin = "embedded bag"
-		s.Graphify.Version = system.GraphifyVersion()
-		s.Graphify.BuildTimeout = cfg.Graphify.BuildTimeout.String()
+		s.Bag.Bin = "embedded"
+		s.Bag.Version = system.GraphEngineVersion()
+		s.Bag.BuildTimeout = cfg.Bag.BuildTimeout.String()
 
 		return c.SendJSON(s)
 	}
@@ -897,7 +897,7 @@ func cancelRepoJob(mgr repoAdmin) ada.HandlerFunc {
 
 // ---- artifact handlers ------------------------------------------------------
 
-// repoArtifact serves a graphify output file (graph.json, GRAPH_REPORT.md,
+// repoArtifact serves a graph output file (graph.json, GRAPH_REPORT.md,
 // graph.html) for a tracked repository so external tools can consume them
 // without filesystem access.
 func repoArtifact(mgr repoReader, pathFn func(repoPath string) string) ada.HandlerFunc {

@@ -32,7 +32,7 @@ type symbol struct {
 // line boundary well before the cap.
 func maxChunkChars(size int) int { return 2 * size }
 
-// chunkFile splits a source file into chunks. When symbols (from the graphify
+// chunkFile splits a source file into chunks. When symbols (from the code
 // graph) are available, chunk boundaries follow symbol boundaries: each chunk
 // starts at a symbol and greedily absorbs following symbols up to size chars.
 // Without symbols it falls back to line-aligned windows of ~size chars with
@@ -251,7 +251,7 @@ func capText(text string, size int) string {
 	return text[:maxLen]
 }
 
-// parseLine extracts the 1-based line number from a graphify source_location
+// parseLine extracts the 1-based line number from a graph source_location
 // such as "L42", "L42-L60", "line 42" or "42:5". Returns 0 when unparseable.
 func parseLine(loc string) int {
 	s := strings.TrimSpace(loc)

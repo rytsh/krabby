@@ -288,9 +288,9 @@
       ["MCP core path", s.mcp.path],
       ["MCP API path", `${s.mcp.path}/api`],
       ["MCP admin path", `${s.mcp.path}/admin`],
-      ["Graph engine", s.graphify.bin],
-      ["Engine version", s.graphify.version || "unknown"],
-      ["Build timeout", s.graphify.build_timeout],
+      ["Graph engine", `bag (${s.bag.bin})`],
+      ["Engine version", s.bag.version || "unknown"],
+      ["Build timeout", s.bag.build_timeout],
     ];
   }
 </script>

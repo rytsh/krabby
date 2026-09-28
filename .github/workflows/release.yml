@@ -45,7 +45,7 @@ jobs:
           go-version-file: go.mod
 
       # dockers_v2 builds a linux/amd64 + linux/arm64 manifest. The Dockerfile
-      # has RUN steps (apt-get, pip), so the arm64 layers need QEMU emulation.
+      # has an apt-get RUN step, so the arm64 layers need QEMU emulation.
       - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v4
 

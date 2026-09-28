@@ -12,7 +12,7 @@ const assetBase = `${import.meta.env.BASE_URL.replace(/\/$/, "")}/`;
     <title>krabby — code search, docs &amp; graph intelligence over MCP</title>
     <meta
       name="description"
-      content="Krabby clones and indexes your repositories, builds a graphify knowledge graph per repo, and serves fast code search, docs retrieval and relationship analysis to LLM agents over MCP."
+      content="Krabby clones and indexes your repositories, builds a knowledge graph per repo with bag, and serves fast code search, docs retrieval and relationship analysis to LLM agents over MCP."
     />
     <meta name="theme-color" content="#f6f1df" />
     <meta property="og:type" content="website" />
@@ -42,7 +42,7 @@ const assetBase = `${import.meta.env.BASE_URL.replace(/\/$/, "")}/`;
             <span class="red">Served to your agent over MCP</span>
           </p>
           <p class="s">
-            Point it at repositories. Krabby clones and indexes them, builds a graphify knowledge graph per repo,
+            Point it at repositories. Krabby clones and indexes them, builds a knowledge graph per repo with bag,
             and keeps those indexes fresh in the background. Graph queries are answered in-process by a native Go
             engine.
           </p>
@@ -252,7 +252,7 @@ const assetBase = `${import.meta.env.BASE_URL.replace(/\/$/, "")}/`;
           <div class="head reveal">
             <span class="caption">// get running</span>
             <h2>From container to first answer in <em>three steps.</em></h2>
-            <p>The image includes Krabby, Graphify, git, and SSH. Start it, add a repository, then give your agent read-only access.</p>
+            <p>The image includes Krabby with its embedded bag engine, plus git and SSH. Start it, add a repository, then give your agent read-only access.</p>
           </div>
 
           <div class="qs">
@@ -315,7 +315,7 @@ http://localhost:8080</pre>
           <a href="https://github.com/rytsh/krabby" target="_blank" rel="noopener">GitHub</a>
           <a href="https://github.com/rytsh/krabby/blob/main/DETAILS.md#mcp-tools" target="_blank" rel="noopener">MCP tools</a>
           <a href="https://github.com/rytsh/krabby/blob/main/DETAILS.md#rest-api" target="_blank" rel="noopener">REST API</a>
-          <a href="https://github.com/Graphify-Labs/graphify" target="_blank" rel="noopener">graphify</a>
+          <a href="https://github.com/rytsh/bag" target="_blank" rel="noopener">bag</a>
         </div>
         <small>MIT © 2026 Eray Ates</small>
       </div>

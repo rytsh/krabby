@@ -6,7 +6,7 @@ import (
 
 	"github.com/rytsh/krabby/internal/config"
 	"github.com/rytsh/krabby/internal/service/docgen"
-	"github.com/rytsh/krabby/internal/service/graphify"
+	"github.com/rytsh/krabby/internal/service/graphbuilder"
 	"github.com/rytsh/krabby/internal/service/registry"
 )
 
@@ -110,8 +110,8 @@ func (m *Manager) RepoSettings(ctx context.Context, ref string) (*RepoSettings, 
 	docs := docsConfig(s)
 
 	var graphGlobal []string
-	if m.gfy != nil {
-		graphGlobal = m.gfy.Exclude()
+	if m.graphBuilder != nil {
+		graphGlobal = m.graphBuilder.Exclude()
 	}
 
 	over := repo.Overrides
@@ -142,7 +142,7 @@ func (m *Manager) RepoSettings(ctx context.Context, ref string) (*RepoSettings, 
 			DocsInclude:          effDocs.Include,
 			DocsIncludeExtra:     effDocs.IncludeExtra,
 			DocsExclude:          effDocs.Exclude,
-			GraphExclude:         graphify.MergeExclude(graphGlobal, over.GraphExclude),
+			GraphExclude:         graphbuilder.MergeExclude(graphGlobal, over.GraphExclude),
 			CodeIncludeIsDefault: len(effCode.Include) == 0,
 			DocsIncludeIsDefault: len(effDocs.Include) == 0,
 			DocsPromptSource:     promptSource(docs.Prompt, over.DocsPrompt),

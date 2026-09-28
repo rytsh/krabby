@@ -46,10 +46,10 @@ type Config struct {
 	// DataDir holds clones, merged graph and registry state. "~" is expanded.
 	DataDir string `cfg:"data_dir" default:"~/.krabby"`
 
-	Server   Server   `cfg:"server"`
-	MCP      MCP      `cfg:"mcp"`
-	Graphify Graphify `cfg:"graphify"`
-	Memory   Memory   `cfg:"memory"`
+	Server Server `cfg:"server"`
+	MCP    MCP    `cfg:"mcp"`
+	Bag    Bag    `cfg:"bag"`
+	Memory Memory `cfg:"memory"`
 
 	Telemetry tell.Config `cfg:"telemetry"`
 }
@@ -117,14 +117,13 @@ type MCP struct {
 	WaitTimeout time.Duration `cfg:"wait_timeout" default:"300s"`
 }
 
-// Graphify configures Graphify-compatible graph construction through bag.
-type Graphify struct {
+// Bag configures graph construction through the embedded bag library.
+type Bag struct {
 	// BuildTimeout bounds a single in-process extract/update/merge run.
 	BuildTimeout time.Duration `cfg:"build_timeout" default:"30m"`
-	// Exclude lists extra gitignore-style patterns krabby writes into a managed
-	// section of the clone's .graphifyignore before each build, so the graph
-	// skips test fixtures and other non-architectural noise. These are appended
-	// to DefaultGraphIgnore; leave empty to use the defaults alone.
+	// Exclude lists extra gitignore-style patterns passed directly to bag so the
+	// graph skips test fixtures and other non-architectural noise. These are
+	// appended to DefaultGraphIgnore; leave empty to use the defaults alone.
 	Exclude []string `cfg:"exclude"`
 	// Merge builds a cross-repo merged graph (queried when a graph tool is
 	// called with no repo). It only adds value when tracked repos share symbols
@@ -223,7 +222,7 @@ type Docs struct {
 	// base URL, API key and timeout; only the model name differs.
 	SummaryModel string `cfg:"summary_model"`
 	// MaxGroups caps how many grouped summary LLM calls a single run makes.
-	// Files are clustered by graphify community; when a repo has more
+	// Files are clustered by graph community; when a repo has more
 	// communities than this, small communities are packed together so the call
 	// count stays bounded regardless of how fragmented the graph is. 0 uses the
 	// built-in default.

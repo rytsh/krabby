@@ -159,7 +159,7 @@ type Settings struct {
 	// TaskConcurrency caps how many background tasks (repo refresh/generate,
 	// web-source sync, reindex) run at once through the central work queue.
 	// <= 0 means the built-in default. Raising it processes more repositories
-	// in parallel; lowering it protects git/graphify/LLM/embedder backends.
+	// in parallel; lowering it protects git/graph-build/LLM/embedder backends.
 	TaskConcurrency int `bw:"task_concurrency" json:"task_concurrency"`
 
 	// System: git polling and webhook verification (previously file/env

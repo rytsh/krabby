@@ -708,7 +708,7 @@ func addCredentialTools(server *mcp.Server, mgr credentialService) {
 	})
 }
 
-// ---- query tools (proxied to graphify serve) --------------------------------
+// ---- native graph query tools -----------------------------------------------
 
 // repoField documents the shared repo selector on query tools.
 const repoField = "repository id (owner/name) to query; always provide it when known, and omit only for explicit cross-repository analysis"

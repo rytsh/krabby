@@ -61,7 +61,7 @@ type Budget struct {
 	// 1536 dimensions than at 96, and this cache is live memory that no amount
 	// of garbage collection can reclaim.
 	VectorCache int64
-	// GraphCache bounds the parsed graphify graphs held by the query engine.
+	// GraphCache bounds the parsed code graphs held by the query engine.
 	GraphCache int64
 }
 

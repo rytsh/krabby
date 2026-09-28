@@ -11,7 +11,7 @@
 
 Krabby provides code search, documentation retrieval, and relationship analysis
 over MCP. Point it at repositories; it clones and indexes, docs and RAG them with LLM and Embeddings,
-builds a [graphify](https://github.com/Graphify-Labs/graphify) knowledge graph per repo, and
+builds a knowledge graph per repo with embedded [bag](https://github.com/rytsh/bag), and
 keeps those indexes fresh in the background.
 
 ```
@@ -54,7 +54,7 @@ keeps those indexes fresh in the background.
   locations — signatures, punctuation, line anchors and case-sensitive
   lookups that a term index cannot express. See
   [Code search modes](#code-search-modes).
-- **Semantic code search (optional)**: source is chunked at graphify symbol
+- **Semantic code search (optional)**: source is chunked at graph-symbol
   boundaries (with line-window fallback), embedded with a dedicated code model
   such as Codestral Embed, and returned as ranked path/line snippets.
 
@@ -391,7 +391,7 @@ reference is an incoming edge, each with a path and a line.
   deliberately no text fallback inside the graph layer: the caller decides
   whether to accept a text match in place of a structural one.
 
-The limit is the extractor's coverage. graphify is AST-based and needs no
+The limit is the extractor's coverage. bag is AST-based and needs no
 model, but a language it does not parse has no nodes, and locals and
 parameters have no nodes in any language — for those, regex search is the
 right tool and the `note` points at it.

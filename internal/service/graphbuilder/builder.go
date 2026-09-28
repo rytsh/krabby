@@ -1,6 +1,5 @@
-// Package graphify provides the Graphify-compatible graph paths and build
-// adapter used by Krabby. Graph construction runs in-process through bag.
-package graphify
+// Package graphbuilder adapts the embedded bag library for Krabby.
+package graphbuilder
 
 import (
 	"context"
@@ -14,8 +13,8 @@ import (
 	"github.com/rytsh/bag"
 )
 
-// Client builds Graphify-compatible graphs in-process.
-type Client struct {
+// Builder builds Graphify-compatible graphs in-process.
+type Builder struct {
 	version      string
 	buildTimeout time.Duration
 	exclude      []string
@@ -27,9 +26,9 @@ const TestedVersion = bag.EngineVersion
 const versionFileName = ".krabby-bag-version"
 
 // New creates an in-process graph builder. exclude carries extra gitignore-style
-// patterns written into each clone's managed .graphifyignore block.
-func New(buildTimeout time.Duration, exclude []string) *Client {
-	return &Client{
+// patterns passed directly to bag for every build.
+func New(buildTimeout time.Duration, exclude []string) *Builder {
+	return &Builder{
 		version:      bag.EngineVersion,
 		buildTimeout: buildTimeout,
 		exclude:      append([]string(nil), exclude...),
@@ -37,18 +36,18 @@ func New(buildTimeout time.Duration, exclude []string) *Client {
 }
 
 // Version returns the linked bag extraction contract.
-func (c *Client) Version() string { return c.version }
+func (c *Builder) Version() string { return c.version }
 
 // GraphBuiltWithCurrentVersion reports whether Krabby recorded this engine version
 // after validating the repository's active graph.
-func (c *Client) GraphBuiltWithCurrentVersion(repoPath string) bool {
+func (c *Builder) GraphBuiltWithCurrentVersion(repoPath string) bool {
 	b, err := os.ReadFile(filepath.Join(repoPath, "graphify-out", versionFileName))
 
 	return err == nil && strings.TrimSpace(string(b)) == c.version
 }
 
 // RecordGraphVersion marks a validated graph with the CLI version that built it.
-func (c *Client) RecordGraphVersion(repoPath string) error {
+func (c *Builder) RecordGraphVersion(repoPath string) error {
 	path := filepath.Join(repoPath, "graphify-out", versionFileName)
 	if err := os.WriteFile(path, []byte(c.version+"\n"), 0o644); err != nil {
 		return fmt.Errorf("record graph engine version; %w", err)
@@ -59,7 +58,7 @@ func (c *Client) RecordGraphVersion(repoPath string) error {
 
 // Exclude returns the install-wide graph ignore patterns, for surfacing the
 // effective configuration of one repository.
-func (c *Client) Exclude() []string { return c.exclude }
+func (c *Builder) Exclude() []string { return c.exclude }
 
 // GraphNeedsIgnoreRebuild reports whether the built graph for repoPath still
 // contains nodes that the current exclude rules should drop, so the refresh path
@@ -67,7 +66,7 @@ func (c *Client) Exclude() []string { return c.exclude }
 // repository's own patterns, which must be considered here too: adding one to a
 // repo has to invalidate its existing graph, or the excluded nodes survive
 // until some unrelated commit happens to trigger a rebuild.
-func (c *Client) GraphNeedsIgnoreRebuild(repoPath string, extra []string) bool {
+func (c *Builder) GraphNeedsIgnoreRebuild(repoPath string, extra []string) bool {
 	return GraphHasExcludedNodes(repoPath, c.ignorePatterns(extra))
 }
 
@@ -76,31 +75,28 @@ func (c *Client) GraphNeedsIgnoreRebuild(repoPath string, extra []string) bool {
 // replacement — an install-wide rule ("never graph vendored protobufs") is a
 // policy, and a single repository opting out of it is not a case worth
 // supporting.
-func (c *Client) ignorePatterns(extra []string) []string {
+func (c *Builder) ignorePatterns(extra []string) []string {
 	return MergeExclude(c.exclude, extra)
 }
 
-func (c *Client) timeout(ctx context.Context) (context.Context, context.CancelFunc) {
+func (c *Builder) timeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithTimeout(ctx, c.buildTimeout)
 	return ctx, cancel
 }
 
 // Update runs an incremental (or initial) AST-only build for repoPath.
-// Code-only extraction needs no LLM key. It first refreshes the clone's managed
-// .graphifyignore block so the graph skips test fixtures and configured noise.
-// extra carries the repository's own ignore patterns, unioned with the
-// install-wide ones.
+// Code-only extraction needs no LLM key. extra carries the repository's own
+// ignore patterns, unioned with the install-wide ones and passed directly to
+// bag without writing files into the clone.
 //
-// The build is forced whenever a krabby-managed ignore block is present. Excluded
-// files (testdata, fixtures, ...) shrink the node count relative to an older
-// graph built without the ignore, and graphify's shrink guard would otherwise
-// refuse to overwrite without --force — leaving stale excluded nodes in the
-// graph forever. Forcing is safe here because krabby only ever runs a
+// Excluded files (testdata, fixtures, ...) can shrink the node count relative to
+// an older graph, and bag's shrink guard would otherwise refuse to overwrite.
+// Forcing is safe here because krabby only ever runs a
 // deterministic full AST re-extraction (no partial LLM chunks to lose).
-func (c *Client) Update(ctx context.Context, repoPath string, extra []string) error {
-	if _, err := WriteIgnore(repoPath, c.ignorePatterns(extra)); err != nil {
-		// Non-fatal: a graph that includes testdata is still usable.
-		slog.Warn("graphify: could not update .graphifyignore", "path", repoPath, "error", err)
+func (c *Builder) Update(ctx context.Context, repoPath string, extra []string) error {
+	if _, err := RemoveLegacyManagedIgnore(repoPath); err != nil {
+		// Non-fatal: duplicate exclusions in the legacy file do not change output.
+		slog.Warn("bag: could not remove legacy managed ignore block", "path", repoPath, "error", err)
 	}
 
 	ctx, cancel := c.timeout(ctx)
@@ -108,7 +104,8 @@ func (c *Client) Update(ctx context.Context, repoPath string, extra []string) er
 
 	start := time.Now()
 	result, err := bag.Build(ctx, repoPath, bag.BuildOptions{
-		Force: HasManagedIgnore(repoPath),
+		Excludes: MergeExclude(DefaultGraphIgnore, c.ignorePatterns(extra)),
+		Force:    true,
 	})
 	if err != nil {
 		return fmt.Errorf("build graph; %w", err)
@@ -120,7 +117,7 @@ func (c *Client) Update(ctx context.Context, repoPath string, extra []string) er
 }
 
 // MergeGraphs merges graph files into out. Requires at least two inputs.
-func (c *Client) MergeGraphs(ctx context.Context, out string, graphs ...string) error {
+func (c *Builder) MergeGraphs(ctx context.Context, out string, graphs ...string) error {
 	ctx, cancel := c.timeout(ctx)
 	defer cancel()
 
@@ -137,15 +134,15 @@ func (c *Client) MergeGraphs(ctx context.Context, out string, graphs ...string) 
 
 // GraphPath returns the graph.json path for a scanned repository path.
 func GraphPath(repoPath string) string {
-	return filepath.Join(repoPath, "graphify-out", "graph.json")
+	return bag.GraphPath(repoPath)
 }
 
 // ReportPath returns the GRAPH_REPORT.md path for a scanned repository path.
 func ReportPath(repoPath string) string {
-	return filepath.Join(repoPath, "graphify-out", "GRAPH_REPORT.md")
+	return bag.ReportPath(repoPath)
 }
 
 // HTMLPath returns the interactive graph.html path for a scanned repository path.
 func HTMLPath(repoPath string) string {
-	return filepath.Join(repoPath, "graphify-out", "graph.html")
+	return bag.HTMLPath(repoPath)
 }

@@ -5,7 +5,7 @@
 // its repo-relative path and line range, so a caller can read more context via
 // read_file when needed.
 //
-// Chunking is symbol-aware: the graphify knowledge graph anchors symbols
+// Chunking is symbol-aware: the code knowledge graph anchors symbols
 // (functions, types, classes) to source lines, and chunk boundaries follow
 // those anchors. Files absent from the graph fall back to line-aligned windows.
 package coderag
@@ -24,7 +24,7 @@ import (
 
 	"github.com/rytsh/krabby/internal/config"
 	"github.com/rytsh/krabby/internal/service/embedder"
-	"github.com/rytsh/krabby/internal/service/graphify"
+	"github.com/rytsh/krabby/internal/service/graphbuilder"
 	"github.com/rytsh/krabby/internal/service/graphquery"
 	"github.com/rytsh/krabby/internal/service/repofs"
 	"github.com/rytsh/krabby/internal/service/vectorstore"
@@ -593,7 +593,7 @@ func overlapsExisting(selected []Snippet, candidate Snippet) bool {
 	return false
 }
 
-// fileSymbols loads the repo's graphify graph and groups its symbol nodes by
+// fileSymbols loads the repo's graph and groups its symbol nodes by
 // repo-relative source file. Returns an empty map when the graph is missing.
 func (s *Service) fileSymbols(clonePath string) map[string][]symbol {
 	out := map[string][]symbol{}
@@ -602,7 +602,7 @@ func (s *Service) fileSymbols(clonePath string) map[string][]symbol {
 		return out
 	}
 
-	graph, err := s.engine.Graph(graphify.GraphPath(clonePath))
+	graph, err := s.engine.Graph(graphbuilder.GraphPath(clonePath))
 	if err != nil {
 		slog.Warn("coderag: graph unavailable, using line-window chunking", "path", clonePath, "error", err)
 

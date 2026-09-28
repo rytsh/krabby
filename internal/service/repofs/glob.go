@@ -52,7 +52,7 @@ type GlobPage struct {
 // is confined by os.Root, as every other read in this package is.
 //
 // Everything in the clone is matchable except git's own object store and
-// krabby's graphify output, neither of which is repository content. Vendored
+// krabby's graph output, neither of which is repository content. Vendored
 // trees are matched: browsing hides them, but a caller who writes "vendor/**"
 // has asked for them, and Total counts every match so the page's own numbers
 // stay honest.

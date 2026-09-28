@@ -5,7 +5,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/rytsh/krabby/internal/service/graphify"
+	"github.com/rytsh/krabby/internal/service/graphbuilder"
 	"github.com/rytsh/krabby/internal/service/registry"
 )
 
@@ -76,7 +76,7 @@ func TestResolveStageDeps(t *testing.T) {
 			docsDir := t.TempDir()
 
 			if tc.graphOK {
-				mustWriteManagerTest(t, graphify.GraphPath(clone), "{}")
+				mustWriteManagerTest(t, graphbuilder.GraphPath(clone), "{}")
 			}
 			if tc.docsOK {
 				mustWriteManagerTest(t, filepath.Join(docsDir, "documentation.md"), "# Docs")
