@@ -118,6 +118,78 @@ func TestEmbedClampsBatchToSafeMax(t *testing.T) {
 	}
 }
 
+func TestRetrievalTaskHintsDistinguishDocumentsAndQueries(t *testing.T) {
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req embedRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		seen = append(seen, req.InputType)
+		var resp embedResponse
+		for range req.Input {
+			resp.Data = append(resp.Data, struct {
+				Embedding []float32 `json:"embedding"`
+			}{Embedding: []float32{1}})
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	c, err := New(config.Embedder{BaseURL: srv.URL, Model: "m", TaskMode: "retrieval"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := c.Embed(context.Background(), []string{"document"}); err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if _, err := c.EmbedQuery(context.Background(), "question"); err != nil {
+		t.Fatalf("EmbedQuery: %v", err)
+	}
+	if got, want := strings.Join(seen, ","), "search_document,search_query"; got != want {
+		t.Fatalf("input types = %q, want %q", got, want)
+	}
+}
+
+func TestRetrievalTaskHintsExposeStrictGatewayRejection(t *testing.T) {
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req embedRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		seen = append(seen, req.InputType)
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"unknown field input_type"}}`))
+	}))
+	defer srv.Close()
+
+	c, err := New(config.Embedder{BaseURL: srv.URL, Model: "m", TaskMode: "retrieval"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := c.Ping(context.Background()); err == nil || !strings.Contains(err.Error(), "input_type") {
+		t.Fatalf("Ping error = %v, want input_type rejection", err)
+	}
+	if got, want := strings.Join(seen, ","), "search_document"; got != want {
+		t.Fatalf("input types = %q, want %q", got, want)
+	}
+}
+
+func TestStandardTaskModeOmitsInputType(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_, _ = w.Write([]byte(`{"data":[{"embedding":[1]}]}`))
+	}))
+	defer srv.Close()
+	c, _ := New(config.Embedder{BaseURL: srv.URL, Model: "m"})
+	if _, err := c.Embed(context.Background(), []string{"document"}); err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if _, ok := got["input_type"]; ok {
+		t.Fatalf("standard request included input_type: %#v", got)
+	}
+}
+
 // TestEmbedRequestsConfiguredDimension pins the point of a configured dim: it
 // has to reach the provider, because that is the only way a Matryoshka model
 // returns a narrower vector.
@@ -314,7 +386,7 @@ func TestEmbedHTTPError(t *testing.T) {
 
 	c, _ := New(config.Embedder{BaseURL: srv.URL, Model: "m"})
 
-	_, _, _, err := c.embedBatchOnce(context.Background(), []string{"ping"}, 0)
+	_, _, _, err := c.embedBatchOnce(context.Background(), []string{"ping"}, 0, "")
 	var transient retryableErr
 	if !errors.As(err, &transient) || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("expected retryable HTTP 500, got %v", err)

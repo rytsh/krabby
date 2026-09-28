@@ -931,6 +931,7 @@ func embedderConfig(s settings.Settings) config.Embedder {
 		Dim:         s.EmbedDim,
 		Batch:       s.EmbedBatch,
 		InputMode:   s.EmbedInputMode,
+		TaskMode:    s.EmbedTaskMode,
 		Concurrency: s.EmbedConcurrency,
 		Timeout:     s.EmbedTimeout,
 	}
@@ -950,6 +951,7 @@ func codeEmbedderConfig(s settings.Settings) config.Embedder {
 		Dim:         s.CodeEmbedDim,
 		Batch:       s.CodeEmbedBatch,
 		InputMode:   s.CodeEmbedInputMode,
+		TaskMode:    s.CodeEmbedTaskMode,
 		Concurrency: s.CodeEmbedConcurrency,
 		Timeout:     s.CodeEmbedTimeout,
 	}

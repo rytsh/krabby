@@ -237,7 +237,7 @@ func TestResponseReadErrorIsPreserved(t *testing.T) {
 		r.Body = brokenEmbedBody{failure}
 		return r, nil
 	})
-	_, _, _, err := c.embedBatchOnce(context.Background(), []string{"input"}, 0)
+	_, _, _, err := c.embedBatchOnce(context.Background(), []string{"input"}, 0, "")
 	var retry retryableErr
 	if !errors.Is(err, failure) || !errors.As(err, &retry) {
 		t.Fatalf("read error lost: %v", err)

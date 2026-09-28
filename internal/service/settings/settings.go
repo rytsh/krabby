@@ -77,7 +77,10 @@ type Settings struct {
 	EmbedBatch   int    `bw:"embed_batch"       json:"embed_batch"`
 	// EmbedInputMode is "batch" or "single"; see config.Embedder.InputMode.
 	// Empty (records written before the field existed) behaves as "batch".
-	EmbedInputMode   string        `bw:"embed_input_mode"  json:"embed_input_mode"`
+	EmbedInputMode string `bw:"embed_input_mode"  json:"embed_input_mode"`
+	// EmbedTaskMode is "standard" or "retrieval". Standard omits the
+	// non-standard input_type field; retrieval sends document/query hints.
+	EmbedTaskMode    string        `bw:"embed_task_mode"   json:"embed_task_mode"`
 	EmbedConcurrency int           `bw:"embed_concurrency" json:"embed_concurrency"`
 	EmbedTimeout     time.Duration `bw:"embed_timeout"     json:"embed_timeout"`
 
@@ -112,6 +115,7 @@ type Settings struct {
 	CodeEmbedDim         int           `bw:"code_embed_dim"         json:"code_embed_dim"`
 	CodeEmbedBatch       int           `bw:"code_embed_batch"       json:"code_embed_batch"`
 	CodeEmbedInputMode   string        `bw:"code_embed_input_mode"  json:"code_embed_input_mode"`
+	CodeEmbedTaskMode    string        `bw:"code_embed_task_mode"   json:"code_embed_task_mode"`
 	CodeEmbedConcurrency int           `bw:"code_embed_concurrency" json:"code_embed_concurrency"`
 	CodeEmbedTimeout     time.Duration `bw:"code_embed_timeout"     json:"code_embed_timeout"`
 
@@ -214,6 +218,7 @@ func Defaults() Settings {
 
 		EmbedBatch:       64,
 		EmbedInputMode:   string(config.EmbedInputBatch),
+		EmbedTaskMode:    string(config.EmbedTaskStandard),
 		EmbedConcurrency: 4,
 		EmbedTimeout:     30 * time.Second,
 
@@ -229,6 +234,7 @@ func Defaults() Settings {
 
 		CodeEmbedBatch:       64,
 		CodeEmbedInputMode:   string(config.EmbedInputBatch),
+		CodeEmbedTaskMode:    string(config.EmbedTaskStandard),
 		CodeEmbedConcurrency: 4,
 		CodeEmbedTimeout:     30 * time.Second,
 
@@ -469,6 +475,7 @@ type Patch struct {
 	EmbedDim         *int           `json:"embed_dim"`
 	EmbedBatch       *int           `json:"embed_batch"`
 	EmbedInputMode   *string        `json:"embed_input_mode"`
+	EmbedTaskMode    *string        `json:"embed_task_mode"`
 	EmbedConcurrency *int           `json:"embed_concurrency"`
 	EmbedTimeout     *time.Duration `json:"embed_timeout"`
 
@@ -491,6 +498,7 @@ type Patch struct {
 	CodeEmbedDim         *int           `json:"code_embed_dim"`
 	CodeEmbedBatch       *int           `json:"code_embed_batch"`
 	CodeEmbedInputMode   *string        `json:"code_embed_input_mode"`
+	CodeEmbedTaskMode    *string        `json:"code_embed_task_mode"`
 	CodeEmbedConcurrency *int           `json:"code_embed_concurrency"`
 	CodeEmbedTimeout     *time.Duration `json:"code_embed_timeout"`
 
@@ -567,14 +575,14 @@ func (p Patch) RuntimeOnly() bool {
 		p.WebImageAnalysisEnabled == nil && p.WebImageModel == nil && p.WebImageMaxPerPage == nil &&
 		p.WebImageMaxBytes == nil && p.WebImageMaxPixels == nil && p.WebImageAllowAuthenticated == nil &&
 		p.EmbedBaseURL == nil && p.EmbedAPIKey == nil && p.EmbedModel == nil &&
-		p.EmbedDim == nil && p.EmbedBatch == nil && p.EmbedInputMode == nil && p.EmbedConcurrency == nil && p.EmbedTimeout == nil &&
+		p.EmbedDim == nil && p.EmbedBatch == nil && p.EmbedInputMode == nil && p.EmbedTaskMode == nil && p.EmbedConcurrency == nil && p.EmbedTimeout == nil &&
 		p.RAGEnabled == nil && p.RAGKeepMarkdownTargets == nil && p.RAGChunkSize == nil && p.RAGChunkOverlap == nil &&
 		p.RAGTopK == nil && p.RAGTopDocs == nil &&
 		p.RAGHybridCandidates == nil && p.RAGHybridRRFK == nil &&
 		p.RAGHybridWeightLexical == nil && p.RAGHybridWeightSemantic == nil &&
 		p.RAGLexicalStopWords == nil &&
 		p.CodeEmbedBaseURL == nil && p.CodeEmbedAPIKey == nil && p.CodeEmbedModel == nil &&
-		p.CodeEmbedDim == nil && p.CodeEmbedBatch == nil && p.CodeEmbedInputMode == nil && p.CodeEmbedConcurrency == nil &&
+		p.CodeEmbedDim == nil && p.CodeEmbedBatch == nil && p.CodeEmbedInputMode == nil && p.CodeEmbedTaskMode == nil && p.CodeEmbedConcurrency == nil &&
 		p.CodeEmbedTimeout == nil && p.CodeRAGEnabled == nil && p.CodeRAGChunkSize == nil &&
 		p.CodeRAGChunkOverlap == nil && p.CodeRAGTopK == nil &&
 		p.CodeRAGInclude == nil && p.CodeRAGIncludeExtra == nil && p.CodeRAGExclude == nil &&
@@ -696,6 +704,9 @@ func (p Patch) Apply(base Settings) Settings {
 	if p.EmbedInputMode != nil {
 		base.EmbedInputMode = *p.EmbedInputMode
 	}
+	if p.EmbedTaskMode != nil {
+		base.EmbedTaskMode = string(config.ParseEmbedTaskMode(*p.EmbedTaskMode))
+	}
 	if p.EmbedConcurrency != nil {
 		base.EmbedConcurrency = *p.EmbedConcurrency
 	}
@@ -752,6 +763,9 @@ func (p Patch) Apply(base Settings) Settings {
 	}
 	if p.CodeEmbedInputMode != nil {
 		base.CodeEmbedInputMode = *p.CodeEmbedInputMode
+	}
+	if p.CodeEmbedTaskMode != nil {
+		base.CodeEmbedTaskMode = string(config.ParseEmbedTaskMode(*p.CodeEmbedTaskMode))
 	}
 	if p.CodeEmbedConcurrency != nil {
 		base.CodeEmbedConcurrency = *p.CodeEmbedConcurrency
@@ -840,7 +854,8 @@ type Store struct {
 	bucket *bw.Bucket[Settings]
 }
 
-// settingsSchemaVersion v17 adds ui_hide_github_link; its zero value keeps the
+// settingsSchemaVersion v18 adds embed_task_mode and code_embed_task_mode;
+// empty migrates to standard behavior. v17 adds ui_hide_github_link; its zero value keeps the
 // link visible, so records migrated from v16 need no backfill. v16 adds embed_input_mode and code_embed_input_mode;
 // an empty value behaves as "batch", so records migrated from v15 need no
 // backfill. v15 adds docs_prompt_extra and the docs_max_*_bytes
@@ -863,7 +878,7 @@ type Store struct {
 // docs_summary_model; v4 docs_max_groups; v3 embed_concurrency /
 // code_embed_concurrency. Bumping the version lets bw migrate existing settings
 // records in place.
-const settingsSchemaVersion = 17
+const settingsSchemaVersion = 18
 
 // New opens the settings bucket. If no record exists yet, seed is persisted as
 // the initial configuration (seeded from file/env config by the caller).

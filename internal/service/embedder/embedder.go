@@ -75,6 +75,10 @@ type Client struct {
 	// singleInput sends one input per request, for endpoints that return a
 	// single vector for a multi-input request.
 	singleInput bool
+	// retrievalTasks enables the optional input_type extension. It is explicit:
+	// an endpoint rejection is surfaced so Test embedder can tell the operator
+	// to select standard mode instead of silently changing semantics.
+	retrievalTasks bool
 
 	dimMu     sync.Mutex
 	dim       int
@@ -141,18 +145,19 @@ func New(cfg config.Embedder, opts ...Option) (*Client, error) {
 	}
 
 	c := &Client{
-		baseURL:     strings.TrimRight(cfg.BaseURL, "/"),
-		apiKey:      cfg.APIKey,
-		model:       cfg.Model,
-		outDim:      cfg.Dim,
-		singleInput: config.ParseEmbedInputMode(cfg.InputMode) == config.EmbedInputSingle,
-		dim:         cfg.Dim,
-		batch:       batch,
-		conc:        conc,
-		http:        &http.Client{Timeout: timeout},
-		requests:    semaphore.NewWeighted(int64(conc)),
-		tracer:      langfuse.Disabled(),
-		system:      langfuse.SystemFromBaseURL(cfg.BaseURL),
+		baseURL:        strings.TrimRight(cfg.BaseURL, "/"),
+		apiKey:         cfg.APIKey,
+		model:          cfg.Model,
+		outDim:         cfg.Dim,
+		singleInput:    config.ParseEmbedInputMode(cfg.InputMode) == config.EmbedInputSingle,
+		retrievalTasks: config.ParseEmbedTaskMode(cfg.TaskMode) == config.EmbedTaskRetrieval,
+		dim:            cfg.Dim,
+		batch:          batch,
+		conc:           conc,
+		http:           &http.Client{Timeout: timeout},
+		requests:       semaphore.NewWeighted(int64(conc)),
+		tracer:         langfuse.Disabled(),
+		system:         langfuse.SystemFromBaseURL(cfg.BaseURL),
 	}
 
 	for _, opt := range opts {
@@ -180,7 +185,8 @@ type embedRequest struct {
 	// Dimensions truncates the output vector on providers that support it
 	// (OpenAI text-embedding-3, Gemini via its OpenAI-compatible layer, where
 	// it maps to output_dimensionality). Omitted when zero.
-	Dimensions int `json:"dimensions,omitempty"`
+	Dimensions int    `json:"dimensions,omitempty"`
+	InputType  string `json:"input_type,omitempty"`
 }
 
 type embedResponse struct {
@@ -253,7 +259,7 @@ func (c *Client) Embed(ctx context.Context, texts []string) ([][]float32, error)
 func (c *Client) EmbedQuery(ctx context.Context, text string) ([]float32, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.http.Timeout)
 	defer cancel()
-	vecs, err := c.Embed(ctx, []string{text})
+	vecs, err := c.embed(ctx, []string{text}, nil, nil, "search_query")
 	if err != nil {
 		return nil, err
 	}
@@ -280,7 +286,7 @@ func (c *Client) EmbedWithMeta(ctx context.Context, texts []string, onProgress f
 		Input:     traceInput(texts),
 	})
 
-	vecs, err := c.embed(ctx, texts, onProgress, meta)
+	vecs, err := c.embed(ctx, texts, onProgress, meta, "search_document")
 
 	meta.seal()
 	meta.Dim = c.Dim()
@@ -324,7 +330,7 @@ func traceInput(texts []string) any {
 
 // embed is the shared implementation. meta may be nil when the caller does not
 // collect usage.
-func (c *Client) embed(ctx context.Context, texts []string, onProgress func(done, total int), meta *Meta) ([][]float32, error) {
+func (c *Client) embed(ctx context.Context, texts []string, onProgress func(done, total int), meta *Meta, inputType string) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
 	}
@@ -332,7 +338,7 @@ func (c *Client) embed(ctx context.Context, texts []string, onProgress func(done
 	total := len(texts)
 
 	if total <= c.batch {
-		vecs, err := c.embedBatch(ctx, texts, meta)
+		vecs, err := c.embedBatch(ctx, texts, meta, inputType)
 		if err == nil && onProgress != nil {
 			onProgress(total, total)
 		}
@@ -369,7 +375,7 @@ func (c *Client) embed(ctx context.Context, texts []string, onProgress func(done
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			vecs, err := c.embedBatch(ctx, texts[start:end], meta)
+			vecs, err := c.embedBatch(ctx, texts[start:end], meta, inputType)
 			if err != nil {
 				errMu.Lock()
 				if firstErr == nil {
@@ -418,9 +424,9 @@ func (c *Client) embed(ctx context.Context, texts []string, onProgress func(done
 // would otherwise fail every request the moment a dimension is configured.
 // The parameter is dropped for the rest of the client's life and the request
 // is replayed; if it still fails, the real error surfaces.
-func (c *Client) embedBatch(ctx context.Context, batch []string, meta *Meta) ([][]float32, error) {
+func (c *Client) embedBatch(ctx context.Context, batch []string, meta *Meta, inputType string) ([][]float32, error) {
 	if len(batch) > 1 && c.singleInput {
-		return c.embedEach(ctx, batch, meta)
+		return c.embedEach(ctx, batch, meta, inputType)
 	}
 
 	var lastErr error
@@ -429,8 +435,9 @@ func (c *Client) embedBatch(ctx context.Context, batch []string, meta *Meta) ([]
 			return nil, err
 		}
 		sentDims := c.requestDim()
+		sentInputType := c.requestInputType(inputType)
 
-		vecs, usage, retryAfter, err := c.embedBatchOnce(ctx, batch, sentDims)
+		vecs, usage, retryAfter, err := c.embedBatchOnce(ctx, batch, sentDims, sentInputType)
 		var dimensionErr dimensionRejectedErr
 		if sentDims > 0 && errors.As(err, &dimensionErr) {
 			if c.noDims.CompareAndSwap(false, true) {
@@ -440,7 +447,7 @@ func (c *Client) embedBatch(ctx context.Context, batch []string, meta *Meta) ([]
 			// Every in-flight request carrying the rejected parameter gets a
 			// replay. It is separate from the transient retry budget, including
 			// when rejection arrives on the last transient attempt.
-			vecs, usage, retryAfter, err = c.embedBatchOnce(ctx, batch, 0)
+			vecs, usage, retryAfter, err = c.embedBatchOnce(ctx, batch, 0, sentInputType)
 		}
 		if err == nil {
 			meta.add(usage)
@@ -477,13 +484,13 @@ func (c *Client) embedBatch(ctx context.Context, batch []string, meta *Meta) ([]
 
 // embedEach embeds a batch one input per request (the "single" input mode).
 // Total in-flight requests stay bounded by the shared request semaphore.
-func (c *Client) embedEach(ctx context.Context, batch []string, meta *Meta) ([][]float32, error) {
+func (c *Client) embedEach(ctx context.Context, batch []string, meta *Meta, inputType string) ([][]float32, error) {
 	out := make([][]float32, len(batch))
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(c.conc)
 	for i, text := range batch {
 		g.Go(func() error {
-			vecs, err := c.embedBatch(gctx, []string{text}, meta)
+			vecs, err := c.embedBatch(gctx, []string{text}, meta, inputType)
 			if err != nil {
 				return err
 			}
@@ -556,16 +563,23 @@ func (c *Client) requestDim() int {
 	return c.outDim
 }
 
+func (c *Client) requestInputType(inputType string) string {
+	if !c.retrievalTasks {
+		return ""
+	}
+	return inputType
+}
+
 // embedBatchOnce performs a single embeddings request. On a retryable failure
 // it returns a retryableErr and, when the server advertised one, a retry delay.
-func (c *Client) embedBatchOnce(ctx context.Context, batch []string, dims int) ([][]float32, Usage, time.Duration, error) {
+func (c *Client) embedBatchOnce(ctx context.Context, batch []string, dims int, inputType string) ([][]float32, Usage, time.Duration, error) {
 	var usage Usage
 	if err := c.requests.Acquire(ctx, 1); err != nil {
 		return nil, usage, 0, err
 	}
 	defer c.requests.Release(1)
 
-	body, err := json.Marshal(embedRequest{Model: c.model, Input: batch, Dimensions: dims})
+	body, err := json.Marshal(embedRequest{Model: c.model, Input: batch, Dimensions: dims, InputType: inputType})
 	if err != nil {
 		return nil, usage, 0, fmt.Errorf("marshal embed request; %w", err)
 	}
@@ -735,13 +749,25 @@ func parseRetryPhrase(body string) time.Duration {
 func (c *Client) Ping(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, c.http.Timeout)
 	defer cancel()
-	vecs, err := c.embedBatch(ctx, []string{"ping"}, nil)
+	vecs, err := c.embedBatch(ctx, []string{"ping"}, nil, "search_document")
 	if err != nil {
 		return err
 	}
 
 	if len(vecs) == 0 || len(vecs[0]) == 0 {
 		return errors.New("embedder returned an empty vector")
+	}
+	if c.retrievalTasks {
+		queryVecs, err := c.embedBatch(ctx, []string{"ping query"}, nil, "search_query")
+		if err != nil {
+			return fmt.Errorf("validate search_query input_type; %w", err)
+		}
+		if len(queryVecs) == 0 || len(queryVecs[0]) == 0 {
+			return errors.New("embedder returned an empty vector for search_query")
+		}
+		if len(queryVecs[0]) != len(vecs[0]) {
+			return fmt.Errorf("search_query dimension %d does not match search_document dimension %d", len(queryVecs[0]), len(vecs[0]))
+		}
 	}
 
 	return nil

@@ -444,6 +444,22 @@ func ParseEmbedInputMode(s string) EmbedInputMode {
 	return EmbedInputBatch
 }
 
+// EmbedTaskMode controls the optional input_type retrieval hint. Standard is
+// the portable OpenAI request shape; retrieval requires gateway support.
+type EmbedTaskMode string
+
+const (
+	EmbedTaskStandard  EmbedTaskMode = "standard"
+	EmbedTaskRetrieval EmbedTaskMode = "retrieval"
+)
+
+func ParseEmbedTaskMode(s string) EmbedTaskMode {
+	if EmbedTaskMode(strings.ToLower(strings.TrimSpace(s))) == EmbedTaskRetrieval {
+		return EmbedTaskRetrieval
+	}
+	return EmbedTaskStandard
+}
+
 // Embedder configures an OpenAI-compatible embeddings endpoint.
 type Embedder struct {
 	// BaseURL is the API root, e.g. "http://localhost:11434/v1" (Ollama).
@@ -466,6 +482,9 @@ type Embedder struct {
 	// per request, "single" sends one input per request for endpoints that
 	// embed only the first input of a list (some LiteLLM-proxied backends).
 	InputMode string `cfg:"input_mode" default:"batch"`
+	// TaskMode "retrieval" sends search_document while indexing and
+	// search_query while searching. "standard" sends neither.
+	TaskMode string `cfg:"task_mode" default:"standard"`
 	// Concurrency bounds embedding requests across all calls sharing a client.
 	Concurrency int `cfg:"concurrency" default:"4"`
 	// Timeout bounds a single indexing request, and the entire query/Ping

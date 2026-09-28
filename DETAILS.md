@@ -742,6 +742,19 @@ are detected on the first request and stay at their native width — `Test
 embedder` reports the width actually returned, not the one asked for. Changing
 the dim changes the index dimension, which wipes and rebuilds it.
 
+Retrieval-aware gateways can also distinguish corpus inputs from queries.
+Settings → Embeddings → **Semantic task hints** defaults to `standard`, which
+keeps the strict OpenAI request shape and works through OpenAI, LiteLLM and any
+other compatible gateway. `retrieval` adds `input_type: search_document` while
+indexing and `input_type: search_query` while searching. This mode requires
+gateway support: **Test embedder** surfaces a rejection instead of silently
+falling back and changing the configured semantics. Changing this setting
+schedules a full reindex because document vectors made under the two modes are
+not interchangeable; stable chunk IDs cause rebuilt vectors to replace the old
+ones. During the background rebuild, searches may temporarily span old and new
+vectors, while an embedding failure leaves the old vectors available rather
+than deleting a working index.
+
 `GET <base>/debug/pprof/heap` is available for when the numbers still do not add
 up, but it is off by default — set `server.pprof: true` to mount it. The
 profiling handlers are unauthenticated like every other route, and a heap dump

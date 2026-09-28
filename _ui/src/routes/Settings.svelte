@@ -673,6 +673,13 @@
           <option value="single">single — one input per request</option>
         </select>
       </label>
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Semantic task hints
+        <select class="input" bind:value={docsDraft.embed_task_mode}>
+          <option value="standard">standard — portable OpenAI request</option>
+          <option value="retrieval">retrieval — document/query hints</option>
+        </select>
+      </label>
     </div>
     <p class="mt-2 text-[12px] text-faint">
       The dim is requested from the provider. On a Matryoshka model (Gemini Embedding 2 accepts
@@ -681,6 +688,10 @@
       test the embedder and check the reported dim. Changing the dim rebuilds the index.
       Use the single input mode if embedding fails with a count mismatch: some endpoints (e.g.
       certain LiteLLM-proxied backends) return one vector for a batched request.
+      Retrieval hints send <code>search_document</code> while indexing and <code>search_query</code>
+      while searching. Use Test embedder before saving: unsupported gateways return an error instead of
+      silently changing semantics. Changing this setting re-embeds existing vectors; until that background
+      reindex completes, semantic results may be mixed.
     </p>
 
     <!-- Source-code embeddings -->
@@ -731,6 +742,13 @@
         <select class="input" bind:value={docsDraft.code_embed_input_mode}>
           <option value="batch">batch — many inputs per request</option>
           <option value="single">single — one input per request</option>
+        </select>
+      </label>
+      <label class="flex flex-col gap-1 text-[13px] text-dim">
+        Code semantic task hints
+        <select class="input" bind:value={docsDraft.code_embed_task_mode}>
+          <option value="standard">standard — portable OpenAI request</option>
+          <option value="retrieval">retrieval — document/query hints</option>
         </select>
       </label>
       <label class="flex flex-col gap-1 text-[13px] text-dim">
