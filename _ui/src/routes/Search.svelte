@@ -477,7 +477,6 @@
   {@const ix = indexByRepo.get(repo)}
   {#if ix}
     <InfoTip label="Index status" tone={!ix.indexed_at || ix.stale ? "warn" : ""}>
-      <div class="font-mono text-fg">{ix.repo}</div>
       {#if !ix.indexed_at}
         <div class="text-warn">Not indexed yet</div>
       {:else if ix.stale}

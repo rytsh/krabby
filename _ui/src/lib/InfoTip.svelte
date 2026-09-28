@@ -41,7 +41,7 @@
 {#if pos}
   <div
     role="tooltip"
-    class="pointer-events-none fixed z-50 max-w-xs rounded-md border border-line-strong bg-surface-3 px-2.5 py-1.5 text-left text-[11.5px] leading-relaxed text-dim shadow-lg"
+    class="pointer-events-none fixed z-50 max-w-xs break-words rounded-md border border-line-strong bg-surface-3 px-2.5 py-1.5 text-left text-[11.5px] leading-relaxed text-dim shadow-lg"
     style={`top: ${pos.top}px; right: ${pos.right}px`}
   >
     {@render children()}
