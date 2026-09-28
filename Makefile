@@ -4,6 +4,9 @@ VERSION := $(or $(VERSION),$(shell git describe --tags --first-parent --match "v
 COMMIT  := $(shell git rev-parse --short HEAD 2> /dev/null || echo -)
 DATE    := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
+export CONTAINER_ARCH ?= amd64
+CONTAINER_PLATFORM := linux/$(CONTAINER_ARCH)
+
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
 .PHONY: build-ui
@@ -30,11 +33,11 @@ lint: ## Run linters
 	golangci-lint run ./...
 
 .PHONY: build-container
-build-container: ## Build the amd64 container image with a test tag
-	GOOS=linux GOARCH=amd64 goreleaser build --snapshot --clean --single-target
-	mkdir -p dist/docker-context/linux/amd64
-	cp dist/krabby_linux_amd64_v1/krabby dist/docker-context/linux/amd64/krabby
-	docker build --platform=linux/amd64 --build-arg TARGETPLATFORM=linux/amd64 -t krabby:test -f Dockerfile dist/docker-context/
+build-container: ## Build a container image (override with CONTAINER_ARCH=amd64)
+	GOOS=linux GOARCH=$(CONTAINER_ARCH) goreleaser build --snapshot --clean --single-target --output dist/krabby-container
+	mkdir -p dist/docker-context/$(CONTAINER_PLATFORM)
+	mv dist/krabby-container dist/docker-context/$(CONTAINER_PLATFORM)/krabby
+	DOCKER_BUILDKIT=1 docker build --platform=$(CONTAINER_PLATFORM) --build-arg TARGETPLATFORM=$(CONTAINER_PLATFORM) -t krabby:test -f Dockerfile dist/docker-context/
 
 .PHONY: help
 help: ## Show this help
