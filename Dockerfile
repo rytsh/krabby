@@ -1,5 +1,5 @@
 # Copies the pre-built binary (built by goreleaser or `make build`) instead of compiling.
-FROM debian:bookworm-slim
+FROM debian:13.7-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git openssh-client ca-certificates \
