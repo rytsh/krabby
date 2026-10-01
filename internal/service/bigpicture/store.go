@@ -259,7 +259,13 @@ func NormalizeConfig(cfg Config) (Config, error) {
 	for _, source := range cfg.Sources {
 		source.Ref = strings.TrimSpace(source.Ref)
 		switch source.Kind {
-		case "repo", "web", "api", "mcp":
+		case "repo", "namespace", "bigpicture", "web", "api", "mcp":
+			if source.Kind == "namespace" {
+				source.Ref = NormalizeNamespace(source.Ref)
+				if !namePattern.MatchString(source.Ref) {
+					return cfg, fmt.Errorf("%w: invalid repository namespace", ErrInvalid)
+				}
+			}
 		default:
 			return cfg, fmt.Errorf("%w: unknown source kind", ErrInvalid)
 		}

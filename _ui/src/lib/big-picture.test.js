@@ -22,6 +22,17 @@ test("schedule drafts round-trip lines without leaking UI-only fields", () => {
   assert.deepEqual(picturePayload(draft).schedule, []);
 });
 
+test("composite sources round-trip without source-picker metadata", () => {
+  const draft = createPictureDraft({ sources: [
+    { kind: "bigpicture", ref: "payments", title: "Payments", status: "published" },
+    { kind: "namespace", ref: "platform", status: "150 repositories" },
+  ] });
+  assert.deepEqual(picturePayload(draft).sources, [
+    { kind: "bigpicture", ref: "payments" },
+    { kind: "namespace", ref: "platform" },
+  ]);
+});
+
 const docs = [{ path: "overview.md", title: "Overview" }, { path: "services/checkout.md", title: "Checkout" }, { path: "services/payments/retries.md", title: "Retries" }];
 
 test("document tree creates each shared folder once, with directories first", () => {

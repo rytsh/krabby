@@ -60,7 +60,7 @@
   const nav = [
     { href: "/repos", label: "Repositories", icon: "boxes", match: (v) => v === "repos" || v === "repo" },
     { href: "/sources", label: "Sources", icon: "book", match: (v) => v === "sources" },
-    { href: "/big-pictures", label: "Big Pictures", icon: "boxes", match: (v) => v === "big-pictures" || v === "big-picture" },
+    { href: "/big-pictures", label: "Big Pictures", icon: "train-track", match: (v) => v === "big-pictures" || v === "big-picture" },
     { href: "/apis", label: "APIs", icon: "braces", match: (v) => v === "apis" },
     { href: "/namespaces", label: "Namespaces", icon: "tag", match: (v) => v === "namespaces" },
     { href: "/activity", label: "Activity", icon: "activity", match: (v) => v === "activity" },

@@ -30,6 +30,9 @@ func (m *Manager) BigPicture(ctx context.Context, name string) (*bigpicture.Pict
 }
 
 func (m *Manager) SaveBigPicture(ctx context.Context, name string, cfg bigpicture.Config) (*bigpicture.Picture, error) {
+	// Serialize graph edits so concurrent reciprocal references cannot both pass
+	// cycle validation against the old graph.
+	defer m.lockKey("bigpicture-source-graph")()
 	if m.bigPictures == nil {
 		return nil, errors.New("big picture store unavailable")
 	}
@@ -40,7 +43,46 @@ func (m *Manager) SaveBigPicture(ctx context.Context, name string, cfg bigpictur
 	if err := m.validatePictureSources(ctx, cfg.Sources); err != nil {
 		return nil, err
 	}
+	if err := m.validatePictureGraph(ctx, cfg.Name, cfg.Sources); err != nil {
+		return nil, err
+	}
 	return m.bigPictures.Save(ctx, name, cfg)
+}
+
+func (m *Manager) validatePictureGraph(ctx context.Context, name string, sources []bigpicture.Source) error {
+	active, visited := map[string]bool{}, map[string]bool{}
+	var visit func(string, []bigpicture.Source) error
+	visit = func(current string, refs []bigpicture.Source) error {
+		if active[current] {
+			return fmt.Errorf("%w: Big Picture source references must not form a cycle", bigpicture.ErrInvalid)
+		}
+		if visited[current] {
+			return nil
+		}
+		active[current] = true
+		for _, source := range refs {
+			if source.Kind != "bigpicture" {
+				continue
+			}
+			if active[source.Ref] {
+				return fmt.Errorf("%w: Big Picture source references must not form a cycle", bigpicture.ErrInvalid)
+			}
+			if visited[source.Ref] {
+				continue
+			}
+			child, err := m.BigPicture(ctx, source.Ref)
+			if err != nil {
+				return err
+			}
+			if err := visit(child.Name, child.Sources); err != nil {
+				return err
+			}
+		}
+		delete(active, current)
+		visited[current] = true
+		return nil
+	}
+	return visit(name, sources)
 }
 
 func (m *Manager) validatePictureSources(ctx context.Context, sources []bigpicture.Source) error {
@@ -48,6 +90,25 @@ func (m *Manager) validatePictureSources(ctx context.Context, sources []bigpictu
 		found := false
 		var err error
 		switch source.Kind {
+		case "bigpicture":
+			if m.bigPictures != nil {
+				picture, lookupErr := m.bigPictures.Get(ctx, source.Ref)
+				found, err = picture != nil, lookupErr
+				if errors.Is(err, bigpicture.ErrNotFound) {
+					err = nil
+				}
+			}
+		case "namespace":
+			if m.reg != nil {
+				groups, lookupErr := m.reg.Namespaces(ctx)
+				err = lookupErr
+				for _, group := range groups {
+					if group.Namespace == source.Ref {
+						found = true
+						break
+					}
+				}
+			}
 		case "repo":
 			if m.reg != nil {
 				repo, lookupErr := m.reg.Get(ctx, source.Ref)
@@ -182,6 +243,33 @@ func (m *Manager) BigPictureSourceOptions(ctx context.Context, kind, text string
 	}
 	options := []PictureSourceOption{}
 	switch kind {
+	case "bigpicture":
+		if m.bigPictures == nil {
+			return out, nil
+		}
+		result, err := m.bigPictures.List(ctx, bigpicture.ListOptions{Namespace: "*", Query: text, Page: page, PerPage: perPage})
+		if err != nil {
+			return out, err
+		}
+		out.Total = result.Total
+		for _, item := range result.Items {
+			status := "not published"
+			if item.CurrentRevision != "" {
+				status = "published"
+			}
+			out.Items = append(out.Items, PictureSourceOption{Source: bigpicture.Source{Kind: kind, Ref: item.Name}, Title: item.Title, Namespace: item.Namespace, Status: status})
+		}
+		return out, nil
+	case "namespace":
+		if m.reg != nil {
+			groups, err := m.reg.Namespaces(ctx)
+			if err != nil {
+				return out, err
+			}
+			for _, group := range groups {
+				options = append(options, PictureSourceOption{Source: bigpicture.Source{Kind: kind, Ref: group.Namespace}, Title: group.Description, Status: fmt.Sprintf("%d repositories", group.Count)})
+			}
+		}
 	case "web":
 		if m.webStore != nil {
 			items, err := m.webStore.ListCollections(ctx)
@@ -217,7 +305,7 @@ func (m *Manager) BigPictureSourceOptions(ctx context.Context, kind, text string
 			}
 		}
 	default:
-		return out, fmt.Errorf("%w: source kind must be repo, web, api or mcp", bigpicture.ErrInvalid)
+		return out, fmt.Errorf("%w: source kind must be repo, namespace, bigpicture, web, api or mcp", bigpicture.ErrInvalid)
 	}
 	text = strings.ToLower(strings.TrimSpace(text))
 	options = slices.DeleteFunc(options, func(option PictureSourceOption) bool {

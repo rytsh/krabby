@@ -14,6 +14,7 @@ import (
 
 	"github.com/rytsh/krabby/internal/service/bigpicture"
 	"github.com/rytsh/krabby/internal/service/queue"
+	"github.com/rytsh/krabby/internal/service/registry"
 	"github.com/rytsh/krabby/internal/service/repofs"
 )
 
@@ -161,8 +162,42 @@ func (m *Manager) pictureGenerationLive(name string) bool {
 
 func (m *Manager) collectPictureResearch(ctx context.Context, p *bigpicture.Picture) (bigpicture.Research, error) {
 	out := bigpicture.Research{Items: []bigpicture.ResearchItem{}, Notes: []string{"Deterministic bounded collection: 256 KiB total source text divided among sources, 16 KiB per raw item. Repositories contribute Krabby-generated documentation, communication signals from the code index and a dependency-graph summary first, then up to 6–8 raw files prioritizing documentation, deployment/configuration and entrypoints. This is not exhaustive research.", "External MCP tools and resource templates are not executed. Only saved exact resource URI grants are read. Secret values may exist in sources: no automatic redaction guarantee; use a trusted model endpoint."}}
-	quota := (256 << 10) / max(1, len(p.Sources))
-	for _, source := range p.Sources {
+	// Expand namespace selectors at run time, deduplicating overlapping repo
+	// selections. Evidence retains the configured selector and a repo-qualified
+	// locator, so publication validation and citations remain scoped correctly.
+	type selectedSource struct {
+		source, evidence bigpicture.Source
+	}
+	sources := []selectedSource{}
+	seen := map[bigpicture.Source]bool{}
+	for _, selector := range p.Sources {
+		if selector.Kind != "namespace" {
+			if !seen[selector] {
+				sources = append(sources, selectedSource{selector, selector})
+				seen[selector] = true
+			}
+			continue
+		}
+		if m.reg == nil {
+			return out, errors.New("repository store unavailable")
+		}
+		repos, err := m.reg.ListNamespace(ctx, selector.Ref)
+		if err != nil {
+			return out, err
+		}
+		slices.SortFunc(repos, func(a, b *registry.Repo) int { return strings.Compare(a.ID, b.ID) })
+		out.Notes = append(out.Notes, fmt.Sprintf("Namespace %s resolved to %d repositories.", selector.Ref, len(repos)))
+		for _, repo := range repos {
+			source := bigpicture.Source{Kind: "repo", Ref: repo.ID}
+			if !seen[source] {
+				sources = append(sources, selectedSource{source, selector})
+				seen[source] = true
+			}
+		}
+	}
+	quota := (256 << 10) / max(1, len(sources))
+	for _, selected := range sources {
+		source := selected.source
 		if err := ctx.Err(); err != nil {
 			return out, err
 		}
@@ -181,9 +216,50 @@ func (m *Manager) collectPictureResearch(ctx context.Context, p *bigpicture.Pict
 				return
 			}
 			remaining -= len(text)
-			out.Items = append(out.Items, bigpicture.ResearchItem{ID: fmt.Sprintf("e%d", len(out.Items)+1), Evidence: bigpicture.Evidence{Source: source, Locator: locator, Revision: revision}, Content: text, Truncated: truncated})
+			if selected.evidence.Kind == "namespace" {
+				locator = source.Ref + ":" + locator
+			}
+			out.Items = append(out.Items, bigpicture.ResearchItem{ID: fmt.Sprintf("e%d", len(out.Items)+1), Evidence: bigpicture.Evidence{Source: selected.evidence, Locator: locator, Revision: revision}, Content: text, Truncated: truncated})
 		}
-		if source.Kind == "mcp" {
+		if source.Kind == "bigpicture" {
+			child, err := m.BigPicture(ctx, source.Ref)
+			if err != nil {
+				return out, err
+			}
+			if child.CurrentRevision == "" {
+				return out, fmt.Errorf("selected Big Picture %s has no published documents; publish it first", source.Ref)
+			}
+			// Pin one immutable revision for the entire source read. Do not
+			// recursively collect its sources or trigger child generation.
+			snapshot, err := m.BigPictureSnapshot(ctx, source.Ref, child.CurrentRevision)
+			if err != nil {
+				return out, err
+			}
+			documents := slices.Clone(snapshot.Documents)
+			slices.SortFunc(documents, func(a, b bigpicture.DocMeta) int {
+				if a.Path == snapshot.Overview && b.Path != snapshot.Overview {
+					return -1
+				}
+				if b.Path == snapshot.Overview && a.Path != snapshot.Overview {
+					return 1
+				}
+				return strings.Compare(a.Path, b.Path)
+			})
+			for _, meta := range documents {
+				if remaining <= 0 {
+					break
+				}
+				if meta.Path == "research.md" {
+					continue
+				}
+				doc, err := m.ReadBigPictureDocument(ctx, source.Ref, snapshot.ID, meta.Path, 0, min(16<<10, remaining))
+				if err != nil {
+					return out, err
+				}
+				add(meta.Path, snapshot.ID, doc.Content, doc.Truncated)
+			}
+			out.Notes = append(out.Notes, fmt.Sprintf("Big Picture %s: read published revision %s. This is model-produced synthesis, not independently verified repository evidence; child sources were not reread.", source.Ref, snapshot.ID))
+		} else if source.Kind == "mcp" {
 			if m.externalMCPs == nil {
 				return out, errors.New("external MCP store unavailable")
 			}

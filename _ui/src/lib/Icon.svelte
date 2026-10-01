@@ -26,6 +26,7 @@
     Sun,
     Tag,
     Trash2,
+    TrainTrack,
     Warehouse,
     X,
   } from "@lucide/svelte";
@@ -59,6 +60,7 @@
     sun: Sun,
     tag: Tag,
     trash: Trash2,
+    "train-track": TrainTrack,
     warehouse: Warehouse,
     x: X,
   };

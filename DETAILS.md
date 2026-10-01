@@ -510,10 +510,30 @@ transit. Custom protocol, cookie and proxy headers cannot be overridden.
 
 Open **Big Pictures** in the UI to create an architecture workspace. Give it a
 stable name, display title, namespace, research prompt and 1–50 explicit source
-references. Source kinds are `repo` (full repository ID), `web` (collection name),
-`api` (catalogued service name) and `mcp` (saved external connection name).
+references. Source kinds are `repo` (full repository ID), `namespace` (repository namespace), `web` (collection name),
+`bigpicture` (another workspace's name), `api` (catalogued service name) and `mcp` (saved external connection name).
 Selections are validated against existing records. A repository can participate
 in multiple workspaces without changing its own namespace.
+
+Choose **Repository namespaces** under Sources to include all current repositories
+in a namespace as one source reference, including repositories added later.
+Namespace selectors expand on each research run; overlapping repository selections
+are deduplicated. The total 256 KiB research budget is shared across expanded
+repositories, and citations retain both the namespace and repository-qualified
+locator. This does not change the workspace's independent namespace label.
+
+Choose **Big Pictures** under Sources to synthesize a higher-level architecture
+from existing workspace publications (for example, Payments + Orders + Platform
+→ System Architecture). Self-references and indirect cycles are rejected on save.
+Children may be selected before publication, but must be published before research
+can run. Each run pins each child's latest immutable published revision, reads its
+overview first and then other pages within the shared research budget (16 KiB per
+page, skipping `research.md`). Citations retain the child workspace, document path
+and revision. Child source repositories are not reread or automatically regenerated;
+child publications are model-produced synthesis, not independent raw evidence.
+New child revisions are picked up on the parent's next manual or scheduled run and
+change the research fingerprint. They do not automatically trigger a parent run.
+A missing/deleted child fails research rather than silently dropping its evidence.
 
 Big Picture namespaces are independent grouping labels, **not access-control
 boundaries**. Names are globally unique; multiple workspaces can share a

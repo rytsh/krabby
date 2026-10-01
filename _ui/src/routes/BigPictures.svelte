@@ -37,8 +37,10 @@
 {:else}
   <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
     {#each result.items as picture (picture.name)}
+      {@const status = picture.current_revision ? (picture.stale ? { label: "Config changed", tone: "warn" } : { label: "Published", tone: "ok" }) : { label: "Not published", tone: "faint" }}
       <a class="card block p-4 transition-colors hover:bg-surface-2" href={pictureURL(picture.name)} use:link>
-        <span class="text-[11px] text-faint">{picture.namespace}</span><h3 class="mt-1 text-[15px] font-semibold">{picture.title}</h3><p class="mt-1 font-mono text-[12px] text-dim">{picture.name}</p><p class="mt-2 text-[13px] text-dim">{picture.description}</p><p class="mt-3 text-[12px] text-faint">{picture.source_count} sources · {picture.document_count} documents · {picture.current_revision ? (picture.stale ? "Config changed since publication" : "Published") : "Not published yet"}</p>
+        <div class="flex items-center justify-between gap-2"><span class="text-[11px] text-faint">{picture.namespace}</span><span class="inline-flex items-center gap-1.5 rounded-full border border-line px-2 py-0.5 text-[11px] text-dim" title={picture.stale ? "The current publication was produced with an older configuration" : undefined}><span class="h-1.5 w-1.5 rounded-full {status.tone === 'ok' ? 'bg-ok' : status.tone === 'warn' ? 'bg-warn' : 'bg-faint'}" aria-hidden="true"></span>{status.label}</span></div>
+        <h3 class="mt-1 text-[15px] font-semibold">{picture.title}</h3><p class="mt-1 font-mono text-[12px] text-dim">{picture.name}</p><p class="mt-2 text-[13px] text-dim">{picture.description}</p><p class="mt-3 text-[12px] text-faint">{picture.source_count} sources · {picture.document_count} documents</p>
       </a>
     {:else}<p class="col-span-full p-6 text-center text-dim">No Big Pictures in this scope.</p>{/each}
   </div>

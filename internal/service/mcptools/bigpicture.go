@@ -77,7 +77,7 @@ func addPictureTools(server *mcp.Server, service pictureReadService) {
 
 type savePictureArgs struct {
 	ExistingName string `json:"existing_name,omitempty" jsonschema:"omit to create; set to update that immutable workspace name"`
-	Config       string `json:"config" jsonschema:"JSON object string: name,title,namespace,description,prompt,sources:[{kind:repo|web|api|mcp,ref}],expected_version,schedule:[cron specs]. Schedule authorizes recurring source disclosure to model/traces; [] disables, omitted keeps the saved schedule. Update requires current version"`
+	Config       string `json:"config" jsonschema:"JSON object string: name,title,namespace,description,prompt,sources:[{kind:repo|namespace|bigpicture|web|api|mcp,ref}],expected_version,schedule:[cron specs]. Namespace sources include all current repositories in that repository namespace at each run. Bigpicture sources read latest published documents from another workspace by name; self-references and cycles are forbidden. Schedule authorizes recurring source disclosure to model/traces; [] disables, omitted keeps the saved schedule. Update requires current version"`
 }
 type publishPictureArgs struct {
 	Name        string `json:"name"`
@@ -105,7 +105,7 @@ func parsePictureJSON(text string, maxBytes int, dst any) error {
 }
 
 func addPictureAdminTools(server *mcp.Server, service pictureAdminService) {
-	addTool(server, &mcp.Tool{Name: "generate_big_picture", Description: "Queue bounded architecture research using repo files, cached Source/API docs and granted exact MCP resource URIs; no external tools/templates. Uses the documentation chat model; failure preserves the publication. Monitor queue_status for bigpicture:<name>."},
+	addTool(server, &mcp.Tool{Name: "generate_big_picture", Description: "Queue bounded architecture research using repo files, repository namespaces, published Big Picture documents, cached Source/API docs and granted exact MCP resource URIs; no external tools/templates. Child Big Pictures must already be published; their sources are not recursively read or regenerated. Uses the documentation chat model; failure preserves the publication. Monitor queue_status for bigpicture:<name>."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, args struct {
 			Name string `json:"name"`
 		}) (*mcp.CallToolResult, any, error) {

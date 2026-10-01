@@ -127,9 +127,20 @@
 
 <a class="mb-3 inline-block text-[13px] text-dim hover:text-fg" href="/big-pictures" use:link>← Big Pictures</a>
 {#if workspace}
-  <div class="mb-4 flex flex-wrap items-start justify-between gap-3"><div><span class="text-[12px] text-faint">{workspace.namespace} · config v{workspace.version}</span><h2 class="mt-1 text-lg font-semibold">{workspace.title}</h2><p class="mt-1 text-[13px] text-dim">{workspace.description}</p></div><div class="flex gap-2"><button class="btn" disabled={busy || loading} onclick={startPublication}>Publish documents</button><button class="btn btn-danger" disabled={busy || loading} onclick={remove}>Delete</button></div></div>
-  <div class="mb-4 flex flex-wrap gap-2"><button class="btn btn-sm" class:btn-primary={tab === "documents"} disabled={busy} onclick={() => { tab = "documents"; }}>Documents</button><button class="btn btn-sm" class:btn-primary={tab === "sources"} disabled={busy} onclick={() => { tab = "sources"; }}>Sources & prompt</button><button class="btn btn-sm" class:btn-primary={tab === "settings"} disabled={busy} onclick={() => { tab = "settings"; }}>Settings</button><button class="btn btn-sm" disabled={busy} onclick={() => load(params.get("revision") || "", params.get("doc") || "")}>Reload</button></div>
-  <div class="mb-4 flex flex-wrap items-center gap-3"><button class="btn btn-primary" disabled={busy || loading} onclick={generate}>Research & generate</button><a class="text-[13px] text-dim hover:text-fg" href="/activity" use:link>View tasks in Activity →</a><span class="text-[12px] text-faint">Uses the documentation model. Bounded source snapshots, not a live-state audit.</span></div>
+  <div class="mb-4 flex flex-wrap items-start justify-between gap-3"><div class="min-w-0"><span class="text-[12px] text-faint">{workspace.namespace} · config v{workspace.version}</span><h2 class="mt-1 text-lg font-semibold">{workspace.title}</h2>{#if workspace.description}<p class="mt-1 text-[13px] text-dim">{workspace.description}</p>{/if}</div><button class="btn btn-primary max-w-full shrink-0" disabled={busy || loading} onclick={generate} title="Uses the documentation model. Bounded source snapshots, not a live-state audit.">Research & generate</button></div>
+  <div class="mb-4 flex flex-wrap items-center gap-2 border-b border-line pb-3">
+    <div class="flex flex-wrap gap-1" role="tablist" aria-label="Workspace views">
+      {#each [["documents", "Documents"], ["sources", "Sources & prompt"], ["settings", "Settings"]] as [id, label] (id)}
+        <button class="view-toggle whitespace-nowrap text-[13px]" class:view-toggle-active={tab === id} role="tab" aria-selected={tab === id} disabled={busy} onclick={() => { tab = id; }}>{label}</button>
+      {/each}
+    </div>
+    <div class="ml-auto flex flex-wrap items-center gap-2">
+      <a class="text-[12px] text-dim hover:text-fg" href="/activity" use:link>Activity →</a>
+      <button class="btn btn-sm" disabled={busy} onclick={() => load(params.get("revision") || "", params.get("doc") || "")}>Reload</button>
+      <button class="btn btn-sm" disabled={busy || loading} onclick={startPublication}>Publish documents</button>
+      <button class="btn btn-sm btn-danger" disabled={busy || loading} onclick={remove}>Delete</button>
+    </div>
+  </div>
 {/if}
 {#if error}<p class="mb-3 text-danger" role="alert">{error}</p>{/if}
 {#if workspace?.last_run}
