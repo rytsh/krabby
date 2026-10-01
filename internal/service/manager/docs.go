@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/rytsh/krabby/internal/service/apicatalog"
+	"github.com/rytsh/krabby/internal/service/bigpicture"
 	"github.com/rytsh/krabby/internal/service/docgen"
 	"github.com/rytsh/krabby/internal/service/repofs"
 	"github.com/rytsh/krabby/internal/service/websource"
@@ -18,6 +19,17 @@ var ErrDocsDisabled = errors.New("docs/rag subsystem is not enabled")
 
 // ListDocs returns the generated doc metadata for a repo from its manifest.
 func (m *Manager) ListDocs(ctx context.Context, repoID string) ([]docgen.DocMeta, error) {
+	if name := bigpicture.Name(repoID); name != "" {
+		snapshot, err := m.BigPictureSnapshot(ctx, name, "")
+		if err != nil {
+			return nil, err
+		}
+		docs := make([]docgen.DocMeta, 0, len(snapshot.Documents))
+		for _, meta := range snapshot.Documents {
+			docs = append(docs, docgen.DocMeta{Path: meta.Path, Title: meta.Title, SourceHash: meta.Hash, Generated: snapshot.PublishedAt})
+		}
+		return docs, nil
+	}
 	if m.docsRootDir == "" {
 		return nil, ErrDocsDisabled
 	}
@@ -50,6 +62,22 @@ func (m *Manager) ListDocs(ctx context.Context, repoID string) ([]docgen.DocMeta
 // GetDoc returns one generated markdown doc. Path is relative to that repo's
 // external docs directory and access is sandboxed to it.
 func (m *Manager) GetDoc(ctx context.Context, repoID, docPath string, offset int64, maxBytes int) (*repofs.FileContent, error) {
+	if name := bigpicture.Name(repoID); name != "" {
+		if parsed, revision := bigpicture.ParseIndexKey(repoID); parsed != "" {
+			doc, err := m.ReadBigPictureDocument(ctx, parsed, revision, docPath, offset, maxBytes)
+			if err != nil {
+				return nil, err
+			}
+			doc.FileContent.Snapshot = doc.Revision
+			return doc.FileContent, nil
+		}
+		doc, err := m.ReadBigPictureDocument(ctx, name, "", docPath, offset, maxBytes)
+		if err != nil {
+			return nil, err
+		}
+		doc.FileContent.Snapshot = doc.Revision
+		return doc.FileContent, nil
+	}
 	if m.docsRootDir == "" && !strings.HasPrefix(repoID, websource.ScopePrefix) && !strings.HasPrefix(repoID, apicatalog.ScopePrefix) {
 		return nil, ErrDocsDisabled
 	}

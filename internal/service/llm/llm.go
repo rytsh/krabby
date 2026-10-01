@@ -27,6 +27,8 @@ import (
 // ErrNotConfigured is returned when the LLM has no base URL configured.
 var ErrNotConfigured = errors.New("llm not configured (set llm.base_url)")
 
+var ErrResponseTooLarge = errors.New("chat response exceeds byte limit")
+
 // Message is a single chat message.
 type Message struct {
 	Role    string        `json:"role"` // "system" | "user" | "assistant"
@@ -92,11 +94,16 @@ type Client struct {
 	// tracer exports each call as a Langfuse generation. Never nil.
 	tracer *langfuse.Tracer
 	// system is the gen_ai.system value derived once from the base URL.
-	system string
+	system        string
+	responseLimit int
 }
 
 // Option customizes a client at construction.
 type Option func(*Client)
+
+// WithResponseLimit bounds response bytes, including SSE framing. Zero keeps
+// existing unbounded behavior; callers doing bounded research should set it.
+func WithResponseLimit(bytes int) Option { return func(c *Client) { c.responseLimit = max(0, bytes) } }
 
 // WithTracer attaches an LLM-observability tracer. Passing nil is allowed and
 // leaves the client untraced.
@@ -522,7 +529,7 @@ func (c *Client) completeOnce(ctx context.Context, body []byte) (res completion,
 		}
 		// An error explicitly reported by the API in the stream is not
 		// transient; only genuine transport read failures are retried.
-		if errors.Is(err, errAPIStream) {
+		if errors.Is(err, errAPIStream) || errors.Is(err, ErrResponseTooLarge) {
 			return completion{}, 0, false, err
 		}
 
@@ -564,15 +571,20 @@ func (c *Client) readStream(body io.Reader, onProgress func()) (completion, erro
 	sc.Buffer(make([]byte, 0, 64*1024), 8<<20)
 
 	var (
-		out     strings.Builder
-		res     completion
-		sawData bool
-		allRaw  strings.Builder // captured for the non-streaming fallback
+		out           strings.Builder
+		res           completion
+		sawData       bool
+		allRaw        strings.Builder // captured for the non-streaming fallback
+		responseBytes int
 	)
 
 	for sc.Scan() {
 		onProgress()
 		raw := sc.Text()
+		responseBytes += len(raw) + 1
+		if c.responseLimit > 0 && responseBytes > c.responseLimit {
+			return completion{}, ErrResponseTooLarge
+		}
 		allRaw.WriteString(raw)
 		allRaw.WriteByte('\n')
 

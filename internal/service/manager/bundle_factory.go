@@ -167,6 +167,11 @@ func (m *Manager) buildBundle(s settings.Settings) (_ *docsBundle, err error) {
 			}
 
 			b.gen = docgen.New(docsConfig(s), chat, summary, m.engine, b.tracer)
+			pictureChat, err := llm.New(llmConfig(s), llm.WithTracer(b.tracer), llm.WithResponseLimit(8<<20))
+			if err != nil {
+				return nil, fmt.Errorf("build big picture llm client; %w", err)
+			}
+			b.pictureChat = pictureChat
 		}
 	}
 

@@ -36,12 +36,13 @@ Tool selection:
 - Use git_blame, git_diff, git_log and list_refs for commit evidence and release comparisons.
 - Use search_docs for generated docs and indexed knowledge. Semantic is the default when configured, otherwise lexical. Use lexical for exact Jira keys/titles/identifiers, hybrid for combined retrieval. Inspect evidence kind and sync metadata; cite the original URL for synced content.
 - Use list_* only when an identifier is unknown or an inventory was requested. Use get_doc with a path found by search_docs, list_docs or repo_overview. Do not exhaust pages routinely.
+- Use list_big_pictures/get_big_picture for namespaced architecture snapshots. search_docs supports bigpicture:<name> or scope bigpictures. Pin revisions on reads; verify claims in sources.
 
 Always pass repo or the exact web:/api: scope_key when known. Broader searches use the 'default' repo namespace unless namespace:'*' is supplied; web sources and APIs are not namespaced. Inspect index state before interpreting empty results as absence.`
 
 const apiInstructions = `This server contains only the API catalog. To call an API, walk it: list_api_groups -> list_api_services -> list_api_endpoints -> get_api_endpoint. Only the last returns schemas; narrow with search/tag rather than listing every endpoint. call_api_endpoint then sends a real request to the target service, so call mutating endpoints only when explicitly requested.`
 
-const adminInstructions = `This server contains Krabby administration tools. It can add, update, refresh, cancel and delete repositories, namespaces, credentials, runtime configuration, web sources and API catalog entries. Source operations manage Krabby collections and sync jobs, not upstream Jira issues or Confluence pages. Use mutation tools only when explicitly requested. Read status and inspect results through the separate core or API MCP server.`
+const adminInstructions = `This server contains Krabby administration tools. It manages repositories, namespaces, credentials, runtime configuration, web sources, API entries and Big Pictures. generate_big_picture queues bounded research; publish_big_picture stores caller-produced documents. Neither verifies live state. Source operations manage Krabby collections and sync jobs, not upstream Jira issues or Confluence pages. Mutate only when explicitly requested. Inspect results through the core/API MCP server.`
 
 // NewCore builds the read-only repository, graph, file, history and docs MCP
 // catalog.
@@ -52,6 +53,7 @@ func NewCore(mgr *manager.Manager, version string) *mcp.Server {
 	addFileTools(server, mgr)
 	addHistoryTools(server, mgr)
 	addDocTools(server, mgr, mgr)
+	addPictureTools(server, mgr)
 
 	return server
 }
@@ -72,6 +74,7 @@ func NewAdmin(mgr *manager.Manager, version string, waitTimeout time.Duration) *
 	addCredentialTools(server, mgr)
 	addDocAdminTools(server, mgr, mgr)
 	addAPIAdminTools(server, mgr)
+	addPictureAdminTools(server, mgr)
 
 	return server
 }

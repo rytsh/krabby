@@ -17,12 +17,14 @@ import (
 	"github.com/rytsh/krabby/internal/service/apicatalog"
 	"github.com/rytsh/krabby/internal/service/apicatalog/grpcreflect"
 	"github.com/rytsh/krabby/internal/service/apicatalog/openapi"
+	"github.com/rytsh/krabby/internal/service/bigpicture"
 	"github.com/rytsh/krabby/internal/service/coderag"
 	"github.com/rytsh/krabby/internal/service/credentials"
 	"github.com/rytsh/krabby/internal/service/gitops"
 	"github.com/rytsh/krabby/internal/service/graphbuilder"
 	"github.com/rytsh/krabby/internal/service/graphquery"
 	"github.com/rytsh/krabby/internal/service/manager"
+	"github.com/rytsh/krabby/internal/service/mcpclient"
 	"github.com/rytsh/krabby/internal/service/mcptools"
 	"github.com/rytsh/krabby/internal/service/rag"
 	"github.com/rytsh/krabby/internal/service/registry"
@@ -183,6 +185,16 @@ func run(ctx context.Context) error {
 		}
 	}()
 	mgr.SetSettingsStore(settingsStore)
+	externalMCPs, err := mcpclient.New(db)
+	if err != nil {
+		return err
+	}
+	mgr.SetExternalMCPs(externalMCPs)
+	bigPictures, err := bigpicture.New(db, cfg.BigPicturesRootDir())
+	if err != nil {
+		return err
+	}
+	mgr.SetBigPictures(bigPictures)
 	// Wire the durable task store into the queue before anything enqueues work,
 	// so every submitted task is recorded and can be replayed after a restart.
 	mgr.SetTaskStore(taskStore)
@@ -283,6 +295,9 @@ func run(ctx context.Context) error {
 		} else if _, err := settingsStore.Set(ctx, *projectionUpgrade); err != nil {
 			slog.Error("persist docs index projection version", "error", err)
 		}
+	}
+	if err := mgr.BackfillBigPictureIndexes(ctx); err != nil {
+		slog.Error("enqueue missing big picture indexes", "error", err)
 	}
 	// Every restored closure now has its stores/configuration, and all startup
 	// durable submissions have sequence values above the persisted maximum.

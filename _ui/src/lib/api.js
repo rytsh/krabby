@@ -42,6 +42,21 @@ async function req(path, opts = {}) {
 
 export const api = {
   settings: () => req("/settings"),
+  bigPictures: ({ namespace = "*", q = "", page = 1, per_page = 20 } = {}, signal) => req(`/big-pictures?${new URLSearchParams({ namespace, q, page: String(page), per_page: String(per_page) })}`, { signal }),
+  bigPicture: (name, signal) => req(`/big-pictures/${encodeURIComponent(name)}`, { signal }),
+  addBigPicture: (config) => req("/big-pictures", { method: "POST", body: JSON.stringify(config) }),
+  updateBigPicture: (name, config) => req(`/big-pictures/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify(config) }),
+  deleteBigPicture: (name, version) => req(`/big-pictures/${encodeURIComponent(name)}?expected_version=${version}`, { method: "DELETE" }),
+  publishBigPicture: (name, publication) => req(`/big-pictures/${encodeURIComponent(name)}/publish`, { method: "POST", body: JSON.stringify(publication) }),
+  generateBigPicture: (name) => req(`/big-pictures/${encodeURIComponent(name)}/generate`, { method: "POST" }),
+  bigPictureSnapshot: (name, revision = "", signal) => req(`/big-pictures/${encodeURIComponent(name)}/snapshot?${new URLSearchParams({ revision })}`, { signal }),
+  bigPictureDocument: (name, revision, path, offset = 0, signal) => req(`/big-pictures/${encodeURIComponent(name)}/document?${new URLSearchParams({ revision, path, offset: String(offset), max_bytes: "131072" })}`, { signal }),
+  bigPictureSourceOptions: (kind, q = "", page = 1, signal) => req(`/big-pictures/source-options?${new URLSearchParams({ kind, q, page: String(page) })}`, { signal }),
+  externalMCPs: () => req("/external-mcps"),
+  addExternalMCP: (config) => req("/external-mcps", { method: "POST", body: JSON.stringify(config) }),
+  updateExternalMCP: (name, config) => req(`/external-mcps/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify(config) }),
+  deleteExternalMCP: (name) => req(`/external-mcps/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  discoverExternalMCP: (config, signal) => req("/external-mcps/discover", { method: "POST", body: JSON.stringify(config), signal }),
   // repos returns a paginated envelope: { items, total, page, per_page }.
   // opts: { page, perPage, q, owner, status }.
   repos: ({ page = 1, perPage = 20, q = "", owner = "", status = "", namespace = "" } = {}) => {

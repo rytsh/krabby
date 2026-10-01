@@ -59,6 +59,7 @@ type DocsPage struct {
 
 // Doc is a ranked documentation excerpt returned by retrieval.
 type Doc struct {
+	Revision   string      `json:"revision,omitempty"`
 	Repo       string      `json:"repo"`
 	ScopeKey   string      `json:"scope_key"`
 	SourceKind string      `json:"source_kind"` // "repository", "web" or "api"

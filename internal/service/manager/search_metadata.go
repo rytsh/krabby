@@ -5,6 +5,7 @@ import (
 	"log/slog"
 
 	"github.com/rytsh/krabby/internal/service/apicatalog"
+	"github.com/rytsh/krabby/internal/service/bigpicture"
 	"github.com/rytsh/krabby/internal/service/rag"
 	"github.com/rytsh/krabby/internal/service/registry"
 	"github.com/rytsh/krabby/internal/service/websource"
@@ -17,6 +18,26 @@ func (m *Manager) enrichDocSources(ctx context.Context, docs []rag.Doc) {
 	collections := map[string]*websource.Collection{}
 	services := map[string]*apicatalog.Service{}
 	for i := range docs {
+		name, revision := bigpicture.ParseIndexKey(docs[i].Repo)
+		if name == "" && docs[i].Revision != "" {
+			name, revision = bigpicture.Name(docs[i].Repo), docs[i].Revision
+		}
+		if name != "" {
+			docs[i].Repo, docs[i].ScopeKey = bigpicture.ScopeKey(name), bigpicture.ScopeKey(name)
+			docs[i].Revision, docs[i].SourceKind = revision, "bigpicture"
+			docs[i].Evidence = rag.DocEvidence{Kind: "architecture_snapshot"}
+			if m.bigPictures != nil {
+				if p, err := m.BigPicture(ctx, name); err == nil {
+					docs[i].Namespace = p.Namespace
+					for _, r := range p.Revisions {
+						if r.ID == revision {
+							docs[i].UpdatedAt = r.PublishedAt
+						}
+					}
+				}
+			}
+			continue
+		}
 		docs[i].ScopeKey = docs[i].Repo
 
 		if service := apicatalog.ServiceName(docs[i].Repo); service != "" {
@@ -25,7 +46,7 @@ func (m *Manager) enrichDocSources(ctx context.Context, docs []rag.Doc) {
 			continue
 		}
 
-		name := websource.CollectionName(docs[i].Repo)
+		name = websource.CollectionName(docs[i].Repo)
 		if name == "" {
 			docs[i].SourceKind = "repository"
 			docs[i].Evidence = rag.DocEvidence{Kind: "generated_summary"}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/rytsh/krabby/internal/config"
 	"github.com/rytsh/krabby/internal/observability/langfuse"
+	"github.com/rytsh/krabby/internal/service/bigpicture"
 	"github.com/rytsh/krabby/internal/service/coderag"
 	"github.com/rytsh/krabby/internal/service/docgen"
 	"github.com/rytsh/krabby/internal/service/llm"
@@ -20,11 +21,12 @@ import (
 // that capability is disabled. Bundles are swapped atomically by Configure; the
 // previous bundle's owned resources are closed after a swap.
 type docsBundle struct {
-	gen      docgen.Generator
-	rag      *rag.Service
-	store    vectorstore.Store // owned; closed on swap
-	vision   *llm.Client
-	imageCfg config.WebImage
+	gen         docgen.Generator
+	pictureChat bigpicture.Completer
+	rag         *rag.Service
+	store       vectorstore.Store // owned; closed on swap
+	vision      *llm.Client
+	imageCfg    config.WebImage
 
 	codeRag   *coderag.Service
 	codeStore vectorstore.Store // owned; closed on swap

@@ -99,8 +99,8 @@ func TestMCPAdminEndpointHealthAndSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list admin tools: %v", err)
 	}
-	if len(tools.Tools) != 38 {
-		t.Fatalf("admin tool count = %d, want 38", len(tools.Tools))
+	if len(tools.Tools) != 42 {
+		t.Fatalf("admin tool count = %d, want 42", len(tools.Tools))
 	}
 }
 

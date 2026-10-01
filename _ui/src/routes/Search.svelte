@@ -8,6 +8,7 @@
   import { fmtDate } from "../lib/format.js";
   import Icon from "../lib/Icon.svelte";
   import InfoTip from "../lib/InfoTip.svelte";
+  import { pictureURL } from "../lib/big-picture.js";
 
   // Repo ids for the filter dropdown, loaded once. Capped so a huge fleet does
   // not build an enormous native <select>; beyond the cap the user searches all
@@ -20,6 +21,7 @@
   // Catalogued API services, searched as "api:<name>": their endpoint
   // documents live in the same docs index as repo and web docs.
   let apiOptions = $state([]);
+  let pictureOptions = $state([]);
   // Namespaces for the namespace filter: [{ namespace, count, description }].
   let namespaceOptions = $state([]);
 
@@ -55,6 +57,13 @@
         // Keep the built-in default when settings cannot be loaded.
       }
     }
+    try {
+      const response = await api.bigPictures({ namespace: "*", per_page: 100 });
+      pictureOptions = response.items || [];
+      for (const picture of pictureOptions) {
+        if (!namespaceOptions.some((ns) => ns.namespace === picture.namespace)) namespaceOptions = [...namespaceOptions, { namespace: picture.namespace, count: 0 }];
+      }
+    } catch { pictureOptions = []; }
   }
 
   let q = $state("");
@@ -139,7 +148,7 @@
       // everything else (repo id, web:<name> or api:<name>) is a key.
       // namespaceFilter is an orthogonal filter passed through to both search
       // kinds ("" = every namespace).
-      const docsScope = ["repos", "sources", "apis"].includes(repoFilter) ? repoFilter : "";
+      const docsScope = ["repos", "sources", "apis", "bigpictures"].includes(repoFilter) ? repoFilter : "";
       const key = docsScope ? "" : repoFilter;
       const opts = { signal: controller.signal };
       const response =
@@ -188,6 +197,7 @@
   }
 
   function resultHref(r) {
+	if (scope === "docs" && r.repo.startsWith("bigpicture:")) return `#${pictureURL(r.repo.slice("bigpicture:".length), r.revision || "", r.path)}`;
     if (scope === "docs") {
       // Web-source hits open the synced markdown on the Sources page.
       if (r.repo.startsWith("web:")) {
@@ -317,7 +327,8 @@
         scope = "code";
         // Code search only understands repo ids; drop docs-only selections.
         if (
-          ["repos", "sources", "apis"].includes(repoFilter) ||
+          ["repos", "sources", "apis", "bigpictures"].includes(repoFilter) ||
+          repoFilter.startsWith("bigpicture:") ||
           repoFilter.startsWith("web:") ||
           repoFilter.startsWith("api:")
         ) {
@@ -340,6 +351,8 @@
       <option value="">everywhere</option>
       <option value="repos">all repositories</option>
       <option value="sources">all web sources</option>
+      <option value="bigpictures">all Big Pictures</option>
+      {#if pictureOptions.length}<optgroup label="Big Pictures">{#each pictureOptions as picture (picture.name)}<option value={`bigpicture:${picture.name}`}>{picture.title} · {picture.namespace}</option>{/each}</optgroup>{/if}
       {#if apiOptions.length > 0}
         <option value="apis">all API endpoints</option>
       {/if}

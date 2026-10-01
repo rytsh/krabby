@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/rytsh/krabby/internal/service/apicatalog"
+	"github.com/rytsh/krabby/internal/service/bigpicture"
 	"github.com/rytsh/krabby/internal/service/rag"
 	"github.com/rytsh/krabby/internal/service/registry"
 	"github.com/rytsh/krabby/internal/service/websource"
@@ -45,6 +46,9 @@ func (m *Manager) ensureDocsTextForSearch(ctx context.Context, scope, key, names
 	}
 
 	if key != "" {
+		if bigpicture.Name(key) != "" {
+			return m.warmPictureText(ctx, scope, key, namespace)
+		}
 		if name := websource.CollectionName(key); name != "" {
 			if m.sourcesRootDir == "" {
 				return nil
@@ -74,8 +78,15 @@ func (m *Manager) ensureDocsTextForSearch(ctx context.Context, scope, key, names
 	}
 
 	var errs []error
+	if err := m.warmPictureText(ctx, scope, key, namespace); err != nil {
+		errs = append(errs, err)
+	}
 	if scope == "" || scope == ScopeAll || scope == ScopeRepos {
-		repos, err := m.reg.List(ctx)
+		var repos []*registry.Repo
+		var err error
+		if m.reg != nil {
+			repos, err = m.reg.List(ctx)
+		}
 		if err != nil {
 			errs = append(errs, err)
 		} else {

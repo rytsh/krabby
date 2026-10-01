@@ -45,8 +45,10 @@ type scheduler struct {
 	webCron cronRunner
 	webSig  string
 
-	apiCron cronRunner
-	apiSig  string
+	apiCron     cronRunner
+	apiSig      string
+	pictureCron cronRunner
+	pictureSig  string
 }
 
 // Run evaluates repo and web-source schedules until ctx is cancelled. Repo
@@ -65,6 +67,7 @@ func Run(ctx context.Context, mgr *manager.Manager) {
 	s.reconcile(ctx)
 	s.reconcileWeb(ctx)
 	s.reconcileAPI(ctx)
+	s.reconcilePictures(ctx)
 
 	for {
 		select {
@@ -84,6 +87,7 @@ func Run(ctx context.Context, mgr *manager.Manager) {
 			s.reconcile(ctx)
 			s.reconcileWeb(ctx)
 			s.reconcileAPI(ctx)
+			s.reconcilePictures(ctx)
 		}
 	}
 }
@@ -285,6 +289,7 @@ func (s *scheduler) stop() {
 	}
 	s.stopWeb()
 	s.stopAPI()
+	s.stopPictures()
 }
 
 // stopWeb cancels the loaded web-source cron set (if any).

@@ -56,9 +56,9 @@ func TestToolCatalogs(t *testing.T) {
 		absent  []string
 	}{
 		{
-			name: "core", server: func() *mcp.Server { return NewCore(nil, "test") }, count: 26,
-			present: []string{"list_repos", "repo_status", "repo_overview", "search_code", "query_graph", "find_definition", "find_references", "search_docs", "list_files", "glob", "get_source"},
-			absent:  []string{"add_repo", "remove_repo", "refresh_repo", "queue_status", "call_api_endpoint", "set_docs_config"},
+			name: "core", server: func() *mcp.Server { return NewCore(nil, "test") }, count: 28,
+			present: []string{"list_repos", "repo_status", "repo_overview", "search_code", "query_graph", "find_definition", "find_references", "search_docs", "list_files", "glob", "get_source", "list_big_pictures", "get_big_picture"},
+			absent:  []string{"add_repo", "remove_repo", "refresh_repo", "queue_status", "call_api_endpoint", "set_docs_config", "publish_big_picture", "save_big_picture", "delete_big_picture"},
 		},
 		{
 			name: "api", server: func() *mcp.Server { return NewAPI(nil, "test") }, count: 5,
@@ -66,9 +66,9 @@ func TestToolCatalogs(t *testing.T) {
 			absent:  []string{"search_code", "add_api_service", "set_docs_config", "add_repo"},
 		},
 		{
-			name: "admin", server: func() *mcp.Server { return NewAdmin(nil, "test", 0) }, count: 38,
-			present: []string{"add_repo", "remove_repo", "refresh_repo", "queue_status", "set_docs_config", "add_source", "add_api_service", "set_credential"},
-			absent:  []string{"list_repos", "repo_status", "search_code", "query_graph", "search_docs", "list_api_services", "call_api_endpoint"},
+			name: "admin", server: func() *mcp.Server { return NewAdmin(nil, "test", 0) }, count: 42,
+			present: []string{"add_repo", "remove_repo", "refresh_repo", "queue_status", "set_docs_config", "add_source", "add_api_service", "set_credential", "save_big_picture", "publish_big_picture", "delete_big_picture"},
+			absent:  []string{"list_repos", "repo_status", "search_code", "query_graph", "search_docs", "list_api_services", "call_api_endpoint", "list_big_pictures", "get_big_picture"},
 		},
 	}
 
@@ -166,8 +166,8 @@ func TestToolCatalogs(t *testing.T) {
 			}
 		})
 	}
-	if len(allNames) != 69 {
-		t.Fatalf("catalog union has %d tools, want 69", len(allNames))
+	if len(allNames) != 75 {
+		t.Fatalf("catalog union has %d tools, want 75", len(allNames))
 	}
 }
 

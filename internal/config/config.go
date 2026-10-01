@@ -614,6 +614,9 @@ func (c *Config) SourcesRootDir() string { return filepath.Join(c.DataDir, "sour
 // service name.
 func (c *Config) APIsRootDir() string { return filepath.Join(c.DataDir, "apis") }
 
+// BigPicturesRootDir stores immutable multi-document architecture publications.
+func (c *Config) BigPicturesRootDir() string { return filepath.Join(c.DataDir, "big-pictures") }
+
 // NormalizeBasePath cleans a configured base path into a canonical form: either
 // "" (serve at root) or "/segment[/segment...]" with a leading slash and no
 // trailing slash. Whitespace and redundant slashes are collapsed.

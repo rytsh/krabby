@@ -150,6 +150,9 @@ Example OpenCode config with core and admin registered separately:
 | `set_api_group_description` / `delete_api_group` | Admin: manage API group descriptions |
 | `get_docs_config` / `set_docs_config` | Admin: read or live-update docs and code RAG settings |
 | `test_llm` / `test_embedder` / `test_code_embedder` | Admin: validate model endpoints without saving |
+| `list_big_pictures` / `get_big_picture` | Core: discover architecture workspaces by namespace, inspect publication manifests and page through documents |
+| `save_big_picture` / `publish_big_picture` / `delete_big_picture` | Admin: manage workspaces and publish caller-produced multi-document snapshots; no automatic research |
+| `generate_big_picture` | Admin: queue bounded source collection and architecture synthesis with the documentation chat model |
 
 Always pass the full repo id (`host/group/.../name`) when it is known. Omit it
 only for an intentional cross-repository search or merged-graph analysis.
@@ -452,6 +455,248 @@ under `data_dir/keys/` with 0600 perms; tokens are fed to git via a credential
 helper (never on argv). Secrets are never returned by any API. The global
 Git credentials are persisted by host or host/path pattern through the UI,
 REST API or MCP tools. The most specific pattern wins.
+
+## External MCP connections
+
+Open **Settings → External MCPs** (`#/settings/external-mcps`) to configure
+outbound connections. These are independent of Krabby's own `/mcp`, `/mcp/api`
+and `/mcp/admin` servers. This first integration provides connection management
+and live catalog discovery; Big Picture research separately reads exact granted resource URIs without executing external tools.
+
+Only remote **Streamable HTTP** endpoints are supported. Supply an HTTP(S) URL,
+an optional bearer token or custom authentication headers, and a timeout of
+1–120 seconds (default 30). OAuth, legacy SSE-only endpoints and local `stdio`
+commands are not supported. URL credentials, query parameters and fragments are
+rejected; put authentication material in headers. Redirects are not followed.
+
+**Test connection & discover** initializes a fresh MCP session and lists tools,
+resources and resource templates, including paginated catalogs. It never executes
+tools, reads resource contents, follows resource URIs or enables sampling.
+Discovery is limited to 500 items per category, 50 pages per category, 4 MiB per
+HTTP response/event and 8 MiB of response data per session. Partial catalogs are
+marked `truncated`; a discovery failure is not evidence that a tool is absent.
+Remote errors are deliberately reduced to a safe stage-specific message.
+
+No tools or resources are granted by default. Select explicit tool names and
+resource URIs/templates, then save the connection. Big Picture generation reads
+granted exact resource URIs; tool and template grants remain configuration for a
+future research runner, not execution endpoints. Read-only hints are unverified
+and never automatically grant access. Disabled connections remain manually
+testable but are rejected by research jobs.
+
+Secrets are write-only and stored in the existing state database, **not encrypted
+at rest**. Protect the data volume and backups. Blank bearer tokens preserve the
+saved token; use the explicit clear control to remove it. Header values are also
+write-only: blank values keep matching saved headers, removing a row removes that
+header. Changing the endpoint drops old credentials and resets grants, preventing
+credentials from being silently sent to a new address.
+
+REST endpoints, relative to `/api/v1` (and the configured server base path):
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/external-mcps` | List redacted connections |
+| POST | `/external-mcps` | Create a connection |
+| PUT | `/external-mcps/{name}` | Replace non-secret settings; merge write-only secrets |
+| DELETE | `/external-mcps/{name}` | Delete a connection |
+| POST | `/external-mcps/discover` | Test a draft; optional `existing_name` reuses its saved secrets |
+
+These are administrator operations: as with other Krabby endpoints, deploy behind
+an authenticating proxy. Configured URLs may reach internal network services;
+only trusted administrators should manage them. Prefer HTTPS for credentials in
+transit. Custom protocol, cookie and proxy headers cannot be overridden.
+
+## Big Picture workspaces
+
+Open **Big Pictures** in the UI to create an architecture workspace. Give it a
+stable name, display title, namespace, research prompt and 1–50 explicit source
+references. Source kinds are `repo` (full repository ID), `web` (collection name),
+`api` (catalogued service name) and `mcp` (saved external connection name).
+Selections are validated against existing records. A repository can participate
+in multiple workspaces without changing its own namespace.
+
+Big Picture namespaces are independent grouping labels, **not access-control
+boundaries**. Names are globally unique; multiple workspaces can share a
+namespace. The UI defaults to all namespaces; `list_big_pictures` defaults to
+`default` and accepts `namespace:"*"` for every namespace.
+
+Use **Research & generate**, `generate_big_picture` on the admin MCP, or
+`POST /big-pictures/{name}/generate` to queue automatic synthesis. Enable
+documentation generation and configure the chat model under Settings first;
+Big Pictures reuse that client and tracing configuration. Track completion,
+errors and cancellation under Activity (`bigpicture:<name>`), then reload the
+workspace. Queued/running task specs survive restarts and preserve their original
+instance, configuration version and publication preconditions. Stale jobs fail
+instead of overwriting new work or targeting a deleted/recreated workspace.
+
+This first automatic research stage uses **deterministic bounded collection**,
+not an autonomous tool-calling agent. It uses 256 KiB of source text total,
+divided among selected sources, and at most 16 KiB per raw item.
+
+Repository sources contribute derived evidence first, so the bounded window covers
+the whole repository rather than a handful of files:
+
+- `krabby-docs/…`: Krabby's generated repository documentation (up to 24 KiB).
+  It is model-written; a note flags it when it predates the latest commit.
+- `krabby:communication-signals`: code-index lines matching messaging
+  (Kafka/AMQP/NATS/SQS…), RPC/HTTP clients and routes, and endpoint configuration,
+  grouped by file (up to 120 lines). Tests and secret-named files are skipped,
+  credential-looking lines are omitted and URL user-info is redacted. Line numbers
+  are omitted so moving code does not count as a change.
+- `krabby:dependency-graph`: static external dependencies (network, database and
+  third-party packages imported by non-test files) and central code entities.
+
+Missing artifacts (docs disabled, index or graph not built) are noted in
+`research.md` and the repository falls back to raw files. Raw files then fill the
+remaining budget (6 files after derived evidence, otherwise 8), prioritizing
+README/architecture, deployment, Helm/Kubernetes/Terraform,
+configuration and service entrypoints over other source files. Inventories are
+capped by the existing file-browser limit; omitted files remain unknown. Web/API
+documents are cached local Markdown snapshots, not freshly fetched upstream
+content. Unavailable selected sources or failed reads stop publication.
+
+External MCP reads require **exact saved URI grants**, reloaded before each read.
+Disabled connections and ungranted URIs are rejected before networking. Selecting
+a connection does not widen grants. Resource templates, external tools, sampling
+and elicitation are not executed. Revocation applies to subsequent requests, not
+an already in-flight read. Existing discovery HTTP/session response budgets,
+timeouts and redirect blocking also apply to resource reads; binary resource
+parts are omitted and marked truncated. Remote error messages are never surfaced.
+
+Common `.env`, secret/credential-named files and PEM/key files are skipped, but
+this is **not guaranteed secret redaction**: ordinary configuration/source files
+and MCP resources may contain credentials or sensitive values. Source snapshots
+and bounded previous-document context are sent to the configured model endpoint.
+Use a trusted endpoint and do not grant sources unsuitable for that disclosure.
+The UI asks for confirmation before queueing research; REST/MCP callers must
+authorize that disclosure themselves. Generated Markdown is model output, not
+independently verified truth or a DLP guarantee.
+
+The model produces up to 24 documents, 64 KiB each. Every model-written document
+must cite at least one collected evidence ID; Krabby resolves these to actual
+collected source references instead of accepting model-invented locators. A
+server-produced `research.md` lists coverage and truncation. Malformed output,
+invented citations, failed model calls and stale preconditions leave the existing
+publication unchanged. Each generation has a 15-minute lifecycle deadline and
+uses the common queue's concurrency and cancellation controls. The dedicated
+chat client caps each response (including SSE framing) at 8 MiB; generated tree
+JSON is capped at 2 MiB. Existing Langfuse capture settings also apply to research
+prompts and output, so include trace storage in your data-disclosure policy.
+
+Prior publications contribute up to 64 KiB of context, 16 KiB per page, alongside
+the complete document-path structure. Subsequent research runs ask for an
+**incremental patch**, not a replacement tree: up to 24 changed/new pages and 64
+explicit deletions. Untouched pages and citations are carried forward in full,
+even if their model context was omitted or truncated. Validated patches are
+published as a new atomic snapshot with a change summary. Evidence fingerprints
+cover collected content only, so commits that touch none of the collected files
+skip the model. A valid patch with no changes records a check instead of a new
+revision, and the same evidence is not re-sent to the model afterwards. This
+detects changes only within the bounded collected window; it is not a complete
+repository/source change audit. The latest run outcome (published, unchanged,
+no changes or failed, with its trigger and message) is shown on the workspace and
+returned as `last_run`; failed runs never block retries.
+
+Workspace `schedule` accepts up to 10 cron specifications (for example
+`["0 2 * * *"]` or `["@every 6h"]`); `[]` disables it and omitting the field
+keeps the saved schedule. The existing scheduler
+reconciles persisted schedules and submits durable update jobs to the shared
+queue. A trigger is skipped while research for that workspace is already queued
+or running; index tasks do not block it. Scheduling authorizes recurring
+source reads and model/trace disclosure; the UI requires explicit consent when a
+schedule is enabled or changed.
+Schedules use existing synced repo/web/API snapshots, not live upstream refreshes,
+and current exact MCP grants. Invalid cron specs are rejected before saving.
+
+Publications are indexed in the shared lexical/semantic stores after publishing.
+Use **Search → Docs**, `search_docs` with `repo:"bigpicture:<name>"`, or
+`scope:"bigpictures"`. Broad searches apply namespace filters to both repositories
+and Big Pictures; web/API sources remain unnamespaced. Explicit workspace keys
+ignore namespace grouping just like explicit repo keys. Search results include
+`source_kind:"bigpicture"`, public `scope_key`, namespace and publication
+`revision`; use `get_doc` with that revision or `get_big_picture` for pinned reads.
+The UI pins result links to their publication. Semantic/hybrid retrieval needs the
+configured docs embedder; missing embedding configuration falls back to lexical.
+Only complete indexes for the current publication are eligible before ranking;
+old or partially built indexes are excluded. Rebuilding an index keeps the live
+one searchable until the replacement is complete, and interrupted attempts are
+reclaimed by the next one. Index readiness is shown in the
+workspace UI, missing indexes are queued at startup, and global reindex includes
+Big Pictures. A failed index does not roll back the readable publication.
+
+Autonomous MCP tool research remains unimplemented. You can also publish an
+external agent's output through the admin MCP or paste publication JSON under
+**Publish documents** in the UI; manual publication still replaces a complete tree.
+
+A minimal publication is:
+
+```json
+{
+  "expected_version": 1,
+  "expected_revision": "",
+  "producer": "architecture-agent",
+  "overview": "overview.md",
+  "documents": [
+    {
+      "path": "overview.md",
+      "title": "Overview",
+      "markdown": "# Architecture\nSee [Checkout](services/checkout.md).",
+      "evidence": []
+    },
+    {
+      "path": "services/checkout.md",
+      "title": "Checkout",
+      "markdown": "# Checkout\nDescribe only behavior supported by your research.",
+      "evidence": []
+    }
+  ]
+}
+```
+
+Each publication replaces the complete document tree. `expected_version` must
+match the current workspace configuration, and `expected_revision` must match
+its current publication ID (empty before the first publication). Obtain both
+with `get_big_picture`. Stale writes return a conflict instead of overwriting
+newer work. Configuration updates also require `expected_version`; all
+non-secret fields are replaced, not patched.
+
+Documents are limited to 64 per publication, 256 KiB each, 4 MiB of Markdown in
+total and 512 KiB of publication metadata. Paths are relative `.md` paths with
+alphanumeric/dot/underscore/hyphen segments; traversal and duplicate/conflicting
+paths are rejected. The overview must name a document in the publication.
+Relative Markdown links stay within the selected publication; Mermaid blocks
+use the existing interactive renderer.
+
+Optional evidence entries have `{source:{kind,ref}, locator, revision}`. The
+source must be selected in the workspace. Citations remain **publisher-supplied**;
+Krabby validates their shape and source membership, not the truth of a claim or
+the cited revision. Do not publish credentials or sensitive configuration values.
+
+Publication files live under `<data_dir>/big-pictures`, with opaque instance and
+revision directory IDs. They are outside repository clones and need no Git
+tracking. A complete directory is staged before one state-record update makes
+it visible. Failed validation/writes preserve the current publication. The latest
+10 publications retain their own source selections, prompt and config version;
+older revisions are removed. A workspace config change marks older publications
+as outdated, without rewriting them. Back up both the state DB and this directory.
+
+REST routes, relative to `/api/v1` and any configured base path:
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET/POST | `/big-pictures` | List/create workspaces; list accepts `namespace`, `q`, `page`, `per_page` |
+| GET/PUT | `/big-pictures/{name}` | Read/replace configuration |
+| DELETE | `/big-pictures/{name}?expected_version=` | Delete workspace/publications, keeping sources |
+| GET | `/big-pictures/source-options?kind=&q=&page=` | Paginated source selection without credentials |
+| POST | `/big-pictures/{name}/publish` | Publish a complete document tree |
+| POST | `/big-pictures/{name}/generate` | Queue bounded research/generation; returns 202, or 503 when the chat model is unavailable |
+| GET | `/big-pictures/{name}/snapshot?revision=` | Publication manifest; empty revision means current |
+| GET | `/big-pictures/{name}/document?revision=&path=&offset=&max_bytes=` | Bounded UTF-8 document read |
+
+Document reads default to 32 KiB and cap at 128 KiB. Pin the returned publication
+ID and advance by the returned `bytes` on continuation reads. Expired/deleted
+revisions return not found; they never silently switch to another publication.
+All administration relies on Krabby's existing authenticating reverse proxy.
 
 ## API catalog
 

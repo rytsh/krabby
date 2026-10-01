@@ -10,6 +10,7 @@ import (
 
 	"github.com/rytsh/krabby/internal/config"
 	"github.com/rytsh/krabby/internal/service/apicatalog"
+	"github.com/rytsh/krabby/internal/service/bigpicture"
 	"github.com/rytsh/krabby/internal/service/docsearch"
 	"github.com/rytsh/krabby/internal/service/rag"
 	"github.com/rytsh/krabby/internal/service/registry"
@@ -20,10 +21,11 @@ import (
 // Docs search scopes: everything, repository docs, web sources or the API
 // catalog.
 const (
-	ScopeAll     = "all"
-	ScopeRepos   = "repos"
-	ScopeSources = "sources"
-	ScopeAPIs    = "apis"
+	ScopeAll         = "all"
+	ScopeRepos       = "repos"
+	ScopeSources     = "sources"
+	ScopeAPIs        = "apis"
+	ScopeBigPictures = "bigpictures"
 )
 
 // Documentation search modes. Semantic is the default when configured;
@@ -85,8 +87,10 @@ func docsFilter(scope, key string) (vectorstore.Filter, error) {
 		return vectorstore.Filter{Kind: vectorstore.KindWeb}, nil
 	case ScopeAPIs:
 		return vectorstore.Filter{Kind: vectorstore.KindAPI}, nil
+	case ScopeBigPictures:
+		return vectorstore.Filter{Kind: vectorstore.KindBigPicture}, nil
 	default:
-		return vectorstore.Filter{}, fmt.Errorf("unknown scope %q (want all, repos, sources or apis)", scope)
+		return vectorstore.Filter{}, fmt.Errorf("unknown scope %q (want all, repos, sources, apis or bigpictures)", scope)
 	}
 }
 
@@ -121,12 +125,37 @@ func (m *Manager) SearchDocs(ctx context.Context, scope, key, namespace, mode, q
 	}
 
 	ragCfg := m.ragConfigSnapshot()
+	// Backfill before resolving publication visibility on upgraded installs.
+	if mode != DocsSearchSemantic && !m.docsTextWarmed.Load() && m.bigPictures != nil {
+		if err := m.warmPictureText(ctx, scope, key, namespace); err != nil {
+			return rag.DocsPage{}, err
+		}
+	}
 
 	filter, emptyScope, err := m.docsNamespaceFilter(ctx, scope, key, namespace, filter)
 	if err != nil {
 		return rag.DocsPage{}, err
 	}
+	if !emptyScope || scope == "" || scope == ScopeAll {
+		var pictureEmpty bool
+		filter, pictureEmpty, err = m.pictureSearchFilter(ctx, scope, key, namespace, mode, filter)
+		if err != nil {
+			return rag.DocsPage{}, err
+		}
+		// Retain the filter resolved above and allow a BP-only namespace.
+		if emptyScope && len(filter.BigPictureKeys) > 0 {
+			emptyScope = false
+			filter.Keys = append(filter.Keys, filter.BigPictureKeys...)
+		}
+		if pictureEmpty {
+			emptyScope = true
+		}
+	}
 	if emptyScope {
+		if bigpicture.Name(key) != "" || scope == ScopeBigPictures {
+			page.Note = "No complete current Big Picture publication index in this scope. Check publication/index status with get_big_picture; try lexical mode if embedding is unavailable."
+			return page, nil
+		}
 		page.Note = fmt.Sprintf("namespace %s holds nothing indexed, so nothing was searched; retry with namespace \"*\" to search every namespace.",
 			displayNamespace(namespace))
 
@@ -151,9 +180,13 @@ func (m *Manager) SearchDocs(ctx context.Context, scope, key, namespace, mode, q
 
 	var lexical docsearch.LexicalIndex
 	if m.docsText != nil {
-		lexical = m.docsText
+		lexical = pictureLexical{m.docsText}
 	}
-	result, err := docsearch.New(lexical, m.retrieveSemanticCandidates).Search(ctx, docsearch.Request{
+	semantic := func(ctx context.Context, filter vectorstore.Filter, question string, candidates int) ([]rag.Doc, rag.RetrieveTiming, error) {
+		docs, timing, err := m.retrieveSemanticCandidates(ctx, filter, question, candidates)
+		return canonicalPictureDocs(docs), timing, err
+	}
+	result, err := docsearch.New(lexical, semantic).Search(ctx, docsearch.Request{
 		Filter: filter, Question: question, Mode: mode, TopDocs: topDocs, Config: ragCfg,
 	})
 	if err != nil {
@@ -214,6 +247,10 @@ func (m *Manager) validateDocsKey(ctx context.Context, key string) error {
 	if key == "" {
 		return nil
 	}
+	if name := bigpicture.Name(key); name != "" {
+		_, err := m.BigPicture(ctx, name)
+		return err
+	}
 	if strings.HasPrefix(key, websource.ScopePrefix) {
 		name := websource.CollectionName(key)
 		if name == "" || m.webStore == nil {
@@ -264,10 +301,14 @@ func (m *Manager) docsNamespaceFilter(ctx context.Context, scope, key, namespace
 	// namespace to narrow, so the filter passes through untouched. Building a
 	// key allow-list for them would instead exclude everything they target.
 	if key != "" || strings.EqualFold(strings.TrimSpace(namespace), registry.NamespaceAll) ||
-		scope == ScopeSources || scope == ScopeAPIs {
+		scope == ScopeSources || scope == ScopeAPIs || scope == ScopeBigPictures {
 		return filter, false, nil
 	}
-	repos, err := m.reg.ListNamespace(ctx, namespace)
+	var repos []*registry.Repo
+	var err error
+	if m.reg != nil {
+		repos, err = m.reg.ListNamespace(ctx, namespace)
+	}
 	if err != nil {
 		return vectorstore.Filter{}, false, err
 	}

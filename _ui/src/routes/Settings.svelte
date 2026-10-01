@@ -7,6 +7,7 @@
   import { replace } from "svelte-spa-router";
   import RuntimeSettings from "../components/settings/RuntimeSettings.svelte";
   import LangfuseSettings from "../components/settings/LangfuseSettings.svelte";
+  import ExternalMCPSettings from "../components/settings/ExternalMCPSettings.svelte";
   import {
     buildDocsPayload,
     buildLangfusePayload,
@@ -262,6 +263,7 @@
   const tabs = [
     { id: "config", label: "Configuration" },
     { id: "credentials", label: "Credentials" },
+    { id: "external-mcps", label: "External MCPs" },
     { id: "appearance", label: "Appearance" },
     { id: "runtime", label: "Runtime" },
     { id: "docs", label: "Docs & RAG" },
@@ -397,6 +399,9 @@
 {:else if !error}
   <div class="mt-4 text-dim">Loading…</div>
 {/if}
+
+{:else if tab === "external-mcps"}
+<ExternalMCPSettings />
 
 {:else if tab === "appearance"}
 <h2 class="mb-1 text-[15px] font-semibold">Appearance</h2>

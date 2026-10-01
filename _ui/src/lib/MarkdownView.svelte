@@ -11,11 +11,11 @@
 
   /**
    * @typedef {{ id: string, text: string, level: number }} Heading
-   * @typedef {{ markdown?: string, onHeadings?: (headings: Heading[]) => void }} Props
+   * @typedef {{ markdown?: string, onHeadings?: (headings: Heading[]) => void, resolveLink?: (href: string) => string | null | undefined }} Props
    */
 
   /** @type {Props} */
-  let { markdown = "", onHeadings = () => {} } = $props();
+  let { markdown = "", onHeadings = () => {}, resolveLink = undefined } = $props();
 
   // Rendered HTML is the single reactive source of truth for the view. Heading
   // ids come straight from comark's output, so we never mutate the DOM to build
@@ -110,8 +110,11 @@
 
       if (el instanceof HTMLAnchorElement) {
         el.removeAttribute("ping");
-        const raw = el.getAttribute("href");
+        let raw = el.getAttribute("href");
         if (!raw) continue;
+        const resolved = resolveLink?.(raw);
+        if (resolved === null) { el.removeAttribute("href"); continue; }
+        if (typeof resolved === "string") { raw = resolved; el.setAttribute("href", resolved); }
         if (raw.startsWith("#")) continue;
 
         try {
@@ -181,6 +184,7 @@
   // below reacts to — no cycle.
   $effect(() => {
     void $theme;
+    void resolveLink;
     render(markdown);
   });
 

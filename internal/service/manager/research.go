@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/rytsh/krabby/internal/service/bigpicture"
 	"github.com/rytsh/krabby/internal/service/docgen"
 	"github.com/rytsh/krabby/internal/service/rag"
 	"github.com/rytsh/krabby/internal/service/repofs"
@@ -24,6 +25,7 @@ type DocumentRead struct {
 	CollectionType string          `json:"collection_type,omitempty"`
 	URL            string          `json:"url,omitempty"`
 	Evidence       rag.DocEvidence `json:"evidence"`
+	Revision       string          `json:"revision,omitempty"`
 }
 
 func (m *Manager) GetDocDetails(ctx context.Context, key, path string, offset int64, maxBytes int) (DocumentRead, error) {
@@ -32,10 +34,16 @@ func (m *Manager) GetDocDetails(ctx context.Context, key, path string, offset in
 		return DocumentRead{}, err
 	}
 	docs := []rag.Doc{{Repo: key, Path: path}}
+	if name := bigpicture.Name(key); name != "" {
+		if parsed, _ := bigpicture.ParseIndexKey(key); parsed != "" {
+			name = parsed
+		}
+		docs[0].Repo = bigpicture.IndexKey(name, content.Snapshot)
+	}
 	m.enrichDocSources(ctx, docs)
 	doc := docs[0]
 	return DocumentRead{FileContent: content, ScopeKey: doc.ScopeKey, SourceKind: doc.SourceKind,
-		CollectionType: doc.CollectionType, URL: doc.URL, Evidence: doc.Evidence}, nil
+		CollectionType: doc.CollectionType, URL: doc.URL, Evidence: doc.Evidence, Revision: doc.Revision}, nil
 }
 
 type OverviewSection struct {

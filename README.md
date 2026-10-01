@@ -20,6 +20,8 @@ and understand relationships through MCP.
 - Web, Confluence, and Jira source indexing
 - API catalog: OpenAPI/Swagger and gRPC endpoints, browsable and searchable, with per-service overrides
 - Web UI, REST API, and MCP support
+- External MCP connection management with credential-safe catalog discovery
+- Big Picture workspaces: multi-source architecture synthesis, evidence citations, versioned document trees, namespaced hybrid search and scheduled incremental updates via UI/REST/admin MCP
 
 ## Run with Docker
 

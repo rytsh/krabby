@@ -9,6 +9,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/rytsh/krabby/internal/service/bigpicture"
 	"github.com/rytsh/krabby/internal/service/coderag"
 	"github.com/rytsh/krabby/internal/service/manager"
 	"github.com/rytsh/krabby/internal/service/rag"
@@ -20,9 +21,9 @@ import (
 
 type searchDocsArgs struct {
 	Question  string `json:"question" jsonschema:"natural-language question or exact term to find relevant documentation for"`
-	Repo      string `json:"repo,omitempty" jsonschema:"one repository id, web:<collection> or api:<service>; always provide when known, omit only for explicit broad search"`
-	Namespace string `json:"namespace,omitempty" jsonschema:"when repo is omitted, scope repo docs to this namespace; empty means the 'default' namespace, '*' searches all namespaces. Web sources and catalogued APIs are never namespaced and always participate"`
-	Scope     string `json:"scope,omitempty" jsonschema:"when repo is unknown: 'all' (default), 'repos', 'sources', or 'apis' (catalogued API endpoints)"`
+	Repo      string `json:"repo,omitempty" jsonschema:"repository id, web:<collection>, api:<service> or bigpicture:<name>; provide when known, omit only for broad search"`
+	Namespace string `json:"namespace,omitempty" jsonschema:"when repo omitted, scope repository and Big Picture docs; default when empty, '*' for all. Web/API docs are not namespaced"`
+	Scope     string `json:"scope,omitempty" jsonschema:"when repo unknown: all (default), repos, sources, apis or bigpictures"`
 	Mode      string `json:"mode,omitempty" jsonschema:"retrieval mode: 'semantic' (default) uses embeddings and is best for conceptual natural-language questions; 'lexical' uses only local BM25 and is best for Jira keys, error codes, exact titles and identifiers; 'hybrid' fuses both ranks and is the most thorough but the slowest on large collections. When no embedder is configured the default is 'lexical'"`
 	TopDocs   int    `json:"top_docs,omitempty" jsonschema:"number of ranked documents to return (default 3, max 20)"`
 }
@@ -58,7 +59,7 @@ func (a searchCodeArgs) searchMode() (string, error) {
 }
 
 type listDocsArgs struct {
-	Repo    string `json:"repo" jsonschema:"exact full repository id returned by list_repos"`
+	Repo    string `json:"repo" jsonschema:"repository id or bigpicture:<name>; use get_big_picture for a revision-pinned manifest"`
 	Page    int    `json:"page,omitempty" jsonschema:"page number (default 1)"`
 	PerPage int    `json:"per_page,omitempty" jsonschema:"documents per page (default 50, max 200)"`
 }
@@ -68,7 +69,8 @@ type repoOverviewArgs struct {
 }
 
 type getDocArgs struct {
-	Repo     string `json:"repo" jsonschema:"exact repository id, web:<collection> or api:<service> scope_key, as returned by search_docs.repo/search_docs.scope_key"`
+	Revision string `json:"revision,omitempty" jsonschema:"Big Picture publication ID from search_docs; pin on continuation reads"`
+	Repo     string `json:"repo" jsonschema:"exact scope_key from search_docs: repo ID, web:<collection>, api:<service> or bigpicture:<name>"`
 	Path     string `json:"path" jsonschema:"document path returned by search_docs, list_docs or repo_overview"`
 	Offset   int64  `json:"offset,omitempty" jsonschema:"byte offset to start reading from (default 0)"`
 	MaxBytes int    `json:"max_bytes,omitempty" jsonschema:"max bytes to return (default 32768, max 131072)"`
@@ -450,7 +452,15 @@ func addDocTools(server *mcp.Server, search docsSearchService, sources sourceRea
 		Description: "Read a known Krabby generated document or stored snapshot in bounded pages; this does not fetch live Jira/Confluence content. Pass repo/scope_key and path from search_docs/list_docs/repo_overview, and use a section's offset for targeted reading. Returns provenance and the original URL for provider-MCP handoff. Verify generated claims in source.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args getDocArgs) (*mcp.CallToolResult, manager.DocumentRead, error) {
-		doc, err := search.GetDocDetails(ctx, args.Repo, args.Path, args.Offset, mcpReadSize(args.MaxBytes))
+		key := args.Repo
+		if args.Revision != "" {
+			name := bigpicture.Name(key)
+			if name == "" {
+				return nil, manager.DocumentRead{}, fmt.Errorf("revision is only supported for Big Picture documents")
+			}
+			key = bigpicture.IndexKey(name, args.Revision)
+		}
+		doc, err := search.GetDocDetails(ctx, key, args.Path, args.Offset, mcpReadSize(args.MaxBytes))
 		return nil, doc, err
 	})
 

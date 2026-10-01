@@ -51,8 +51,9 @@ type Match struct {
 // The convention belongs to the store because the store is what has to answer
 // questions about it; websource and apicatalog re-export these constants.
 const (
-	ScopePrefix    = "web:"
-	APIScopePrefix = "api:"
+	ScopePrefix           = "web:"
+	APIScopePrefix        = "api:"
+	BigPictureScopePrefix = "bigpicture:"
 )
 
 // The classes of key a stored chunk can belong to. They are persisted in an
@@ -63,14 +64,17 @@ const (
 // before a prefix existed keep classifying correctly: no migration is needed to
 // add a class, only keys carrying the new prefix change meaning.
 const (
-	KindRepo = "repo"
-	KindWeb  = "web"
-	KindAPI  = "api"
+	KindRepo       = "repo"
+	KindWeb        = "web"
+	KindAPI        = "api"
+	KindBigPicture = "bigpicture"
 )
 
 // KindOf classifies a store key.
 func KindOf(key string) string {
 	switch {
+	case strings.HasPrefix(key, BigPictureScopePrefix):
+		return KindBigPicture
 	case strings.HasPrefix(key, ScopePrefix):
 		return KindWeb
 	case strings.HasPrefix(key, APIScopePrefix):
@@ -84,6 +88,9 @@ func KindOf(key string) string {
 // web-source scope keys). The zero value matches everything. All set fields
 // are combined with AND.
 type Filter struct {
+	// Non-nil constrains only Big Picture hits to complete current publication
+	// indexes. Empty excludes that kind while leaving other kinds untouched.
+	BigPictureKeys []string
 	// Keys restricts matches to these exact keys.
 	Keys []string
 	// Kind restricts matches to one class of key: KindRepo or KindWeb.
@@ -107,7 +114,7 @@ func FilterKey(key string) Filter {
 
 // IsZero reports whether the filter matches everything.
 func (f Filter) IsZero() bool {
-	return len(f.Keys) == 0 && f.Kind == ""
+	return len(f.Keys) == 0 && f.Kind == "" && f.BigPictureKeys == nil
 }
 
 // Query translates the filter into a bw where clause over the indexed "repo"
@@ -120,6 +127,13 @@ func (f Filter) Query() *query.Query {
 	}
 
 	q := query.New()
+	if f.BigPictureKeys != nil {
+		allowed := []query.Expression{query.NewExpressionCmp(query.OperatorNe, "kind", KindBigPicture).Expression()}
+		if len(f.BigPictureKeys) > 0 {
+			allowed = append(allowed, query.NewExpressionCmp(query.OperatorIn, "repo", f.BigPictureKeys).Expression())
+		}
+		q.Where = append(q.Where, query.NewExpressionLogic(query.OperatorOr, allowed).Expression())
+	}
 
 	switch len(f.Keys) {
 	case 0:

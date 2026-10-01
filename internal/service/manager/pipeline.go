@@ -422,6 +422,20 @@ func (m *Manager) reindexAll(ctx context.Context) error {
 	if err := m.enqueueAPIReindex(ctx); err != nil {
 		errs = append(errs, err)
 	}
+	if m.bigPictures != nil {
+		pictures, err := m.bigPictures.All(ctx, "*")
+		if err != nil {
+			errs = append(errs, err)
+		} else {
+			for _, p := range pictures {
+				if p.CurrentRevision != "" {
+					if err := m.scheduleReindex("bigpicture:" + p.Name); err != nil {
+						errs = append(errs, err)
+					}
+				}
+			}
+		}
+	}
 
 	return errors.Join(errs...)
 }

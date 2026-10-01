@@ -19,11 +19,13 @@ import (
 	"github.com/rytsh/krabby/internal/config"
 	"github.com/rytsh/krabby/internal/observability/langfuse"
 	"github.com/rytsh/krabby/internal/service/apicatalog"
+	"github.com/rytsh/krabby/internal/service/bigpicture"
 	"github.com/rytsh/krabby/internal/service/coderag"
 	"github.com/rytsh/krabby/internal/service/credentials"
 	"github.com/rytsh/krabby/internal/service/gitops"
 	"github.com/rytsh/krabby/internal/service/graphbuilder"
 	"github.com/rytsh/krabby/internal/service/graphquery"
+	"github.com/rytsh/krabby/internal/service/mcpclient"
 	"github.com/rytsh/krabby/internal/service/queue"
 	"github.com/rytsh/krabby/internal/service/rag"
 	"github.com/rytsh/krabby/internal/service/registry"
@@ -40,6 +42,8 @@ type Manager struct {
 	graphBuilder *graphbuilder.Builder
 	engine       *graphquery.Engine
 	creds        *credentials.Store
+	externalMCPs *mcpclient.Store
+	bigPictures  *bigpicture.Store
 	codeText     *coderag.TextStore
 	docsText     *rag.TextStore
 

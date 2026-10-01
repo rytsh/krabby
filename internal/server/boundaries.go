@@ -8,10 +8,12 @@ import (
 
 	"github.com/rytsh/krabby/internal/observability/langfuse"
 	"github.com/rytsh/krabby/internal/service/apicatalog"
+	"github.com/rytsh/krabby/internal/service/bigpicture"
 	"github.com/rytsh/krabby/internal/service/coderag"
 	"github.com/rytsh/krabby/internal/service/credentials"
 	"github.com/rytsh/krabby/internal/service/docgen"
 	"github.com/rytsh/krabby/internal/service/manager"
+	"github.com/rytsh/krabby/internal/service/mcpclient"
 	"github.com/rytsh/krabby/internal/service/queue"
 	"github.com/rytsh/krabby/internal/service/rag"
 	"github.com/rytsh/krabby/internal/service/registry"
@@ -138,6 +140,25 @@ type credentialService interface {
 	DeleteCredential(context.Context, string) error
 }
 
+type externalMCPService interface {
+	ListExternalMCPs(context.Context) ([]mcpclient.View, error)
+	SaveExternalMCP(context.Context, string, mcpclient.Config) (mcpclient.View, error)
+	DeleteExternalMCP(context.Context, string) error
+	DiscoverExternalMCP(context.Context, string, mcpclient.Config) (mcpclient.Discovery, error)
+}
+
+type bigPictureService interface {
+	TriggerBigPictureGeneration(context.Context, string) error
+	ListBigPictures(context.Context, bigpicture.ListOptions) (bigpicture.Page, error)
+	BigPicture(context.Context, string) (*bigpicture.Picture, error)
+	SaveBigPicture(context.Context, string, bigpicture.Config) (*bigpicture.Picture, error)
+	DeleteBigPicture(context.Context, string, uint64) error
+	PublishBigPicture(context.Context, string, bigpicture.Publication) (*bigpicture.Snapshot, error)
+	BigPictureSnapshot(context.Context, string, string) (*bigpicture.Snapshot, error)
+	ReadBigPictureDocument(context.Context, string, string, string, int64, int) (*bigpicture.DocumentRead, error)
+	BigPictureSourceOptions(context.Context, string, string, int, int) (manager.PictureSourcePage, error)
+}
+
 type tracingService interface {
 	Tracer() *langfuse.Tracer
 }
@@ -149,23 +170,27 @@ type webhookService interface {
 }
 
 type routeServices struct {
-	system      systemInfoService
-	repos       repoService
-	queue       queueService
-	docs        docsService
-	docsConfig  docsSettingsService
-	sources     sourceService
-	apis        apiCatalogService
-	credentials credentialService
-	tracing     tracingService
-	webhook     webhookService
+	system       systemInfoService
+	repos        repoService
+	queue        queueService
+	docs         docsService
+	docsConfig   docsSettingsService
+	sources      sourceService
+	apis         apiCatalogService
+	credentials  credentialService
+	externalMCPs externalMCPService
+	bigPictures  bigPictureService
+	tracing      tracingService
+	webhook      webhookService
 }
 
 func managerRouteServices(mgr *manager.Manager) routeServices {
 	return routeServices{
 		system: mgr, repos: mgr, queue: mgr, docs: mgr,
 		docsConfig: mgr, sources: mgr, apis: mgr, credentials: mgr,
-		tracing: mgr, webhook: mgr,
+		externalMCPs: mgr,
+		bigPictures:  mgr,
+		tracing:      mgr, webhook: mgr,
 	}
 }
 
@@ -179,6 +204,8 @@ var (
 	_ sourceService       = (*manager.Manager)(nil)
 	_ apiCatalogService   = (*manager.Manager)(nil)
 	_ credentialService   = (*manager.Manager)(nil)
+	_ externalMCPService  = (*manager.Manager)(nil)
+	_ bigPictureService   = (*manager.Manager)(nil)
 	_ tracingService      = (*manager.Manager)(nil)
 	_ webhookService      = (*manager.Manager)(nil)
 )

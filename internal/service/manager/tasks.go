@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/rytsh/krabby/internal/service/apicatalog"
+	"github.com/rytsh/krabby/internal/service/bigpicture"
 	"github.com/rytsh/krabby/internal/service/queue"
 	"github.com/rytsh/krabby/internal/service/registry"
 	"github.com/rytsh/krabby/internal/service/taskstore"
@@ -182,6 +183,11 @@ func (m *Manager) StartTaskQueue() {
 // or whose kind is unknown, so the caller can drop the record.
 func (m *Manager) rebuildTask(spec queue.Spec) (queue.Task, bool) {
 	switch spec.Kind {
+	case pictureTaskKind:
+		if !strings.HasPrefix(spec.ID, "bigpicture:") || strings.TrimPrefix(spec.ID, "bigpicture:") == "" || spec.Params["instance"] == "" || spec.Params["version"] == "" {
+			return queue.Task{}, false
+		}
+		return m.pictureGenerateTask(spec), true
 	case taskKindRefresh:
 		return m.refreshTask(spec.ID, splitTargets(spec.Params["skip"])), true
 
@@ -446,6 +452,9 @@ func (m *Manager) reindexAllTask() queue.Task {
 // why the scope prefixes have to be unambiguous: a repo id can never contain
 // ':', so a prefixed key is always one of the non-repo kinds.
 func (m *Manager) reindexTask(id string) queue.Task {
+	if name := bigpicture.Name(id); name != "" {
+		return queue.Task{ID: id, Kind: taskKindReindex, Title: "Reindex " + id, Key: taskKindReindex + ":" + id, Spec: queue.Spec{Kind: taskKindReindex, ID: id}, Run: func(ctx context.Context) error { return m.indexBigPicture(ctx, name, true) }}
+	}
 	if name := websource.CollectionName(id); name != "" {
 		scope := id
 
