@@ -49,7 +49,7 @@ func TestBuildBundleRollbackClosesNewResources(t *testing.T) {
 	var opens, tracerShutdowns atomic.Int32
 
 	m := &Manager{
-		docs: &docsBundle{},
+		bundleState: bundleState{docs: &docsBundle{}},
 		openVectorStore: func(string) (vectorstore.Store, error) {
 			if opens.Add(1) == 1 {
 				return docsStore, nil
@@ -90,14 +90,14 @@ func TestBuildBundleRollbackRetainsBorrowedTracer(t *testing.T) {
 	var opens, tracerShutdowns atomic.Int32
 
 	m := &Manager{
-		docs: &docsBundle{
+		bundleState: bundleState{docs: &docsBundle{
 			tracer: borrowedTracer,
 			tracerShutdown: func(context.Context) error {
 				tracerShutdowns.Add(1)
 
 				return nil
 			},
-		},
+		}},
 		openVectorStore: func(string) (vectorstore.Store, error) {
 			if opens.Add(1) == 1 {
 				return docsStore, nil
@@ -175,7 +175,7 @@ func TestManagerCloseDrainsQueueBeforeBundle(t *testing.T) {
 	var tracerShutdowns atomic.Int32
 	m := &Manager{
 		queue: queue.New(context.Background(), 1),
-		docs: &docsBundle{
+		bundleState: bundleState{docs: &docsBundle{
 			store:  store,
 			tracer: langfuse.Disabled(),
 			tracerShutdown: func(context.Context) error {
@@ -184,7 +184,7 @@ func TestManagerCloseDrainsQueueBeforeBundle(t *testing.T) {
 
 				return nil
 			},
-		},
+		}},
 	}
 
 	started := make(chan struct{})

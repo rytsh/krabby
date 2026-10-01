@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -46,7 +47,7 @@ func (c *Builder) GraphBuiltWithCurrentVersion(repoPath string) bool {
 	return err == nil && strings.TrimSpace(string(b)) == c.version
 }
 
-// RecordGraphVersion marks a validated graph with the CLI version that built it.
+// RecordGraphVersion marks a validated graph with the engine version that built it.
 func (c *Builder) RecordGraphVersion(repoPath string) error {
 	path := filepath.Join(repoPath, "graphify-out", versionFileName)
 	if err := os.WriteFile(path, []byte(c.version+"\n"), 0o644); err != nil {
@@ -58,7 +59,7 @@ func (c *Builder) RecordGraphVersion(repoPath string) error {
 
 // Exclude returns the install-wide graph ignore patterns, for surfacing the
 // effective configuration of one repository.
-func (c *Builder) Exclude() []string { return c.exclude }
+func (c *Builder) Exclude() []string { return slices.Clone(c.exclude) }
 
 // GraphNeedsIgnoreRebuild reports whether the built graph for repoPath still
 // contains nodes that the current exclude rules should drop, so the refresh path
@@ -84,7 +85,7 @@ func (c *Builder) timeout(ctx context.Context) (context.Context, context.CancelF
 	return ctx, cancel
 }
 
-// Update runs an incremental (or initial) AST-only build for repoPath.
+// Update replaces the graph with a full AST-only build for repoPath.
 // Code-only extraction needs no LLM key. extra carries the repository's own
 // ignore patterns, unioned with the install-wide ones and passed directly to
 // bag without writing files into the clone.

@@ -137,9 +137,9 @@ func TestBuildDocsAndIndexEmptyBundleDefersReindex(t *testing.T) {
 	m := &Manager{
 		// An empty bundle: every capability nil, exactly what Close installs
 		// and what a mid-swap Configure can momentarily expose.
-		docs:     &docsBundle{},
-		queue:    queue.New(ctx, 1),
-		activity: map[string]map[string]struct{}{},
+		bundleState: bundleState{docs: &docsBundle{}},
+		queue:       queue.New(ctx, 1),
+		activity:    map[string]map[string]struct{}{},
 	}
 	t.Cleanup(m.queue.Close)
 
@@ -163,9 +163,9 @@ func TestBuildDocsAndIndexEmptyBundleNoRequeueOnReindexPath(t *testing.T) {
 	ctx := context.Background()
 
 	m := &Manager{
-		docs:     &docsBundle{},
-		queue:    queue.New(ctx, 1),
-		activity: map[string]map[string]struct{}{},
+		bundleState: bundleState{docs: &docsBundle{}},
+		queue:       queue.New(ctx, 1),
+		activity:    map[string]map[string]struct{}{},
 	}
 	t.Cleanup(m.queue.Close)
 
@@ -277,13 +277,13 @@ func TestSettingsReindexFullyRebuildsSemanticIndexes(t *testing.T) {
 		docsRootDir: docsRoot,
 		activity:    map[string]map[string]struct{}{},
 		progress:    map[string]map[string]Progress{},
-		docs: &docsBundle{
+		bundleState: bundleState{docs: &docsBundle{
 			gen:       unchangedDocsGenerator{},
 			rag:       docsRAG,
 			store:     docsStore,
 			codeRag:   codeRAG,
 			codeStore: codeStore,
-		},
+		}},
 	}
 
 	m.buildDocsAndIndex(ctx, repo, nil, false, true)
@@ -331,12 +331,12 @@ func TestConfigureDisabledKeepsVectorsAsInactiveCache(t *testing.T) {
 	m := &Manager{
 		docsVectorsDir: docsDir,
 		codeVectorsDir: codeDir,
-		docs: &docsBundle{
+		bundleState: bundleState{docs: &docsBundle{
 			rag:       &rag.Service{},
 			store:     docsStore,
 			codeRag:   &coderag.Service{},
 			codeStore: codeStore,
-		},
+		}},
 	}
 	if err := m.Configure(ctx, settings.Settings{}); err != nil {
 		t.Fatal(err)

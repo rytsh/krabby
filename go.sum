@@ -386,8 +386,8 @@ github.com/rogpeppe/go-internal v1.14.1/go.mod h1:MaRKkUm5W0goXpeCfT7UZI6fk/L7L7
 github.com/ryanuber/columnize v0.0.0-20160712163229-9b3edd62028f/go.mod h1:sm1tb6uqfes/u+d4ooFouqFdy9/2g9QGwK3SQygK0Ts=
 github.com/ryanuber/go-glob v1.0.0 h1:iQh3xXAumdQ+4Ufa5b25cRpC5TYKlno6hsv6Cb3pkBk=
 github.com/ryanuber/go-glob v1.0.0/go.mod h1:807d1WSdnB0XRJzKNil9Om6lcp/3a0v4qIHxIXzX/Yc=
-github.com/rytsh/bag v0.1.0 h1:ga7R107AAs3VcPIBnQ5I++y9ii8GR0sioQNGMGw9y3Y=
-github.com/rytsh/bag v0.1.0/go.mod h1:WWv7f8oK47pZgLVAg+z6f+oHfxpmy8/CD+lR+Y/HGY0=
+github.com/rytsh/bag v0.1.2 h1:ri6hawQM8k4hI6NZwJjqLq8cDqIdxGhQUsqlzxYxij8=
+github.com/rytsh/bag v0.1.2/go.mod h1:0ZtH01MhlMquKxwthwmHvEjezKZ77pk3B+CWmJIuKcM=
 github.com/scylladb/termtables v0.0.0-20191203121021-c4c0b6d42ff4/go.mod h1:C1a7PQSMz9NShzorzCiG2fk9+xuCgLkPeCvMHYR2OWg=
 github.com/sean-/seed v0.0.0-20170313163322-e2103e2c3529 h1:nn5Wsu0esKSJiIVhscUtVbo7ada43DJhG55ua/hjS5I=
 github.com/sean-/seed v0.0.0-20170313163322-e2103e2c3529/go.mod h1:DxrIzT+xaE7yg65j358z/aeFdxmN0P9QXhEzd20vsDc=

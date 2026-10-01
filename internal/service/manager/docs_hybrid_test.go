@@ -131,7 +131,7 @@ func newHybridFixture(t *testing.T, embedDelay time.Duration, lexicalChunks int)
 		docsText:    text,
 		docsRootDir: docsRoot,
 
-		docs: &docsBundle{rag: ragSvc, store: store},
+		bundleState: bundleState{docs: &docsBundle{rag: ragSvc, store: store}},
 	}
 	m.docsTextWarmed.Store(true)
 
@@ -229,7 +229,7 @@ func TestHybridReportsRankerFailure(t *testing.T) {
 		docsText:    text,
 		docsRootDir: docsRoot,
 
-		docs: &docsBundle{},
+		bundleState: bundleState{docs: &docsBundle{}},
 	}
 	m.docsTextWarmed.Store(true)
 

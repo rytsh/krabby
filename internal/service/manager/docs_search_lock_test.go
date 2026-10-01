@@ -165,7 +165,7 @@ func TestEnsureDocsTextKeySkipsLockedKey(t *testing.T) {
 		docsText:    text,
 		docsRootDir: docsRoot,
 
-		docs: &docsBundle{},
+		bundleState: bundleState{docs: &docsBundle{}},
 	}
 
 	// Simulate a refresh/generate holding the repo lock.

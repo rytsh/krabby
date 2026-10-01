@@ -31,7 +31,7 @@ require (
 	github.com/rakunlabs/logi v0.4.6
 	github.com/rakunlabs/query v0.5.1
 	github.com/rakunlabs/tell v0.1.6
-	github.com/rytsh/bag v0.1.0
+	github.com/rytsh/bag v0.1.2
 	github.com/worldline-go/hardloop v0.3.2
 	github.com/worldline-go/types v0.6.1
 	go.opentelemetry.io/otel v1.46.0

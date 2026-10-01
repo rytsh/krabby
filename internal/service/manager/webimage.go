@@ -38,12 +38,12 @@ type webImageSnapshot struct {
 }
 
 func (m *Manager) imageSnapshot() webImageSnapshot {
-	m.docsMu.RLock()
-	defer m.docsMu.RUnlock()
-	if m.docs == nil {
+	d, release := m.acquireDocs()
+	defer release()
+	if d == nil {
 		return webImageSnapshot{}
 	}
-	return webImageSnapshot{client: m.docs.vision, cfg: m.docs.imageCfg}
+	return webImageSnapshot{client: d.vision, cfg: d.imageCfg}
 }
 
 // enrichWebImages adds cached or freshly generated vision text immediately

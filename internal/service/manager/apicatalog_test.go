@@ -98,7 +98,7 @@ func newAPIManager(t *testing.T, provider apicatalog.Provider) (*Manager, *apica
 		apisRootDir:  t.TempDir(),
 		apiStore:     store,
 		apiProviders: map[string]apicatalog.Provider{"fake": provider},
-		docs:         &docsBundle{},
+		bundleState:  bundleState{docs: &docsBundle{}},
 	}
 	t.Cleanup(m.queue.Close)
 
@@ -149,10 +149,10 @@ func newIndexedAPIManager(
 		apiStore:     store,
 		apiProviders: map[string]apicatalog.Provider{"fake": provider},
 		docsText:     text,
-		docs: &docsBundle{
+		bundleState: bundleState{docs: &docsBundle{
 			rag:   rag.New(config.RAG{ChunkSize: 200, ChunkOverlap: 40}, emb, vectors),
 			store: vectors,
-		},
+		}},
 	}
 	t.Cleanup(m.queue.Close)
 

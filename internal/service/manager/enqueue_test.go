@@ -149,9 +149,9 @@ func TestSettingsSaveReportsReindexEnqueueFailure(t *testing.T) {
 
 	wantErr := errors.New("task store unavailable")
 	m := &Manager{
-		queue:    queue.New(context.Background(), 1),
-		docs:     &docsBundle{},
-		settings: settingsStore,
+		queue:       queue.New(context.Background(), 1),
+		bundleState: bundleState{docs: &docsBundle{}},
+		settings:    settingsStore,
 	}
 	t.Cleanup(m.queue.Close)
 	bootstrapFailingTaskStore(t, m, wantErr)

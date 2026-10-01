@@ -8,6 +8,7 @@ import (
 
 	"github.com/rakunlabs/bw"
 
+	"github.com/rytsh/krabby/internal/service/searchutil"
 	"github.com/rytsh/krabby/internal/service/vectorstore"
 )
 
@@ -88,12 +89,12 @@ func BenchmarkLexicalSearch(b *testing.B) {
 
 		for _, tt := range []struct {
 			name string
-			stop StopWords
+			stop searchutil.StopWords
 		}{
 			{"unfiltered", nil},
 			{"frequent-filtered", store.FrequentTerms(ctx)},
 		} {
-			query := LexicalQuery(benchQuestion, tt.stop)
+			query := searchutil.LexicalQuery(benchQuestion, tt.stop)
 
 			b.Run(fmt.Sprintf("n=%d/%s", n, tt.name), func(b *testing.B) {
 				for b.Loop() {
@@ -126,9 +127,9 @@ func BenchmarkRefreshStats(b *testing.B) {
 }
 
 func BenchmarkLexicalQueryBuild(b *testing.B) {
-	stop := NewStopWords([]string{"how", "does", "the", "a", "is"})
+	stop := searchutil.NewStopWords([]string{"how", "does", "the", "a", "is"})
 
 	for b.Loop() {
-		_ = LexicalQuery(benchQuestion, stop)
+		_ = searchutil.LexicalQuery(benchQuestion, stop)
 	}
 }

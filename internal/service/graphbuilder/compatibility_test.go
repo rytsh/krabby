@@ -32,6 +32,23 @@ func TestClientReportsVersion(t *testing.T) {
 	}
 }
 
+func TestExcludeDoesNotExposeBuilderConfiguration(t *testing.T) {
+	input := []string{"vendor/**"}
+	builder := graphbuilder.New(time.Minute, input)
+	input[0] = "input-mutated"
+	got := builder.Exclude()
+	if got[0] != "vendor/**" {
+		t.Fatalf("constructor retained input slice: %v", got)
+	}
+	got[0] = "result-mutated"
+	if next := builder.Exclude(); next[0] != "vendor/**" {
+		t.Fatalf("Exclude exposed internal slice: %v", next)
+	}
+	if got := graphbuilder.New(time.Minute, nil).Exclude(); got != nil {
+		t.Fatalf("nil excludes = %v, want nil", got)
+	}
+}
+
 func TestBagLibraryCompatibility(t *testing.T) {
 	builder := graphbuilder.New(2*time.Minute, nil)
 	if got := builder.Version(); got != graphbuilder.TestedVersion {

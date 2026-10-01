@@ -159,7 +159,7 @@ func newReconcileManagerWithDeps(
 		webStore:       webStore,
 		webFetchers:    map[string]websource.Fetcher{"fake": fetcher},
 		docsText:       docsText,
-		docs:           &docsBundle{rag: ragSvc, store: store},
+		bundleState:    bundleState{docs: &docsBundle{rag: ragSvc, store: store}},
 	}
 	t.Cleanup(m.queue.Close)
 

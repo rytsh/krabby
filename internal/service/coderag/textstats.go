@@ -10,7 +10,7 @@ import (
 
 	"github.com/rakunlabs/bw"
 
-	"github.com/rytsh/krabby/internal/service/rag"
+	"github.com/rytsh/krabby/internal/service/searchutil"
 )
 
 // The code index needs the same corpus-derived query tuning the documentation
@@ -46,18 +46,18 @@ type codeStats struct {
 // it only changes when the index is rebuilt.
 type statsCache struct {
 	mu     sync.RWMutex
-	terms  rag.StopWords
+	terms  searchutil.StopWords
 	loaded bool
 }
 
-func (c *statsCache) get() (rag.StopWords, bool) {
+func (c *statsCache) get() (searchutil.StopWords, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
 	return c.terms, c.loaded
 }
 
-func (c *statsCache) set(terms rag.StopWords) {
+func (c *statsCache) set(terms searchutil.StopWords) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -76,7 +76,7 @@ func (c *statsCache) invalidate() {
 // FrequentTerms returns the terms the indexed source itself shows to be too
 // common to be worth searching. Nil means the statistics have not been
 // computed yet, which simply means no filtering.
-func (s *TextStore) FrequentTerms(ctx context.Context) rag.StopWords {
+func (s *TextStore) FrequentTerms(ctx context.Context) searchutil.StopWords {
 	if terms, ok := s.stats.get(); ok {
 		return terms
 	}
@@ -87,9 +87,9 @@ func (s *TextStore) FrequentTerms(ctx context.Context) rag.StopWords {
 		return nil
 	}
 
-	var terms rag.StopWords
+	var terms searchutil.StopWords
 	if rec != nil {
-		terms = rag.NewStopWords(rec.Frequent)
+		terms = searchutil.NewStopWords(rec.Frequent)
 	}
 
 	s.stats.set(terms)
@@ -116,14 +116,14 @@ func (s *TextStore) RefreshStats(ctx context.Context) error {
 		return nil
 	}
 
-	if prev, err := s.statsBucket.Get(ctx, codeStatsRecordID); err == nil && prev != nil && rag.StatsFresh(prev.Total, total) {
+	if prev, err := s.statsBucket.Get(ctx, codeStatsRecordID); err == nil && prev != nil && searchutil.StatsFresh(prev.Total, total) {
 		return nil
 	}
 
 	// The walk is strided across the whole bucket. Chunk ids are
 	// repo-prefixed, so a prefix of the walk would measure one repository's
 	// vocabulary rather than the corpus's.
-	sampler := rag.NewFrequentTermSampler(total)
+	sampler := searchutil.NewFrequentTermSampler(total)
 
 	// Only the chunk text is offered. Path and symbol are indexed too, but a
 	// path segment shared by most of a repository ("internal", "service") is
@@ -153,7 +153,7 @@ func (s *TextStore) RefreshStats(ctx context.Context) error {
 		return fmt.Errorf("save code search stats; %w", err)
 	}
 
-	s.stats.set(rag.NewStopWords(frequent))
+	s.stats.set(searchutil.NewStopWords(frequent))
 
 	slog.Info("code search stats refreshed",
 		"chunks", total, "sampled", sampled, "frequent_terms", len(frequent))

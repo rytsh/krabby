@@ -589,9 +589,10 @@ func (m *Manager) ImportWebPages(ctx context.Context, name string, imports []Web
 	}
 
 	select {
-	case result := <-resultCh:
-		return result.result, result.err
 	case <-handle.Done():
+		// Run publishes its result before the queue records the terminal state.
+		// Wait for the handle so callers also observe completed task history,
+		// rather than racing a task that still appears to be running.
 		select {
 		case result := <-resultCh:
 			return result.result, result.err

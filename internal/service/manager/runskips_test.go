@@ -280,11 +280,11 @@ func newSkipTestManager(
 		docsRootDir: docsRoot,
 		activity:    map[string]map[string]struct{}{},
 		progress:    map[string]map[string]Progress{},
-		docs: &docsBundle{
+		bundleState: bundleState{docs: &docsBundle{
 			gen:   gen,
 			rag:   rag.New(config.RAG{ChunkSize: 80, ChunkOverlap: 20}, emb, docsStore),
 			store: docsStore,
-		},
+		}},
 	}
 
 	return m, reg, docsStore, docsRoot

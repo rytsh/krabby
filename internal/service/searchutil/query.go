@@ -1,4 +1,5 @@
-package rag
+// Package searchutil contains corpus-independent lexical query and sampling helpers.
+package searchutil
 
 import (
 	"strings"
