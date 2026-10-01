@@ -4,6 +4,7 @@
   // document ranks.
   import { onDestroy, onMount } from "svelte";
   import { api } from "../lib/api.js";
+  import { docsSearchPage } from "../lib/search-results.js";
   import { fmtDate } from "../lib/format.js";
   import Icon from "../lib/Icon.svelte";
   import InfoTip from "../lib/InfoTip.svelte";
@@ -78,6 +79,8 @@
   const hasSavedDocsTop = Number.isInteger(savedDocsTop) && savedDocsTop >= 1 && savedDocsTop <= 20;
   let docsTop = $state(hasSavedDocsTop ? savedDocsTop : 3);
   let results = $state(null); // null = not searched yet
+  let resultNote = $state("");
+  let resultDocsMode = $state("");
   let total = $state(0);
   let page = $state(1);
   // Regex search reports whether it saw the whole corpus or stopped at its
@@ -149,7 +152,10 @@
               path: pathFilter.trim(),
             });
       if (seq !== searchSeq) return;
-      results = searchScope === "docs" ? (Array.isArray(response) ? response : []) : response?.results || [];
+      const docsPage = searchScope === "docs" ? docsSearchPage(response, searchMode) : null;
+      results = docsPage ? docsPage.results : response?.results || [];
+      resultNote = docsPage?.note || "";
+      resultDocsMode = docsPage?.mode || "";
       total = searchScope === "docs" ? results.length : response?.total || 0;
       page = searchScope === "docs" ? 1 : response?.page || nextPage;
       resultsExhaustive = response?.exhaustive !== false;
@@ -158,6 +164,7 @@
       // A cancelled request already restored the UI; it is not an error.
       if (seq !== searchSeq || e?.name === "AbortError") return;
       error = e.message;
+      resultNote = "";
       results = [];
       total = 0;
     } finally {
@@ -172,6 +179,8 @@
     searchSeq++;
     abortSearch();
     results = null;
+    resultNote = "";
+    resultDocsMode = "";
     total = 0;
     page = 1;
     error = "";
@@ -491,7 +500,7 @@
 
 {#if results !== null && !loading}
   {#if results.length === 0 && !error}
-    <div class="card p-6 text-center text-dim">No matches.</div>
+    <div class="card p-6 text-center text-dim">{resultNote || "No matches."}</div>
   {:else}
     <div class="mb-2 flex items-center justify-between text-[12px] text-faint">
       <span>
@@ -517,8 +526,8 @@
                 {#if r.updated_at && !r.updated_at.startsWith("0001")}
                   <span title="last updated">{fmtDate(r.updated_at)}</span>
                 {/if}
-                <span title={docsMode === "hybrid" ? "Fused rank score; comparable only within this result list." : ""}>
-                  {docsMode === "semantic" ? pct(r.score) : docsMode === "lexical" ? `BM25 ${r.score.toFixed(2)}` : `RRF ${r.score.toFixed(4)}`}
+                <span title={resultDocsMode === "hybrid" ? "Fused rank score; comparable only within this result list." : ""}>
+                  {resultDocsMode === "semantic" ? pct(r.score) : resultDocsMode === "lexical" ? `BM25 ${r.score.toFixed(2)}` : `RRF ${r.score.toFixed(4)}`}
                 </span>
               </span>
             </div>
