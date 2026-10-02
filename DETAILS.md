@@ -461,7 +461,7 @@ REST API or MCP tools. The most specific pattern wins.
 Open **Settings → External MCPs** (`#/settings/external-mcps`) to configure
 outbound connections. These are independent of Krabby's own `/mcp`, `/mcp/api`
 and `/mcp/admin` servers. This first integration provides connection management
-and live catalog discovery; Big Picture research separately reads exact granted resource URIs without executing external tools.
+and live catalog discovery; Big Picture research reads exact granted resource URIs and may call granted tools (see *MCP lookups*).
 
 Only remote **Streamable HTTP** endpoints are supported. Supply an HTTP(S) URL,
 an optional bearer token or custom authentication headers, and a timeout of
@@ -479,8 +479,8 @@ Remote errors are deliberately reduced to a safe stage-specific message.
 
 No tools or resources are granted by default. Select explicit tool names and
 resource URIs/templates, then save the connection. Big Picture generation reads
-granted exact resource URIs; tool and template grants remain configuration for a
-future research runner, not execution endpoints. Read-only hints are unverified
+granted exact resource URIs and can call **granted tools** during research; template
+grants are not expanded. Grant only read-only tools: read-only hints are unverified
 and never automatically grant access. Disabled connections remain manually
 testable but are rejected by research jobs.
 
@@ -509,17 +509,53 @@ transit. Custom protocol, cookie and proxy headers cannot be overridden.
 ## Big Picture workspaces
 
 Open **Big Pictures** in the UI to create an architecture workspace. Give it a
-stable name, display title, namespace, research prompt and 1–50 explicit source
-references. Source kinds are `repo` (full repository ID), `namespace` (repository namespace), `web` (collection name),
+stable name, display title, namespace, research prompt and 1–500 explicit source
+references. Source kinds are `repo` (full repository ID), `namespace` (repository namespace), `repo_pattern` (repository ID glob), `web` (collection name),
 `bigpicture` (another workspace's name), `api` (catalogued service name) and `mcp` (saved external connection name).
 Selections are validated against existing records. A repository can participate
-in multiple workspaces without changing its own namespace.
+in multiple workspaces without changing its own namespace. Up to 500 sources can be
+selected; a namespace or pattern counts once however many repositories it covers.
+
+### Integration profiles and large pictures
+
+Repository documentation generation also writes `integration.md` next to
+`documentation.md`: a compact profile with fixed sections (Role, Exposes, Calls,
+Publishes, Consumes, Data stores, Deployment, Configuration, Dependencies) that
+keeps identifiers such as topic names and routes verbatim. Big Picture research
+reads it before anything else from a repository, because those identifiers are
+what connect a producer in one repository to a consumer in another. It costs one
+extra model call per changed repository and can be turned off under
+**Settings → Docs → Generate integration profiles**. Regenerate a repository's docs
+once to create its profile.
+
+Each source gets at least 48 KiB of research material, however many sources are
+selected. When the total exceeds 256 KiB, research is condensed before synthesis:
+each source becomes one note (repositories with an integration profile use it
+directly, small sources are passed through, others get one model call), and notes
+are merged in batches until they fit. Citations to a condensed note record every
+source it covers. Notes are cached per workspace by content hash, so a scheduled
+update only re-condenses sources whose collected content changed. Generation runs
+time out after two hours.
+
+Choose **Repository pattern** under Sources to select every repository whose ID
+matches a glob, such as `github.com/acme/**` (`*` matches one path segment, `**`
+any number; matching is case-insensitive and a trailing `/` means the whole
+subtree). Like namespaces, the pattern is one source reference that is
+re-evaluated on each run, so repositories added later are included.
+
+Web sources (Jira, Confluence, pages), API docs and external MCP resources only
+contribute content related to the workspace: their indexed documents are searched
+with terms from the title, description, prompt and selected repository names,
+and MCP resources that mention none of those terms are skipped. A source with no
+related content is skipped and noted in `research.md`; its unused budget goes to
+the remaining sources. Collections without a lexical index fall back to the
+previous file-name sampling.
 
 Choose **Repository namespaces** under Sources to include all current repositories
 in a namespace as one source reference, including repositories added later.
 Namespace selectors expand on each research run; overlapping repository selections
-are deduplicated. The total 256 KiB research budget is shared across expanded
-repositories, and citations retain both the namespace and repository-qualified
+are deduplicated. Each expanded repository is its own research source (see
+*Integration profiles and large pictures*), and citations retain both the namespace and repository-qualified
 locator. This does not change the workspace's independent namespace label.
 
 Choose **Big Pictures** under Sources to synthesize a higher-level architecture
@@ -550,13 +586,14 @@ instance, configuration version and publication preconditions. Stale jobs fail
 instead of overwriting new work or targeting a deleted/recreated workspace.
 
 This first automatic research stage uses **deterministic bounded collection**,
-not an autonomous tool-calling agent. It uses 256 KiB of source text total,
-divided among selected sources, and at most 16 KiB per raw item.
+not an autonomous tool-calling agent. Each source gets an even share of 256 KiB, but
+at least 48 KiB, and at most 16 KiB per raw item; research beyond 256 KiB is
+condensed per source before synthesis.
 
 Repository sources contribute derived evidence first, so the bounded window covers
 the whole repository rather than a handful of files:
 
-- `krabby-docs/…`: Krabby's generated repository documentation (up to 24 KiB).
+- `krabby-docs/…`: Krabby's generated repository documentation (up to 24 KiB), integration profile first.
   It is model-written; a note flags it when it predates the latest commit.
 - `krabby:communication-signals`: code-index lines matching messaging
   (Kafka/AMQP/NATS/SQS…), RPC/HTTP clients and routes, and endpoint configuration,
@@ -577,11 +614,33 @@ content. Unavailable selected sources or failed reads stop publication.
 
 External MCP reads require **exact saved URI grants**, reloaded before each read.
 Disabled connections and ungranted URIs are rejected before networking. Selecting
-a connection does not widen grants. Resource templates, external tools, sampling
-and elicitation are not executed. Revocation applies to subsequent requests, not
+a connection does not widen grants. Resource templates, sampling and elicitation
+are not executed; granted tools are called only through MCP lookups. Revocation applies to subsequent requests, not
 an already in-flight read. Existing discovery HTTP/session response budgets,
 timeouts and redirect blocking also apply to resource reads; binary resource
 parts are omitted and marked truncated. Remote error messages are never surfaced.
+
+### MCP lookups
+
+Research can follow identifiers found in repositories into a selected MCP source,
+for example a config server exposing Consul and Vault. Say what to look up in the
+research prompt, such as *"look up the config paths used in the code (e.g. in
+config.go) in the consul and vault sections of the config MCP"*, select the MCP
+connection as a source and grant its lookup tool (for example `get_config`).
+
+After collection, the model receives the prompt, the connection's resource names
+(its sections), the granted tools with their input schemas and the collected
+repository material, and plans up to 40 calls. Krabby runs a call only when the
+tool is granted and every string argument occurs verbatim in the repository
+material or is one of the listed section names, so neither the model nor text
+injected into a source can query arbitrary paths. Results are attached as
+evidence of the MCP source (locator `tool:<name>{arguments}`), with
+credential-looking values and URL passwords masked (best effort). Rejected and
+failed calls are listed in `research.md`. The plan is cached by input; tools are
+called on every run, so a configuration change also updates the picture.
+
+Prefer tools that list keys or return non-secret configuration. Masking is not a
+DLP guarantee: do not grant tools that return secret values, such as Vault reads.
 
 Common `.env`, secret/credential-named files and PEM/key files are skipped, but
 this is **not guaranteed secret redaction**: ordinary configuration/source files

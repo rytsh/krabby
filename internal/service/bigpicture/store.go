@@ -32,6 +32,9 @@ const (
 	MaxDocumentBytes    = 256 << 10
 	MaxPublicationBytes = 4 << 20
 	MaxRevisions        = 10
+	// MaxSources bounds explicit selections; each namespace or pattern counts
+	// once however many repositories it expands to.
+	MaxSources = 500
 )
 
 var (
@@ -251,20 +254,27 @@ func NormalizeConfig(cfg Config) (Config, error) {
 	if !namePattern.MatchString(cfg.Name) || !namePattern.MatchString(cfg.Namespace) || cfg.Title == "" || len(cfg.Title) > 256 || len(cfg.Description) > 4096 || cfg.Prompt == "" || len(cfg.Prompt) > 32768 {
 		return cfg, fmt.Errorf("%w: valid name/namespace, title and prompt are required (title ≤256, description ≤4096, prompt ≤32768 bytes)", ErrInvalid)
 	}
-	if len(cfg.Sources) == 0 || len(cfg.Sources) > 50 {
-		return cfg, fmt.Errorf("%w: select between 1 and 50 sources", ErrInvalid)
+	if len(cfg.Sources) == 0 || len(cfg.Sources) > MaxSources {
+		return cfg, fmt.Errorf("%w: select between 1 and %d sources", ErrInvalid, MaxSources)
 	}
 	sources := make([]Source, 0, len(cfg.Sources))
 	seen := map[Source]bool{}
 	for _, source := range cfg.Sources {
 		source.Ref = strings.TrimSpace(source.Ref)
 		switch source.Kind {
-		case "repo", "namespace", "bigpicture", "web", "api", "mcp":
+		case "repo", "namespace", "repo_pattern", "bigpicture", "web", "api", "mcp":
 			if source.Kind == "namespace" {
 				source.Ref = NormalizeNamespace(source.Ref)
 				if !namePattern.MatchString(source.Ref) {
 					return cfg, fmt.Errorf("%w: invalid repository namespace", ErrInvalid)
 				}
+			}
+			if source.Kind == "repo_pattern" {
+				pattern, err := NormalizeRepoPattern(source.Ref)
+				if err != nil {
+					return cfg, err
+				}
+				source.Ref = pattern
 			}
 		default:
 			return cfg, fmt.Errorf("%w: unknown source kind", ErrInvalid)

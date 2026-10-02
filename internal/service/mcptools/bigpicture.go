@@ -77,7 +77,7 @@ func addPictureTools(server *mcp.Server, service pictureReadService) {
 
 type savePictureArgs struct {
 	ExistingName string `json:"existing_name,omitempty" jsonschema:"omit to create; set to update that immutable workspace name"`
-	Config       string `json:"config" jsonschema:"JSON object string: name,title,namespace,description,prompt,sources:[{kind:repo|namespace|bigpicture|web|api|mcp,ref}],expected_version,schedule:[cron specs]. Namespace sources include all current repositories in that repository namespace at each run. Bigpicture sources read latest published documents from another workspace by name; self-references and cycles are forbidden. Schedule authorizes recurring source disclosure to model/traces; [] disables, omitted keeps the saved schedule. Update requires current version"`
+	Config       string `json:"config" jsonschema:"JSON object string: name,title,namespace,description,prompt,sources:[{kind:repo|namespace|repo_pattern|bigpicture|web|api|mcp,ref}],expected_version,schedule:[cron specs]. Namespace sources include all current repositories in that repository namespace at each run. repo_pattern refs are repository id globs (e.g. github.com/acme/** ; * matches one segment, ** any number) resolved at each run. Web/API/MCP sources contribute only content relevant to the research prompt; granted tools of selected MCP sources may be called with values found in the repositories, as the prompt directs. Bigpicture sources read latest published documents from another workspace by name; self-references and cycles are forbidden. Schedule authorizes recurring source disclosure to model/traces; [] disables, omitted keeps the saved schedule. Update requires current version"`
 }
 type publishPictureArgs struct {
 	Name        string `json:"name"`

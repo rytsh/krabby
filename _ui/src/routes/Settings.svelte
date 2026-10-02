@@ -543,6 +543,18 @@
         <input class="input" bind:value={docsDraft.docs_summary_model} placeholder="e.g. google-ai/gemini-2.5-flash" />
       </label>
     </div>
+    <label class="mt-3 flex items-start gap-2 text-[13px]">
+      <input
+        class="mt-1"
+        type="checkbox"
+        checked={!docsDraft.docs_skip_integration_profile}
+        onchange={(e) => (docsDraft.docs_skip_integration_profile = !e.currentTarget.checked)}
+      />
+      <span>
+        Generate integration profiles
+        <span class="block text-[12px] text-faint">Also writes integration.md per repository: endpoints, calls, Kafka topics, data stores and deployment in a fixed structure. Big Pictures read it first, which keeps large multi-repository pictures accurate and cheap. One extra model call per changed repository.</span>
+      </span>
+    </label>
 
     <!-- Vision analysis for images in web pages -->
     <div class="mb-2 mt-6 text-[13px] font-semibold text-dim">Web image analysis</div>

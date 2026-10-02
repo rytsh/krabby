@@ -45,6 +45,10 @@ type Settings struct {
 	// the built-in default) instead of replacing it, so an install-wide house
 	// rule does not force restating the default prompt's constraints.
 	DocsPromptExtra string `bw:"docs_prompt_extra" json:"docs_prompt_extra"`
+	// DocsSkipIntegrationProfile disables integration.md, the per-repository
+	// profile Big Picture research reads first. False (the zero value) keeps
+	// it on, including for records migrated from earlier versions.
+	DocsSkipIntegrationProfile bool `bw:"docs_skip_integration_profile" json:"docs_skip_integration_profile"`
 	// Input budgets for documentation generation. Zero uses the built-in
 	// defaults (see config.DocsLimits). Raise DocsMaxSourceBytes for repos
 	// whose value sits in a few very large files, which are otherwise
@@ -453,6 +457,8 @@ type Patch struct {
 	DocsPrompt       *string   `json:"docs_prompt"`
 	DocsPromptExtra  *string   `json:"docs_prompt_extra"`
 
+	DocsSkipIntegrationProfile *bool `json:"docs_skip_integration_profile"`
+
 	DocsMaxSourceBytes    *int `json:"docs_max_source_bytes"`
 	DocsMaxGroupBytes     *int `json:"docs_max_group_bytes"`
 	DocsMaxSynthesisBytes *int `json:"docs_max_synthesis_bytes"`
@@ -569,7 +575,7 @@ func (p Patch) RuntimeOnly() bool {
 		p.DocsEnabled == nil && p.DocsConcurrency == nil &&
 		p.DocsSummaryModel == nil && p.DocsMaxGroups == nil &&
 		p.DocsInclude == nil && p.DocsIncludeExtra == nil && p.DocsExclude == nil && p.DocsPrompt == nil &&
-		p.DocsPromptExtra == nil && p.DocsMaxSourceBytes == nil && p.DocsMaxGroupBytes == nil &&
+		p.DocsPromptExtra == nil && p.DocsSkipIntegrationProfile == nil && p.DocsMaxSourceBytes == nil && p.DocsMaxGroupBytes == nil &&
 		p.DocsMaxSynthesisBytes == nil &&
 		p.LLMBaseURL == nil && p.LLMAPIKey == nil && p.LLMModel == nil && p.LLMTimeout == nil &&
 		p.WebImageAnalysisEnabled == nil && p.WebImageModel == nil && p.WebImageMaxPerPage == nil &&
@@ -646,6 +652,9 @@ func (p Patch) Apply(base Settings) Settings {
 	}
 	if p.DocsPromptExtra != nil {
 		base.DocsPromptExtra = *p.DocsPromptExtra
+	}
+	if p.DocsSkipIntegrationProfile != nil {
+		base.DocsSkipIntegrationProfile = *p.DocsSkipIntegrationProfile
 	}
 	if p.DocsMaxSourceBytes != nil {
 		base.DocsMaxSourceBytes = *p.DocsMaxSourceBytes
@@ -854,7 +863,8 @@ type Store struct {
 	bucket *bw.Bucket[Settings]
 }
 
-// settingsSchemaVersion v18 adds embed_task_mode and code_embed_task_mode;
+// settingsSchemaVersion v19 adds docs_skip_integration_profile; false keeps
+// the integration profile on, so migrated records need no backfill. v18 adds embed_task_mode and code_embed_task_mode;
 // empty migrates to standard behavior. v17 adds ui_hide_github_link; its zero value keeps the
 // link visible, so records migrated from v16 need no backfill. v16 adds embed_input_mode and code_embed_input_mode;
 // an empty value behaves as "batch", so records migrated from v15 need no
@@ -878,7 +888,7 @@ type Store struct {
 // docs_summary_model; v4 docs_max_groups; v3 embed_concurrency /
 // code_embed_concurrency. Bumping the version lets bw migrate existing settings
 // records in place.
-const settingsSchemaVersion = 18
+const settingsSchemaVersion = 19
 
 // New opens the settings bucket. If no record exists yet, seed is persisted as
 // the initial configuration (seeded from file/env config by the caller).

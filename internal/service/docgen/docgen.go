@@ -56,6 +56,9 @@ type Manifest struct {
 	// Summaries is the internal per-file summary cache used for incremental
 	// regeneration and as synthesis input. Not exposed by ListDocs.
 	Summaries []DocMeta `json:"summaries,omitempty"`
+	// ProfileHash is the hash of the prompt that produced integration.md, so
+	// a prompt change regenerates the profile without touching anything else.
+	ProfileHash string `json:"profile_hash,omitempty"`
 
 	// ChangedDocs reports whether this run rewrote any user-facing document.
 	// In-memory only (not persisted): callers use it to skip re-indexing when
@@ -68,6 +71,10 @@ const ManifestName = "docs-index.json"
 
 // DocName is the single comprehensive documentation file.
 const DocName = "documentation.md"
+
+// ProfileName is the compact integration profile: the facts other systems and
+// cross-repository (Big Picture) research need, in a fixed structure.
+const ProfileName = "integration.md"
 
 // docsDirName is the in-clone directory krabby writes generated docs to when
 // no external docs root is configured; it is never itself documented.
@@ -213,6 +220,60 @@ Formatting rules:
 - Mermaid labels may be wrapped in double quotes, for example A["Load config"].
   Never put another literal or escaped double quote inside an already quoted
   label. Rephrase the label instead of nesting or escaping quotes.`
+
+// ProfilePrompt produces integration.md: a compact, fixed-structure profile
+// of how this repository connects to the rest of the system. Big Picture
+// research reads it first, so its headings and exact identifiers are what let
+// a cross-repository synthesis join a producer in one repo to a consumer in
+// another.
+const ProfilePrompt = `You are writing the INTEGRATION PROFILE of one repository for an
+architecture team that will combine profiles from many repositories into a
+system-wide picture. You are given dense per-file summaries and, when available,
+a knowledge-graph overview. Output compact GitHub-flavored Markdown with EXACTLY
+these level-2 sections, in this order, and nothing else:
+
+## Role
+One to three sentences: what this repository is (service, library, frontend,
+job, infrastructure, ...) and the business capability it owns.
+
+## Exposes
+HTTP/gRPC/GraphQL endpoints served (METHOD /path or service.Method), CLIs,
+library packages other code imports. One bullet each.
+
+## Calls
+Outbound HTTP/gRPC calls and the target service, host or base-URL config key.
+
+## Publishes
+Messages/events produced: broker (Kafka, RabbitMQ, SQS, ...), topic/queue/exchange
+name and payload type.
+
+## Consumes
+Messages/events consumed: broker, topic/queue, consumer group, handler.
+
+## Data stores
+Databases, tables/collections, caches, buckets and whether it reads, writes or owns them.
+
+## Deployment
+How it is built and deployed (container, Helm chart, Kubernetes kind, serverless,
+cron schedule) and the environments named in the input.
+
+## Configuration
+Only environment variables / config keys that point at OTHER systems (URLs,
+hosts, topics, queues, databases). Names only, never values.
+
+## Dependencies
+Internal shared libraries and notable third-party platforms (auth provider,
+payment gateway, ...).
+
+Rules:
+- Use exact identifiers verbatim from the input (topic names, routes, table
+  names, env vars, service names) in backticks. These are join keys; never
+  paraphrase or abbreviate them.
+- Cite the source file path in parentheses after each bullet when known.
+- Write "None found in the analysed sources." for an empty section; never invent
+  entries. The input may be partial, so this is not proof of absence.
+- Never include secret values, credentials or tokens.
+- No diagrams, no prose introduction, no other sections.`
 
 // groupSummaryPrompt is the internal prompt for the grouped (per-community)
 // summary phase. It summarizes several related files in one call, emitting one
@@ -440,14 +501,33 @@ func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir st
 		docs = append(docs, *docMeta)
 	}
 
+	profileHash := ""
+	var profileMeta *DocMeta
+	var profiled bool
+	var profileErr error
+	if !g.cfg.SkipIntegrationProfile {
+		profileHash = hashString(ProfilePrompt)
+		profileMeta, profiled, profileErr = g.maybeProfile(ctx, repo, docsDir, graph, summaries, priorMan, regen, profileHash, limits)
+	}
+	if profileMeta != nil {
+		docs = append(docs, *profileMeta)
+	}
+	if profileErr != nil {
+		// The profile is supplementary: keep documentation.md and retry it on
+		// the next build rather than failing the whole stage.
+		slog.Warn("generate integration profile", "repo", repo, "error", profileErr)
+		profileHash = ""
+	}
+
 	man = &Manifest{
 		Repo:        repo,
 		Model:       g.llm.Model(),
 		PromptHash:  promptHash,
+		ProfileHash: profileHash,
 		Generated:   time.Now(),
 		Docs:        docs,
 		Summaries:   summaries,
-		ChangedDocs: synthesized,
+		ChangedDocs: synthesized || profiled,
 	}
 
 	if err := writeManifest(docsDir, man); err != nil {
@@ -957,6 +1037,73 @@ func (g *llmGenerator) maybeSynthesize(
 	return &DocMeta{
 		Path:      DocName,
 		Title:     "Documentation",
+		Generated: time.Now(),
+	}, true, nil
+}
+
+// maybeProfile produces integration.md from the same summaries as
+// documentation.md, reusing the previous profile when no summary changed and
+// the profile prompt is the same. On failure the previous profile, if any, is
+// kept so a transient model error does not drop it from the docs set.
+func (g *llmGenerator) maybeProfile(
+	ctx context.Context,
+	repo, docsDir string,
+	graph *graphquery.Graph,
+	summaries []DocMeta,
+	priorMan *Manifest,
+	regen int,
+	profileHash string,
+	limits config.DocsLimits,
+) (*DocMeta, bool, error) {
+	docAbs := filepath.Join(docsDir, ProfileName)
+
+	var prior *DocMeta
+	if priorMan != nil {
+		for i := range priorMan.Docs {
+			if priorMan.Docs[i].Path == ProfileName {
+				if _, err := os.Stat(docAbs); err == nil {
+					prior = &priorMan.Docs[i]
+				}
+			}
+		}
+	}
+
+	if prior != nil && regen == 0 && priorMan.ProfileHash == profileHash && len(priorMan.Summaries) == len(summaries) {
+		return prior, false, nil
+	}
+
+	if len(summaries) == 0 {
+		return prior, false, nil
+	}
+
+	var user strings.Builder
+	fmt.Fprintf(&user, "Repository: %s\n\n", repo)
+
+	if graph != nil {
+		user.WriteString("Knowledge-graph overview:\n")
+		user.WriteString(graph.OverviewContext(0, 0))
+		user.WriteString("\n\n")
+	}
+
+	user.WriteString("Per-file summaries:\n\n")
+	user.WriteString(joinSummaries(docsDir, summaries, limits.MaxSynthesisBytes))
+
+	out, _, err := g.llm.CompleteOp(ctx, "chat.profile", []llm.Message{
+		{Role: "system", Content: ProfilePrompt},
+		{Role: "user", Content: user.String()},
+	})
+	if err != nil {
+		return prior, false, err
+	}
+
+	markdown := fmt.Sprintf("# %s integration profile\n\n%s\n", repo, strings.TrimSpace(out))
+	if err := os.WriteFile(docAbs, []byte(markdown), 0o644); err != nil { //nolint:gosec // docs are non-secret
+		return prior, false, fmt.Errorf("write %s; %w", ProfileName, err)
+	}
+
+	return &DocMeta{
+		Path:      ProfileName,
+		Title:     "Integration profile",
 		Generated: time.Now(),
 	}, true, nil
 }

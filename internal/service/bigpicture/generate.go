@@ -16,6 +16,9 @@ type Research struct {
 	Items    []ResearchItem `json:"items"`
 	Notes    []string       `json:"notes"`
 	Previous []Document     `json:"previous_documents,omitempty"`
+	// Collected holds the original evidence when Items were condensed, so the
+	// research report still lists everything that was read.
+	Collected []ResearchItem `json:"-"`
 }
 
 type ResearchItem struct {
@@ -23,6 +26,30 @@ type ResearchItem struct {
 	Evidence  Evidence `json:"evidence"`
 	Content   string   `json:"content"`
 	Truncated bool     `json:"truncated"`
+	// Covers lists the further evidence a condensed note was built from.
+	// Citing the note cites these too; never sent to the model.
+	Covers []Evidence `json:"-"`
+}
+
+// citations returns the evidence recorded for citing item, bounded so a
+// page citing a broad merged note stays within the publication limit.
+func (item ResearchItem) citations() []Evidence {
+	return append([]Evidence{item.Evidence}, item.Covers...)
+}
+
+// addCitations appends id's evidence to out without duplicates, up to the
+// per-document limit.
+func addCitations(out []Evidence, seen map[Evidence]bool, item ResearchItem) []Evidence {
+	for _, evidence := range item.citations() {
+		if len(out) >= 50 {
+			break
+		}
+		if !seen[evidence] {
+			seen[evidence] = true
+			out = append(out, evidence)
+		}
+	}
+	return out
 }
 
 type Completer interface {
@@ -93,9 +120,9 @@ func Generate(ctx context.Context, client Completer, p *Picture, research Resear
 	if len(tree.Documents) == 0 || len(tree.Documents) > 24 {
 		return Publication{}, errors.New("model must return 1–24 documents")
 	}
-	evidence := map[string]Evidence{}
+	evidence := map[string]ResearchItem{}
 	for _, item := range research.Items {
-		evidence[item.ID] = item.Evidence
+		evidence[item.ID] = item
 	}
 	pub := Publication{ExpectedInstance: p.StorageID, ExpectedVersion: p.Version, ExpectedRevision: p.CurrentRevision, Producer: "krabby-research", Overview: tree.Overview}
 	pub.ResearchHash = Fingerprint(p, research)
@@ -105,16 +132,13 @@ func Generate(ctx context.Context, client Completer, p *Picture, research Resear
 			return Publication{}, errors.New("model returned invalid document size, reserved path or missing citations")
 		}
 		out := Document{Path: doc.Path, Title: doc.Title, Markdown: doc.Markdown}
-		seen := map[string]bool{}
+		seen := map[Evidence]bool{}
 		for _, id := range doc.EvidenceIDs {
-			citation, ok := evidence[id]
+			item, ok := evidence[id]
 			if !ok {
 				return Publication{}, errors.New("model cited evidence that was not collected")
 			}
-			if !seen[id] {
-				out.Evidence = append(out.Evidence, citation)
-				seen[id] = true
-			}
+			out.Evidence = addCitations(out.Evidence, seen, item)
 		}
 		pub.Documents = append(pub.Documents, out)
 	}
@@ -132,7 +156,11 @@ func coverageDocument(research Research) Document {
 		fmt.Fprintf(&report, "- %s\n", note)
 	}
 	report.WriteString("\n## Collected evidence\n\n")
-	for _, item := range research.Items {
+	collected := research.Collected
+	if collected == nil {
+		collected = research.Items
+	}
+	for _, item := range collected {
 		fmt.Fprintf(&report, "- `%s`: `%s:%s` — `%s` (revision `%s`, truncated: %t)\n", item.ID, item.Evidence.Source.Kind, item.Evidence.Source.Ref, item.Evidence.Locator, item.Evidence.Revision, item.Truncated)
 	}
 	return Document{Path: "research.md", Title: "Research coverage", Markdown: report.String(), Evidence: []Evidence{}}

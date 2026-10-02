@@ -87,7 +87,7 @@ func TestSummaryTruncatesAtDefaultSourceBudget(t *testing.T) {
 		mu   sync.Mutex
 		seen []string
 	)
-	gen := New(config.Docs{}, bodyRecordingLLM(t, &seen, &mu), nil, nil, nil)
+	gen := New(config.Docs{SkipIntegrationProfile: true}, bodyRecordingLLM(t, &seen, &mu), nil, nil, nil)
 
 	if _, err := gen.Generate(context.Background(), "o/r", clone,
 		filepath.Join(clone, "krabby-docs"), config.DocsOverride{}, false); err != nil {
@@ -147,7 +147,7 @@ func TestRepoOverrideRaisesSourceBudget(t *testing.T) {
 		mu   sync.Mutex
 		seen []string
 	)
-	gen := New(config.Docs{}, bodyRecordingLLM(t, &seen, &mu), nil, nil, nil)
+	gen := New(config.Docs{SkipIntegrationProfile: true}, bodyRecordingLLM(t, &seen, &mu), nil, nil, nil)
 
 	over := config.DocsOverride{Limits: config.DocsLimits{
 		MaxSourceBytes: size * 4,
@@ -225,7 +225,7 @@ func TestRaisingSourceBudgetInvalidatesTruncatedSummaries(t *testing.T) {
 		mu   sync.Mutex
 		seen []string
 	)
-	gen := New(config.Docs{}, bodyRecordingLLM(t, &seen, &mu), nil, nil, nil)
+	gen := New(config.Docs{SkipIntegrationProfile: true}, bodyRecordingLLM(t, &seen, &mu), nil, nil, nil)
 	if _, err := gen.Generate(context.Background(), "o/r", clone, docsDir, config.DocsOverride{}, false); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}

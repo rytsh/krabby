@@ -148,9 +148,9 @@ func Update(ctx context.Context, client Completer, p *Picture, research Research
 		delete(byPath, path)
 		seen[path] = true
 	}
-	evidence := map[string]Evidence{}
+	evidence := map[string]ResearchItem{}
 	for _, item := range research.Items {
-		evidence[item.ID] = item.Evidence
+		evidence[item.ID] = item
 	}
 	for _, doc := range patch.Upserts {
 		if doc.Path == "research.md" || seen[doc.Path] || len(doc.Markdown) > 64<<10 || len(doc.EvidenceIDs) == 0 || len(doc.EvidenceIDs) > 50 {
@@ -158,16 +158,13 @@ func Update(ctx context.Context, client Completer, p *Picture, research Research
 		}
 		seen[doc.Path] = true
 		out := Document{Path: doc.Path, Title: doc.Title, Markdown: doc.Markdown}
-		used := map[string]bool{}
+		used := map[Evidence]bool{}
 		for _, id := range doc.EvidenceIDs {
-			citation, ok := evidence[id]
+			item, ok := evidence[id]
 			if !ok {
 				return nil, errors.New("incremental patch cited uncollected evidence")
 			}
-			if !used[id] {
-				out.Evidence = append(out.Evidence, citation)
-				used[id] = true
-			}
+			out.Evidence = addCitations(out.Evidence, used, item)
 		}
 		byPath[doc.Path] = out
 	}

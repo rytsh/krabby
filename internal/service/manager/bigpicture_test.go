@@ -147,8 +147,13 @@ func TestBigPictureNamespaceResearch(t *testing.T) {
 			t.Fatalf("invalid namespace evidence: %+v", item.Evidence)
 		}
 	}
-	if total > 256<<10 {
-		t.Fatalf("research budget exceeded: %d", total)
+	if total > 32<<20 {
+		t.Fatalf("research memory bound exceeded: %d", total)
+	}
+	// Many sources no longer starve each other: each keeps a useful share and
+	// the overflow is condensed before synthesis.
+	if len(research.Items[0].Content) < 16<<10 {
+		t.Fatalf("per-source share too small: %d", len(research.Items[0].Content))
 	}
 	// Namespace evidence is publishable under the original selector.
 	_, err = m.PublishBigPicture(ctx, p.Name, bigpicture.Publication{Producer: "test", ExpectedVersion: p.Version, Overview: "overview.md", Documents: []bigpicture.Document{{Path: "overview.md", Title: "Overview", Markdown: "# System", Evidence: []bigpicture.Evidence{research.Items[0].Evidence}}}})

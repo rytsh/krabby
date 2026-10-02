@@ -88,7 +88,14 @@ func (m *Manager) pictureRepoDocs(repo *registry.Repo) ([]pictureInsight, string
 	}
 	budget := pictureDocsBytes
 	var out []pictureInsight
-	for _, doc := range man.Docs {
+	// The integration profile is written for cross-repository research, so it
+	// is read first and never crowded out by the longer documentation.
+	docs := slices.Clone(man.Docs)
+	slices.SortStableFunc(docs, func(a, b docgen.DocMeta) int {
+		return boolRank(b.Path == docgen.ProfileName) - boolRank(a.Path == docgen.ProfileName)
+	})
+	hasProfile := false
+	for _, doc := range docs {
 		if budget <= 0 {
 			break
 		}
@@ -96,14 +103,25 @@ func (m *Manager) pictureRepoDocs(repo *registry.Repo) ([]pictureInsight, string
 		if err != nil {
 			continue
 		}
+		hasProfile = hasProfile || doc.Path == docgen.ProfileName
 		out = append(out, pictureInsight{locator: "krabby-docs/" + path.Clean(doc.Path), text: content.Content, truncated: content.Truncated})
 		budget -= content.Bytes
 	}
 	note := ""
+	if !hasProfile {
+		note = "no integration profile yet (regenerate repository docs to create integration.md); used the general documentation."
+	}
 	if stage := repo.Stages.Docs; stage.Commit != "" && repo.LastCommit != "" && stage.Commit != repo.LastCommit {
-		note = "generated documentation predates the latest commit; it may be stale."
+		note = strings.TrimSpace(note + " generated documentation predates the latest commit; it may be stale.")
 	}
 	return out, note
+}
+
+func boolRank(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func (m *Manager) pictureRepoSignals(ctx context.Context, repo *registry.Repo) (*pictureInsight, string) {

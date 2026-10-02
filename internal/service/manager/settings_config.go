@@ -20,6 +20,8 @@ func docsConfig(s settings.Settings) config.Docs {
 		},
 		Prompt:      s.DocsPrompt,
 		PromptExtra: s.DocsPromptExtra,
+
+		SkipIntegrationProfile: s.DocsSkipIntegrationProfile,
 		Limits: config.DocsLimits{
 			MaxSourceBytes:    s.DocsMaxSourceBytes,
 			MaxGroupBytes:     s.DocsMaxGroupBytes,

@@ -79,18 +79,20 @@
     {#if scheduleNeedsConsent}<label class="flex items-start gap-2 text-[12px] text-dim"><input type="checkbox" bind:checked={scheduleConsent} /><span>I authorize recurring source reads and disclosure of source snapshots to the configured model/trace services. Sources can contain sensitive configuration.</span></label>{/if}
 
     <section class="space-y-3">
-      <h3 class="text-[13px] font-semibold">Sources ({draft.sources.length}/50)</h3>
+      <h3 class="text-[13px] font-semibold">Sources ({draft.sources.length}/500)</h3>
       <div class="flex flex-wrap gap-2">
         {#each draft.sources as source (`${source.kind}:${source.ref}`)}
           <button class="btn btn-sm max-w-full" type="button" title="Remove source" onclick={() => toggleSource(source, false)}><span class="truncate">{source.kind}:{source.ref}</span><span aria-hidden="true">×</span></button>
         {/each}
       </div>
       <div class="flex flex-wrap gap-2">
-        <select class="input" aria-label="Source kind" bind:value={sourceKind} onchange={() => loadSources()}><option value="repo">Repositories</option><option value="namespace">Repository namespaces</option><option value="bigpicture">Big Pictures</option><option value="web">Sources</option><option value="api">API catalog</option><option value="mcp">External MCPs</option></select>
-        <input class="input min-w-0 flex-1" aria-label="Search sources" bind:value={sourceQuery} placeholder="Find sources…" onkeydown={(event) => { if (event.key === "Enter") { event.preventDefault(); loadSources(); } }} />
-        <button class="btn" type="button" onclick={() => loadSources()}>Search</button>
+        <select class="input" aria-label="Source kind" bind:value={sourceKind} onchange={() => loadSources()}><option value="repo">Repositories</option><option value="repo_pattern">Repository pattern</option><option value="namespace">Repository namespaces</option><option value="bigpicture">Big Pictures</option><option value="web">Sources</option><option value="api">API catalog</option><option value="mcp">External MCPs</option></select>
+        <input class="input min-w-0 flex-1" aria-label="Search sources" bind:value={sourceQuery} placeholder={sourceKind === "repo_pattern" ? "github.com/acme/**" : "Find sources…"} onkeydown={(event) => { if (event.key === "Enter") { event.preventDefault(); loadSources(); } }} />
+        <button class="btn" type="button" onclick={() => loadSources()}>{sourceKind === "repo_pattern" ? "Preview" : "Search"}</button>
       </div>
-      {#if sourceKind === "mcp"}<p class="text-[12px] text-faint">Connection references only. Selecting an MCP does not read its contents or widen its saved tool/resource grants. Configure grants under Settings → External MCPs.</p>{/if}
+      {#if sourceKind === "repo_pattern"}<p class="text-[12px] text-faint">Select every repository whose id matches a pattern, as one source. <code>*</code> matches one path segment, <code>**</code> any number (e.g. <code>github.com/acme/**</code>, <code>gitlab.com/*/payments-*</code>). The pattern is re-evaluated on each run, so repositories added later are included.</p>{/if}
+      {#if sourceKind === "web" || sourceKind === "api" || sourceKind === "mcp"}<p class="text-[12px] text-faint">Only content related to the research prompt and selected repositories is used: Jira/Confluence pages and API docs are searched with the prompt, and unrelated MCP resources are skipped. Sources with no related content are noted in the research report.</p>{/if}
+      {#if sourceKind === "mcp"}<p class="text-[12px] text-faint">Granted resources are read, and granted tools can be used to look up names found in the repositories (for example config paths) when the research prompt asks for it, e.g. “look up the config paths from the code in consul and vault”. Only values that occur in the repositories are sent. Grant only read-only tools under Settings → External MCPs.</p>{/if}
       {#if sourceKind === "namespace"}<p class="text-[12px] text-faint">Select all repositories in a namespace as one source, including repositories added later. Research uses locally synced snapshots and shares the bounded text budget across repositories. Namespaces are not access-control boundaries.</p>{/if}
       {#if sourceKind === "bigpicture"}<p class="text-[12px] text-faint">Build a higher-level picture from other Big Pictures’ published documents. Each run reads their latest published revisions, not their original sources. Publish child pictures before research; self-references and circular dependencies are not allowed.</p>{/if}
       {#if sourceError}<p class="text-danger" role="alert">{sourceError}</p>{/if}
@@ -98,8 +100,8 @@
       {:else}
         <div class="max-h-64 space-y-1 overflow-y-auto rounded border border-line p-2">
           {#each options.items as option (`${option.kind}:${option.ref}`)}
-            <label class="flex items-start gap-2 rounded p-2 text-[13px] hover:bg-surface-2"><input type="checkbox" checked={selected(option)} disabled={(option.kind === "bigpicture" && option.ref === draft.name.trim()) || (!selected(option) && draft.sources.length >= 50)} onchange={(e) => toggleSource(option, e.currentTarget.checked)} /><span class="min-w-0"><span class="block break-all font-mono">{option.ref}</span><span class="block text-[12px] text-dim">{option.title !== option.ref ? option.title : ""} {option.namespace || ""} · {option.status || "unknown"}</span></span></label>
-          {:else}<p class="p-2 text-[13px] text-dim">No matching sources. Try another search or add repositories, Big Pictures, indexed sources, APIs or external MCP connections first.</p>{/each}
+            <label class="flex items-start gap-2 rounded p-2 text-[13px] hover:bg-surface-2"><input type="checkbox" checked={selected(option)} disabled={(option.kind === "bigpicture" && option.ref === draft.name.trim()) || (!selected(option) && draft.sources.length >= 500)} onchange={(e) => toggleSource(option, e.currentTarget.checked)} /><span class="min-w-0"><span class="block break-all font-mono">{option.ref}</span><span class="block text-[12px] text-dim">{option.title !== option.ref ? option.title : ""} {option.namespace || ""} · {option.status || "unknown"}</span></span></label>
+          {:else}<p class="p-2 text-[13px] text-dim">{sourceKind === "repo_pattern" ? "Type a pattern and press Preview to see how many repositories it matches." : "No matching sources. Try another search or add repositories, Big Pictures, indexed sources, APIs or external MCP connections first."}</p>{/each}
         </div>
         <div class="flex items-center justify-between text-[12px] text-dim"><span>{options.total} matches · page {sourcePage}</span><div class="flex gap-2"><button class="btn btn-sm" type="button" disabled={sourcePage <= 1} onclick={() => loadSources(sourcePage - 1)}>Previous</button><button class="btn btn-sm" type="button" disabled={sourcePage * options.per_page >= options.total} onclick={() => loadSources(sourcePage + 1)}>Next</button></div></div>
       {/if}
@@ -107,5 +109,5 @@
     {#if error}<p class="text-danger" role="alert">{error}</p>{/if}
     <div class="flex gap-2"><button class="btn btn-primary" type="submit" disabled={draft.sources.length === 0 || (scheduleNeedsConsent && !scheduleConsent)}>{picture ? "Save settings" : "Create Big Picture"}</button><button class="btn" type="button" onclick={onCancel}>Cancel</button></div>
   </fieldset>
-  <p class="text-[12px] text-faint">Manual research uses “Research & generate” or generate_big_picture on the admin MCP. Saving a schedule enables recurring incremental updates. External tools are never executed.</p>
+  <p class="text-[12px] text-faint">Manual research uses “Research & generate” or generate_big_picture on the admin MCP. Saving a schedule enables recurring incremental updates. Granted MCP tools may be called with values found in the repositories, as the research prompt directs.</p>
 </form>

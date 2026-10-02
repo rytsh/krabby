@@ -114,6 +114,10 @@ func (m *Manager) validatePictureSources(ctx context.Context, sources []bigpictu
 				repo, lookupErr := m.reg.Get(ctx, source.Ref)
 				found, err = repo != nil, lookupErr
 			}
+		case "repo_pattern":
+			// A pattern may legitimately match nothing yet; repositories
+			// added later are picked up at research time.
+			found = true
 		case "web":
 			if m.webStore != nil {
 				col, lookupErr := m.webStore.GetCollection(ctx, source.Ref)
@@ -241,6 +245,36 @@ func (m *Manager) BigPictureSourceOptions(ctx context.Context, kind, text string
 		}
 		return out, nil
 	}
+	if kind == "repo_pattern" {
+		// Preview: the typed pattern is the single option, and its status
+		// shows how many repositories it currently matches.
+		pattern, err := bigpicture.NormalizeRepoPattern(text)
+		if strings.TrimSpace(text) == "" || m.reg == nil {
+			return out, nil
+		}
+		if err != nil {
+			return out, err
+		}
+		repos, err := m.reg.List(ctx)
+		if err != nil {
+			return out, err
+		}
+		matched := matchRepoPattern(pattern, repos)
+		title := "no repositories match yet"
+		if len(matched) > 0 {
+			ids := []string{}
+			for _, repo := range matched[:min(3, len(matched))] {
+				ids = append(ids, repo.ID)
+			}
+			title = strings.Join(ids, ", ")
+			if len(matched) > 3 {
+				title += ", …"
+			}
+		}
+		out.Total = 1
+		out.Items = []PictureSourceOption{{Source: bigpicture.Source{Kind: kind, Ref: pattern}, Title: title, Status: fmt.Sprintf("%d repositories", len(matched))}}
+		return out, nil
+	}
 	options := []PictureSourceOption{}
 	switch kind {
 	case "bigpicture":
@@ -305,7 +339,7 @@ func (m *Manager) BigPictureSourceOptions(ctx context.Context, kind, text string
 			}
 		}
 	default:
-		return out, fmt.Errorf("%w: source kind must be repo, namespace, bigpicture, web, api or mcp", bigpicture.ErrInvalid)
+		return out, fmt.Errorf("%w: source kind must be repo, namespace, repo_pattern, bigpicture, web, api or mcp", bigpicture.ErrInvalid)
 	}
 	text = strings.ToLower(strings.TrimSpace(text))
 	options = slices.DeleteFunc(options, func(option PictureSourceOption) bool {

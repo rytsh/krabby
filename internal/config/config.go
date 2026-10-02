@@ -242,6 +242,11 @@ type Docs struct {
 	// carries constraints — mermaid escaping, required sections — that a
 	// replacement silently drops.
 	PromptExtra string `cfg:"prompt_extra"`
+	// SkipIntegrationProfile turns off integration.md, the compact
+	// fixed-structure profile of a repository's endpoints, calls, events, data
+	// stores and deployment that Big Picture research reads first. The profile
+	// costs one extra model call per changed repository; it is on by default.
+	SkipIntegrationProfile bool `cfg:"skip_integration_profile"`
 }
 
 // Default input budgets for documentation generation. They are deliberately

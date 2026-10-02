@@ -156,7 +156,7 @@
         <label class="block space-y-1 text-[13px]"><span>Allowed tool names — one per line</span><textarea class="input w-full font-mono" rows="3" bind:value={allowedToolText}></textarea></label>
         <label class="block space-y-1 text-[13px]"><span>Allowed resource URIs / templates — one per line</span><textarea class="input w-full font-mono" rows="3" bind:value={allowedResourceText}></textarea></label>
       </div>
-      <p class="text-[12px] text-faint">No grants by default. Read-only hints are not proof of safety. Grants are saved for the future research runner; this screen never executes tools or reads resource contents.</p>
+      <p class="text-[12px] text-faint">No grants by default. Big Picture research reads granted resources and may call granted tools with values found in repositories, so grant only read-only tools and avoid tools that return secrets. Read-only hints are not proof of safety. This screen never executes tools or reads resource contents.</p>
       <div class="flex flex-wrap gap-2">
         <button class="btn" type="button" onclick={discover}>Test connection & discover</button>
         <button class="btn btn-primary" type="submit">Save connection</button>

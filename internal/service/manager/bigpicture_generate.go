@@ -46,7 +46,7 @@ func (m *Manager) triggerPictureGeneration(ctx context.Context, name, trigger st
 
 func (m *Manager) pictureGenerateTask(spec queue.Spec) queue.Task {
 	return queue.Task{ID: spec.ID, Kind: pictureTaskKind, Title: "Research and generate " + spec.ID, Key: spec.ID + ":" + pictureTaskKind, Spec: spec, Run: func(ctx context.Context) error {
-		ctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+		ctx, cancel := context.WithTimeout(ctx, 2*time.Hour)
 		defer cancel()
 		name := strings.TrimPrefix(spec.ID, "bigpicture:")
 		trigger := spec.Params["trigger"]
@@ -93,21 +93,43 @@ func (m *Manager) runPictureGeneration(ctx context.Context, name string, p *bigp
 		if err != nil {
 			return nil, "", err
 		}
+		cache := pictureNoteCache{m.bigPictures, p}
+		lookupKeys := map[string]bool{}
+		m.pictureLookups(ctx, b.pictureChat, cache, p, &research, lookupKeys)
 		run.ResearchHash = bigpicture.Fingerprint(p, research)
+		if p.CurrentRevision != "" {
+			previous, err := m.BigPictureSnapshot(ctx, name, p.CurrentRevision)
+			if err != nil {
+				return nil, "", err
+			}
+			if bigpicture.Unchanged(p, previous, run.ResearchHash) {
+				run.Message = "Collected evidence is unchanged; model call skipped."
+				return nil, bigpicture.RunUnchanged, nil
+			}
+		}
+		// Large research is condensed per source (and merged if needed) so
+		// any number of sources fits one synthesis call.
+		raw := research.Items
+		research, used, err := bigpicture.Condense(ctx, b.pictureChat, cache, p, research)
+		if err != nil {
+			return nil, "", err
+		}
+		for key := range lookupKeys {
+			used[key] = true
+		}
+		research.Collected = raw
+		m.bigPictures.PruneNotes(p, used)
 		if p.CurrentRevision == "" {
 			generated, err := bigpicture.Generate(ctx, b.pictureChat, p, research)
 			if err != nil {
 				return nil, "", err
 			}
+			generated.ResearchHash = run.ResearchHash
 			return &generated, bigpicture.RunPublished, nil
 		}
 		previous, err := m.BigPictureSnapshot(ctx, name, p.CurrentRevision)
 		if err != nil {
 			return nil, "", err
-		}
-		if bigpicture.Unchanged(p, previous, run.ResearchHash) {
-			run.Message = "Collected evidence is unchanged; model call skipped."
-			return nil, bigpicture.RunUnchanged, nil
 		}
 		documents, err := m.pictureDocuments(ctx, name, previous)
 		if err != nil {
@@ -121,6 +143,7 @@ func (m *Manager) runPictureGeneration(ctx context.Context, name string, p *bigp
 		if err != nil {
 			return nil, "", err
 		}
+		pub.ResearchHash = run.ResearchHash
 		return pub, bigpicture.RunPublished, nil
 	}()
 	if err != nil {
@@ -161,7 +184,7 @@ func (m *Manager) pictureGenerationLive(name string) bool {
 }
 
 func (m *Manager) collectPictureResearch(ctx context.Context, p *bigpicture.Picture) (bigpicture.Research, error) {
-	out := bigpicture.Research{Items: []bigpicture.ResearchItem{}, Notes: []string{"Deterministic bounded collection: 256 KiB total source text divided among sources, 16 KiB per raw item. Repositories contribute Krabby-generated documentation, communication signals from the code index and a dependency-graph summary first, then up to 6–8 raw files prioritizing documentation, deployment/configuration and entrypoints. This is not exhaustive research.", "External MCP tools and resource templates are not executed. Only saved exact resource URI grants are read. Secret values may exist in sources: no automatic redaction guarantee; use a trusted model endpoint."}}
+	out := bigpicture.Research{Items: []bigpicture.ResearchItem{}, Notes: []string{"Deterministic bounded collection: each source gets an even share of 256 KiB but at least 48 KiB, 16 KiB per raw item; research beyond 256 KiB is condensed per source before synthesis. Repositories contribute their integration profile and Krabby-generated documentation, communication signals from the code index and a dependency-graph summary first, then up to 6–8 raw files prioritizing documentation, deployment/configuration and entrypoints. This is not exhaustive research.", "External MCP resource templates are not expanded and only saved exact resource URI grants are read. Granted MCP tools may be called with arguments that occur verbatim in the collected repository material (see MCP lookups below). Secret values may exist in sources: no automatic redaction guarantee; use a trusted model endpoint."}}
 	// Expand namespace selectors at run time, deduplicating overlapping repo
 	// selections. Evidence retains the configured selector and a repo-qualified
 	// locator, so publication validation and citations remain scoped correctly.
@@ -170,8 +193,9 @@ func (m *Manager) collectPictureResearch(ctx context.Context, p *bigpicture.Pict
 	}
 	sources := []selectedSource{}
 	seen := map[bigpicture.Source]bool{}
+	var allRepos []*registry.Repo
 	for _, selector := range p.Sources {
-		if selector.Kind != "namespace" {
+		if selector.Kind != "namespace" && selector.Kind != "repo_pattern" {
 			if !seen[selector] {
 				sources = append(sources, selectedSource{selector, selector})
 				seen[selector] = true
@@ -181,12 +205,24 @@ func (m *Manager) collectPictureResearch(ctx context.Context, p *bigpicture.Pict
 		if m.reg == nil {
 			return out, errors.New("repository store unavailable")
 		}
-		repos, err := m.reg.ListNamespace(ctx, selector.Ref)
-		if err != nil {
-			return out, err
+		var repos []*registry.Repo
+		if selector.Kind == "namespace" {
+			var err error
+			if repos, err = m.reg.ListNamespace(ctx, selector.Ref); err != nil {
+				return out, err
+			}
+			out.Notes = append(out.Notes, fmt.Sprintf("Namespace %s resolved to %d repositories.", selector.Ref, len(repos)))
+		} else {
+			if allRepos == nil {
+				var err error
+				if allRepos, err = m.reg.List(ctx); err != nil {
+					return out, err
+				}
+			}
+			repos = matchRepoPattern(selector.Ref, allRepos)
+			out.Notes = append(out.Notes, fmt.Sprintf("Repository pattern %s resolved to %d repositories.", selector.Ref, len(repos)))
 		}
 		slices.SortFunc(repos, func(a, b *registry.Repo) int { return strings.Compare(a.ID, b.ID) })
-		out.Notes = append(out.Notes, fmt.Sprintf("Namespace %s resolved to %d repositories.", selector.Ref, len(repos)))
 		for _, repo := range repos {
 			source := bigpicture.Source{Kind: "repo", Ref: repo.ID}
 			if !seen[source] {
@@ -195,14 +231,30 @@ func (m *Manager) collectPictureResearch(ctx context.Context, p *bigpicture.Pict
 			}
 		}
 	}
-	quota := (256 << 10) / max(1, len(sources))
+	// Each source gets an even share of the direct budget, but never less than
+	// pictureMinSourceBytes: beyond the direct budget, research is condensed
+	// per source before synthesis, so more sources no longer starve each one.
+	// totalBudget only bounds memory.
+	const totalBudget = 32 << 20
+	budgetLeft, directLeft := totalBudget, bigpicture.DirectBudget
+	repoNames := []string{}
 	for _, selected := range sources {
+		if selected.source.Kind == "repo" {
+			repoNames = append(repoNames, selected.source.Ref)
+		}
+	}
+	terms := m.pictureRelevanceTerms(ctx, p, repoNames)
+	for index, selected := range sources {
 		source := selected.source
 		if err := ctx.Err(); err != nil {
 			return out, err
 		}
 		before := len(out.Items)
-		remaining := quota
+		// An even share of the direct budget, with what earlier sources left
+		// unused passed on, but never less than pictureMinSourceBytes.
+		remaining := max(directLeft/(len(sources)-index), pictureMinSourceBytes)
+		remaining = min(remaining, budgetLeft)
+		quota := remaining
 		add := func(locator, revision, text string, truncated bool) {
 			text = strings.ToValidUTF8(text, "")
 			if len(text) > remaining {
@@ -216,7 +268,7 @@ func (m *Manager) collectPictureResearch(ctx context.Context, p *bigpicture.Pict
 				return
 			}
 			remaining -= len(text)
-			if selected.evidence.Kind == "namespace" {
+			if selected.evidence.Kind == "namespace" || selected.evidence.Kind == "repo_pattern" {
 				locator = source.Ref + ":" + locator
 			}
 			out.Items = append(out.Items, bigpicture.ResearchItem{ID: fmt.Sprintf("e%d", len(out.Items)+1), Evidence: bigpicture.Evidence{Source: selected.evidence, Locator: locator, Revision: revision}, Content: text, Truncated: truncated})
@@ -267,18 +319,40 @@ func (m *Manager) collectPictureResearch(ctx context.Context, p *bigpicture.Pict
 			if err != nil || c.Disabled {
 				return out, errors.New("selected external MCP is missing or disabled; existing publication kept")
 			}
-			for i, uri := range c.AllowedResources {
-				if i >= 8 || remaining <= 0 {
+			// Read a bounded set of granted resources, then keep only the ones
+			// that share vocabulary with the research prompt, best first.
+			type mcpResource struct {
+				uri, text string
+				truncated bool
+				score     int
+			}
+			resources := []mcpResource{}
+			for _, uri := range c.AllowedResources {
+				if len(resources) >= pictureMCPCandidates {
 					break
 				}
 				if strings.ContainsAny(uri, "{}") {
 					continue
 				}
-				text, truncated, err := m.externalMCPs.ReadResource(ctx, source.Ref, uri, min(16<<10, remaining))
+				text, truncated, err := m.externalMCPs.ReadResource(ctx, source.Ref, uri, min(16<<10, quota))
 				if err != nil {
 					return out, errors.New("selected MCP resource could not be read; existing publication kept")
 				}
-				add(uri, "", text, truncated)
+				resources = append(resources, mcpResource{uri, text, truncated, pictureRelevanceScore(terms, uri+"\n"+text)})
+			}
+			read := len(resources)
+			if len(terms) > 0 {
+				resources = slices.DeleteFunc(resources, func(r mcpResource) bool { return r.score == 0 })
+				slices.SortStableFunc(resources, func(a, b mcpResource) int { return b.score - a.score })
+			}
+			for i, r := range resources {
+				if i >= 8 || remaining <= 0 {
+					break
+				}
+				add(r.uri, "", r.text, r.truncated)
+			}
+			if len(terms) > 0 {
+				out.Notes = append(out.Notes, fmt.Sprintf("mcp:%s: read %d granted resources, %d matched the research prompt; unrelated resources were skipped.", source.Ref, read, len(resources)))
 			}
 		} else {
 			root, revision := "", ""
@@ -319,6 +393,35 @@ func (m *Manager) collectPictureResearch(ctx context.Context, p *bigpicture.Pict
 			default:
 				return out, bigpicture.ErrInvalid
 			}
+			// Jira/Confluence/API collections can be large and mostly
+			// unrelated to the prompt, so their indexed documents are searched
+			// with the prompt instead of being sampled by file name.
+			if source.Kind != "repo" {
+				if hits, searched := m.pictureRelevantPaths(ctx, pictureScopeKey(source), terms, rawLimit); searched {
+					count := 0
+					for _, file := range hits {
+						if remaining <= 0 {
+							break
+						}
+						content, err := repofs.ReadFile(root, file, 0, min(16<<10, remaining))
+						if err != nil {
+							// The index can briefly lag a sync that removed the page.
+							continue
+						}
+						add(file, revision, content.Content, content.Truncated)
+						count++
+					}
+					if len(hits) == 0 {
+						out.Notes = append(out.Notes, fmt.Sprintf("%s:%s: no indexed document matched the research prompt; source skipped as unrelated.", source.Kind, source.Ref))
+					} else {
+						out.Notes = append(out.Notes, fmt.Sprintf("%s:%s: selected %d documents most relevant to the research prompt from the search index. Web/API documents are cached snapshots, not live upstream reads.", source.Kind, source.Ref, count))
+					}
+					out.Notes = append(out.Notes, fmt.Sprintf("%s:%s: %d evidence items collected; uncollected content and runtime state remain unknown.", source.Kind, source.Ref, len(out.Items)-before))
+					budgetLeft -= quota - remaining
+					directLeft = max(0, directLeft-(quota-remaining))
+					continue
+				}
+			}
 			// The sandbox never follows symlinks outside this source. Limit the
 			// inventory too; a partial listing is explicitly noted, not exhaustive.
 			entries, err := repofs.ListFiles(root, "", true)
@@ -355,6 +458,8 @@ func (m *Manager) collectPictureResearch(ctx context.Context, p *bigpicture.Pict
 			out.Notes = append(out.Notes, fmt.Sprintf("%s:%s: inspected a bounded inventory of %d entries, selected %d of %d eligible files. Web/API documents are cached snapshots, not live upstream reads.", source.Kind, source.Ref, len(entries), count, len(files)))
 		}
 		out.Notes = append(out.Notes, fmt.Sprintf("%s:%s: %d evidence items collected; uncollected content and runtime state remain unknown.", source.Kind, source.Ref, len(out.Items)-before))
+		budgetLeft -= quota - remaining
+		directLeft = max(0, directLeft-(quota-remaining))
 	}
 	if p.CurrentRevision != "" {
 		snapshot, err := m.BigPictureSnapshot(ctx, p.Name, p.CurrentRevision)

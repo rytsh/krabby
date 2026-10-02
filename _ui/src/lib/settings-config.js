@@ -10,6 +10,7 @@ const DOCS_FIELDS = [
   "docs_exclude",
   "docs_prompt",
   "docs_prompt_extra",
+  "docs_skip_integration_profile",
   "docs_max_source_bytes",
   "docs_max_group_bytes",
   "docs_max_synthesis_bytes",
