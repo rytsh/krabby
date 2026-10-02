@@ -108,6 +108,10 @@
   let selected = $state(null);
   let fileContent = $state(null);
   let fileError = $state("");
+  // Markdown file display in the Files view: rendered HTML or raw source.
+  let fileView = $state("rendered");
+  let isMarkdownFile = $derived(/\.(md|markdown|mdx)$/i.test(selected || ""));
+  let showRenderedFile = $derived(isMarkdownFile && fileView === "rendered");
 
   // File tree state: root entries plus lazily-loaded children per directory.
   let rootEntries = $state([]);
@@ -361,6 +365,7 @@
     const isLatest = linkRequests.next();
     mode = "files";
     targetLine = line;
+    if (line > 0) fileView = "raw";
     await revealFile(file);
     if (!isLatest()) return;
     await openFile({ path: file, is_dir: false });
@@ -486,13 +491,27 @@
 
         <div class="flex h-full min-w-0 flex-1 flex-col">
           {#if selected}
-            <div class="flex-shrink-0 border-b border-line bg-surface px-3.5 py-2.5 font-mono text-xs text-faint">
-              {selected}
-              {#if fileContent && fileContent.truncated}<span class="ml-2 text-warn">truncated</span>{/if}
+            <div class="flex flex-shrink-0 items-center gap-2 border-b border-line bg-surface px-3.5 py-2 font-mono text-xs text-faint">
+              <span class="truncate">{selected}</span>
+              {#if fileContent && fileContent.truncated}<span class="text-warn">truncated</span>{/if}
+              {#if isMarkdownFile}
+                <span class="ml-auto flex gap-1">
+                  <button class="view-toggle" class:view-toggle-active={fileView === "rendered"} onclick={() => (fileView = "rendered")}>
+                    Preview
+                  </button>
+                  <button class="view-toggle" class:view-toggle-active={fileView === "raw"} onclick={() => (fileView = "raw")}>
+                    Raw
+                  </button>
+                </span>
+              {/if}
             </div>
-            <div class="min-h-0 flex-1 overflow-auto" style={fileContent ? "background:#24292e" : ""}>
+            <div class="min-h-0 flex-1 overflow-auto" style={fileContent && !showRenderedFile ? "background:#24292e" : ""}>
               {#if fileContent}
-                <CodeView code={fileContent.content} path={selected} scrollTo={targetLine} />
+                {#if showRenderedFile}
+                  <MarkdownView markdown={fileContent.content} />
+                {:else}
+                  <CodeView code={fileContent.content} path={selected} scrollTo={targetLine} />
+                {/if}
               {:else if !fileError}
                 <div class="p-4 text-dim">Loading…</div>
               {/if}
