@@ -141,18 +141,19 @@ Example OpenCode config with core and admin registered separately:
 | `list_namespaces` | Discover repository groups, counts, and human descriptions before broad search |
 | `list_sources` / `get_source` | Discover web collections and their exact `web:<name>` scope keys; inspect bounded item-title samples |
 | `register_source_page` / `import_source_pages` / `import_source_sitemap` / `delete_source_page` | Admin: manage individual `pages` source items |
-| `source_types` / `get_source_config` / `add_source` / `update_source` / `delete_source` / `refresh_source` | Admin: manage Krabby collections and sync jobs (`pages`, `confluence`, `jira`), not upstream issues or pages |
-| `queue_status` / `bump_task` / `cancel_task` / `set_task_concurrency` / `cancel_repo_job` | Admin: inspect and steer the background work queue |
-| `set_repo_namespace` / `set_repo_overrides` / `set_namespace_description` / `delete_namespace` | Admin: namespaces and per-repository overrides |
+| `source_types` / `get_source_config` / `add_source` / `update_source` / `delete_source` / `refresh_source` / `cancel_source` / `test_source_config` | Admin: manage Krabby collections and sync jobs (`pages`, `confluence`, `jira`), not upstream issues or pages |
+| `queue_status` / `bump_task` / `cancel_task` / `set_task_concurrency` / `cancel_pending_tasks` / `clear_task_history` / `cancel_repo_job` | Admin: inspect and steer the background work queue |
+| `set_repo_namespace` / `set_repo_overrides` / `get_repo_settings` / `set_namespace_description` / `delete_namespace` | Admin: namespaces and per-repository overrides |
 | `list_api_groups` / `list_api_services` / `list_api_endpoints` / `get_api_endpoint` | API: walk the catalog from domain to service to endpoint to its full request shape |
 | `call_api_endpoint` | API: send a real request to a catalogued HTTP or gRPC endpoint |
-| `api_service_kinds` / `add_api_service` / `update_api_service` / `delete_api_service` / `refresh_api_service` / `get_api_service_config` | Admin: manage catalogued APIs |
+| `api_service_kinds` / `add_api_service` / `update_api_service` / `delete_api_service` / `refresh_api_service` / `cancel_api_service` / `test_api_service_config` / `get_api_service_config` | Admin: manage catalogued APIs |
 | `set_api_group_description` / `delete_api_group` | Admin: manage API group descriptions |
 | `get_docs_config` / `set_docs_config` | Admin: read or live-update docs and code RAG settings |
-| `test_llm` / `test_embedder` / `test_code_embedder` | Admin: validate model endpoints without saving |
+| `test_llm` / `test_embedder` / `test_code_embedder` / `test_langfuse` | Admin: validate model and tracing endpoints without saving |
 | `list_big_pictures` / `get_big_picture` | Core: discover architecture workspaces by namespace, inspect publication manifests and page through documents |
-| `save_big_picture` / `publish_big_picture` / `delete_big_picture` | Admin: manage workspaces and publish caller-produced multi-document snapshots; no automatic research |
+| `save_big_picture` / `publish_big_picture` / `delete_big_picture` / `big_picture_source_options` | Admin: manage workspaces and publish caller-produced multi-document snapshots; no automatic research |
 | `generate_big_picture` | Admin: queue bounded source collection and architecture synthesis with the documentation chat model |
+| `list_external_mcps` / `save_external_mcp` / `delete_external_mcp` / `discover_external_mcp` | Admin: manage outbound MCP connections used as Big Picture sources |
 
 Always pass the full repo id (`host/group/.../name`) when it is known. Omit it
 only for an intentional cross-repository search or merged-graph analysis.

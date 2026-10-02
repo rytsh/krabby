@@ -15,6 +15,7 @@ import (
 	"github.com/rytsh/krabby/internal/service/gitops"
 	"github.com/rytsh/krabby/internal/service/graphquery"
 	"github.com/rytsh/krabby/internal/service/manager"
+	"github.com/rytsh/krabby/internal/service/mcpclient"
 	"github.com/rytsh/krabby/internal/service/queue"
 	"github.com/rytsh/krabby/internal/service/rag"
 	"github.com/rytsh/krabby/internal/service/registry"
@@ -51,11 +52,14 @@ type repoAdminService interface {
 	TriggerRefresh(string, ...string) error
 	RefreshWait(context.Context, string, ...string) (*registry.Repo, bool, error)
 	CancelJob(string) bool
+	RepoSettings(context.Context, string) (*manager.RepoSettings, error)
 	Activity(string) string
 }
 
 type queueService interface {
 	TaskSnapshot() queue.Snapshot
+	ClearTaskHistory()
+	CancelPendingTasks() int
 	BumpTask(uint64) bool
 	CancelTask(uint64) bool
 	CancelTasks(string) int
@@ -111,6 +115,8 @@ type sourceAdminService interface {
 	ImportWebPages(context.Context, string, []manager.WebPageImport) (manager.WebPageImportResult, error)
 	ImportWebSitemap(context.Context, string, string) (manager.SitemapImportResult, error)
 	DeleteWebPage(context.Context, string, string) error
+	TestWebSource(context.Context, string, string, json.RawMessage) manager.WebSourceTestResult
+	CancelTasks(string) int
 }
 
 type docsSettingsService interface {
@@ -119,6 +125,7 @@ type docsSettingsService interface {
 	TestLLM(context.Context, settings.Settings) manager.TestResult
 	TestEmbedder(context.Context, settings.Settings) manager.TestResult
 	TestCodeEmbedder(context.Context, settings.Settings) manager.TestResult
+	TestLangfuse(context.Context, settings.Settings) manager.TestResult
 }
 
 type apiReadService interface {
@@ -139,6 +146,9 @@ type apiAdminService interface {
 	DeleteAPIService(context.Context, string) error
 	APIService(context.Context, string) (*apicatalog.Service, error)
 	TriggerAPIRefresh(string) error
+	TriggerAPIFullRefresh(string) error
+	TestAPIServiceConfig(context.Context, string, string, json.RawMessage, json.RawMessage) (apicatalog.PreviewResult, error)
+	CancelTasks(string) int
 	APIServiceConfigView(*apicatalog.Service) any
 	Activity(string) string
 }
@@ -147,6 +157,13 @@ type credentialService interface {
 	SetCredential(context.Context, *credentials.Credential) error
 	ListCredentials(context.Context) ([]*credentials.Credential, error)
 	DeleteCredential(context.Context, string) error
+}
+
+type externalMCPService interface {
+	ListExternalMCPs(context.Context) ([]mcpclient.View, error)
+	SaveExternalMCP(context.Context, string, mcpclient.Config) (mcpclient.View, error)
+	DeleteExternalMCP(context.Context, string) error
+	DiscoverExternalMCP(context.Context, string, mcpclient.Config) (mcpclient.Discovery, error)
 }
 
 var (
@@ -165,4 +182,5 @@ var (
 	_ apiReadService      = (*manager.Manager)(nil)
 	_ apiAdminService     = (*manager.Manager)(nil)
 	_ credentialService   = (*manager.Manager)(nil)
+	_ externalMCPService  = (*manager.Manager)(nil)
 )

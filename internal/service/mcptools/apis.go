@@ -54,6 +54,18 @@ type apiServiceNameArgs struct {
 	Name string `json:"name" jsonschema:"the api service name"`
 }
 
+type refreshAPIServiceArgs struct {
+	Name  string `json:"name" jsonschema:"the api service name"`
+	Force bool   `json:"force,omitempty" jsonschema:"re-render from the document even if it did not change upstream"`
+}
+
+type testAPIServiceConfigArgs struct {
+	Kind         string     `json:"kind" jsonschema:"provider kind from api_service_kinds (e.g. openapi)"`
+	ExistingName string     `json:"existing_name,omitempty" jsonschema:"saved service whose stored config (and secrets) the draft is merged over; omit for a new service"`
+	Config       jsonObject `json:"config,omitempty" jsonschema:"provider config, same shape as add_api_service"`
+	SpecPatch    jsonObject `json:"spec_patch,omitempty" jsonschema:"RFC 7386 JSON Merge Patch applied to the document before parsing"`
+}
+
 type apiGroupArgs struct {
 	Name        string `json:"name"                  jsonschema:"the group name (lowercase [a-z0-9._-])"`
 	Description string `json:"description,omitempty" jsonschema:"what this group holds; this is what a model reads to pick a group, so describe the domain"`
@@ -479,9 +491,10 @@ func addAPIAdminTools(server *mcp.Server, mgr apiAdminService) {
 	})
 
 	addTool(server, &mcp.Tool{
-		Name:        "refresh_api_service",
-		Description: "Re-fetch a service's document and re-index its endpoints in the background. Returns immediately; poll list_api_services for status.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args apiServiceNameArgs) (*mcp.CallToolResult, any, error) {
+		Name: "refresh_api_service",
+		Description: "Re-fetch a service's document and re-index its endpoints in the background. Returns immediately; poll list_api_services for status. " +
+			"Pass force to re-render even when the upstream document is unchanged (e.g. after an override change).",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args refreshAPIServiceArgs) (*mcp.CallToolResult, any, error) {
 		name := strings.TrimSpace(strings.ToLower(args.Name))
 
 		svc, err := mgr.APIService(ctx, name)
@@ -492,11 +505,42 @@ func addAPIAdminTools(server *mcp.Server, mgr apiAdminService) {
 			return nil, nil, fmt.Errorf("api service %s not found", name)
 		}
 
-		if err := mgr.TriggerAPIRefresh(name); err != nil {
+		if args.Force {
+			err = mgr.TriggerAPIFullRefresh(name)
+		} else {
+			err = mgr.TriggerAPIRefresh(name)
+		}
+		if err != nil {
 			return nil, nil, err
 		}
 
 		return textResult("refresh queued"), nil, nil
+	})
+
+	addTool(server, &mcp.Tool{
+		Name:        "cancel_api_service",
+		Description: "Cancel a service's queued or running sync.",
+	}, func(_ context.Context, _ *mcp.CallToolRequest, args apiServiceNameArgs) (*mcp.CallToolResult, any, error) {
+		name := strings.TrimSpace(strings.ToLower(args.Name))
+		n := mgr.CancelTasks(apicatalog.ScopeKey(name))
+
+		return jsonResult(map[string]any{"status": "cancelled", "tasks": n}), nil, nil
+	})
+
+	addTool(server, &mcp.Tool{
+		Name: "test_api_service_config",
+		Description: "Preview an API service config without saving: fetches the document, applies spec_patch and reports title, version and a sample of endpoints. " +
+			"Pass existing_name to test edits of a saved service; blank secrets then keep the stored values.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args testAPIServiceConfigArgs) (*mcp.CallToolResult, any, error) {
+		res, err := mgr.TestAPIServiceConfig(ctx,
+			strings.TrimSpace(strings.ToLower(args.ExistingName)),
+			strings.TrimSpace(strings.ToLower(args.Kind)),
+			json.RawMessage(args.Config), json.RawMessage(args.SpecPatch))
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return jsonResult(res), nil, nil
 	})
 
 	addTool(server, &mcp.Tool{

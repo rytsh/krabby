@@ -158,6 +158,12 @@ type sourceNameArgs struct {
 	Name string `json:"name" jsonschema:"collection name"`
 }
 
+type testSourceConfigArgs struct {
+	Type         string `json:"type" jsonschema:"source type: 'pages', 'confluence' or 'jira' (see source_types)"`
+	ExistingName string `json:"existing_name,omitempty" jsonschema:"saved source whose stored config (and secrets) the draft is merged over; omit for a new source"`
+	Config       string `json:"config,omitempty" jsonschema:"provider-owned config as a JSON object encoded in a string, same shape as add_source"`
+}
+
 type registerSourcePageArgs struct {
 	Name string `json:"name" jsonschema:"existing pages source name"`
 	URL  string `json:"url" jsonschema:"absolute HTTP(S) page URL to register for server-side fetching"`
@@ -649,6 +655,34 @@ func addSourceAdminTools(server *mcp.Server, mgr sourceAdminService) {
 	})
 
 	addTool(server, &mcp.Tool{
+		Name:        "cancel_source",
+		Description: "Cancel a source's queued or running sync. Fails when no sync is in flight.",
+	}, func(_ context.Context, _ *mcp.CallToolRequest, args sourceNameArgs) (*mcp.CallToolResult, any, error) {
+		name := strings.TrimSpace(strings.ToLower(args.Name))
+		if mgr.CancelTasks(websource.ScopeKey(name)) == 0 {
+			return nil, nil, fmt.Errorf("no sync queued or running for %s", name)
+		}
+
+		return jsonResult(map[string]string{"status": "cancelling", "source": name}), nil, nil
+	})
+
+	addTool(server, &mcp.Tool{
+		Name: "test_source_config",
+		Description: "Preview a source provider config without saving or queueing work: connects with the given config and reports what it would index. " +
+			"Pass existing_name to test edits of a saved source; a blank api_token then keeps the stored secret.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args testSourceConfigArgs) (*mcp.CallToolResult, any, error) {
+		raw, err := rawConfig(args.Config)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		sourceType := strings.TrimSpace(strings.ToLower(args.Type))
+		existing := strings.TrimSpace(strings.ToLower(args.ExistingName))
+
+		return jsonResult(mgr.TestWebSource(ctx, sourceType, existing, raw)), nil, nil
+	})
+
+	addTool(server, &mcp.Tool{
 		Name:        "register_source_page",
 		Description: "Register one absolute HTTP(S) URL on an existing pages source and queue a source refresh. The server fetch may use matching stored web credentials; use only when the user explicitly requests that URL.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args registerSourcePageArgs) (*mcp.CallToolResult, registerSourcePageOutput, error) {
@@ -865,6 +899,17 @@ func (a testCodeEmbedderArgs) settingsArgs() setDocsConfigArgs {
 	return setDocsConfigArgs{CodeEmbedBaseURL: a.BaseURL, CodeEmbedAPIKey: a.APIKey, CodeEmbedModel: a.Model, CodeEmbedDim: a.Dimension, CodeEmbedBatch: a.Batch, CodeEmbedInputMode: a.InputMode, CodeEmbedTaskMode: a.TaskMode, CodeEmbedConcurrency: a.Concurrency, CodeEmbedTimeout: a.Timeout}
 }
 
+type testLangfuseArgs struct {
+	Host      string `json:"langfuse_host,omitempty" jsonschema:"Langfuse root URL; blank uses the stored value"`
+	PublicKey string `json:"langfuse_public_key,omitempty" jsonschema:"project public key; blank uses the stored value"`
+	SecretKey string `json:"langfuse_secret_key,omitempty" jsonschema:"project secret key for this test only; blank uses the stored secret"`
+	Timeout   string `json:"langfuse_timeout,omitempty" jsonschema:"request timeout as a Go duration, e.g. 10s"`
+}
+
+func (a testLangfuseArgs) settingsArgs() setDocsConfigArgs {
+	return setDocsConfigArgs{LangfuseHost: a.Host, LangfusePublicKey: a.PublicKey, LangfuseSecretKey: a.SecretKey, LangfuseTimeout: a.Timeout}
+}
+
 // merge overlays only JSON properties actually sent by the MCP client. The
 // typed args alone cannot distinguish omitted fields from explicit zero values.
 func (a setDocsConfigArgs) merge(base settings.Settings, raw json.RawMessage) (settings.Settings, error) {
@@ -1009,5 +1054,18 @@ func addDocConfigTools(server *mcp.Server, mgr docsSettingsService) {
 		}
 
 		return jsonResult(mgr.TestCodeEmbedder(ctx, merged)), nil, nil
+	})
+
+	addTool(server, &mcp.Tool{
+		Name: "test_langfuse",
+		Description: "Test the Langfuse host and project keys without saving. Blank fields fall back to " +
+			"the stored values. Returns ok/latency/error.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args testLangfuseArgs) (*mcp.CallToolResult, any, error) {
+		merged, err := settingsForArgs(ctx, mgr, req, args.settingsArgs())
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return jsonResult(mgr.TestLangfuse(ctx, merged)), nil, nil
 	})
 }

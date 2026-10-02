@@ -9,6 +9,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/rytsh/krabby/internal/service/bigpicture"
+	"github.com/rytsh/krabby/internal/service/manager"
 )
 
 type pictureReadService interface {
@@ -23,6 +24,7 @@ type pictureAdminService interface {
 	SaveBigPicture(context.Context, string, bigpicture.Config) (*bigpicture.Picture, error)
 	DeleteBigPicture(context.Context, string, uint64) error
 	PublishBigPicture(context.Context, string, bigpicture.Publication) (*bigpicture.Snapshot, error)
+	BigPictureSourceOptions(context.Context, string, string, int, int) (manager.PictureSourcePage, error)
 }
 
 type listPicturesArgs struct {
@@ -83,6 +85,12 @@ type publishPictureArgs struct {
 	Name        string `json:"name"`
 	Publication string `json:"publication" jsonschema:"JSON object string: expected_version, expected_revision (empty initially), producer, overview (document path), documents:[{path,title,markdown,evidence:[{source:{kind,ref},locator,revision}]}]. Replaces the whole document tree; max 64 documents, 256 KiB each, 4 MiB total"`
 }
+type pictureSourceOptionsArgs struct {
+	Kind    string `json:"kind" jsonschema:"repo, namespace, repo_pattern, bigpicture, web, api or mcp"`
+	Query   string `json:"query,omitempty" jsonschema:"filter text; for repo_pattern the glob to preview"`
+	Page    int    `json:"page,omitempty"`
+	PerPage int    `json:"per_page,omitempty" jsonschema:"default 20, max 100"`
+}
 type deletePictureArgs struct {
 	Name            string `json:"name"`
 	ExpectedVersion uint64 `json:"expected_version" jsonschema:"current workspace version from get_big_picture"`
@@ -129,6 +137,11 @@ func addPictureAdminTools(server *mcp.Server, service pictureAdminService) {
 			}
 			snapshot, err := service.PublishBigPicture(ctx, args.Name, pub)
 			return nil, snapshot, err
+		})
+	addTool(server, &mcp.Tool{Name: "big_picture_source_options", Description: "List selectable source refs of one kind for save_big_picture sources, with status. For repo_pattern, previews which repositories the glob matches.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}},
+		func(ctx context.Context, _ *mcp.CallToolRequest, args pictureSourceOptionsArgs) (*mcp.CallToolResult, manager.PictureSourcePage, error) {
+			page, err := service.BigPictureSourceOptions(ctx, strings.TrimSpace(args.Kind), args.Query, args.Page, args.PerPage)
+			return nil, page, err
 		})
 	destructive := true
 	addTool(server, &mcp.Tool{Name: "delete_big_picture", Description: "Delete an architecture workspace and its publications. Does not delete source repositories or connections.", Annotations: &mcp.ToolAnnotations{DestructiveHint: &destructive}},

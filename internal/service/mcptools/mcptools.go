@@ -42,7 +42,7 @@ Always pass repo or the exact web:/api: scope_key when known. Broader searches u
 
 const apiInstructions = `This server contains only the API catalog. To call an API, walk it: list_api_groups -> list_api_services -> list_api_endpoints -> get_api_endpoint. Only the last returns schemas; narrow with search/tag rather than listing every endpoint. call_api_endpoint then sends a real request to the target service, so call mutating endpoints only when explicitly requested.`
 
-const adminInstructions = `This server contains Krabby administration tools. It manages repositories, namespaces, credentials, runtime configuration, web sources, API entries and Big Pictures. generate_big_picture queues bounded research; publish_big_picture stores caller-produced documents. Neither verifies live state. Source operations manage Krabby collections and sync jobs, not upstream Jira issues or Confluence pages. Mutate only when explicitly requested. Inspect results through the core/API MCP server.`
+const adminInstructions = `This server contains Krabby administration tools. It manages repositories, namespaces, credentials, the task queue, runtime configuration, web sources, API entries, outbound MCP connections and Big Pictures. generate_big_picture queues bounded research; publish_big_picture stores caller-produced documents. Neither verifies live state. Source operations manage Krabby collections and sync jobs, not upstream Jira issues or Confluence pages. Mutate only when explicitly requested. Inspect results through the core/API MCP server.`
 
 // NewCore builds the read-only repository, graph, file, history and docs MCP
 // catalog.
@@ -75,6 +75,7 @@ func NewAdmin(mgr *manager.Manager, version string, waitTimeout time.Duration) *
 	addDocAdminTools(server, mgr, mgr)
 	addAPIAdminTools(server, mgr)
 	addPictureAdminTools(server, mgr)
+	addExternalMCPTools(server, mgr)
 
 	return server
 }
@@ -386,6 +387,20 @@ func addManagementTools(
 				"overrides": repo.Overrides,
 			}), nil, nil
 		})
+
+		addTool(server, &mcp.Tool{
+			Name: "get_repo_settings",
+			Description: "Inspect one repository's build configuration: the install-wide settings, this repo's stored overrides (including prompts), " +
+				"and the effective merge the next build uses. Read it before set_repo_overrides, which replaces the whole override set.",
+			Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+		}, func(ctx context.Context, _ *mcp.CallToolRequest, args repoIDArgs) (*mcp.CallToolResult, any, error) {
+			out, err := adminService.RepoSettings(ctx, args.Repo)
+			if err != nil {
+				return nil, nil, err
+			}
+
+			return jsonResult(out), nil, nil
+		})
 	}
 
 	if !admin {
@@ -609,6 +624,25 @@ func addQueueTools(server *mcp.Server, mgr queueService) {
 		n := mgr.CancelTasks(args.Repo)
 
 		return textResult(fmt.Sprintf("cancelled %d task(s) for %s", n, args.Repo)), nil, nil
+	})
+
+	addTool(server, &mcp.Tool{
+		Name: "cancel_pending_tasks",
+		Description: "Drop every queued (not yet started) background task. Running work continues; " +
+			"use cancel_task to abort a running task. Returns the resulting queue snapshot.",
+	}, func(_ context.Context, _ *mcp.CallToolRequest, _ emptyArgs) (*mcp.CallToolResult, any, error) {
+		n := mgr.CancelPendingTasks()
+
+		return jsonResult(map[string]any{"cancelled": n, "queue": mgr.TaskSnapshot()}), nil, nil
+	})
+
+	addTool(server, &mcp.Tool{
+		Name:        "clear_task_history",
+		Description: "Remove finished, failed and cancelled tasks from the queue history. Queued and running work is untouched.",
+	}, func(_ context.Context, _ *mcp.CallToolRequest, _ emptyArgs) (*mcp.CallToolResult, any, error) {
+		mgr.ClearTaskHistory()
+
+		return jsonResult(mgr.TaskSnapshot()), nil, nil
 	})
 
 	addTool(server, &mcp.Tool{

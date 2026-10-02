@@ -66,8 +66,8 @@ func TestToolCatalogs(t *testing.T) {
 			absent:  []string{"search_code", "add_api_service", "set_docs_config", "add_repo"},
 		},
 		{
-			name: "admin", server: func() *mcp.Server { return NewAdmin(nil, "test", 0) }, count: 42,
-			present: []string{"add_repo", "remove_repo", "refresh_repo", "queue_status", "set_docs_config", "add_source", "add_api_service", "set_credential", "save_big_picture", "publish_big_picture", "delete_big_picture"},
+			name: "admin", server: func() *mcp.Server { return NewAdmin(nil, "test", 0) }, count: 55,
+			present: []string{"add_repo", "remove_repo", "refresh_repo", "queue_status", "set_docs_config", "add_source", "add_api_service", "set_credential", "save_big_picture", "publish_big_picture", "delete_big_picture", "get_repo_settings", "cancel_pending_tasks", "clear_task_history", "test_langfuse", "cancel_source", "test_source_config", "cancel_api_service", "test_api_service_config", "list_external_mcps", "save_external_mcp", "delete_external_mcp", "discover_external_mcp", "big_picture_source_options"},
 			absent:  []string{"list_repos", "repo_status", "search_code", "query_graph", "search_docs", "list_api_services", "call_api_endpoint", "list_big_pictures", "get_big_picture"},
 		},
 	}
@@ -166,8 +166,8 @@ func TestToolCatalogs(t *testing.T) {
 			}
 		})
 	}
-	if len(allNames) != 75 {
-		t.Fatalf("catalog union has %d tools, want 75", len(allNames))
+	if len(allNames) != 88 {
+		t.Fatalf("catalog union has %d tools, want 88", len(allNames))
 	}
 }
 

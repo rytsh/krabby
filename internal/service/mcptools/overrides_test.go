@@ -116,10 +116,17 @@ func (s *stubRepoService) RefreshWait(context.Context, string, ...string) (*regi
 
 func (s *stubRepoService) CancelJob(string) bool        { return false }
 func (s *stubRepoService) TaskSnapshot() queue.Snapshot { return queue.Snapshot{} }
-func (s *stubRepoService) BumpTask(uint64) bool         { return false }
-func (s *stubRepoService) CancelTask(uint64) bool       { return false }
-func (s *stubRepoService) CancelTasks(string) int       { return 0 }
-func (s *stubRepoService) SetTaskConcurrency(int)       {}
+func (s *stubRepoService) ClearTaskHistory()            {}
+func (s *stubRepoService) CancelPendingTasks() int      { return 0 }
+
+func (s *stubRepoService) RepoSettings(context.Context, string) (*manager.RepoSettings, error) {
+	return nil, errStubReached
+}
+
+func (s *stubRepoService) BumpTask(uint64) bool   { return false }
+func (s *stubRepoService) CancelTask(uint64) bool { return false }
+func (s *stubRepoService) CancelTasks(string) int { return 0 }
+func (s *stubRepoService) SetTaskConcurrency(int) {}
 
 // adminRepoSession registers the admin management tools against a stub service
 // and connects an in-memory MCP client to them.
