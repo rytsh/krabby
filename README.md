@@ -21,6 +21,7 @@ and understand relationships through MCP.
 - API catalog: OpenAPI/Swagger and gRPC endpoints, browsable and searchable, with per-service overrides
 - Web UI, REST API, and MCP support
 - External MCP connection management with credential-safe catalog discovery
+- Shared agent memory: Markdown notes with timestamped history, grouped in spaces, pinned to code and flagged when that code changes
 - Big Picture workspaces: multi-source architecture synthesis, evidence citations, versioned document trees, namespaced hybrid search and scheduled incremental updates via UI/REST/admin MCP
 
 ## Run with Docker
@@ -65,24 +66,27 @@ Go to **About** section in the UI and follow the instructions to add Krabby to y
 <details>
 <summary>Click for MCP configuration</summary>
 
-Krabby exposes three independent streamable HTTP MCP catalogs:
+Krabby exposes four independent streamable HTTP MCP catalogs:
 
 - `http://localhost:8080/mcp` — read-only code, graph, files, history, and docs
 - `http://localhost:8080/mcp/api` — API catalog discovery and live endpoint calls
 - `http://localhost:8080/mcp/admin` — repository, credential, source, API, queue, and settings administration
+- `http://localhost:8080/mcp/memory` — shared, durable agent memory
 
 Paste this into your coding agent:
 
-> Add Krabby to my MCP client configuration as three remote streamable HTTP
-> servers named "krabby", "krabby-api", and "krabby-admin", using
-> http://localhost:8080/mcp, http://localhost:8080/mcp/api, and
-> http://localhost:8080/mcp/admin. Preserve my existing MCP servers and tell me
-> how to enable only the catalogs needed for a task.
+> Add Krabby to my MCP client configuration as four remote streamable HTTP
+> servers named "krabby", "krabby-api", "krabby-admin", and "krabby-memory",
+> using http://localhost:8080/mcp, http://localhost:8080/mcp/api,
+> http://localhost:8080/mcp/admin, and http://localhost:8080/mcp/memory.
+> Preserve my existing MCP servers and tell me how to enable only the catalogs
+> needed for a task.
 
 The catalogs do not overlap. Keep `krabby` enabled for normal codebase work,
 enable `krabby-api` only when an agent should discover or call catalogued APIs,
-and enable `krabby-admin` only while it should be allowed to add, change, or
-delete Krabby-managed resources.
+enable `krabby-admin` only while it should be allowed to add, change, or
+delete Krabby-managed resources, and enable `krabby-memory` when agents should
+share durable notes across sessions.
 
 For client-specific configuration examples, private repository credentials,
 REST endpoints, MCP tools, memory tuning, and development instructions, see

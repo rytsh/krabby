@@ -22,19 +22,24 @@ import (
 	"github.com/rytsh/krabby/internal/service/manager"
 )
 
+// MCPCatalogs are the independent MCP servers mounted under the MCP path.
+type MCPCatalogs struct {
+	Core, API, Admin, Memory *mcp.Server
+}
+
 // Handler builds the configured HTTP route graph without binding a socket.
-func Handler(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpServer, mcpAPIServer, mcpAdminServer *mcp.Server) http.Handler {
-	return newRouter(ctx, cfg, managerRouteServices(mgr), mcpServer, mcpAPIServer, mcpAdminServer)
+func Handler(ctx context.Context, cfg *config.Config, mgr *manager.Manager, catalogs MCPCatalogs) http.Handler {
+	return newRouter(ctx, cfg, managerRouteServices(mgr), catalogs)
 }
 
 // Start runs the HTTP server until ctx is cancelled.
-func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, mcpServer, mcpAPIServer, mcpAdminServer *mcp.Server) error {
-	server := newRouter(ctx, cfg, managerRouteServices(mgr), mcpServer, mcpAPIServer, mcpAdminServer)
+func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, catalogs MCPCatalogs) error {
+	server := newRouter(ctx, cfg, managerRouteServices(mgr), catalogs)
 
 	return server.StartWithContext(ctx, cfg.Server.Host+":"+cfg.Server.Port)
 }
 
-func newRouter(ctx context.Context, cfg *config.Config, services routeServices, mcpServer, mcpAPIServer, mcpAdminServer *mcp.Server) *ada.Server {
+func newRouter(ctx context.Context, cfg *config.Config, services routeServices, catalogs MCPCatalogs) *ada.Server {
 	server := ada.New()
 	server.Use(
 		mrecover.Middleware(),
@@ -61,7 +66,7 @@ func newRouter(ctx context.Context, cfg *config.Config, services routeServices, 
 
 	// Each path owns a disjoint tool catalog. Clients add only the capabilities
 	// they need and can enable or disable API and administration independently.
-	for path, catalog := range mcpCatalogRoutes(cfg.MCP.Path, mcpServer, mcpAPIServer, mcpAdminServer) {
+	for path, catalog := range mcpCatalogRoutes(cfg.MCP.Path, catalogs) {
 		handler := mcp.NewStreamableHTTPHandler(
 			func(_ *http.Request) *mcp.Server { return catalog },
 			&mcp.StreamableHTTPOptions{},
@@ -179,6 +184,14 @@ func newRouter(ctx context.Context, cfg *config.Config, services routeServices, 
 	api.PUT("/external-mcps/{name}", server.Wrap(saveExternalMCP(services.externalMCPs, false)))
 	api.DELETE("/external-mcps/{name}", server.Wrap(deleteExternalMCP(services.externalMCPs)))
 	api.POST("/external-mcps/discover", server.Wrap(discoverExternalMCP(services.externalMCPs)))
+	api.GET("/memories", server.Wrap(listMemories(services.memories)))
+	api.POST("/memories", server.Wrap(createMemory(services.memories)))
+	api.GET("/memories/spaces", server.Wrap(listMemorySpaces(services.memories)))
+	api.GET("/memories/search", server.Wrap(searchMemories(services.memories)))
+	api.GET("/memories/export", server.Wrap(exportMemories(services.memories)))
+	api.GET("/memories/{id}", server.Wrap(getMemory(services.memories)))
+	api.PATCH("/memories/{id}", server.Wrap(updateMemory(services.memories)))
+	api.DELETE("/memories/{id}", server.Wrap(deleteMemory(services.memories)))
 	api.GET("/big-pictures", server.Wrap(listBigPictures(services.bigPictures)))
 	api.POST("/big-pictures", server.Wrap(saveBigPicture(services.bigPictures, true)))
 	api.GET("/big-pictures/source-options", server.Wrap(bigPictureSourceOptions(services.bigPictures)))
@@ -215,11 +228,12 @@ func newRouter(ctx context.Context, cfg *config.Config, services routeServices, 
 	return server
 }
 
-func mcpCatalogRoutes(root string, core, api, admin *mcp.Server) map[string]*mcp.Server {
+func mcpCatalogRoutes(root string, catalogs MCPCatalogs) map[string]*mcp.Server {
 	return map[string]*mcp.Server{
-		root:            core,
-		root + "/api":   api,
-		root + "/admin": admin,
+		root:             catalogs.Core,
+		root + "/api":    catalogs.API,
+		root + "/admin":  catalogs.Admin,
+		root + "/memory": catalogs.Memory,
 	}
 }
 

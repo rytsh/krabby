@@ -117,6 +117,9 @@ func New(cfg config.RAG, emb *embedder.Client, store vectorstore.Store) *Service
 	return &Service{cfg: cfg, emb: emb, store: store}
 }
 
+// Embedder returns the client used for docs embeddings.
+func (s *Service) Embedder() *embedder.Client { return s.emb }
+
 // Index (re)builds the vector index for a repo's generated docs. It reads the
 // markdown files under docsDir, chunks them (heading-aware, size-capped),
 // embeds the chunks and upserts them into the store, replacing any prior

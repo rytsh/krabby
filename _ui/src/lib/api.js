@@ -52,6 +52,28 @@ export const api = {
   bigPictureSnapshot: (name, revision = "", signal) => req(`/big-pictures/${encodeURIComponent(name)}/snapshot?${new URLSearchParams({ revision })}`, { signal }),
   bigPictureDocument: (name, revision, path, offset = 0, signal) => req(`/big-pictures/${encodeURIComponent(name)}/document?${new URLSearchParams({ revision, path, offset: String(offset), max_bytes: "131072" })}`, { signal }),
   bigPictureSourceOptions: (kind, q = "", page = 1, signal) => req(`/big-pictures/source-options?${new URLSearchParams({ kind, q, page: String(page) })}`, { signal }),
+  // Shared memories. space may be a list; "" lists every space.
+  memories: ({ space = [], kind = "", status = "", repo = "", tag = "", q = "", page = 1, per_page = 20 } = {}, signal) => {
+    const p = new URLSearchParams({ kind, status, repo, tag, q, page: String(page), per_page: String(per_page) });
+    for (const s of [].concat(space).filter(Boolean)) p.append("space", s);
+    return req(`/memories?${p}`, { signal });
+  },
+  searchMemories: ({ q, space = [], kind = "", status = "", repo = "", mode = "" }, signal) => {
+    const p = new URLSearchParams({ q, kind, status, repo, mode });
+    for (const s of [].concat(space).filter(Boolean)) p.append("space", s);
+    return req(`/memories/search?${p}`, { signal });
+  },
+  memorySpaces: () => req("/memories/spaces"),
+  memory: (id, signal) => req(`/memories/${encodeURIComponent(id)}`, { signal }),
+  createMemory: (input) => req("/memories", { method: "POST", body: JSON.stringify(input) }),
+  updateMemory: (id, patch) => req(`/memories/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  deleteMemory: (id) => req(`/memories/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  memoryExportURL: ({ space = [], kind = "", status = "", repo = "" } = {}) => {
+    const p = new URLSearchParams({ kind, status, repo });
+    for (const s of [].concat(space).filter(Boolean)) p.append("space", s);
+    return `${BASE}/memories/export?${p}`;
+  },
+  memoryMarkdownURL: (id) => `${BASE}/memories/${encodeURIComponent(id)}?format=markdown`,
   externalMCPs: () => req("/external-mcps"),
   addExternalMCP: (config) => req("/external-mcps", { method: "POST", body: JSON.stringify(config) }),
   updateExternalMCP: (name, config) => req(`/external-mcps/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify(config) }),

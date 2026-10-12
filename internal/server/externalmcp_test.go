@@ -27,7 +27,7 @@ func TestExternalMCPRoutes(t *testing.T) {
 	}
 	mgr := &manager.Manager{}
 	mgr.SetExternalMCPs(store)
-	router := newRouter(context.Background(), &config.Config{Server: config.Server{BasePath: "/krabby"}, MCP: config.MCP{Path: "/mcp"}}, routeServices{externalMCPs: mgr, tracing: mgr}, nil, nil, nil)
+	router := newRouter(context.Background(), &config.Config{Server: config.Server{BasePath: "/krabby"}, MCP: config.MCP{Path: "/mcp"}}, routeServices{externalMCPs: mgr, tracing: mgr}, MCPCatalogs{})
 	request := func(method, path, body string, want int) string {
 		t.Helper()
 		rec := httptest.NewRecorder()

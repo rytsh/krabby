@@ -70,6 +70,11 @@ func TestToolCatalogs(t *testing.T) {
 			present: []string{"add_repo", "remove_repo", "refresh_repo", "queue_status", "set_docs_config", "add_source", "add_api_service", "set_credential", "save_big_picture", "publish_big_picture", "delete_big_picture", "get_repo_settings", "cancel_pending_tasks", "clear_task_history", "test_langfuse", "cancel_source", "test_source_config", "cancel_api_service", "test_api_service_config", "list_external_mcps", "save_external_mcp", "delete_external_mcp", "discover_external_mcp", "big_picture_source_options"},
 			absent:  []string{"list_repos", "repo_status", "search_code", "query_graph", "search_docs", "list_api_services", "call_api_endpoint", "list_big_pictures", "get_big_picture"},
 		},
+		{
+			name: "memory", server: func() *mcp.Server { return NewMemory(nil, "test") }, count: 6,
+			present: []string{"remember", "recall", "get_memory", "update_memory", "forget", "list_memories"},
+			absent:  []string{"search_code", "add_repo", "search_docs"},
+		},
 	}
 
 	allNames := map[string]string{}
@@ -166,8 +171,8 @@ func TestToolCatalogs(t *testing.T) {
 			}
 		})
 	}
-	if len(allNames) != 88 {
-		t.Fatalf("catalog union has %d tools, want 88", len(allNames))
+	if len(allNames) != 94 {
+		t.Fatalf("catalog union has %d tools, want 94", len(allNames))
 	}
 }
 

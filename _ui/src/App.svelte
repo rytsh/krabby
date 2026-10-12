@@ -25,6 +25,7 @@
   import Sources from "./routes/Sources.svelte";
   import BigPictures from "./routes/BigPictures.svelte";
   import BigPictureDetail from "./routes/BigPictureDetail.svelte";
+  import Memories from "./routes/Memories.svelte";
   import Apis from "./routes/Apis.svelte";
   import Namespaces from "./routes/Namespaces.svelte";
   import Activity from "./routes/Activity.svelte";
@@ -43,6 +44,8 @@
     if (p === "/big-pictures") return { view: "big-pictures" };
     if (p.startsWith("/big-pictures/")) return { view: "big-picture", pictureName: p.slice("/big-pictures/".length) };
     if (p.startsWith("/sources/")) return { view: "sources", sourceName: p.slice("/sources/".length) };
+    if (p === "/memories") return { view: "memories" };
+    if (p.startsWith("/memories/")) return { view: "memories", memoryId: p.slice("/memories/".length) };
     if (p === "/apis") return { view: "apis" };
     if (p.startsWith("/apis/")) return { view: "apis", apiName: p.slice("/apis/".length) };
     if (p === "/namespaces") return { view: "namespaces" };
@@ -61,6 +64,7 @@
     { href: "/repos", label: "Repositories", icon: "boxes", match: (v) => v === "repos" || v === "repo" },
     { href: "/sources", label: "Sources", icon: "book", match: (v) => v === "sources" },
     { href: "/big-pictures", label: "Big Pictures", icon: "train-track", match: (v) => v === "big-pictures" || v === "big-picture" },
+    { href: "/memories", label: "Memory", icon: "brain", match: (v) => v === "memories" },
     { href: "/apis", label: "APIs", icon: "braces", match: (v) => v === "apis" },
     { href: "/namespaces", label: "Namespaces", icon: "tag", match: (v) => v === "namespaces" },
     { href: "/activity", label: "Activity", icon: "activity", match: (v) => v === "activity" },
@@ -75,6 +79,7 @@
     sources: "Sources",
     "big-pictures": "Big Pictures",
     "big-picture": "Big Picture",
+    memories: "Memory",
     apis: "API catalog",
     namespaces: "Namespaces",
     activity: "Activity",
@@ -380,6 +385,8 @@
         <BigPictures />
       {:else if view === "big-picture"}
         {#key route.pictureName}<BigPictureDetail name={route.pictureName} />{/key}
+      {:else if view === "memories"}
+        <Memories memoryId={route.memoryId} />
       {:else if view === "apis"}
         <Apis apiName={route.apiName || ""} />
       {:else if view === "namespaces"}

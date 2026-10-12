@@ -54,22 +54,23 @@ type OverviewSection struct {
 // RepoOverview is a bounded orientation, not a new LLM-generated answer. It
 // reads the existing synthesis and exposes a navigable outline of that artifact.
 type RepoOverview struct {
-	Repo              string            `json:"repo"`
-	Available         bool              `json:"available"`
-	Path              string            `json:"path,omitempty"`
-	Overview          string            `json:"overview,omitempty"`
-	Truncated         bool              `json:"truncated,omitempty"`
-	NextOffset        int64             `json:"next_offset,omitempty"`
-	Sections          []OverviewSection `json:"sections,omitempty"`
-	SectionsTruncated bool              `json:"sections_truncated,omitempty"`
-	GeneratedAt       time.Time         `json:"generated_at,omitzero"`
-	SummarizedFiles   int               `json:"summarized_files,omitempty" jsonschema:"files represented in the summary cache, not total repo coverage"`
-	DocsStatus        string            `json:"docs_status,omitempty"`
-	DocsCommit        string            `json:"docs_commit,omitempty" jsonschema:"commit recorded by the last successful docs stage; may be unknown"`
-	CloneCommit       string            `json:"clone_commit,omitempty"`
-	Stale             bool              `json:"stale,omitempty" jsonschema:"known mismatch between documentation and local clone commits"`
-	EvidenceKind      string            `json:"evidence_kind"`
-	Note              string            `json:"note"`
+	Repo              string             `json:"repo"`
+	Available         bool               `json:"available"`
+	Path              string             `json:"path,omitempty"`
+	Overview          string             `json:"overview,omitempty"`
+	Truncated         bool               `json:"truncated,omitempty"`
+	NextOffset        int64              `json:"next_offset,omitempty"`
+	Sections          []OverviewSection  `json:"sections,omitempty"`
+	SectionsTruncated bool               `json:"sections_truncated,omitempty"`
+	GeneratedAt       time.Time          `json:"generated_at,omitzero"`
+	SummarizedFiles   int                `json:"summarized_files,omitempty" jsonschema:"files represented in the summary cache, not total repo coverage"`
+	DocsStatus        string             `json:"docs_status,omitempty"`
+	DocsCommit        string             `json:"docs_commit,omitempty" jsonschema:"commit recorded by the last successful docs stage; may be unknown"`
+	CloneCommit       string             `json:"clone_commit,omitempty"`
+	Stale             bool               `json:"stale,omitempty" jsonschema:"known mismatch between documentation and local clone commits"`
+	EvidenceKind      string             `json:"evidence_kind"`
+	Note              string             `json:"note"`
+	Memories          *RepoMemorySummary `json:"memories,omitempty" jsonschema:"shared memories pinned to this repo; read them with the memory MCP recall tool"`
 }
 
 func (m *Manager) RepoOverview(ctx context.Context, id string) (RepoOverview, error) {
@@ -85,6 +86,9 @@ func (m *Manager) RepoOverview(ctx context.Context, id string) (RepoOverview, er
 	out.DocsCommit, out.CloneCommit = repo.Stages.Docs.Commit, repo.LastCommit
 	out.Stale = out.DocsCommit != "" && out.CloneCommit != "" && out.DocsCommit != out.CloneCommit
 	out.Note = "Generated orientation is unavailable. Use search_code/read_file for implementation and repo_status to inspect the docs stage."
+	if summary, err := m.RepoMemorySummary(ctx, repo.ID); err == nil && summary.Total > 0 {
+		out.Memories = &summary
+	}
 	if m.docsRootDir == "" {
 		return out, nil
 	}

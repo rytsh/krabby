@@ -14,6 +14,7 @@ import (
 	"github.com/rytsh/krabby/internal/service/docgen"
 	"github.com/rytsh/krabby/internal/service/manager"
 	"github.com/rytsh/krabby/internal/service/mcpclient"
+	"github.com/rytsh/krabby/internal/service/memory"
 	"github.com/rytsh/krabby/internal/service/queue"
 	"github.com/rytsh/krabby/internal/service/rag"
 	"github.com/rytsh/krabby/internal/service/registry"
@@ -159,6 +160,16 @@ type bigPictureService interface {
 	BigPictureSourceOptions(context.Context, string, string, int, int) (manager.PictureSourcePage, error)
 }
 
+type memoryService interface {
+	Remember(context.Context, memory.Input) (manager.RememberResult, error)
+	RecallMemories(context.Context, string, string, memory.ListOptions, int) (manager.MemorySearch, error)
+	Memory(context.Context, string) (*memory.Memory, error)
+	UpdateMemory(context.Context, string, memory.Patch) (*memory.Memory, error)
+	ForgetMemory(context.Context, string) error
+	ListMemories(context.Context, memory.ListOptions) (memory.Page, error)
+	MemorySpaces(context.Context) ([]memory.SpaceCount, error)
+}
+
 type tracingService interface {
 	Tracer() *langfuse.Tracer
 }
@@ -180,6 +191,7 @@ type routeServices struct {
 	credentials  credentialService
 	externalMCPs externalMCPService
 	bigPictures  bigPictureService
+	memories     memoryService
 	tracing      tracingService
 	webhook      webhookService
 }
@@ -190,6 +202,7 @@ func managerRouteServices(mgr *manager.Manager) routeServices {
 		docsConfig: mgr, sources: mgr, apis: mgr, credentials: mgr,
 		externalMCPs: mgr,
 		bigPictures:  mgr,
+		memories:     mgr,
 		tracing:      mgr, webhook: mgr,
 	}
 }
@@ -206,6 +219,7 @@ var (
 	_ credentialService   = (*manager.Manager)(nil)
 	_ externalMCPService  = (*manager.Manager)(nil)
 	_ bigPictureService   = (*manager.Manager)(nil)
+	_ memoryService       = (*manager.Manager)(nil)
 	_ tracingService      = (*manager.Manager)(nil)
 	_ webhookService      = (*manager.Manager)(nil)
 )

@@ -26,6 +26,7 @@ import (
 	"github.com/rytsh/krabby/internal/service/manager"
 	"github.com/rytsh/krabby/internal/service/mcpclient"
 	"github.com/rytsh/krabby/internal/service/mcptools"
+	"github.com/rytsh/krabby/internal/service/memory"
 	"github.com/rytsh/krabby/internal/service/rag"
 	"github.com/rytsh/krabby/internal/service/registry"
 	"github.com/rytsh/krabby/internal/service/scheduler"
@@ -195,6 +196,11 @@ func run(ctx context.Context) error {
 		return err
 	}
 	mgr.SetBigPictures(bigPictures)
+	memories, err := memory.New(db)
+	if err != nil {
+		return err
+	}
+	mgr.SetMemories(memories)
 	// Wire the durable task store into the queue before anything enqueues work,
 	// so every submitted task is recorded and can be replayed after a restart.
 	mgr.SetTaskStore(taskStore)
@@ -299,6 +305,15 @@ func run(ctx context.Context) error {
 	if err := mgr.BackfillBigPictureIndexes(ctx); err != nil {
 		slog.Error("enqueue missing big picture indexes", "error", err)
 	}
+	// Memories saved before an embedder was configured become searchable by
+	// meaning once one is.
+	background.Go(func() error {
+		if err := mgr.BackfillMemoryEmbeddings(appCtx); err != nil && appCtx.Err() == nil {
+			slog.Warn("backfill memory embeddings", "error", err)
+		}
+
+		return nil
+	})
 	// Every restored closure now has its stores/configuration, and all startup
 	// durable submissions have sequence values above the persisted maximum.
 	mgr.StartTaskQueue()
@@ -311,12 +326,15 @@ func run(ctx context.Context) error {
 		return nil
 	})
 
-	mcpServer := mcptools.NewCore(mgr, version)
-	mcpAPIServer := mcptools.NewAPI(mgr, version)
-	mcpAdminServer := mcptools.NewAdmin(mgr, version, cfg.MCP.WaitTimeout)
+	catalogs := server.MCPCatalogs{
+		Core:   mcptools.NewCore(mgr, version),
+		API:    mcptools.NewAPI(mgr, version),
+		Admin:  mcptools.NewAdmin(mgr, version, cfg.MCP.WaitTimeout),
+		Memory: mcptools.NewMemory(mgr, version),
+	}
 
 	// Server blocks until ctx is cancelled, then shuts down.
-	if err := server.Start(appCtx, cfg, mgr, mcpServer, mcpAPIServer, mcpAdminServer); err != nil {
+	if err := server.Start(appCtx, cfg, mgr, catalogs); err != nil {
 		return fmt.Errorf("start server; %w", err)
 	}
 

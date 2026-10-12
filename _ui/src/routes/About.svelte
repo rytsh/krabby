@@ -72,7 +72,7 @@
 Server name: ${mcpName}
 Transport: streamable HTTP
 URL: ${mcpUrl}
-Tool catalog: ${mcpCatalog} (${mcpCatalog === "core" ? "read-only code, graph, files and docs" : mcpCatalog === "api" ? "API discovery and live endpoint calls" : "Krabby administration and mutations"})
+Tool catalog: ${mcpCatalog} (${mcpCatalog === "core" ? "read-only code, graph, files and docs" : mcpCatalog === "api" ? "API discovery and live endpoint calls" : mcpCatalog === "memory" ? "shared, durable agent memory" : "Krabby administration and mutations"})
 Authentication: none — the server is reached through a proxy that authenticates the request.
 
 Detect this client's MCP configuration format and update the appropriate project or user configuration. Preserve all existing settings and other MCP servers. After configuring it, verify the connection and confirm that the Krabby tools are available.`);
@@ -89,9 +89,8 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
   -d '{"url": "https://github.com/owner/repo", "branch": ""}'`);
 
   // The complete tool inventory, kept in sync with the registrations in
-  // internal/service/mcptools (TestToolCatalogs pins the disjoint counts: 25
-  // core, 5 api, 38 admin). A tool's third element selects its catalog;
-  // absent means core.
+  // internal/service/mcptools (TestToolCatalogs pins the disjoint counts). A
+  // tool's third element selects its catalog; absent means core.
   const toolGroups = [
     {
       name: "Repositories",
@@ -201,6 +200,17 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
         ["test_llm", "Test the chat LLM connection without saving.", "admin"],
         ["test_embedder", "Test the embeddings connection without saving.", "admin"],
         ["test_code_embedder", "Test the dedicated code embeddings connection without saving.", "admin"],
+      ],
+    },
+    {
+      name: "Memory",
+      tools: [
+        ["remember", "Store a durable Markdown memory, optionally pinned to code; duplicates return the existing memory.", "memory"],
+        ["recall", "Search memories by meaning and keywords across spaces, filtered by repo, kind or status.", "memory"],
+        ["get_memory", "Read one memory in full with evidence status and timestamped history.", "memory"],
+        ["update_memory", "Change selected fields; reviewing a stale memory re-pins it to current code.", "memory"],
+        ["forget", "Delete a memory that is wrong or no longer useful.", "memory"],
+        ["list_memories", "Browse memories newest first, or list spaces with counts.", "memory"],
       ],
     },
     {
@@ -365,7 +375,7 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
   <p class="mt-0 text-[13px] text-faint">
     Add only the catalogs this client needs. Each is a separate MCP server, so API access and administration can be enabled or disabled independently.
   </p>
-  <div class="mt-3 grid gap-2 sm:grid-cols-3">
+  <div class="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
     <button
       class={`cursor-pointer rounded-md border p-3 text-left transition-colors hover:border-accent/60 ${mcpCatalog === "core" ? "border-accent bg-accent/5" : "border-line"}`}
       aria-pressed={mcpCatalog === "core"}
@@ -395,6 +405,16 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
       <code class="mt-1 block break-all font-mono text-[11px] text-fg">{mcpRoot}/admin</code>
       <div class="mt-1 text-[12px] text-dim">All create, update, refresh, cancel, delete, credential, queue, and configuration tools.</div>
       <div class="mt-2 text-[11px] font-medium text-accent">38 tools</div>
+    </button>
+    <button
+      class={`cursor-pointer rounded-md border p-3 text-left transition-colors hover:border-accent/60 ${mcpCatalog === "memory" ? "border-accent bg-accent/5" : "border-line"}`}
+      aria-pressed={mcpCatalog === "memory"}
+      onclick={() => (mcpCatalog = "memory")}
+    >
+      <div class="text-[13px] font-medium">Memory</div>
+      <code class="mt-1 block break-all font-mono text-[11px] text-fg">{mcpRoot}/memory</code>
+      <div class="mt-1 text-[12px] text-dim">Shared Markdown memories agents read and write across sessions, re-checked against pinned code.</div>
+      <div class="mt-2 text-[11px] font-medium text-accent">6 tools</div>
     </button>
   </div>
   <p class="mb-0 mt-2 text-[13px] text-faint">
@@ -442,6 +462,13 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
           aria-pressed={mcpCatalog === "admin"}
           onclick={() => (mcpCatalog = "admin")}
         >Admin</button>
+        <button
+          class="cursor-pointer rounded px-2.5 py-1 text-[11px] text-dim transition-colors hover:text-fg"
+          class:!bg-surface-2={mcpCatalog === "memory"}
+          class:!text-fg={mcpCatalog === "memory"}
+          aria-pressed={mcpCatalog === "memory"}
+          onclick={() => (mcpCatalog = "memory")}
+        >Memory</button>
     </div>
   </div>
 
@@ -480,6 +507,8 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
   <p class="mb-0 mt-3 text-[11px] text-faint">
     {#if mcpCatalog === "admin"}
       Admin uses <code class="font-mono">{mcpPath}/admin</code> and exposes only mutation and configuration tools. Add Core or API separately when the same client also needs their read tools.
+    {:else if mcpCatalog === "memory"}
+      Memory uses <code class="font-mono">{mcpPath}/memory</code> and exposes only the shared memory tools. Every client reads every space, so agents should keep secrets out; use a space like <code class="font-mono">agent:&lt;name&gt;</code> for an agent's own notes.
     {:else if mcpCatalog === "api"}
       API uses <code class="font-mono">{mcpPath}/api</code> and exposes only catalog discovery and <code class="font-mono">call_api_endpoint</code>.
     {:else}
@@ -559,7 +588,7 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
       </p>
     </div>
     <div class="ml-auto flex items-center rounded-md border border-line bg-bg p-0.5" aria-label="Published MCP tool catalog">
-      {#each [["core", 22], ["api", 5], ["admin", 38]] as [catalog, count] (catalog)}
+      {#each [["core", 22], ["api", 5], ["admin", 38], ["memory", 6]] as [catalog, count] (catalog)}
         <button
           class="cursor-pointer rounded px-2.5 py-1 text-[11px] capitalize text-dim transition-colors hover:text-fg"
           class:!bg-surface-2={mcpCatalog === catalog}

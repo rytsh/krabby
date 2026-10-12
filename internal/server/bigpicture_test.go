@@ -36,7 +36,7 @@ func TestBigPictureRESTLifecycle(t *testing.T) {
 	mgr := &manager.Manager{}
 	mgr.SetExternalMCPs(connections)
 	mgr.SetBigPictures(pictures)
-	router := newRouter(ctx, &config.Config{Server: config.Server{BasePath: "/krabby"}, MCP: config.MCP{Path: "/mcp"}}, routeServices{bigPictures: mgr, tracing: mgr}, nil, nil, nil)
+	router := newRouter(ctx, &config.Config{Server: config.Server{BasePath: "/krabby"}, MCP: config.MCP{Path: "/mcp"}}, routeServices{bigPictures: mgr, tracing: mgr}, MCPCatalogs{})
 	request := func(method, suffix string, payload any, want int, output any) {
 		t.Helper()
 		data, err := json.Marshal(payload)

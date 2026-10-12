@@ -565,6 +565,10 @@ func (m *Manager) refresh(ctx context.Context, repo *registry.Repo, skips runSki
 		slog.Error("rebuild merged graph", "error", err)
 	}
 
+	if err := m.CheckRepoMemories(ctx, repo.ID); err != nil {
+		slog.Error("check memory evidence", "repo", repo.ID, "error", err)
+	}
+
 	// Best-effort docs + RAG indexing. Failures never fail the graph build.
 	// deferReindex=true: if the live bundle is unavailable, re-queue so a healthy
 	// bundle finishes the indexes instead of leaving them silently missing.

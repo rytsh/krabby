@@ -100,6 +100,7 @@ a proxy that authenticates every request:
 - `http://localhost:8080/mcp` — read-only repository, graph, file, history, and documentation tools
 - `http://localhost:8080/mcp/api` — API discovery plus `call_api_endpoint`, which sends real requests
 - `http://localhost:8080/mcp/admin` — every Krabby mutation and administrative tool
+- `http://localhost:8080/mcp/memory` — shared agent memory (see [Shared memory](#shared-memory))
 
 The catalogs are disjoint. Add them as separate MCP servers so a client can
 enable API access or administration only for the tasks that require it.
@@ -154,6 +155,7 @@ Example OpenCode config with core and admin registered separately:
 | `save_big_picture` / `publish_big_picture` / `delete_big_picture` / `big_picture_source_options` | Admin: manage workspaces and publish caller-produced multi-document snapshots; no automatic research |
 | `generate_big_picture` | Admin: queue bounded source collection and architecture synthesis with the documentation chat model |
 | `list_external_mcps` / `save_external_mcp` / `delete_external_mcp` / `discover_external_mcp` | Admin: manage outbound MCP connections used as Big Picture sources |
+| `remember` / `recall` / `get_memory` / `update_memory` / `forget` / `list_memories` | Memory: shared Markdown memories with spaces, code pins and history; see [Shared memory](#shared-memory) |
 
 Always pass the full repo id (`host/group/.../name`) when it is known. Omit it
 only for an intentional cross-repository search or merged-graph analysis.
@@ -506,6 +508,69 @@ These are administrator operations: as with other Krabby endpoints, deploy behin
 an authenticating proxy. Configured URLs may reach internal network services;
 only trusted administrators should manage them. Prefer HTTPS for credentials in
 transit. Custom protocol, cookie and proxy headers cannot be overridden.
+
+## Shared memory
+
+The `/mcp/memory` catalog and the **Memory** page give agents and people one
+shared, durable memory. A memory is a Markdown note with a title, a kind
+(`decision`, `convention`, `gotcha`, `fact`, `preference`, `todo`, `note`),
+tags, an optional expiry and optional code evidence.
+
+**Spaces** group memories. `default` holds shared team knowledge; any other
+label works, e.g. a team name or `agent:<name>` for an agent's own working
+notes. Spaces organise, they do not restrict: every client can read and write
+every space, and `recall` searches all of them unless `spaces` is passed. A
+user asking an agent to "add this to the development notes" gets space
+`development`; sub-topics belong in tags or a sub-space such as
+`development/migration`. `remember` reports `new_space` with the existing space
+names when it opens a new one, so a near-miss (`dev` vs `development`) can be
+moved with `update_memory`. Never
+store secrets — writes that look like keys or tokens are rejected.
+
+**History.** Every memory records when it was created and updated, by whom
+and why. `author` is optional free text — a person, team or agent name — set
+by the caller; Krabby never derives it from the connection, because many people
+share the same client. Edits record their own optional `author` and `note` in
+the history, and the memory keeps its original author. Krabby appends
+its own events when pinned code moves, changes or disappears. `get_memory`
+and `GET /api/v1/memories/{id}?format=markdown` render a memory as a Markdown
+document with a metadata table, the body, evidence and history;
+`GET /api/v1/memories/export` exports a filtered set as one document.
+
+**Evidence and staleness.** Evidence pins a memory to `repo` + `path`,
+optionally a line range or a `symbol` (resolved to its definition through the
+knowledge graph). Pinned lines are hashed at write time. After every repository
+refresh Krabby re-checks each pin:
+
+| Outcome | Memory status | Meaning |
+| --- | --- | --- |
+| lines unchanged | `active` | pin is current |
+| same lines elsewhere in the file | `active` | line range updated, `moved` event recorded |
+| lines changed | `stale` | verify against the code before relying on it |
+| file or repository gone | `orphaned` | the code it described no longer exists |
+
+A file pin without lines only tracks the file's existence. Editing a stale or
+orphaned memory (or **Still true** in the UI) re-pins it to the current code.
+`repo_overview` reports how many memories, stale and orphaned, a repository
+has.
+
+**Search.** `recall` ranks with BM25 over title, body, tags and pinned paths,
+and — when the docs embedder is configured — fuses that with semantic
+similarity. Without an embedder it falls back to lexical search. Memories
+written before an embedder was configured are embedded in the background.
+`remember` returns the existing memory instead of storing an exact duplicate,
+or a near-duplicate (cosine ≥ 0.92) in the same space.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/v1/memories` | List; filters `space` (repeatable), `kind`, `status`, `repo`, `tag`, `q` |
+| `GET /api/v1/memories/search?q=` | Recall; same filters plus `mode` and `limit` |
+| `GET /api/v1/memories/spaces` | Spaces with counts per status |
+| `GET /api/v1/memories/export` | Filtered memories as one Markdown document |
+| `POST /api/v1/memories` | Create (`space`, `kind`, `title`, `content`, `tags`, `evidence`, `expires_at`) |
+| `GET /api/v1/memories/{id}` | One memory; `?format=markdown` for Markdown |
+| `PATCH /api/v1/memories/{id}` | Update selected fields; `expected_version` guards concurrent edits |
+| `DELETE /api/v1/memories/{id}` | Forget |
 
 ## Big Picture workspaces
 

@@ -26,6 +26,7 @@ import (
 	"github.com/rytsh/krabby/internal/service/graphbuilder"
 	"github.com/rytsh/krabby/internal/service/graphquery"
 	"github.com/rytsh/krabby/internal/service/mcpclient"
+	"github.com/rytsh/krabby/internal/service/memory"
 	"github.com/rytsh/krabby/internal/service/queue"
 	"github.com/rytsh/krabby/internal/service/rag"
 	"github.com/rytsh/krabby/internal/service/registry"
@@ -44,6 +45,7 @@ type Manager struct {
 	creds        *credentials.Store
 	externalMCPs *mcpclient.Store
 	bigPictures  *bigpicture.Store
+	memories     *memory.Store
 	codeText     *coderag.TextStore
 	docsText     *rag.TextStore
 
@@ -112,7 +114,9 @@ type Manager struct {
 	// docsTextKeys the keys already known to be indexed. Together they keep the
 	// query path free of existence probes; see SearchDocs.
 	docsTextWarmed atomic.Bool
-	docsTextKeys   sync.Map
+	// memoryEmbedding guards the single background embedding backfill.
+	memoryEmbedding atomic.Bool
+	docsTextKeys    sync.Map
 
 	progressMu sync.Mutex
 	// progress is id -> phase -> counters. A repo runs code_index alongside
@@ -647,6 +651,9 @@ func (m *Manager) RemoveRepo(ctx context.Context, id string) error {
 
 	if err := m.reg.Delete(ctx, id); err != nil {
 		return err
+	}
+	if err := m.OrphanRepoMemories(ctx, id); err != nil {
+		slog.Error("mark memories of removed repo", "repo", id, "error", err)
 	}
 
 	snapshotRoot := m.snapshotRoot(id)

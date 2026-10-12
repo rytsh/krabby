@@ -40,7 +40,7 @@ func TestRouterBasePathAndFallbackPrecedence(t *testing.T) {
 		Server: config.Server{BasePath: "/krabby"},
 		MCP:    config.MCP{Path: "/mcp"},
 	}
-	handler := newRouter(context.Background(), cfg, routeServices{}, nil, nil, nil)
+	handler := newRouter(context.Background(), cfg, routeServices{}, MCPCatalogs{})
 
 	tests := []struct {
 		name         string
@@ -101,7 +101,7 @@ func TestRouterBasePathAndFallbackPrecedence(t *testing.T) {
 // of it.
 func TestPprofIsOffByDefault(t *testing.T) {
 	cfg := &config.Config{Server: config.Server{}, MCP: config.MCP{Path: "/mcp"}}
-	handler := newRouter(context.Background(), cfg, routeServices{}, nil, nil, nil)
+	handler := newRouter(context.Background(), cfg, routeServices{}, MCPCatalogs{})
 
 	for _, path := range []string{
 		"/debug/pprof/",
@@ -130,7 +130,7 @@ func TestPprofMountsWhenEnabled(t *testing.T) {
 		Server: config.Server{BasePath: "/krabby", Pprof: true},
 		MCP:    config.MCP{Path: "/mcp"},
 	}
-	handler := newRouter(context.Background(), cfg, routeServices{}, nil, nil, nil)
+	handler := newRouter(context.Background(), cfg, routeServices{}, MCPCatalogs{})
 
 	// A named profile behind a base path is the case pprof.Index cannot serve
 	// itself, so it is the one worth asserting.
@@ -157,19 +157,21 @@ func TestMCPCatalogRoutes(t *testing.T) {
 	core := mcp.NewServer(&mcp.Implementation{Name: "core", Version: "test"}, nil)
 	api := mcp.NewServer(&mcp.Implementation{Name: "api", Version: "test"}, nil)
 	admin := mcp.NewServer(&mcp.Implementation{Name: "admin", Version: "test"}, nil)
+	mem := mcp.NewServer(&mcp.Implementation{Name: "memory", Version: "test"}, nil)
 
-	routes := mcpCatalogRoutes("/custom/mcp", core, api, admin)
+	routes := mcpCatalogRoutes("/custom/mcp", MCPCatalogs{Core: core, API: api, Admin: admin, Memory: mem})
 	for path, want := range map[string]*mcp.Server{
-		"/custom/mcp":       core,
-		"/custom/mcp/api":   api,
-		"/custom/mcp/admin": admin,
+		"/custom/mcp":        core,
+		"/custom/mcp/api":    api,
+		"/custom/mcp/admin":  admin,
+		"/custom/mcp/memory": mem,
 	} {
 		if got := routes[path]; got != want {
 			t.Errorf("route %q = %p, want %p", path, got, want)
 		}
 	}
-	if len(routes) != 3 {
-		t.Fatalf("route count = %d, want 3", len(routes))
+	if len(routes) != 4 {
+		t.Fatalf("route count = %d, want 4", len(routes))
 	}
 }
 
