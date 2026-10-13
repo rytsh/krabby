@@ -30,7 +30,7 @@ func (m *Manager) BigPictureSchedules(ctx context.Context) ([]BigPictureSchedule
 	return out, nil
 }
 
-// Re-check the saved schedule when firing so a removed schedule stops source
+// TriggerScheduledBigPicture re-checks the saved schedule when firing so a removed schedule stops source
 // disclosure immediately, even before the next cron-set reconciliation tick.
 func (m *Manager) TriggerScheduledBigPicture(ctx context.Context, name string) error {
 	p, err := m.BigPicture(ctx, name)

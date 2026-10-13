@@ -48,7 +48,7 @@ var (
 	storagePattern           = regexp.MustCompile(`^[a-zA-Z0-9]{26}$`)
 )
 
-// Sources are references only. Selecting a connection does not grant tools or
+// Source is a reference only. Selecting a connection does not grant tools or
 // read resources; execution must re-check the connection's current allowlist.
 type Source struct {
 	Kind string `bw:"kind" json:"kind"`

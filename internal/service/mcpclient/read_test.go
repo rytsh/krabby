@@ -78,7 +78,9 @@ func TestReadResourceDoesNotEchoRemoteErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "credential-secret", 401) }))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "credential-secret", http.StatusUnauthorized)
+	}))
 	defer server.Close()
 	if _, err := s.Save(context.Background(), "", Config{Name: "config", URL: server.URL, AllowedResources: []string{"config://prod"}}); err != nil {
 		t.Fatal(err)

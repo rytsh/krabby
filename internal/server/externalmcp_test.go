@@ -70,7 +70,9 @@ func TestExternalMCPRoutes(t *testing.T) {
 	request("POST", "", `{"name":"bad","description":"`+strings.Repeat("x", 65536)+`"}`, 400)
 	request("POST", "/discover", `{"existing_name":"missing","url":"https://example.com"}`, 404)
 	// The remote may echo auth in an error: the REST result must still be safe.
-	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, r.Header.Get("Authorization"), 401) }))
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, r.Header.Get("Authorization"), http.StatusUnauthorized)
+	}))
 	defer remote.Close()
 	response := request("POST", "/discover", `{"name":"draft","url":"`+remote.URL+`","bearer_token":"token-secret"}`, 200)
 	var discovery mcpclient.Discovery
