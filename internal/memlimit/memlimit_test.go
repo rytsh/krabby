@@ -47,7 +47,7 @@ func TestNewScalesWithTheLimit(t *testing.T) {
 	if large.BlockCache > 64<<20 {
 		t.Errorf("block cache %s exceeds its cap", Bytes(large.BlockCache))
 	}
-	if small.MemTable < 8<<20 {
+	if small.MemTable < 16<<20 {
 		t.Errorf("memtable %s is below its floor", Bytes(small.MemTable))
 	}
 }

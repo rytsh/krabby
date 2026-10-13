@@ -126,7 +126,12 @@ func NewWithOverrides(limit int64, ratio float64, over Overrides) Budget {
 	// paid twice: only the docs and code stores hold embeddings.
 	b.BlockCache = clamp(b.Total/64, 16<<20, 64<<20)
 	b.IndexCache = clamp(b.Total/128, 8<<20, 32<<20)
-	b.MemTable = clamp(b.Total/256, 8<<20, 32<<20)
+	// The memtable floor also bounds the largest transaction Badger accepts
+	// (15% of it). A full-text write rewrites one posting block per distinct
+	// term of a document, and a full block is about 1 KiB, so a 16 KiB memory
+	// of distinct words needs roughly 3 MiB; 16 MiB leaves room for that,
+	// where 8 MiB did not.
+	b.MemTable = clamp(b.Total/256, 16<<20, 32<<20)
 	b.GraphCache = clamp(b.Total/16, 64<<20, 512<<20)
 
 	// The vector cache is derived from the same total but with a higher

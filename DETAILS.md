@@ -1111,7 +1111,10 @@ Three things about the design are worth knowing when tuning it:
   written at once — and how much a batch costs depends on the embedding model's
   width, the document's vocabulary and, for vectors, how large the HNSW graph
   already is. None of that is knowable in advance, so the write paths start
-  optimistic and halve on `ErrTxnTooBig`, keeping the size they find.
+  optimistic and halve on `ErrTxnTooBig`, keeping the size they find. Halving
+  stops at one record, so the memtable never goes below 16 MiB: a single
+  full-text record rewrites one posting block per distinct term, and the
+  largest one krabby stores (a 16 KiB memory) needs a few MiB in the worst case.
 
 The vector cache deserves a note because it is the one bound `GOMEMLIMIT`
 cannot enforce: its contents are live, so the collector can only thrash against
