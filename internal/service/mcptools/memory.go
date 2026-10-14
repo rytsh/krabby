@@ -17,7 +17,7 @@ const memoryInstructions = `This server is Krabby's shared, durable memory for a
 - Call remember only for durable, non-obvious knowledge future sessions need: why a decision was made, a convention, a pitfall. Do not store task progress, code that is already in the repo, or anything a search would find.
 - Pin evidence (repo + path, optionally lines or a symbol) when a memory is about code. Krabby re-checks pins after every repository refresh and marks memories stale or orphaned when the code changes or disappears. Verify stale memories with read_file before trusting them, then update_memory to confirm or correct them.
 - Spaces: 'default' is shared team knowledge. When the user names a section ("add this to development notes"), use that name as the space, lowercase ('development'); put sub-topics in tags ('migration') or a sub-space ('development/migration'). Reuse existing space names: check list_memories when unsure, and if remember reports new_space for a space you did not intend, move the memory with update_memory. recall searches all spaces unless you pass spaces.
-- author is optional free text; set it only to a name the user gave you (a person, team or agent name).
+- author is optional free text; set it only to a name the user gave you (a person, team or agent name). When omitted, the HTTP X-User header is used if present.
 - remember returns an existing memory instead of a duplicate; refine it with update_memory.`
 
 type memoryService interface {
@@ -54,7 +54,7 @@ type rememberArgs struct {
 	Tags      []string            `json:"tags,omitempty"`
 	Evidence  []memoryEvidenceArg `json:"evidence,omitempty" jsonschema:"code locations this memory is about; re-checked after each refresh"`
 	ExpiresAt string              `json:"expires_at,omitempty" jsonschema:"RFC 3339 time after which the memory is hidden"`
-	Author    string              `json:"author,omitempty" jsonschema:"optional name of who wrote it: a person, team or agent; ask the user if unsure"`
+	Author    string              `json:"author,omitempty" jsonschema:"optional name of who wrote it: a person, team or agent; defaults to HTTP X-User"`
 }
 
 type recallArgs struct {
@@ -88,7 +88,7 @@ type updateMemoryArgs struct {
 	Evidence        *[]memoryEvidenceArg `json:"evidence,omitempty" jsonschema:"replaces all evidence; [] removes pins"`
 	ExpiresAt       *string              `json:"expires_at,omitempty" jsonschema:"RFC 3339; empty string clears"`
 	Note            string               `json:"note,omitempty" jsonschema:"why it changed; recorded in history"`
-	Author          string               `json:"author,omitempty" jsonschema:"optional name of who made this change"`
+	Author          string               `json:"author,omitempty" jsonschema:"optional name of who made this change; defaults to HTTP X-User"`
 }
 
 type listMemoriesArgs struct {
@@ -147,6 +147,15 @@ func parseTime(value string) (time.Time, error) {
 	return t, nil
 }
 
+// memoryAuthor uses the current request header only when no author was supplied.
+// The memory service validates both explicit and header-derived names.
+func memoryAuthor(author string, req *mcp.CallToolRequest) string {
+	if strings.TrimSpace(author) != "" || req == nil || req.Extra == nil {
+		return author
+	}
+	return req.Extra.Header.Get("X-User")
+}
+
 // NewMemory builds the shared memory MCP catalog.
 func NewMemory(mgr *manager.Manager, version string) *mcp.Server {
 	server := newServer(mgr, "krabby-memory", "Krabby shared memory", version, memoryInstructions)
@@ -159,13 +168,13 @@ func addMemoryTools(server *mcp.Server, svc memoryService) {
 	addTool(server, &mcp.Tool{
 		Name:        "remember",
 		Description: "Store a durable Markdown memory for future sessions. Returns the existing memory instead when the same space already holds the same or a near-identical one.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args rememberArgs) (*mcp.CallToolResult, any, error) {
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args rememberArgs) (*mcp.CallToolResult, any, error) {
 		expires, err := parseTime(args.ExpiresAt)
 		if err != nil {
 			return nil, nil, err
 		}
 		res, err := svc.Remember(ctx, memory.Input{Space: args.Space, Kind: args.Kind, Title: args.Title, Content: args.Content, Tags: args.Tags,
-			Evidence: evidenceInput(args.Evidence), ExpiresAt: expires, Author: args.Author})
+			Evidence: evidenceInput(args.Evidence), ExpiresAt: expires, Author: memoryAuthor(args.Author, req)})
 		if err != nil {
 			return nil, nil, err
 		}
@@ -210,8 +219,8 @@ func addMemoryTools(server *mcp.Server, svc memoryService) {
 	addTool(server, &mcp.Tool{
 		Name:        "update_memory",
 		Description: "Change selected fields of a memory; omitted fields are kept. Updating a stale memory re-pins its evidence to the current code, so check the code first.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args updateMemoryArgs) (*mcp.CallToolResult, any, error) {
-		patch := memory.Patch{ExpectedVersion: args.ExpectedVersion, Space: args.Space, Kind: args.Kind, Title: args.Title, Content: args.Content, Tags: args.Tags, Note: args.Note, Author: args.Author}
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args updateMemoryArgs) (*mcp.CallToolResult, any, error) {
+		patch := memory.Patch{ExpectedVersion: args.ExpectedVersion, Space: args.Space, Kind: args.Kind, Title: args.Title, Content: args.Content, Tags: args.Tags, Note: args.Note, Author: memoryAuthor(args.Author, req)}
 		if args.Evidence != nil {
 			ev := evidenceInput(*args.Evidence)
 			patch.Evidence = &ev

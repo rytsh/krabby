@@ -73,6 +73,7 @@ func New() *Fetcher {
 }
 
 func oauthClient(ctx context.Context, cfg Config) (*http.Client, error) {
+	//nolint:staticcheck // SA1019: provider config is validated as a service_account key by Validate before use.
 	creds, err := google.CredentialsFromJSONWithParams(ctx, []byte(cfg.ServiceAccount), google.CredentialsParams{
 		Scopes: []string{scope}, Subject: cfg.Subject,
 	})

@@ -23,6 +23,7 @@ func TestGitHubIssuesAndPulls(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/v3/repos/acme/svc/issues":
 			gotSince = r.URL.Query().Get("since")
+			//nolint:errcheck // Test response write failures are surfaced by the client assertions.
 			fmt.Fprintf(w, `[
 {"number":1,"title":"Crash on start","body":"stack trace","state":"open","html_url":"https://gh/1","user":{"login":"ann"},
  "created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","comments":1,"comments_url":"%s/api/v3/c/1","labels":[{"name":"bug"}]},

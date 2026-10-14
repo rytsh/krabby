@@ -30,7 +30,7 @@ func TestCrawlFollowsLinksWithinScope(t *testing.T) {
 		hits[r.URL.Path]++
 		switch r.URL.Path {
 		case "/robots.txt":
-			fmt.Fprint(w, "User-agent: *\nDisallow: /docs/secret\n")
+			fmt.Fprint(w, "User-agent: *\nDisallow: /docs/secret\n") //nolint:errcheck // Test response write failures are surfaced by the client assertions.
 		case "/docs/":
 			if r.Header.Get("If-None-Match") == `"v1"` {
 				w.WriteHeader(http.StatusNotModified)
@@ -38,15 +38,16 @@ func TestCrawlFollowsLinksWithinScope(t *testing.T) {
 			}
 			w.Header().Set("ETag", `"v1"`)
 			w.Header().Set("Content-Type", "text/html")
+			//nolint:errcheck // Test response write failures are surfaced by the client assertions.
 			fmt.Fprintf(w, `<html><head><title>Home</title></head><body><main><h1>Home</h1><p>welcome text for the docs home page</p>
 <a href="guide">Guide</a><a href="/docs/secret">S</a><a href="/blog/">Blog</a><a href="https://other.example/">x</a>
 <a href="manual.txt">txt</a><a href="logo.png">img</a></main></body></html>`)
 		case "/docs/guide":
 			w.Header().Set("Content-Type", "text/html")
-			fmt.Fprint(w, `<html><head><title>Guide</title></head><body><main><h1>Guide</h1><p>install steps described here in detail</p><a href="/docs/">home</a></main></body></html>`)
+			fmt.Fprint(w, `<html><head><title>Guide</title></head><body><main><h1>Guide</h1><p>install steps described here in detail</p><a href="/docs/">home</a></main></body></html>`) //nolint:errcheck // Test response write failures are surfaced by the client assertions.
 		case "/docs/manual.txt":
 			w.Header().Set("Content-Type", "text/plain")
-			fmt.Fprint(w, "plain manual")
+			fmt.Fprint(w, "plain manual") //nolint:errcheck // Test response write failures are surfaced by the client assertions.
 		default:
 			http.NotFound(w, r)
 		}

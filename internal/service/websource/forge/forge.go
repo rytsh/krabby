@@ -63,7 +63,7 @@ func (c Config) normalize() Config {
 }
 
 // apiBase returns the REST API root for the provider.
-func (c Config) apiBase() string {
+func (c Config) apiBase() string { //nolint:staticcheck // ST1016: local receiver names do not affect provider behavior.
 	switch c.Provider {
 	case GitHub:
 		if c.BaseURL == "" || c.BaseURL == "https://github.com" {
