@@ -113,6 +113,7 @@ type sourceAdminService interface {
 	UpdateWebCollection(context.Context, string, websource.CollectionUpdate, json.RawMessage) error
 	DeleteWebCollection(context.Context, string) error
 	TriggerWebRefresh(string) error
+	TriggerWebFullRefresh(string) error
 	AddWebPage(context.Context, string, string) (*websource.Page, error)
 	ImportWebPages(context.Context, string, []manager.WebPageImport) (manager.WebPageImportResult, error)
 	ImportWebSitemap(context.Context, string, string) (manager.SitemapImportResult, error)

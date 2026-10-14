@@ -83,6 +83,22 @@ func TestImportSourcePagesArgs(t *testing.T) {
 	}
 }
 
+func TestDeleteSourcePageArgsSlug(t *testing.T) {
+	t.Parallel()
+
+	if got, err := (deleteSourcePageArgs{Slug: " page-1 "}).slug(); err != nil || got != "page-1" {
+		t.Fatalf("slug = %q, %v", got, err)
+	}
+	if got, err := (deleteSourcePageArgs{ID: "TICKET-1"}).slug(); err != nil || got != manager.PushSlug("TICKET-1") {
+		t.Fatalf("id slug = %q, %v", got, err)
+	}
+	for _, args := range []deleteSourcePageArgs{{}, {Slug: "a", ID: "b"}} {
+		if _, err := args.slug(); err == nil {
+			t.Fatalf("%#v was accepted", args)
+		}
+	}
+}
+
 func TestSearchCodeArgsMode(t *testing.T) {
 	t.Parallel()
 

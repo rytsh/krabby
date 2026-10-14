@@ -154,8 +154,8 @@ Example OpenCode config with core and admin registered separately:
 | `search_docs` / `list_docs` / `get_doc` | Search generated or synced Markdown, with evidence kind and source metadata; these are stored/indexed copies, not live Jira/Confluence queries |
 | `list_namespaces` | Discover repository groups, counts, and human descriptions before broad search |
 | `list_sources` / `get_source` | Discover web collections and their exact `web:<name>` scope keys; inspect bounded item-title samples |
-| `register_source_page` / `import_source_pages` / `import_source_sitemap` / `delete_source_page` | Admin: manage individual `pages` source items |
-| `source_types` / `get_source_config` / `add_source` / `update_source` / `delete_source` / `refresh_source` / `cancel_source` / `test_source_config` | Admin: manage Krabby collections and sync jobs (`pages`, `confluence`, `jira`), not upstream issues or pages |
+| `register_source_page` / `import_source_pages` / `import_source_sitemap` / `delete_source_page` | Admin: manage individual `pages` source items; `delete_source_page` also removes a `push` item by `id` |
+| `source_types` / `get_source_config` / `add_source` / `update_source` / `delete_source` / `refresh_source` / `cancel_source` / `test_source_config` | Admin: manage Krabby collections and sync jobs (`pages`, `confluence`, `jira`), not upstream issues or pages; `refresh_source` with `full: true` ignores the incremental watermark |
 | `queue_status` / `bump_task` / `cancel_task` / `set_task_concurrency` / `cancel_pending_tasks` / `clear_task_history` / `cancel_repo_job` | Admin: inspect and steer the background work queue |
 | `set_repo_namespace` / `set_repo_overrides` / `get_repo_settings` / `set_namespace_description` / `delete_namespace` | Admin: namespaces and per-repository overrides |
 | `list_api_groups` / `list_api_services` / `list_api_endpoints` / `get_api_endpoint` | API: walk the catalog from domain to service to endpoint to its full request shape |

@@ -247,8 +247,28 @@ type importSourceSitemapArgs struct {
 }
 
 type deleteSourcePageArgs struct {
-	Name string `json:"name" jsonschema:"existing pages source name"`
-	Slug string `json:"slug" jsonschema:"exact item slug returned by get_source"`
+	Name string `json:"name" jsonschema:"existing pages or push source name"`
+	Slug string `json:"slug,omitempty" jsonschema:"exact item slug returned by get_source; give slug or id"`
+	ID   string `json:"id,omitempty" jsonschema:"push source item id used with push_source_items; give slug or id"`
+}
+
+func (a deleteSourcePageArgs) slug() (string, error) {
+	slug, id := strings.TrimSpace(a.Slug), strings.TrimSpace(a.ID)
+	switch {
+	case slug != "" && id != "":
+		return "", fmt.Errorf("give either slug or id, not both")
+	case id != "":
+		return manager.PushSlug(id), nil
+	case slug != "":
+		return slug, nil
+	default:
+		return "", fmt.Errorf("slug or id is required")
+	}
+}
+
+type refreshSourceArgs struct {
+	Name string `json:"name" jsonschema:"collection name"`
+	Full bool   `json:"full,omitempty" jsonschema:"ignore the incremental sync watermark and re-fetch every item; use when an incremental sync missed changes"`
 }
 
 type getSourceArgs struct {
@@ -678,8 +698,8 @@ func addSourceAdminTools(server *mcp.Server, mgr sourceAdminService) {
 	addTool(server, &mcp.Tool{
 		Name: "refresh_source",
 		Description: "Queue a background refresh of Krabby's stored source snapshot: fetches current items, re-embeds changed " +
-			"ones and prunes items that vanished. This is not a live item lookup. Poll get_source for ingestion status; use a provider MCP for immediate upstream state.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args sourceNameArgs) (*mcp.CallToolResult, any, error) {
+			"ones and prunes items that vanished. full:true ignores the incremental watermark for one run. This is not a live item lookup. Poll get_source for ingestion status; use a provider MCP for immediate upstream state.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args refreshSourceArgs) (*mcp.CallToolResult, any, error) {
 		name := strings.TrimSpace(strings.ToLower(args.Name))
 		col, err := mgr.WebCollection(ctx, name)
 		if err != nil {
@@ -688,11 +708,15 @@ func addSourceAdminTools(server *mcp.Server, mgr sourceAdminService) {
 		if col == nil {
 			return nil, nil, fmt.Errorf("source %s not found", name)
 		}
-		if err := mgr.TriggerWebRefresh(name); err != nil {
+		trigger, status := mgr.TriggerWebRefresh, "refresh queued"
+		if args.Full {
+			trigger, status = mgr.TriggerWebFullRefresh, "full refresh queued"
+		}
+		if err := trigger(name); err != nil {
 			return nil, nil, err
 		}
 
-		return jsonResult(map[string]string{"status": "refresh queued", "source": name}), nil, nil
+		return jsonResult(map[string]string{"status": status, "source": name}), nil, nil
 	})
 
 	addTool(server, &mcp.Tool{
@@ -805,10 +829,13 @@ func addSourceAdminTools(server *mcp.Server, mgr sourceAdminService) {
 
 	addTool(server, &mcp.Tool{
 		Name:        "delete_source_page",
-		Description: "Delete one manually managed item from a Krabby pages collection (local stored copy only), including its Markdown, image-analysis cache and search-index entries. Pass the exact slug returned by get_source and use only on explicit user request.",
+		Description: "Delete one manually managed item from a Krabby pages or push collection (local stored copy only), including its Markdown, image-analysis cache and search-index entries. Pass the exact slug returned by get_source, or for push sources the item id; use only on explicit user request.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args deleteSourcePageArgs) (*mcp.CallToolResult, deleteSourcePageOutput, error) {
 		name := strings.TrimSpace(strings.ToLower(args.Name))
-		slug := strings.TrimSpace(args.Slug)
+		slug, err := args.slug()
+		if err != nil {
+			return nil, deleteSourcePageOutput{}, err
+		}
 		if err := mgr.DeleteWebPage(ctx, name, slug); err != nil {
 			return nil, deleteSourcePageOutput{}, err
 		}
