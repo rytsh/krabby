@@ -93,7 +93,7 @@ func TestImportWebPagesRejectsUnsupportedContent(t *testing.T) {
 	}
 
 	_, err := m.ImportWebPages(ctx, "offline", []WebPageImport{{
-		URL: "https://example.com/data", ContentType: "application/json", Content: `{}`,
+		URL: "https://example.com/data", ContentType: "application/x-msdownload", Content: "MZ\x00\x01",
 	}})
 	if err == nil || !strings.Contains(err.Error(), "unsupported content type") {
 		t.Fatalf("error = %v", err)

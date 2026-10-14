@@ -212,11 +212,10 @@ func getSource(mgr sourceService) ada.HandlerFunc {
 			return c.Err(err)
 		}
 
-		// The distinct team list (for the UI filter) is meaningful only for
-		// jira sources, which are comparatively small; skip the full scan for
-		// large discovery sources like Confluence.
+		// The distinct team list (for the UI filter) needs a scan of the item
+		// records, so it is limited to types that tag items with teams.
 		var teams []string
-		if col.Type == websource.TypeJira {
+		if teamTaggedTypes[col.Type] {
 			teams, err = mgr.WebSourceTeams(c.Request.Context(), name)
 			if err != nil {
 				return c.Err(err)

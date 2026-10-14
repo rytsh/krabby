@@ -106,6 +106,8 @@ type sourceReadService interface {
 type sourceAdminService interface {
 	sourceReadService
 	WebSourceTypes() []string
+	WebSourceDescriptors() []websource.Descriptor
+	PrunePushItems(context.Context, string, []string) (int, error)
 	WebSourceConfigView(*websource.Collection) any
 	AddWebCollection(context.Context, *websource.Collection) error
 	UpdateWebCollection(context.Context, string, websource.CollectionUpdate, json.RawMessage) error

@@ -13,6 +13,7 @@
   import MarkdownView from "../lib/MarkdownView.svelte";
   import { successToast } from "../lib/toast.js";
   import { createBrowserImportController } from "../lib/source-browser-import.js";
+  import { builtinFormTypes, fileToPushItem, formConfig, formValues, secretIsSet } from "../lib/source-config.js";
 
   // selected/doc come from the route: /sources/<name>?doc=<path>.
   let { sourceName = "" } = $props();
@@ -70,6 +71,22 @@
   let testingConfig = $state(false);
   let configTest = $state(null);
   let testedConfigSignature = $state("");
+
+  // Source type descriptors from the server; types without a hand-written
+  // form get one generated from their field list.
+  let sourceTypes = $state([]);
+  let typeInfo = $derived(sourceTypes.find((t) => t.type === form.type));
+  let genericForm = $derived(!builtinFormTypes.has(form.type) && !!typeInfo);
+  let genericValues = $state({});
+  let genericView = $state(null);
+  function typeLabel(type) {
+    return sourceTypes.find((t) => t.type === type)?.label || type;
+  }
+  function selectType(type) {
+    form.type = type;
+    genericView = null;
+    genericValues = formValues(sourceTypes.find((t) => t.type === type)?.fields || []);
+  }
 
   function newForm() {
     return {
@@ -239,6 +256,7 @@
   }
 
   function providerConfig() {
+    if (genericForm) return formConfig(typeInfo.fields || [], genericValues, !!editingName);
     if (form.type === "confluence") {
       return {
         base_url: form.base_url.trim(),
@@ -357,6 +375,8 @@
       max_issues: source.config?.max_issues || "",
       full_resync_schedule: source.config?.full_resync_schedule || "0 2 * * *",
     };
+    genericView = source.config || null;
+    genericValues = formValues(sourceTypes.find((t) => t.type === source.type)?.fields || [], genericView);
     configTest = null;
     testedConfigSignature = "";
     showAdd = true;
@@ -367,6 +387,8 @@
     showAdd = false;
     editingName = "";
     form = newForm();
+    genericValues = {};
+    genericView = null;
     configTest = null;
     testedConfigSignature = "";
   }
@@ -478,6 +500,32 @@
       error = e.message;
     } finally {
       savingManualPage = false;
+    }
+  }
+
+  // Push sources: upload files (PDF, Office, Markdown, …) as items.
+  let pushing = $state(false);
+  let pushFiles = $state(null);
+  async function pushUpload(name) {
+    if (!pushFiles?.length) return;
+    pushing = true;
+    error = "";
+    try {
+      const items = [];
+      for (const file of pushFiles) items.push(await fileToPushItem(file));
+      let changed = 0;
+      for (let i = 0; i < items.length; i += 20) {
+        const res = await api.pushSourceItems(name, items.slice(i, i + 20));
+        changed += res?.changed || 0;
+      }
+      successToast(`Pushed ${items.length} items (${changed} changed)`);
+      pushFiles = null;
+      await loadPages(name, 1);
+      await load();
+    } catch (e) {
+      error = e.message;
+    } finally {
+      pushing = false;
     }
   }
 
@@ -598,6 +646,12 @@
   onMount(() => {
     corsRelay = localStorage.getItem("krabby-cors-relay") || "";
     void sourcePoller.run();
+    api
+      .sourceTypes()
+      .then((types) => {
+        if (isMounted) sourceTypes = types || [];
+      })
+      .catch(() => {});
     api
       .settings()
       .then((settings) => {
@@ -832,8 +886,9 @@
   {/if}
 {:else}
   <p class="text-dim">
-    Non-git content sources: wikis and Confluence spaces synced to markdown and searchable via docs
-    search as <code class="font-mono text-[12px]">web:&lt;name&gt;</code>.
+    Non-git content sources — wikis, Confluence, JIRA, crawled sites, feeds, APIs, files, buckets, chats,
+    forges, databases and pushed documents — synced to markdown and searchable via docs search as
+    <code class="font-mono text-[12px]">web:&lt;name&gt;</code>.
   </p>
 
   {#if error}
@@ -852,10 +907,21 @@
           </label>
           <label class="flex flex-col gap-1 text-[13px] text-dim">
             Type
-            <select class="input" bind:value={form.type} disabled={!!editingName}>
-              <option value="pages">Custom web (URL list)</option>
-              <option value="confluence">Confluence space</option>
-              <option value="jira">JIRA project / JQL</option>
+            <select
+              class="input"
+              value={form.type}
+              onchange={(e) => selectType(e.target.value)}
+              disabled={!!editingName}
+            >
+              {#if sourceTypes.length}
+                {#each sourceTypes as t (t.type)}
+                  <option value={t.type}>{t.label || t.type}</option>
+                {/each}
+              {:else}
+                <option value="pages">Custom web (URL list)</option>
+                <option value="confluence">Confluence space</option>
+                <option value="jira">JIRA project / JQL</option>
+              {/if}
             </select>
           </label>
           <label class="flex flex-col gap-1 text-[13px] text-dim">
@@ -1021,6 +1087,55 @@
             Team field ids are instance-specific JIRA custom fields that hold team/squad ownership
             (e.g. a "Squad" field). Their values are indexed so tickets are searchable by team name.
           </p>
+        {:else if genericForm}
+          {#if typeInfo.description}
+            <p class="m-0 text-[12px] text-faint">{typeInfo.description}</p>
+          {/if}
+          {#if typeInfo.fields?.length}
+            <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              {#each typeInfo.fields as field (field.key)}
+                {#if field.kind === "bool"}
+                  <label class="flex items-center gap-2 text-[13px] text-dim sm:col-span-2">
+                    <input type="checkbox" bind:checked={genericValues[field.key]} />
+                    {field.label}
+                  </label>
+                {:else}
+                  <label
+                    class="flex flex-col gap-1 text-[13px] text-dim {field.kind === 'text' || field.kind === 'map' ? 'sm:col-span-2' : ''}"
+                  >
+                    <span>
+                      {field.label}{field.required ? " *" : ""}
+                      {#if field.kind === "secret" && editingName && secretIsSet(genericView, field.key)}
+                        <span class="text-faint">(set; blank = keep)</span>
+                      {/if}
+                    </span>
+                    {#if field.kind === "select"}
+                      <select class="input" bind:value={genericValues[field.key]}>
+                        {#if !field.required}<option value="">default{field.default ? ` (${field.default})` : ""}</option>{/if}
+                        {#each field.options || [] as opt (opt)}
+                          <option value={opt}>{opt}</option>
+                        {/each}
+                      </select>
+                    {:else if field.kind === "text" || field.kind === "map"}
+                      <textarea
+                        class="input min-h-24 font-mono text-[12.5px]"
+                        placeholder={field.kind === "map" ? "Header-Name=value (one per line; blank value keeps the stored one)" : field.placeholder || ""}
+                        bind:value={genericValues[field.key]}
+                      ></textarea>
+                    {:else}
+                      <input
+                        class="input"
+                        type={field.kind === "secret" ? "password" : field.kind === "number" ? "number" : "text"}
+                        placeholder={field.placeholder || (field.default !== undefined ? String(field.default) : "")}
+                        bind:value={genericValues[field.key]}
+                      />
+                    {/if}
+                    {#if field.help}<span class="text-[11px] text-faint">{field.help}</span>{/if}
+                  </label>
+                {/if}
+              {/each}
+            </div>
+          {/if}
         {:else}
           <p class="m-0 text-[12px] text-faint">
             Add page URLs or import a sitemap after creating the collection. Private pages resolve
@@ -1036,7 +1151,7 @@
           {:else if configTest.ok}
             <div class="rounded-md border border-ok bg-ok/10 px-3 py-2.5 text-[13px] text-ok">
               <strong>{configTest.item_count} items</strong> would be indexed from {configTest.scanned} checked
-              {#if configTest.total} ({configTest.total} returned by JIRA){/if}.
+              {#if configTest.total} ({configTest.total} reported by the provider){/if}.
               Test completed in {configTest.latency_ms}ms.
               {#if configTest.truncated}
                 <span class="block text-warn">
@@ -1052,7 +1167,7 @@
         {/if}
 
         <div class="flex flex-wrap gap-2">
-          {#if form.type === "jira" || form.type === "confluence"}
+          {#if form.type === "jira" || form.type === "confluence" || typeInfo?.preview}
             <button class="btn" onclick={testConfig} disabled={testingConfig || adding}>
               {testingConfig ? "Testing…" : "Test & preview"}
             </button>
@@ -1083,7 +1198,7 @@
             <Icon name={expanded[s.name] ? "chevron-down" : "chevron-right"} size={14} />
             <Icon name={s.type === "confluence" ? "book" : s.type === "jira" ? "tag" : "search"} size={14} />
             <span class="font-mono text-[13.5px] font-medium">{s.name}</span>
-            <span class="rounded border border-line px-1.5 text-[11px] text-dim">{s.type}</span>
+            <span class="rounded border border-line px-1.5 text-[11px] text-dim" title={typeLabel(s.type)}>{s.type}</span>
             <span class="font-mono text-[11px] text-faint">web:{s.name}</span>
             <span class="ml-auto flex items-center gap-2.5 text-[12px] text-faint">
               {#if phase(s)}
@@ -1168,6 +1283,26 @@
                 </span>
               </div>
 
+              {#if s.type === "push"}
+                <div class="mb-3 flex flex-wrap items-center gap-2 rounded-md border border-line bg-surface-2 px-3 py-2 text-[12px] text-dim">
+                  <span class="font-medium text-fg">Push files</span>
+                  <input
+                    type="file"
+                    multiple
+                    accept=".md,.markdown,.txt,.rst,.adoc,.html,.htm,.csv,.tsv,.json,.yaml,.yml,.pdf,.docx,.pptx,.xlsx"
+                    onchange={(e) => (pushFiles = e.target.files)}
+                  />
+                  <button class="btn btn-sm btn-primary" onclick={() => pushUpload(s.name)} disabled={pushing || !pushFiles?.length}>
+                    {pushing ? "Pushing…" : "Upload & index"}
+                  </button>
+                  <span class="basis-full text-faint">
+                    File names are the item ids; uploading the same name again updates it. Automate with
+                    <code class="font-mono">POST api/v1/sources/{s.name}/items</code> or the
+                    <code class="font-mono">push_source_items</code> MCP tool.
+                  </span>
+                </div>
+              {/if}
+
               <div class="mb-3 flex flex-wrap items-center gap-2">
                 <div class="relative min-w-64 flex-1">
                   <span class="pointer-events-none absolute inset-y-0 left-2.5 flex items-center text-faint">
@@ -1189,7 +1324,7 @@
                 {/if}
               </div>
 
-              {#if s.type === "jira" && teams[s.name]?.length}
+              {#if teams[s.name]?.length}
                 <div class="mb-3 flex items-center gap-2 text-[12px] text-dim">
                   <span>Filter by team:</span>
                   <select
@@ -1246,7 +1381,7 @@
                           {#if p.url}
                             <a class="mr-1 text-[11px] text-dim hover:text-fg" href={p.url} target="_blank" rel="noreferrer noopener">open</a>
                           {/if}
-                          {#if s.type === "pages"}
+                          {#if s.type === "pages" || s.type === "push"}
                             <button class="btn btn-sm btn-danger" onclick={() => removePage(s.name, p.slug)}>Remove</button>
                           {/if}
                         </td>

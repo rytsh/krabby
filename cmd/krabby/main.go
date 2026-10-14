@@ -33,9 +33,23 @@ import (
 	"github.com/rytsh/krabby/internal/service/settings"
 	"github.com/rytsh/krabby/internal/service/taskstore"
 	"github.com/rytsh/krabby/internal/service/websource"
+	"github.com/rytsh/krabby/internal/service/websource/chat"
 	"github.com/rytsh/krabby/internal/service/websource/confluence"
+	"github.com/rytsh/krabby/internal/service/websource/crawl"
+	"github.com/rytsh/krabby/internal/service/websource/feed"
+	"github.com/rytsh/krabby/internal/service/websource/forge"
+	wsfs "github.com/rytsh/krabby/internal/service/websource/fs"
+	"github.com/rytsh/krabby/internal/service/websource/gdrive"
+	"github.com/rytsh/krabby/internal/service/websource/httpapi"
 	"github.com/rytsh/krabby/internal/service/websource/jira"
+	"github.com/rytsh/krabby/internal/service/websource/mcpres"
+	"github.com/rytsh/krabby/internal/service/websource/notion"
 	"github.com/rytsh/krabby/internal/service/websource/pages"
+	"github.com/rytsh/krabby/internal/service/websource/push"
+	wss3 "github.com/rytsh/krabby/internal/service/websource/s3"
+	"github.com/rytsh/krabby/internal/service/websource/sharepoint"
+	"github.com/rytsh/krabby/internal/service/websource/sqlsrc"
+	"github.com/rytsh/krabby/internal/service/websource/webdav"
 	"github.com/rytsh/krabby/internal/storage"
 )
 
@@ -215,6 +229,20 @@ func run(ctx context.Context) error {
 		websource.TypePages:      pages.New(pageCredentials(creds)),
 		websource.TypeConfluence: confluence.New(),
 		websource.TypeJira:       jira.New(),
+		websource.TypePush:       push.New(),
+		httpapi.Type:             httpapi.New(),
+		mcpres.Type:              mcpres.New(externalMCPs),
+		crawl.Type:               crawl.New(),
+		wsfs.Type:                wsfs.New(nil),
+		wss3.Type:                wss3.New(),
+		webdav.Type:              webdav.New(),
+		feed.Type:                feed.New(),
+		forge.Type:               forge.New(),
+		chat.Type:                chat.New(),
+		sqlsrc.Type:              sqlsrc.New(),
+		notion.Type:              notion.New(),
+		gdrive.Type:              gdrive.New(),
+		sharepoint.Type:          sharepoint.New(),
 	})
 
 	// API catalog (OpenAPI documents, gRPC servers). Each service kind has a

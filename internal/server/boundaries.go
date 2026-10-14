@@ -105,6 +105,8 @@ type sourceService interface {
 	ImportWebSitemap(context.Context, string, string) (manager.SitemapImportResult, error)
 	DeleteWebPage(context.Context, string, string) error
 	WebSourceDoc(context.Context, string, string) (*repofs.FileContent, error)
+	WebSourceDescriptors() []websource.Descriptor
+	PrunePushItems(context.Context, string, []string) (int, error)
 	Activity(string) string
 	Progress(string) ([]manager.Progress, bool)
 	TaskState(string) string

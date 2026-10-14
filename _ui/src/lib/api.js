@@ -240,6 +240,11 @@ export const api = {
   deleteSourcePage: (name, slug) =>
     req(`/sources/${name}/pages?slug=${encodeURIComponent(slug)}`, { method: "DELETE", keepalive: true }),
   sourceDoc: (name, path) => req(`/sources/${name}/doc?path=${encodeURIComponent(path)}`),
+  sourceTypes: () => req("/sources/types"),
+  pushSourceItems: (name, items) =>
+    req(`/sources/${name}/items`, { method: "POST", body: JSON.stringify({ items }) }),
+  prunePushItems: (name, keep) =>
+    req(`/sources/${name}/items/prune`, { method: "POST", body: JSON.stringify({ keep }) }),
 
   // API catalog (OpenAPI documents, gRPC servers).
   apiGroups: () => req("/apis/groups"),

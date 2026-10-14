@@ -81,3 +81,8 @@ memory:
 # POST /api/v1/repos (with an optional "namespace"); additions are persisted.
 
 telemetry: {}
+
+# The "fs" web-source type (index a server-side / mounted folder) is disabled
+# until the operator allows directories through an environment variable, so a
+# REST/MCP client cannot point Krabby at arbitrary server files:
+#   KRABBY_SOURCES_FS_ROOTS=/data/docs:/mnt/share

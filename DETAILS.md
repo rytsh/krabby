@@ -34,8 +34,21 @@ keeps those indexes fresh in the background.
 - **Docs & RAG (optional)**: with an LLM configured, krabby generates per-file
   Markdown documentation (prompt is configurable in Settings) plus a repo
   overview, browsable in the UI.
-- **Web sources**: named Custom web URL collections and Confluence spaces are
-  converted to Markdown and indexed beside repo docs. Search everything, all
+- **Web sources**: named collections converted to Markdown and indexed beside
+  repo docs. Source types: `pages` (URL list / sitemap / manual Markdown),
+  `confluence`, `jira`, `push` (clients push items by id over REST/MCP/CI),
+  `http` (any paginated JSON API mapped with field paths or a template),
+  `mcp` (resources granted on an external MCP connection), `crawl` (same-origin
+  docs-site crawler with robots.txt and conditional requests), `feed`
+  (RSS/Atom), `fs` (server folders under `KRABBY_SOURCES_FS_ROOTS`), `s3`
+  (S3/MinIO/R2/GCS), `webdav` (Nextcloud, ownCloud), `forge` (GitHub, GitLab,
+  Gitea, Bitbucket issues and PRs with discussion), `chat` (Slack, Mattermost,
+  Teams threads of listed channels), `sql` (read-only PostgreSQL/MySQL query
+  rendered per row), `notion`, `gdrive` and `sharepoint` (Graph). File-like
+  sources convert HTML, Markdown, text, CSV, JSON/YAML, PDF, DOCX, PPTX and
+  XLSX through one shared converter and skip unchanged files by ETag/version.
+  `GET /api/v1/sources/types` (or the `source_types` MCP tool) lists every
+  type with its config fields; the UI renders forms from it. Search everything, all
   repos, all web sources, or one collection such as `web:wine`. Providers stream
   their items as they are fetched, so a 35k-ticket JIRA project or a whole
   Confluence space syncs in the same memory as a handful of pages.
@@ -212,12 +225,16 @@ Because each endpoint publishes only its own catalog, a client pays the
 | `GET /api/v1/repos/{full-path...}/-/report` | `GRAPH_REPORT.md` audit report |
 | `GET /api/v1/repos/{full-path...}/-/html` | Interactive graph visualization |
 | `GET /api/v1/graph` | Merged cross-repo `graph.json` |
-| `GET/POST /api/v1/sources` | List/create named Custom web or Confluence collections |
+| `GET/POST /api/v1/sources` | List/create named source collections |
+| `GET /api/v1/sources/types` | Source types with their config field descriptors |
 | `GET/PUT/DELETE /api/v1/sources/{name}` | Read/update/delete a collection |
 | `POST /api/v1/sources/{name}/refresh` | Sync and reindex a collection |
 | `POST/DELETE /api/v1/sources/{name}/pages` | Add/remove Custom web URLs |
 | `POST /api/v1/sources/{name}/pages/import` | Import HTML/Markdown pages, including URL-less manually authored Markdown, and index them |
 | `POST /api/v1/sources/{name}/sitemap` | Import URLs from a Custom web sitemap |
+| `POST /api/v1/sources/{name}/items` | Push items (`id`, `content_type`, `content`, optional `encoding: base64`, `teams`) into a push source |
+| `POST /api/v1/sources/{name}/items/prune` | Delete push items whose id is not in `keep` |
+| `DELETE /api/v1/sources/{name}/items?id=` | Delete one push item by id |
 | `GET/POST /api/v1/apis/groups` | List/describe API catalog groups |
 | `DELETE /api/v1/apis/groups/{name}` | Delete a group description (services keep their tag) |
 | `GET /api/v1/apis/kinds` | List the registered service kinds (`openapi`, `grpc`) |
@@ -418,7 +435,7 @@ other tools (doc generators, linters, indexers) are free to read it:
 ├── merged/graph.json           # cross-repo merged graph
 ├── keys/                       # materialized credential SSH keys (0600)
 ├── docs-vectors/               # embedded documentation vector index
-├── sources/<name>/*.md         # synced Custom web / Confluence pages
+├── sources/<name>/*.md         # synced web-source documents (all source types)
 ├── apis/<name>/*.md            # API catalog endpoint projections (one per operation)
 ├── code-vectors/               # embedded source-code vector index
 └── state/                      # registry + credentials database

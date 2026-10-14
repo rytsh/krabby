@@ -137,6 +137,7 @@ func newRouter(ctx context.Context, cfg *config.Config, services routeServices, 
 	// Web content sources (wikis, Confluence spaces): named collections whose
 	// pages are synced to markdown and indexed into the docs RAG.
 	api.GET("/sources", server.Wrap(listSources(services.sources)))
+	api.GET("/sources/types", server.Wrap(listSourceTypes(services.sources)))
 	api.POST("/sources", server.Wrap(addSource(services.sources)))
 	api.POST("/sources/config/test", server.Wrap(testSourceConfig(services.sources)))
 	api.GET("/sources/{name}", server.Wrap(getSource(services.sources)))
@@ -148,6 +149,9 @@ func newRouter(ctx context.Context, cfg *config.Config, services routeServices, 
 	api.POST("/sources/{name}/pages/import", server.Wrap(importSourcePages(services.sources)))
 	api.POST("/sources/{name}/sitemap", server.Wrap(importSourceSitemap(services.sources)))
 	api.DELETE("/sources/{name}/pages", server.Wrap(deleteSourcePage(services.sources)))
+	api.POST("/sources/{name}/items", server.Wrap(pushSourceItems(services.sources)))
+	api.POST("/sources/{name}/items/prune", server.Wrap(prunePushItems(services.sources)))
+	api.DELETE("/sources/{name}/items", server.Wrap(deletePushItem(services.sources)))
 	api.GET("/sources/{name}/doc", server.Wrap(getSourceDoc(services.sources)))
 
 	// API catalog: OpenAPI documents and gRPC servers, catalogued as groups of

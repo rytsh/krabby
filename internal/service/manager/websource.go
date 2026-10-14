@@ -19,6 +19,7 @@ import (
 	"github.com/rytsh/krabby/internal/service/queue"
 	"github.com/rytsh/krabby/internal/service/repofs"
 	"github.com/rytsh/krabby/internal/service/websource"
+	"github.com/rytsh/krabby/internal/service/websource/convert"
 )
 
 // ErrNoWebSources is returned when web-source methods are called before the
@@ -74,14 +75,59 @@ func (m *Manager) SetWebSources(store *websource.Store, fetchers map[string]webs
 	m.webFetchers = fetchers
 }
 
-// WebSourceTypes returns the registered collection types.
+// WebSourceTypes returns the registered collection types, sorted.
 func (m *Manager) WebSourceTypes() []string {
 	types := make([]string, 0, len(m.webFetchers))
 	for t := range m.webFetchers {
 		types = append(types, t)
 	}
+	slices.Sort(types)
 
 	return types
+}
+
+// builtinDescriptors document the hand-written providers whose config the UI
+// renders with dedicated forms.
+var builtinDescriptors = map[string]websource.Descriptor{
+	websource.TypePages: {
+		Type: websource.TypePages, Label: "Custom web (URL list)",
+		Description: "User-registered page URLs, sitemaps and manually written Markdown. Pages are re-fetched on the source schedule.",
+		ManualItems: true,
+	},
+	websource.TypeConfluence: {
+		Type: websource.TypeConfluence, Label: "Confluence space",
+		Description: "A Confluence space or page sub-tree via REST API, incremental by last-modified time.",
+		Preview:     true,
+	},
+	websource.TypeJira: {
+		Type: websource.TypeJira, Label: "JIRA project / JQL",
+		Description: "JIRA issues of a project or JQL query via REST API, incremental by updated time.",
+		Preview:     true,
+	},
+}
+
+// WebSourceDescriptors documents every registered source type for the UI's
+// generic config form and for MCP clients.
+func (m *Manager) WebSourceDescriptors() []websource.Descriptor {
+	out := make([]websource.Descriptor, 0, len(m.webFetchers))
+	for _, t := range m.WebSourceTypes() {
+		f := m.webFetchers[t]
+		var d websource.Descriptor
+		if describer, ok := f.(websource.Describer); ok {
+			d = describer.Describe()
+		} else if b, ok := builtinDescriptors[t]; ok {
+			d = b
+		} else {
+			d = websource.Descriptor{Type: t, Label: t}
+		}
+		d.Type = t
+		if _, ok := f.(websource.Previewer); ok {
+			d.Preview = true
+		}
+		out = append(out, d)
+	}
+
+	return out
 }
 
 // sourcesDir returns the markdown content directory of one collection.
@@ -532,17 +578,28 @@ func (m *Manager) AddWebPage(ctx context.Context, name, pageURL string) (*websou
 	return page, nil
 }
 
-// WebPageImport is page content supplied by a client. ContentType accepts HTML,
-// Markdown or plain text; HTML is reduced to its readable article before it is
-// indexed. URL may be empty for manually authored Markdown, in which case Title
-// is required and provides a stable page identity.
+// WebPageImport is page content supplied by a client. ContentType accepts any
+// format the shared converter handles (HTML, Markdown, text, CSV, JSON/YAML,
+// PDF, DOCX, PPTX, XLSX); HTML is reduced to its readable article before it is
+// indexed. Binary formats are sent base64-encoded with Encoding "base64".
+//
+// For pages collections URL may be empty for manually authored Markdown, in
+// which case Title is required and provides a stable page identity. For push
+// collections ID is the client-chosen identity and is required.
 type WebPageImport struct {
+	ID          string    `json:"id,omitempty"`
 	URL         string    `json:"url"`
 	Title       string    `json:"title,omitempty"`
 	ContentType string    `json:"content_type"`
 	Content     string    `json:"content"`
+	Encoding    string    `json:"encoding,omitempty"`
+	Teams       []string  `json:"teams,omitempty"`
 	UpdatedAt   time.Time `json:"updated_at,omitempty"`
 }
+
+// manualItemTypes are the collection types whose items are written by
+// clients rather than discovered by the provider.
+func manualItemType(t string) bool { return t == websource.TypePages || t == websource.TypePush }
 
 // WebPageImportResult summarizes one direct-content batch.
 type WebPageImportResult struct {
@@ -650,22 +707,27 @@ func (m *Manager) importWebPages(ctx context.Context, name string, imports []Web
 	if col == nil {
 		return result, fmt.Errorf("collection %s not found", name)
 	}
-	if col.Type != websource.TypePages {
-		return result, fmt.Errorf("collection %s is type %q; direct page imports require type %q", name, col.Type, websource.TypePages)
+	if !manualItemType(col.Type) {
+		return result, fmt.Errorf("collection %s is type %q; direct imports require type %q or %q", name, col.Type, websource.TypePages, websource.TypePush)
 	}
+	push := col.Type == websource.TypePush
 
 	now := time.Now()
 	remotes := make([]websource.RemotePage, 0, len(imports))
 	for i, item := range imports {
 		item.URL = strings.TrimSpace(item.URL)
 		item.Title = strings.TrimSpace(item.Title)
+		item.ID = strings.TrimSpace(item.ID)
 		if item.URL != "" {
 			item.URL, err = validateWebPageURL(item.URL)
 			if err != nil {
 				return result, fmt.Errorf("page %d url; %w", i+1, err)
 			}
 		}
-		if item.URL == "" && item.Title == "" {
+		if push && item.ID == "" {
+			return result, fmt.Errorf("item %d id is required for push sources", i+1)
+		}
+		if !push && item.URL == "" && item.Title == "" {
 			return result, fmt.Errorf("page %d title is required when url is empty", i+1)
 		}
 		if len(item.Title) > maxWebPageTitleBytes {
@@ -675,23 +737,26 @@ func (m *Manager) importWebPages(ctx context.Context, name string, imports []Web
 			return result, fmt.Errorf("page %d content is required", i+1)
 		}
 
-		contentType, _, _ := strings.Cut(strings.ToLower(strings.TrimSpace(item.ContentType)), ";")
+		data, err := decodeImportContent(item)
+		if err != nil {
+			return result, fmt.Errorf("page %d; %w", i+1, err)
+		}
+		doc, err := convert.ToMarkdown(data, convert.Options{
+			ContentType: item.ContentType,
+			Name:        firstNonEmpty(item.URL, item.ID, item.Title),
+			BaseURL:     item.URL,
+			Readability: item.URL != "",
+		})
+		if err != nil {
+			if errors.Is(err, convert.ErrUnsupported) {
+				return result, fmt.Errorf("page %d has unsupported content type %q", i+1, item.ContentType)
+			}
+			return result, fmt.Errorf("page %d; %w", i+1, err)
+		}
+		markdown := doc.Markdown
 		title := item.Title
-		var markdown string
-		switch contentType {
-		case "text/html", "application/xhtml+xml":
-			extractedTitle, extractedMarkdown, err := websource.ExtractArticle(item.Content, item.URL)
-			if err != nil {
-				return result, fmt.Errorf("page %d; %w", i+1, err)
-			}
-			markdown = extractedMarkdown
-			if title == "" {
-				title = extractedTitle
-			}
-		case "text/markdown", "text/x-markdown", "markdown", "text/plain":
-			markdown = strings.TrimSpace(item.Content)
-		default:
-			return result, fmt.Errorf("page %d has unsupported content type %q", i+1, item.ContentType)
+		if title == "" {
+			title = doc.Title
 		}
 
 		updatedAt := item.UpdatedAt
@@ -699,9 +764,12 @@ func (m *Manager) importWebPages(ctx context.Context, name string, imports []Web
 			updatedAt = now
 		}
 		slug := ""
-		if item.URL == "" {
+		switch {
+		case push:
+			slug = pushSlug(item.ID)
+		case item.URL == "":
 			slug = "manual-" + websource.Slugify(title) + "-" + websource.Hash(title)[:8]
-		} else {
+		default:
 			slug, _, err = m.pageForURL(ctx, name, item.URL)
 			if err != nil {
 				return result, fmt.Errorf("page %d identity; %w", i+1, err)
@@ -712,6 +780,7 @@ func (m *Manager) importWebPages(ctx context.Context, name string, imports []Web
 			Title:     title,
 			URL:       item.URL,
 			Markdown:  markdown,
+			Teams:     item.Teams,
 			UpdatedAt: updatedAt,
 		})
 	}
@@ -726,8 +795,8 @@ func (m *Manager) importWebPages(ctx context.Context, name string, imports []Web
 	if col == nil {
 		return result, fmt.Errorf("collection %s not found", name)
 	}
-	if col.Type != websource.TypePages {
-		return result, fmt.Errorf("collection %s is type %q; direct page imports require type %q", name, col.Type, websource.TypePages)
+	if !manualItemType(col.Type) {
+		return result, fmt.Errorf("collection %s is type %q; direct imports require type %q or %q", name, col.Type, websource.TypePages, websource.TypePush)
 	}
 
 	dir := m.sourcesDir(name)
@@ -745,10 +814,12 @@ func (m *Manager) importWebPages(ctx context.Context, name string, imports []Web
 		if rec == nil {
 			rec = &websource.Page{ID: websource.PageID(name, remote.Slug), Collection: name, Slug: remote.Slug}
 		}
-		metadataChanged := rec.URL != remote.URL || rec.Title != remote.Title || !rec.UpdatedAt.Equal(remote.UpdatedAt)
+		metadataChanged := rec.URL != remote.URL || rec.Title != remote.Title || !rec.UpdatedAt.Equal(remote.UpdatedAt) ||
+			!slices.Equal(rec.Teams, remote.Teams)
 
 		rec.URL = remote.URL
 		rec.Title = remote.Title
+		rec.Teams = remote.Teams
 		rec.UpdatedAt = remote.UpdatedAt
 		rec.LastFetchAt = now
 		rec.Status = websource.StatusReady
@@ -929,8 +1000,8 @@ func (m *Manager) DeleteWebPage(ctx context.Context, name, slug string) error {
 	if col == nil {
 		return fmt.Errorf("collection %s not found", name)
 	}
-	if col.Type != websource.TypePages {
-		return fmt.Errorf("collection %s is type %q; only pages source items can be deleted manually", name, col.Type)
+	if !manualItemType(col.Type) {
+		return fmt.Errorf("collection %s is type %q; only pages and push source items can be deleted manually", name, col.Type)
 	}
 	page, err := m.webStore.GetPage(ctx, websource.PageID(name, slug))
 	if err != nil {

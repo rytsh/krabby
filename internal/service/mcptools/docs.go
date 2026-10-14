@@ -86,12 +86,12 @@ type listSourcesArgs struct {
 // depends on Type (discover shapes with source_types).
 type addSourceArgs struct {
 	Name            string `json:"name" jsonschema:"collection name; lowercase [a-z0-9._-]; becomes the search scope key web:<name>. Choose a meaningful key, e.g. 'delivery-support'"`
-	Type            string `json:"type" jsonschema:"source type: 'pages', 'confluence' or 'jira' (see source_types)"`
+	Type            string `json:"type" jsonschema:"source type, e.g. 'pages', 'confluence', 'jira', 'push', 'http', 'crawl', 's3'; call source_types for the full list and each type's config fields"`
 	Description     string `json:"description,omitempty" jsonschema:"short human summary of what this source holds (e.g. 'Delivery Support runbooks and TERs'); shown to models by list_sources so they can pick the right source to search"`
 	AnalyzeImages   bool   `json:"analyze_images,omitempty" jsonschema:"analyze images in this source when global web image analysis is enabled; off by default"`
 	RefreshInterval string `json:"refresh_interval,omitempty" jsonschema:"legacy fixed interval as a Go duration, e.g. '1h' or '24h'; used only when schedule is empty. Empty or 'manual' means manual only. Prefer schedule for cron-style timing"`
 	Schedule        string `json:"schedule,omitempty" jsonschema:"comma-separated cron schedules (hardloop syntax, e.g. '0 2 * * *' for daily 02:00, or '@every 6h'); mirrors repository schedules and is authoritative over refresh_interval when set"`
-	Config          string `json:"config,omitempty" jsonschema:"provider-owned config as a JSON object encoded in a string, e.g. '{\"base_url\":\"https://...\",\"root_page\":\"123\",\"api_token\":\"...\"}'. jira: base_url, user, api_token, project or jql, include_labels, exclude_labels, include_subtasks (default false: sub-task issue types are skipped), team_fields, max_issues. confluence: base_url, and either space (whole space) or root_page (a page id to index that page and all its descendants as one keyed source), optional include_root, user, api_token, include_labels, exclude_labels. API tokens are write-only; blank on update keeps the stored secret"`
+	Config          string `json:"config,omitempty" jsonschema:"provider-owned config as a JSON object encoded in a string, e.g. '{\"base_url\":\"https://...\",\"root_page\":\"123\",\"api_token\":\"...\"}'. jira: base_url, user, api_token, project or jql, include_labels, exclude_labels, include_subtasks (default false: sub-task issue types are skipped), team_fields, max_issues. confluence: base_url, and either space (whole space) or root_page (a page id to index that page and all its descendants as one keyed source), optional include_root, user, api_token, include_labels, exclude_labels. Other types: see the fields listed by source_types. API tokens are write-only; blank on update keeps the stored secret"`
 }
 
 type updateSourceArgs struct {
@@ -159,7 +159,7 @@ type sourceNameArgs struct {
 }
 
 type testSourceConfigArgs struct {
-	Type         string `json:"type" jsonschema:"source type: 'pages', 'confluence' or 'jira' (see source_types)"`
+	Type         string `json:"type" jsonschema:"source type, e.g. 'pages', 'confluence', 'jira', 'push', 'http', 'crawl', 's3'; call source_types for the full list and each type's config fields"`
 	ExistingName string `json:"existing_name,omitempty" jsonschema:"saved source whose stored config (and secrets) the draft is merged over; omit for a new source"`
 	Config       string `json:"config,omitempty" jsonschema:"provider-owned config as a JSON object encoded in a string, same shape as add_source"`
 }
@@ -180,6 +180,46 @@ type sourcePageInput struct {
 type importSourcePagesArgs struct {
 	Name  string            `json:"name" jsonschema:"existing pages source name"`
 	Pages []sourcePageInput `json:"pages" jsonschema:"1-20 pages to create or update; matching URL, or matching title for URL-less content, is upserted"`
+}
+
+type pushItemInput struct {
+	ID          string   `json:"id" jsonschema:"stable client-chosen item id; pushing the same id again updates the item"`
+	Title       string   `json:"title,omitempty" jsonschema:"document title; derived from the content when omitted"`
+	URL         string   `json:"url,omitempty" jsonschema:"optional absolute HTTP(S) link back to the original item"`
+	ContentType string   `json:"content_type" jsonschema:"text/markdown, text/plain, text/html, text/csv, application/json, application/yaml, application/pdf or an Office (docx/pptx/xlsx) media type"`
+	Content     string   `json:"content" jsonschema:"document content; base64 for binary formats (set encoding)"`
+	Encoding    string   `json:"encoding,omitempty" jsonschema:"'base64' for binary content, empty for text"`
+	Teams       []string `json:"teams,omitempty" jsonschema:"optional owner/team tags used to filter items"`
+	UpdatedAt   string   `json:"updated_at,omitempty" jsonschema:"optional RFC3339 source modification time"`
+}
+
+type pushSourceItemsArgs struct {
+	Name  string          `json:"name" jsonschema:"existing push source name"`
+	Items []pushItemInput `json:"items" jsonschema:"1-20 items to create or update by id"`
+}
+
+func (a pushSourceItemsArgs) imports() ([]manager.WebPageImport, error) {
+	imports := make([]manager.WebPageImport, 0, len(a.Items))
+	for i, item := range a.Items {
+		var updatedAt time.Time
+		if strings.TrimSpace(item.UpdatedAt) != "" {
+			parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(item.UpdatedAt))
+			if err != nil {
+				return nil, fmt.Errorf("item %d updated_at must be RFC3339: %w", i+1, err)
+			}
+			updatedAt = parsed
+		}
+		imports = append(imports, manager.WebPageImport{
+			ID: item.ID, URL: item.URL, Title: item.Title, ContentType: item.ContentType,
+			Content: item.Content, Encoding: item.Encoding, Teams: item.Teams, UpdatedAt: updatedAt,
+		})
+	}
+	return imports, nil
+}
+
+type pruneSourceItemsArgs struct {
+	Name string   `json:"name" jsonschema:"existing push source name"`
+	Keep []string `json:"keep" jsonschema:"every item id that should remain; all other items are deleted"`
 }
 
 func (a importSourcePagesArgs) imports() ([]manager.WebPageImport, error) {
@@ -552,10 +592,11 @@ func addDocAdminTools(server *mcp.Server, settings docsSettingsService, sources 
 func addSourceAdminTools(server *mcp.Server, mgr sourceAdminService) {
 	addTool(server, &mcp.Tool{
 		Name: "source_types",
-		Description: "List the web-source types that can be created (e.g. pages, confluence, jira) " +
-			"so add_source is called with a valid type. Config shape depends on the type.",
+		Description: "List the web-source types that can be created (pages, confluence, jira, push, http, crawl, " +
+			"feed, mcp, fs, s3, webdav, forge, chat, sql, notion, gdrive, sharepoint, …) with their config fields, " +
+			"so add_source is called with a valid type and config shape.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, _ emptyArgs) (*mcp.CallToolResult, any, error) {
-		return jsonResult(map[string]any{"types": mgr.WebSourceTypes()}), nil, nil
+		return jsonResult(map[string]any{"types": mgr.WebSourceDescriptors()}), nil, nil
 	})
 
 	addTool(server, &mcp.Tool{
@@ -693,6 +734,37 @@ func addSourceAdminTools(server *mcp.Server, mgr sourceAdminService) {
 		}
 		out := registerSourcePageOutput{Source: name, ScopeKey: websource.ScopeKey(name), Page: summarizeSourceItem(page)}
 		return nil, out, nil
+	})
+
+	addTool(server, &mcp.Tool{
+		Name:        "push_source_items",
+		Description: "Create or update items in an existing push source and index changed content immediately. Accepts 1-20 items identified by id; binary documents (PDF, DOCX, PPTX, XLSX) are sent base64-encoded with encoding:'base64'. Use for content Krabby cannot fetch itself.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args pushSourceItemsArgs) (*mcp.CallToolResult, importSourcePagesOutput, error) {
+		imports, err := args.imports()
+		if err != nil {
+			return nil, importSourcePagesOutput{}, err
+		}
+		name := strings.TrimSpace(strings.ToLower(args.Name))
+		result, err := mgr.ImportWebPages(ctx, name, imports)
+		if err != nil {
+			return nil, importSourcePagesOutput{}, err
+		}
+		return nil, importSourcePagesOutput{
+			Source: name, ScopeKey: websource.ScopeKey(name), Imported: result.Imported,
+			Changed: result.Changed, Unchanged: result.Unchanged,
+		}, nil
+	})
+
+	addTool(server, &mcp.Tool{
+		Name:        "prune_source_items",
+		Description: "Delete every item of a push source whose id is not listed in keep (local copy and index entries only). Call after pushing a complete export; use only on explicit request.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args pruneSourceItemsArgs) (*mcp.CallToolResult, any, error) {
+		name := strings.TrimSpace(strings.ToLower(args.Name))
+		n, err := mgr.PrunePushItems(ctx, name, args.Keep)
+		if err != nil {
+			return nil, nil, err
+		}
+		return jsonResult(map[string]any{"source": name, "removed": n}), nil, nil
 	})
 
 	addTool(server, &mcp.Tool{

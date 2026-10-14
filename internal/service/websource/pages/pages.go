@@ -20,6 +20,7 @@ import (
 
 	"github.com/rytsh/krabby/internal/service/progress"
 	"github.com/rytsh/krabby/internal/service/websource"
+	"github.com/rytsh/krabby/internal/service/websource/convert"
 	"golang.org/x/net/html/charset"
 )
 
@@ -293,7 +294,7 @@ func (f *Fetcher) fetchOne(ctx context.Context, pageURL string) (title, markdown
 	}
 
 	req.Header.Set("User-Agent", "krabby-websource/1.0")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/pdf,text/plain,*/*;q=0.5")
 
 	if err := f.setCredentials(ctx, req, pageURL); err != nil {
 		return "", "", err
@@ -319,12 +320,14 @@ func (f *Fetcher) fetchOne(ctx context.Context, pageURL string) (title, markdown
 	}
 
 	contentType := res.Header.Get("Content-Type")
+	isHTML := true
 	if contentType != "" {
 		mediaType, _, parseErr := mime.ParseMediaType(contentType)
 		if parseErr != nil {
 			return "", "", fmt.Errorf("fetch %s; invalid content type %q", pageURL, contentType)
 		}
-		if mediaType != "text/html" && mediaType != "application/xhtml+xml" {
+		isHTML = mediaType == "text/html" || mediaType == "application/xhtml+xml"
+		if !isHTML && convert.Detect(contentType, pageURL) == convert.FormatUnknown {
 			return "", "", fmt.Errorf("fetch %s; unsupported content type %q", pageURL, mediaType)
 		}
 	}
@@ -337,6 +340,20 @@ func (f *Fetcher) fetchOne(ctx context.Context, pageURL string) (title, markdown
 		return "", "", fmt.Errorf("read %s; page exceeds %d bytes", pageURL, maxBodyBytes)
 	}
 
+	finalURL := pageURL
+	if res.Request != nil && res.Request.URL != nil {
+		finalURL = res.Request.URL.String()
+	}
+
+	if !isHTML {
+		doc, err := convert.ToMarkdown(body, convert.Options{ContentType: contentType, Name: finalURL, BaseURL: finalURL})
+		if err != nil {
+			return "", "", fmt.Errorf("convert %s; %w", pageURL, err)
+		}
+
+		return doc.Title, doc.Markdown, nil
+	}
+
 	decoded, err := charset.NewReader(bytes.NewReader(body), contentType)
 	if err != nil {
 		return "", "", fmt.Errorf("decode %s; %w", pageURL, err)
@@ -344,11 +361,6 @@ func (f *Fetcher) fetchOne(ctx context.Context, pageURL string) (title, markdown
 	body, err = io.ReadAll(decoded)
 	if err != nil {
 		return "", "", fmt.Errorf("decode %s; %w", pageURL, err)
-	}
-
-	finalURL := pageURL
-	if res.Request != nil && res.Request.URL != nil {
-		finalURL = res.Request.URL.String()
 	}
 
 	return websource.ExtractArticle(string(body), finalURL)

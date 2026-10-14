@@ -32,6 +32,7 @@ const (
 	TypePages      = "pages"      // custom web: user-registered page URLs
 	TypeConfluence = "confluence" // Confluence space via REST API
 	TypeJira       = "jira"       // JIRA project / JQL query via REST API
+	TypePush       = "push"       // client-pushed items (REST / MCP / CI)
 )
 
 // Collection status values.

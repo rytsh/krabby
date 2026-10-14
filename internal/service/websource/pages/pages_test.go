@@ -110,8 +110,8 @@ func TestFetchOneStripsCredentialsOnCrossOriginRedirect(t *testing.T) {
 func TestFetchOneRejectsUnsupportedAndOversizedBodies(t *testing.T) {
 	t.Run("content type", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"message":"not documentation"}`))
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write([]byte("\x89PNG"))
 		}))
 		defer server.Close()
 

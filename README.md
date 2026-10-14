@@ -17,7 +17,8 @@ and understand relationships through MCP.
 - File discovery by path pattern
 - Architecture and relationship analysis with knowledge graphs
 - Optional generated documentation and semantic search
-- Web, Confluence, and Jira source indexing
+- Source indexing beyond git: web pages, crawled docs sites, Confluence, Jira, RSS/Atom, any JSON API, pushed documents (CI/REST/MCP), external MCP resources, folders, S3, WebDAV, GitHub/GitLab/Gitea/Bitbucket issues & PRs, Slack/Mattermost/Teams, SQL queries, Notion, Google Drive and SharePoint
+- Document conversion for HTML, Markdown, text, CSV, JSON/YAML, PDF, DOCX, PPTX and XLSX
 - API catalog: OpenAPI/Swagger and gRPC endpoints, browsable and searchable, with per-service overrides
 - Web UI, REST API, and MCP support
 - External MCP connection management with credential-safe catalog discovery
