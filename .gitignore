@@ -19,3 +19,8 @@ _docs/dist/
 _docs/.astro/
 internal/server/dist/*
 !internal/server/dist/.gitkeep
+
+# impeccable working files (comps, build state, review captures)
+.impeccable/*
+!.impeccable/config.json
+!.impeccable/surfaces/
