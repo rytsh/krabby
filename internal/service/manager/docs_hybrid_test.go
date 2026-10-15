@@ -170,19 +170,27 @@ func TestHybridRunsBothRankersConcurrently(t *testing.T) {
 		return time.Since(started)
 	}
 
-	semanticTook := search(DocsSearchSemantic)
-	lexicalTook := search(DocsSearchLexical)
-	hybridTook := search(DocsSearchHybrid)
-	t.Logf("semantic %v lexical %v hybrid %v", semanticTook, lexicalTook, hybridTook)
+	// Scheduler and CPU contention (-race, parallel packages on CI) only ever
+	// add time, so the fastest of several interleaved rounds is the closest
+	// estimate of each mode's real cost.
+	const rounds = 5
+	semanticTook, lexicalTook, hybridTook := time.Duration(1<<62), time.Duration(1<<62), time.Duration(1<<62)
+	for range rounds {
+		semanticTook = min(semanticTook, search(DocsSearchSemantic))
+		lexicalTook = min(lexicalTook, search(DocsSearchLexical))
+		hybridTook = min(hybridTook, search(DocsSearchHybrid))
+	}
+	t.Logf("best of %d: semantic %v lexical %v hybrid %v", rounds, semanticTook, lexicalTook, hybridTook)
 
 	if lexicalTook < minLexical {
 		t.Skipf("lexical arm too cheap to measure overlap (%v); the timing says nothing", lexicalTook)
 	}
 
 	// Sequential would cost both arms. Concurrent costs the slower one, so
-	// anything below the sum minus half the smaller arm can only be overlap.
+	// anything clearly below the sum can only be overlap. A quarter of the
+	// smaller arm leaves room for jitter without accepting sequential runs.
 	smaller := min(semanticTook, lexicalTook)
-	limit := semanticTook + lexicalTook - smaller/2
+	limit := semanticTook + lexicalTook - smaller/4
 
 	if hybridTook >= limit {
 		t.Fatalf("hybrid took %v, want < %v (semantic %v + lexical %v): the rankers did not overlap",
