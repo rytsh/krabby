@@ -42,7 +42,14 @@ body {
 }
 
 ::selection {
-  background: var(--yellow);
+  background: var(--ink);
+  color: var(--white);
+}
+
+.cmd ::selection,
+.case-panel > code::selection,
+.catalogs code::selection {
+  background: var(--white);
   color: var(--ink);
 }
 
@@ -102,6 +109,10 @@ p code {
 }
 
 /* masthead */
+
+.masthead {
+  overflow-x: clip;
+}
 
 .mast-row {
   display: grid;
@@ -284,17 +295,25 @@ p code {
   z-index: 3;
 }
 
-.bubble::after {
-  content: "";
+.bubble .tail {
   position: absolute;
-  bottom: -16px;
-  left: 12%;
-  width: 26px;
-  height: 26px;
-  border-right: var(--line);
-  border-bottom: var(--line);
-  background: var(--white);
-  transform: skewX(30deg) rotate(20deg);
+  top: 100%;
+  left: 34%;
+  width: 40px;
+  height: 36px;
+  overflow: visible;
+}
+
+.tail polygon {
+  fill: var(--white);
+}
+
+.tail polyline {
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: 3px;
+  stroke-linejoin: miter;
+  vector-effect: non-scaling-stroke;
 }
 
 .lens {
