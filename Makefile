@@ -9,6 +9,10 @@ CONTAINER_PLATFORM := linux/$(CONTAINER_ARCH)
 
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
+.PHONY: docs
+docs: ## Serve _docs folder
+	cd _docs && pnpm run dev
+
 .PHONY: build-ui
 build-ui: ## Build the web UI into internal/server/dist
 	cd _ui && pnpm install && pnpm build
