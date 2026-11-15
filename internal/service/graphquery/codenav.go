@@ -41,7 +41,7 @@ type Definition struct {
 	ID        string `json:"id"`
 	Path      string `json:"path,omitempty"`     // repo-relative source_file
 	Line      int    `json:"line,omitempty"`     // parsed from source_location
-	EndLine   int    `json:"end_line,omitempty"` // only set for a range location
+	EndLine   int    `json:"end_line,omitempty"` // last line of the declaration, when known
 	Degree    int    `json:"degree"`
 	Community *int   `json:"community,omitempty"`
 }
@@ -121,6 +121,11 @@ func (g *Graph) Definitions(symbol string, limit int) SymbolDefs {
 
 		d := g.Nodes[id]
 		line, endLine := parseSourceLocation(d.SourceLocation)
+		// bag records where a declaration ends separately from where it
+		// starts; an end written into the location itself is older graphs.
+		if endLine == 0 && d.EndLine > line && line > 0 {
+			endLine = d.EndLine
+		}
 		def := Definition{
 			Label:   g.labelOf(id),
 			ID:      id,
@@ -425,11 +430,12 @@ func regexFallbackNote(symbol string) string {
 		sanitize(symbol), sanitize(regexp.QuoteMeta(symbol)))
 }
 
-// parseSourceLocation extracts the 1-based start and end line from a graphify
-// source_location. graphify emits several shapes ("L42", "L42-L60", "line 42",
-// "42:5"); unparseable values yield 0 so callers omit the line rather than
-// pointing at line 1. Only '-' opens a range: the trailing number in "42:5" is a
-// column, and reporting it as an end line would render a backwards span.
+// parseSourceLocation extracts the 1-based start and end line from a
+// source_location. Graph builders have emitted several shapes ("L42",
+// "L42-L60", "line 42", "42:5"); unparseable values yield 0 so callers omit
+// the line rather than pointing at line 1. Only '-' opens a range: the
+// trailing number in "42:5" is a column, and reporting it as an end line would
+// render a backwards span. bag records the end separately, as end_line.
 func parseSourceLocation(loc string) (line, endLine int) {
 	line, rest := leadingLineNumber(strings.TrimSpace(loc))
 	if line == 0 {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/rytsh/krabby/internal/service/graphquery"
+	"github.com/rytsh/krabby/internal/service/repofs"
 )
 
 // FindDefinition resolves where a symbol is defined in the selected repository's
@@ -92,4 +93,151 @@ func (m *Manager) resolveGraphRepo(ctx context.Context, repoID, namespace, tool 
 
 		return "", graphRepoSelectionText(tool, namespace, repoIDs), nil
 	}
+}
+
+// maxSymbolLines bounds one read_symbol answer. A declaration longer than this
+// is cut and marked truncated; the caller pages the rest with read_file.
+const maxSymbolLines = 400
+
+// SymbolSource is one definition of a symbol together with its source.
+type SymbolSource struct {
+	graphquery.Definition
+	// Source is the declaration's text, from Line through EndLine (or as far
+	// as maxSymbolLines allows).
+	Source *repofs.LineRange `json:"source,omitempty"`
+	// Note explains why Source is missing or shorter than the declaration.
+	Note string `json:"note,omitempty"`
+}
+
+// SymbolSources is what ReadSymbol returns.
+type SymbolSources struct {
+	Symbol  string         `json:"symbol"`
+	Symbols []SymbolSource `json:"symbols"`
+	// Total counts every definition found, including those past limit.
+	Total      int      `json:"total"`
+	Candidates []string `json:"candidates,omitempty"`
+	Snapshot   string   `json:"snapshot,omitempty"`
+	Note       string   `json:"note,omitempty"`
+}
+
+// ReadSymbol returns the source of every definition of symbol: the graph says
+// where each declaration starts and ends, and the lines are read from the
+// repository's active clone. A definition whose end the graph does not know
+// (an older graph, a language bag cannot bound) is returned from its start
+// line with a note, rather than guessed.
+//
+// It needs one repository's graph, because a definition's path is only
+// meaningful inside the clone it came from. A cross-repository merged graph
+// therefore does not answer it, even when merging is enabled.
+func (m *Manager) ReadSymbol(ctx context.Context, repoID, namespace, symbol string, limit int) (SymbolSources, error) {
+	out := SymbolSources{Symbol: symbol, Symbols: []SymbolSource{}}
+
+	repo, selection, err := m.singleGraphRepo(ctx, repoID, namespace, symbol)
+	if err != nil {
+		return out, err
+	}
+	if selection != "" {
+		out.Note = selection
+
+		return out, nil
+	}
+
+	graphPath, err := m.GraphPathFor(ctx, repo)
+	if err != nil {
+		return out, err
+	}
+
+	defs, err := m.engine.Definitions(graphPath, symbol, limit)
+	if err != nil {
+		return out, fmt.Errorf("finding definitions of %s; %w", symbol, err)
+	}
+
+	out.Total, out.Candidates, out.Note = defs.Total, defs.Candidates, defs.Note
+	if len(defs.Definitions) == 0 {
+		return out, nil
+	}
+
+	// Read from the snapshot the graph belongs to. The token lets a caller
+	// continue with read_file on the same version.
+	dir, token, err := m.repoCloneDirAt(ctx, repo, "")
+	if err != nil {
+		return out, err
+	}
+	out.Snapshot = token
+
+	for _, def := range defs.Definitions {
+		out.Symbols = append(out.Symbols, readDefinition(dir, def))
+	}
+
+	return out, nil
+}
+
+// singleGraphRepo resolves the one repository read_symbol runs against. It
+// applies the usual selection rules, except that a merged graph never stands
+// in for a repository: with merging enabled and no repo given, the choice is
+// made the same way it would be without merging.
+func (m *Manager) singleGraphRepo(ctx context.Context, repoID, namespace, symbol string) (repo, selection string, err error) {
+	if repoID != "" {
+		r, err := m.reg.Resolve(ctx, repoID)
+		if err != nil {
+			return "", "", err
+		}
+		if r == nil {
+			return "", "", fmt.Errorf("unknown repository %q; use list_repos for its exact id", repoID)
+		}
+
+		return r.ID, "", nil
+	}
+
+	repoIDs, err := m.graphRepoIDs(ctx, namespace)
+	if err != nil {
+		return "", "", err
+	}
+
+	switch len(repoIDs) {
+	case 0:
+		return "", "", fmt.Errorf("no repository graph is ready in namespace %s; add a repository, wait for its build to finish, or retry with namespace \"*\"", displayNamespace(namespace))
+	case 1:
+		return repoIDs[0], "", nil
+	default:
+		if inferred := inferRepoID(repoIDs, map[string]any{"symbol": symbol}); inferred != "" {
+			return inferred, "", nil
+		}
+
+		return "", graphRepoSelectionText("read_symbol", namespace, repoIDs), nil
+	}
+}
+
+func readDefinition(dir string, def graphquery.Definition) SymbolSource {
+	out := SymbolSource{Definition: def}
+
+	switch {
+	case def.Path == "" || def.Line == 0:
+		out.Note = "the graph records no location for this definition"
+
+		return out
+	case def.EndLine == 0:
+		// Without an end the declaration is one line, or one whose extent the
+		// graph builder could not tell; either way its first line is real.
+		out.Note = "the graph does not record where this declaration ends; showing its first line. Use read_file for the rest."
+		def.EndLine = def.Line
+	}
+
+	end := min(def.EndLine, def.Line+maxSymbolLines-1)
+
+	src, err := repofs.ReadLines(dir, def.Path, def.Line, end)
+	if err != nil {
+		out.Note = "source unavailable: " + err.Error()
+
+		return out
+	}
+	out.Source = src
+
+	if end < def.EndLine {
+		src.Truncated = true
+		out.Note = fmt.Sprintf("declaration is %d lines; showing the first %d. Use read_file for the rest.",
+			def.EndLine-def.Line+1, maxSymbolLines)
+	}
+
+	return out
 }

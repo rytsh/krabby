@@ -70,6 +70,7 @@ type graphQueryService interface {
 	CallGraphTool(context.Context, string, string, string, map[string]any) (*mcp.CallToolResult, error)
 	FindDefinition(context.Context, string, string, string, int) (graphquery.SymbolDefs, error)
 	FindReferences(context.Context, string, string, string, []string, int, int) (graphquery.SymbolRefs, error)
+	ReadSymbol(context.Context, string, string, string, int) (manager.SymbolSources, error)
 }
 
 type repoFileService interface {

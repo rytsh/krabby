@@ -8,6 +8,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/rytsh/krabby/internal/service/graphquery"
+	"github.com/rytsh/krabby/internal/service/manager"
 )
 
 func TestQueryGraphArgsTraversalMode(t *testing.T) {
@@ -71,6 +72,10 @@ func (s *stubGraphQuery) FindDefinition(context.Context, string, string, string,
 
 func (s *stubGraphQuery) FindReferences(context.Context, string, string, string, []string, int, int) (graphquery.SymbolRefs, error) {
 	return graphquery.SymbolRefs{}, nil
+}
+
+func (s *stubGraphQuery) ReadSymbol(context.Context, string, string, string, int) (manager.SymbolSources, error) {
+	return manager.SymbolSources{}, nil
 }
 
 func queryToolSession(t *testing.T) (*mcp.ClientSession, *stubGraphQuery) {

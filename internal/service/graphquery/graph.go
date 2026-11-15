@@ -1,13 +1,12 @@
-// Package graphquery is a native Go implementation of the graphify graph query
-// tools (query_graph, get_node, get_neighbors, get_community, god_nodes,
-// graph_stats, shortest_path). It reads a graphify graph.json directly and
-// answers queries in-process, so krabby no longer needs to spawn a
-// `python -m graphify.serve` MCP server for every graph. The python graphify
-// CLI is still used for building/merging graphs.
+// Package graphquery answers krabby's graph tools (query_graph, get_node,
+// get_neighbors, get_community, god_nodes, graph_stats, shortest_path, and
+// symbol navigation) in-process from a bag graph.json.
 //
-// The algorithms here are a faithful port of graphify's serve.py: identical
-// scoring/IDF, BFS/DFS hub thresholds, seed selection, context filters, god-node
-// filtering, shortest path over an undirected view, and label sanitisation.
+// The traversal algorithms began as a port of Graphify's serve.py (scoring
+// and IDF, BFS/DFS hub thresholds, seed selection, context filters, god-node
+// filtering, shortest path over an undirected view, label sanitisation).
+// They are krabby's own now and can change where that serves agents better;
+// the comments that cite Graphify record where an idea came from.
 package graphquery
 
 import (
@@ -31,8 +30,11 @@ type Node struct {
 	NormLabel      string
 	SourceFile     string
 	SourceLocation string
-	FileType       string
-	Community      *int
+	// EndLine is the last line of the declaration SourceLocation starts, when
+	// the graph builder recorded one; 0 otherwise.
+	EndLine   int
+	FileType  string
+	Community *int
 }
 
 // Edge is one directed edge (source -> target). graphify stores graphs as
@@ -46,7 +48,7 @@ type Edge struct {
 	Context    string
 }
 
-// Graph is an in-memory directed view of a graphify graph.json.
+// Graph is an in-memory directed view of a graph.json.
 type Graph struct {
 	Nodes    map[string]*Node
 	nodeList []string // insertion order (matches JSON node order for stable output)
@@ -90,6 +92,7 @@ type rawNode struct {
 	NormLabel      string `json:"norm_label"`
 	SourceFile     string `json:"source_file"`
 	SourceLocation string `json:"source_location"`
+	EndLine        int    `json:"end_line"`
 	FileType       string `json:"file_type"`
 	Community      *int   `json:"community"`
 }
@@ -102,7 +105,7 @@ type rawEdge struct {
 	Context    string `json:"context"`
 }
 
-// Load reads and parses a graphify graph.json into an in-memory Graph.
+// Load reads and parses a graph.json into an in-memory Graph.
 func Load(path string) (*Graph, error) {
 	raw, err := readRaw(path)
 	if err != nil {
@@ -215,6 +218,7 @@ func fromRaw(raw *rawGraph) (*Graph, error) {
 			NormLabel:      n.NormLabel,
 			SourceFile:     n.SourceFile,
 			SourceLocation: n.SourceLocation,
+			EndLine:        n.EndLine,
 			FileType:       n.FileType,
 			Community:      n.Community,
 		}

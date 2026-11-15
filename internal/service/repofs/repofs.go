@@ -298,6 +298,64 @@ func ReadFile(rootDir, rel string, offset int64, maxBytes int) (*FileContent, er
 	}, nil
 }
 
+// LineRange is a slice of a file by line.
+type LineRange struct {
+	Path string `json:"path"`
+	// Start and End are the 1-based inclusive lines returned. End can fall
+	// short of what was asked when the file is shorter or MaxFileBytes cut
+	// the read; Truncated then says so.
+	Start     int    `json:"start_line"`
+	End       int    `json:"end_line"`
+	Content   string `json:"content"`
+	Truncated bool   `json:"truncated,omitempty"`
+}
+
+// ReadLines returns lines start..end (1-based, inclusive) of a file, reading
+// no more than MaxFileBytes from its beginning. It is how a symbol is read
+// whole: the graph gives the lines, and a byte-paged read_file would make the
+// caller find them.
+func ReadLines(rootDir, rel string, start, end int) (*LineRange, error) {
+	if start < 1 || end < start {
+		return nil, fmt.Errorf("invalid line range %d-%d", start, end)
+	}
+
+	content, err := ReadFile(rootDir, rel, 0, MaxFileBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	lines := strings.SplitAfter(content.Content, "\n")
+	// A file cut mid-line by the byte limit ends in a partial line, which must
+	// not be presented as complete.
+	complete := len(lines)
+	if content.Truncated && complete > 0 && !strings.HasSuffix(lines[complete-1], "\n") {
+		complete--
+	}
+	if complete > 0 && lines[complete-1] == "" {
+		complete--
+	}
+
+	if start > complete {
+		if content.Truncated {
+			return nil, fmt.Errorf("line %d of %s is beyond the first %d bytes krabby reads; use read_file with an offset", start, content.Path, MaxFileBytes)
+		}
+
+		return nil, fmt.Errorf("%s has %d lines; line %d does not exist", content.Path, complete, start)
+	}
+
+	last := min(end, complete)
+	out := &LineRange{
+		Path:    content.Path,
+		Start:   start,
+		End:     last,
+		Content: strings.Join(lines[start-1:last], ""),
+		// Short of the request because of the byte limit, not the file's end.
+		Truncated: last < end && content.Truncated,
+	}
+
+	return out, nil
+}
+
 // readFileBytes sizes the initial allocation to the expected remaining bytes,
 // not the 512 KiB read ceiling. Indexing reads many small source files. The
 // stat is only a hint: a file that grows after Stat (or reports size zero) is

@@ -148,6 +148,7 @@ Example OpenCode config with core and admin registered separately:
 | `set_credential` / `list_credentials` / `remove_credential` | Admin: per-host / per-org git credentials |
 | `search_code` | First choice for symbols, literals, usages and implementation locations; `mode` selects term (`normal`), regular-expression (`regex`) or vector (`semantic`) retrieval, and `path` narrows any of them to a file glob |
 | `find_definition` / `find_references` | Locate a known symbol's definitions, or its usages as real graph edges, with a path and a line for each |
+| `read_symbol` | Read a function, method or type whole: each definition with its source from first line to last |
 | `read_file` / `list_files` / `glob` | Page through a known source file, inspect one directory, or find files by path pattern. Browsing hides vendored trees; `glob` does not, because a caller who writes `vendor/**` asked for them |
 | `query_graph` | Architecture, dependency, call/data-flow, and cross-file relationship questions |
 | `get_node` / `get_neighbors` / `get_community` | Node-level inspection |
@@ -454,6 +455,22 @@ The limit is the extractor's coverage. bag is AST-based and needs no
 model, but a language it does not parse has no nodes, and locals and
 parameters have no nodes in any language — for those, regex search is the
 right tool and the `note` points at it.
+
+`read_symbol` goes one step further and returns the code. bag records where
+each function, method, class and type declaration ends (`end_line` on the
+node), so a definition's source is its lines from `line` to `end_line`, read
+from the same snapshot the graph was built from. It replaces the usual
+find-then-page dance: the caller no longer has to guess how far into the file
+a function runs.
+
+- A declaration over 400 lines is cut at 400 and marked `truncated`; the
+  returned `snapshot` token continues with `read_file` on the same version.
+- A definition with no recorded end — a one-line declaration, or a graph
+  built before bag recorded end lines — returns its first line with a `note`
+  rather than a guessed range.
+- It reads from one repository's graph only. With `bag.merge` enabled and no
+  `repo` given it still chooses a single repository, because a path in the
+  merged graph does not say which clone it belongs to.
 
 ## Data layout & external tools
 

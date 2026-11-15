@@ -119,6 +119,7 @@ The URL can be HTTPS or SSH (e.g. git@github.com:owner/repo.git). For private re
       tools: [
         ["query_graph", "Analyze architecture, dependencies, flows, and cross-file relationships with BFS/DFS."],
         ["find_definition", "Locate where a symbol is defined — a real graph node with a path and a line, not a text guess."],
+        ["read_symbol", "Read a function, method or type whole — every definition with its source from first line to last."],
         ["find_references", "List where a symbol is used as real incoming graph edges; filter by edge context to ask 'who calls this'."],
         ["get_node", "Get full details for a node by label or ID."],
         ["get_neighbors", "Page through direct neighbors of a node with edge details."],

@@ -31,7 +31,7 @@ Coexistence with live tools:
 Tool selection:
 - Use search_code first for symbols, literals, usages and implementation locations; regex handles punctuation/line anchors, semantic handles concepts. Narrow with repo/path.
 - Use repo_overview for orientation in an unfamiliar repo: it returns the existing generated introduction, section offsets and generation metadata. Follow a relevant section with get_doc, then verify paths/symbols with search_code/read_file.
-- Use find_definition/find_references for exact graph symbols; context:['call'] follows calls. query_graph explains dependencies and cross-file relationships.
+- Use find_definition/find_references for exact graph symbols; context:['call'] follows calls. read_symbol returns a symbol's whole source. query_graph explains dependencies and cross-file relationships.
 - Use glob for file names; list_files for one directory; read_file for source. Preserve returned snapshot tokens on continuation reads.
 - Use git_blame, git_diff, git_log and list_refs for commit evidence and release comparisons.
 - Use search_docs for generated docs and indexed knowledge. Semantic is the default when configured, otherwise lexical. Use lexical for exact Jira keys/titles/identifiers, hybrid for combined retrieval. Inspect evidence kind and sync metadata; cite the original URL for synced content.
@@ -856,6 +856,21 @@ func addQueryTools(server *mcp.Server, mgr graphQueryService) {
 			"A symbol defined in several places returns all of them. " + repoField + ".",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args findSymbolArgs) (*mcp.CallToolResult, any, error) {
 		res, err := mgr.FindDefinition(ctx, args.Repo, args.Namespace, args.Symbol, args.Limit)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return jsonResult(res), nil, nil
+	})
+
+	addTool(server, &mcp.Tool{
+		Name: "read_symbol",
+		Description: "Read a symbol's whole declaration - a function, method, class or type - in one call: find_definition's location plus the source from its first line to its last. " +
+			"Use it instead of find_definition followed by read_file when you want the code itself. " +
+			"Every definition of the symbol is returned with its own source; a declaration over 400 lines is cut and marked truncated. " +
+			"The returned snapshot token continues on the same version with read_file. " + repoField + ".",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args findSymbolArgs) (*mcp.CallToolResult, any, error) {
+		res, err := mgr.ReadSymbol(ctx, args.Repo, args.Namespace, args.Symbol, args.Limit)
 		if err != nil {
 			return nil, nil, err
 		}
