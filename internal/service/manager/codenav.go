@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/rytsh/krabby/internal/service/graphbuilder"
 	"github.com/rytsh/krabby/internal/service/graphquery"
 	"github.com/rytsh/krabby/internal/service/repofs"
 )
@@ -99,6 +100,17 @@ func (m *Manager) resolveGraphRepo(ctx context.Context, repoID, namespace, tool 
 // is cut and marked truncated; the caller pages the rest with read_file.
 const maxSymbolLines = 400
 
+// read_symbol returns source, not just locations, so it answers far fewer
+// definitions than find_definition: a common name ("String", "New") can have
+// dozens, and each could carry maxSymbolLines of code.
+const (
+	defaultReadSymbolLimit = 5
+	maxReadSymbolLimit     = 20
+	// maxReadSymbolTotalLines bounds the source across all definitions in one
+	// answer. Definitions past it keep their location and get a note.
+	maxReadSymbolTotalLines = 1200
+)
+
 // SymbolSource is one definition of a symbol together with its source.
 type SymbolSource struct {
 	graphquery.Definition
@@ -142,9 +154,25 @@ func (m *Manager) ReadSymbol(ctx context.Context, repoID, namespace, symbol stri
 		return out, nil
 	}
 
-	graphPath, err := m.GraphPathFor(ctx, repo)
+	// The graph and the source come from the same snapshot directory, read
+	// once: resolving them separately would let a refresh that finishes in
+	// between pair one version's line numbers with another version's file.
+	// The token lets a caller continue with read_file on that version.
+	dir, token, err := m.repoCloneDirAt(ctx, repo, "")
 	if err != nil {
 		return out, err
+	}
+
+	graphPath := graphbuilder.GraphPath(dir)
+	if !fileExists(graphPath) {
+		return out, fmt.Errorf("graph for %s not built yet", repo)
+	}
+
+	switch {
+	case limit <= 0:
+		limit = defaultReadSymbolLimit
+	case limit > maxReadSymbolLimit:
+		limit = maxReadSymbolLimit
 	}
 
 	defs, err := m.engine.Definitions(graphPath, symbol, limit)
@@ -156,17 +184,24 @@ func (m *Manager) ReadSymbol(ctx context.Context, repoID, namespace, symbol stri
 	if len(defs.Definitions) == 0 {
 		return out, nil
 	}
-
-	// Read from the snapshot the graph belongs to. The token lets a caller
-	// continue with read_file on the same version.
-	dir, token, err := m.repoCloneDirAt(ctx, repo, "")
-	if err != nil {
-		return out, err
-	}
 	out.Snapshot = token
 
+	budget := maxReadSymbolTotalLines
 	for _, def := range defs.Definitions {
-		out.Symbols = append(out.Symbols, readDefinition(dir, def))
+		if budget <= 0 {
+			out.Symbols = append(out.Symbols, SymbolSource{
+				Definition: def,
+				Note:       "source left out: this answer reached its line budget. Call read_symbol with repo and a narrower symbol, or read_file at this location.",
+			})
+
+			continue
+		}
+
+		sym := readDefinition(dir, def, min(budget, maxSymbolLines))
+		if sym.Source != nil {
+			budget -= sym.Source.End - sym.Source.Start + 1
+		}
+		out.Symbols = append(out.Symbols, sym)
 	}
 
 	return out, nil
@@ -208,7 +243,8 @@ func (m *Manager) singleGraphRepo(ctx context.Context, repoID, namespace, symbol
 	}
 }
 
-func readDefinition(dir string, def graphquery.Definition) SymbolSource {
+// readDefinition reads one definition's source, at most maxLines of it.
+func readDefinition(dir string, def graphquery.Definition, maxLines int) SymbolSource {
 	out := SymbolSource{Definition: def}
 
 	switch {
@@ -223,7 +259,7 @@ func readDefinition(dir string, def graphquery.Definition) SymbolSource {
 		def.EndLine = def.Line
 	}
 
-	end := min(def.EndLine, def.Line+maxSymbolLines-1)
+	end := min(def.EndLine, def.Line+maxLines-1)
 
 	src, err := repofs.ReadLines(dir, def.Path, def.Line, end)
 	if err != nil {
@@ -236,7 +272,7 @@ func readDefinition(dir string, def graphquery.Definition) SymbolSource {
 	if end < def.EndLine {
 		src.Truncated = true
 		out.Note = fmt.Sprintf("declaration is %d lines; showing the first %d. Use read_file for the rest.",
-			def.EndLine-def.Line+1, maxSymbolLines)
+			def.EndLine-def.Line+1, end-def.Line+1)
 	}
 
 	return out

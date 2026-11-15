@@ -465,6 +465,12 @@ a function runs.
 
 - A declaration over 400 lines is cut at 400 and marked `truncated`; the
   returned `snapshot` token continues with `read_file` on the same version.
+- One answer stays small: `limit` defaults to 5 definitions (max 20), and
+  past 1200 lines of source in total the remaining definitions come back as
+  locations only, with a note.
+- The graph and the source are read from the same snapshot, so a refresh
+  finishing mid-call cannot pair one version's line numbers with another
+  version's file.
 - A definition with no recorded end — a one-line declaration, or a graph
   built before bag recorded end lines — returns its first line with a `note`
   rather than a guessed range.

@@ -179,3 +179,49 @@ func TestReadSymbolUnknownRepository(t *testing.T) {
 		t.Fatalf("err = %v, want unknown repository", err)
 	}
 }
+
+// A common name can have many definitions, each with up to maxSymbolLines of
+// source. The answer stays bounded: few definitions by default, and a total
+// line budget past which definitions come back as locations only.
+func TestReadSymbolBoundsTheAnswer(t *testing.T) {
+	long := func(pkg string) string {
+		var b strings.Builder
+		b.WriteString("package " + pkg + "\n\nfunc Run() int {\n")
+		for range maxSymbolLines + 10 {
+			b.WriteString("\t_ = 1\n")
+		}
+		b.WriteString("\treturn 0\n}\n")
+
+		return b.String()
+	}
+
+	files := map[string]string{}
+	for _, pkg := range []string{"a", "b", "c", "d", "e", "f", "g"} {
+		files[pkg+"/run.go"] = long(pkg)
+	}
+	m, repo := readSymbolManager(t, files)
+
+	got, err := m.ReadSymbol(context.Background(), repo, "", "Run", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Total != 7 || len(got.Symbols) != defaultReadSymbolLimit {
+		t.Fatalf("total %d, returned %d; want 7 found and %d returned", got.Total, len(got.Symbols), defaultReadSymbolLimit)
+	}
+
+	lines, withSource := 0, 0
+	for _, sym := range got.Symbols {
+		if sym.Source == nil {
+			if !strings.Contains(sym.Note, "line budget") {
+				t.Errorf("definition without source has note %q", sym.Note)
+			}
+
+			continue
+		}
+		withSource++
+		lines += strings.Count(sym.Source.Content, "\n")
+	}
+	if lines > maxReadSymbolTotalLines || withSource != maxReadSymbolTotalLines/maxSymbolLines {
+		t.Errorf("%d definitions with %d lines of source; budget is %d lines", withSource, lines, maxReadSymbolTotalLines)
+	}
+}

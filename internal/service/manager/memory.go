@@ -10,6 +10,10 @@ import (
 // SetMemories installs the memory store and builds the memory service over
 // it. The service reaches the rest of the manager only through the
 // dependencies wired here.
+//
+// Call it before building the HTTP router and the MCP catalogs: they capture
+// the service Memories returns when they are built, so a later call would
+// leave them on the previous one.
 func (m *Manager) SetMemories(store *memory.Store) {
 	m.memories = memorysvc.New(store, memorysvc.Deps{
 		ResolveRepo:    m.reg.Resolve,

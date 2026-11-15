@@ -15,7 +15,9 @@ const (
 )
 
 // SetMetrics wires the recorder into the queue and the graph cache. Call it
-// once at startup; without it nothing is measured and nothing breaks.
+// once at startup, before the task queue or the server starts: the recorder
+// is read without locking, and a second call would register the gauges twice.
+// Without it nothing is measured and nothing breaks.
 func (m *Manager) SetMetrics(rec *metrics.Recorder) error {
 	m.metrics = rec
 

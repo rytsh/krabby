@@ -100,8 +100,17 @@ type Service struct {
 	embedding atomic.Bool
 }
 
-// New creates the service. store may be nil.
+// New creates the service. store may be nil. A missing Embed means there is
+// no embedder (lexical recall only) and a missing Go means background work is
+// never started; the repository lookups are required.
 func New(store *memory.Store, deps Deps) *Service {
+	if deps.Embed == nil {
+		deps.Embed = func(context.Context, string, bool) ([]float32, string, error) { return nil, "", nil }
+	}
+	if deps.Go == nil {
+		deps.Go = func(func(context.Context)) bool { return false }
+	}
+
 	return &Service{store: store, deps: deps}
 }
 
@@ -255,11 +264,11 @@ func (s *Service) Remember(ctx context.Context, in memory.Input) (RememberResult
 		return RememberResult{}, err
 	}
 	out := RememberResult{Memory: created, Created: true}
-	if !slices.ContainsFunc(spaces, func(s memory.SpaceCount) bool { return s.Space == in.Space }) {
+	if !slices.ContainsFunc(spaces, func(sc memory.SpaceCount) bool { return sc.Space == in.Space }) {
 		out.NewSpace = true
 		out.Spaces = []string{}
-		for _, s := range spaces {
-			out.Spaces = append(out.Spaces, s.Space)
+		for _, sc := range spaces {
+			out.Spaces = append(out.Spaces, sc.Space)
 		}
 		if len(out.Spaces) > 0 {
 			out.Note = "created new space " + in.Space + "; if you meant an existing space, move it with update_memory"

@@ -884,18 +884,25 @@ func (q *Queue) finish(t *task, err, runCtxErr error) {
 		q.persistWG.Add(1)
 	}
 	q.pushRecentLocked(t)
-	observe, finished := q.onFinish, t.item()
+	observe := q.onFinish
+	var finished Item
+	if observe != nil {
+		finished = t.item()
+	}
 	q.mu.Unlock()
 
 	q.wakeUp()
-	if observe != nil {
-		observe(finished)
-	}
 	if remove {
 		q.removePersisted(p, t)
 		q.persistWG.Done()
 	}
 	t.handle.complete(t.err)
+
+	// Last, so an observer that is slow or panics cannot keep the task's
+	// handle open or its durable record from being removed.
+	if observe != nil {
+		observe(finished)
+	}
 }
 
 // stopAccepting marks the queue closed and cancels every queued task. Running

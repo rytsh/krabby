@@ -775,6 +775,13 @@ type findSymbolArgs struct {
 	Limit     int    `json:"limit,omitempty" jsonschema:"maximum definitions to return (default 50, max 200)"`
 }
 
+type readSymbolArgs struct {
+	Symbol    string `json:"symbol" jsonschema:"exact symbol name, e.g. 'SearchCodeText'; resolution falls back to a prefix then a substring match and reports the other candidates it saw"`
+	Repo      string `json:"repo,omitempty" jsonschema:"repository id (owner/name); always provide when known"`
+	Namespace string `json:"namespace,omitempty" jsonschema:"namespace to scope to when repo is omitted; empty means the 'default' namespace, '*' searches all namespaces"`
+	Limit     int    `json:"limit,omitempty" jsonschema:"maximum definitions to return with source (default 5, max 20)"`
+}
+
 type findReferencesArgs struct {
 	Symbol    string   `json:"symbol" jsonschema:"exact symbol name whose usages to list"`
 	Repo      string   `json:"repo,omitempty" jsonschema:"repository id (owner/name); always provide when known"`
@@ -867,9 +874,9 @@ func addQueryTools(server *mcp.Server, mgr graphQueryService) {
 		Name: "read_symbol",
 		Description: "Read a symbol's whole declaration - a function, method, class or type - in one call: find_definition's location plus the source from its first line to its last. " +
 			"Use it instead of find_definition followed by read_file when you want the code itself. " +
-			"Every definition of the symbol is returned with its own source; a declaration over 400 lines is cut and marked truncated. " +
+			"Every definition is returned with its own source: limit defaults to 5 (max 20), a declaration over 400 lines is cut and marked truncated, and past 1200 lines in total the remaining definitions come back as locations only. " +
 			"The returned snapshot token continues on the same version with read_file. " + repoField + ".",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args findSymbolArgs) (*mcp.CallToolResult, any, error) {
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args readSymbolArgs) (*mcp.CallToolResult, any, error) {
 		res, err := mgr.ReadSymbol(ctx, args.Repo, args.Namespace, args.Symbol, args.Limit)
 		if err != nil {
 			return nil, nil, err
