@@ -1,9 +1,11 @@
 package graphbuilder
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestRemoveLegacyManagedIgnore(t *testing.T) {
@@ -66,54 +68,6 @@ func TestRemoveLegacyManagedIgnoreLeavesUserFileAlone(t *testing.T) {
 	}
 }
 
-func TestMatchesExcluded(t *testing.T) {
-	patterns := mergedPatterns(nil)
-	cases := map[string]bool{
-		"pkg/plugins/extractor/xml2/testdata/result/sub/output_sub_5.json": true,
-		"testdata/mock/db.go":                    true,
-		"a/b/fixtures/c.json":                    true,
-		"foo/__mocks__/bar.js":                   true,
-		"lib.min.js":                             true,
-		"vendor/github.com/pkg/errors/errors.go": true,
-		"vendor/modules.txt":                     true,
-		"internal/service/foo.go":                false,
-		"cmd/main.go":                            false,
-		"pkg/testdatabase/x.go":                  false, // substring must NOT match a dir segment
-		"exporter/testdatatofile.go":             false,
-	}
-	for rel, want := range cases {
-		if got := matchesExcluded(rel, patterns); got != want {
-			t.Errorf("matchesExcluded(%q) = %v, want %v", rel, got, want)
-		}
-	}
-}
-
-func TestGraphHasExcludedNodes(t *testing.T) {
-	clone := t.TempDir()
-	outDir := filepath.Join(clone, "graphify-out")
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	// A clean graph: no excluded nodes.
-	clean := `{"nodes":[{"source_file":"internal/svc/a.go"},{"source_file":"cmd/main.go"}],"links":[]}`
-	if err := os.WriteFile(filepath.Join(outDir, "graph.json"), []byte(clean), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if GraphHasExcludedNodes(clone, nil) {
-		t.Error("clean graph reported excluded nodes")
-	}
-
-	// A dirty graph with a nested testdata node.
-	dirty := `{"nodes":[{"source_file":"pkg/x/testdata/result/out.json"}],"links":[]}`
-	if err := os.WriteFile(filepath.Join(outDir, "graph.json"), []byte(dirty), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if !GraphHasExcludedNodes(clone, nil) {
-		t.Error("dirty graph with testdata node not detected")
-	}
-}
-
 // A repository's own patterns are unioned with the install-wide ones rather
 // than replacing them: an install-wide rule is a policy, and a repo opting out
 // of it is not a case worth supporting.
@@ -137,5 +91,102 @@ func TestPerRepoIgnorePatternsUnion(t *testing.T) {
 	_ = base.ignorePatterns([]string{"repo/"})
 	if len(base.exclude) != 1 || base.exclude[0] != "global/" {
 		t.Fatalf("install-wide excludes mutated: %v", base.exclude)
+	}
+}
+
+func writeGraphSource(t *testing.T, repo string) {
+	t.Helper()
+
+	for rel, src := range map[string]string{
+		"a.py":     "def a():\n    return 1\n",
+		"gen/b.py": "def b():\n    return 2\n",
+	} {
+		path := filepath.Join(repo, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// The rebuild decision follows the rules a graph was built with, in both
+// directions. A removed pattern is the case inspecting the graph cannot see:
+// the files it should now contain are simply absent from it.
+func TestGraphNeedsIgnoreRebuild(t *testing.T) {
+	repo := t.TempDir()
+	writeGraphSource(t, repo)
+
+	built := New(time.Minute, []string{"global/"})
+	if err := built.Update(context.Background(), repo, []string{"gen/"}); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name    string
+		global  []string
+		extra   []string
+		rebuild bool
+	}{
+		{name: "same rules", global: []string{"global/"}, extra: []string{"gen/"}},
+		{name: "repo pattern added", global: []string{"global/"}, extra: []string{"gen/", "a.py"}, rebuild: true},
+		{name: "repo pattern removed", global: []string{"global/"}, rebuild: true},
+		{name: "install-wide pattern added", global: []string{"global/", "more/"}, extra: []string{"gen/"}, rebuild: true},
+		{name: "install-wide pattern removed", extra: []string{"gen/"}, rebuild: true},
+		{name: "patterns reordered", global: []string{"gen/"}, extra: []string{"global/"}, rebuild: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := New(time.Minute, tt.global).GraphNeedsIgnoreRebuild(repo, tt.extra); got != tt.rebuild {
+				t.Fatalf("GraphNeedsIgnoreRebuild() = %v, want %v", got, tt.rebuild)
+			}
+		})
+	}
+}
+
+// A graph from before the rules were recorded cannot be vouched for, so it is
+// rebuilt once; the rebuild writes the record and settles it.
+func TestGraphWithoutRecordedIgnoreRulesIsRebuiltOnce(t *testing.T) {
+	repo := t.TempDir()
+	writeGraphSource(t, repo)
+
+	builder := New(time.Minute, nil)
+	if err := builder.Update(context.Background(), repo, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(filepath.Dir(GraphPath(repo)), ignoreFileName)); err != nil {
+		t.Fatal(err)
+	}
+
+	if !builder.GraphNeedsIgnoreRebuild(repo, nil) {
+		t.Fatal("graph without recorded ignore rules was trusted")
+	}
+
+	if err := builder.Update(context.Background(), repo, nil); err != nil {
+		t.Fatal(err)
+	}
+	if builder.GraphNeedsIgnoreRebuild(repo, nil) {
+		t.Fatal("rebuilt graph still reports stale ignore rules")
+	}
+}
+
+// Deciding must not cost a read of the graph: it runs for every repository on
+// every refresh, before anything is known to have changed.
+func TestGraphNeedsIgnoreRebuildDoesNotReadGraph(t *testing.T) {
+	repo := t.TempDir()
+	writeGraphSource(t, repo)
+
+	builder := New(time.Minute, nil)
+	if err := builder.Update(context.Background(), repo, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(GraphPath(repo), []byte("not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if builder.GraphNeedsIgnoreRebuild(repo, nil) {
+		t.Fatal("decision depended on the graph's content")
 	}
 }

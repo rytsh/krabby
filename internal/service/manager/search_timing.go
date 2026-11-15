@@ -2,9 +2,10 @@ package manager
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"time"
+
+	"github.com/rytsh/krabby/internal/observability/metrics"
 )
 
 // searchTimeout bounds one index-only search (normal text, regex).
@@ -55,17 +56,11 @@ func (t *codeSearchTiming) enter(stage string) {
 	t.last, t.stage = now, stage
 }
 
-func (t *codeSearchTiming) finish(ctx context.Context, logger *slog.Logger, mode, repo, namespace string, results int, matched uint64, err error) {
+func (t *codeSearchTiming) finish(ctx context.Context, logger *slog.Logger, rec *metrics.Recorder, mode, repo, namespace string, results int, matched uint64, err error) {
 	t.enter("")
 	total := t.last.Sub(t.started)
-	outcome := "ok"
-	if errors.Is(err, context.Canceled) {
-		outcome = "cancelled"
-	} else if errors.Is(err, context.DeadlineExceeded) {
-		outcome = "deadline"
-	} else if err != nil {
-		outcome = "error"
-	}
+	outcome := metrics.Outcome(err)
+	rec.SearchFinished(ctx, searchKindCode, mode, outcome, total)
 	attrs := []any{"mode", mode, "repo", repo, "namespace", namespace, "total_ms", total.Milliseconds(), "results", results, "matched", matched, "outcome", outcome, "retried", t.retried}
 	for _, stage := range []string{"scope", "warm", "prepare", "index", "retry", "metadata"} {
 		attrs = append(attrs, stage+"_ms", t.times[stage].Milliseconds())

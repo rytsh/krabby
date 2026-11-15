@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rytsh/krabby/internal/observability/metrics"
 	"github.com/rytsh/krabby/internal/service/graphbuilder"
 	"github.com/rytsh/krabby/internal/service/rag"
 	"github.com/rytsh/krabby/internal/service/registry"
@@ -20,6 +21,18 @@ import (
 // on the repo record and exposing it as a current activity while it runs.
 // Stage-state mutation and persistence are serialized on stageMu so multiple
 // stages of the same repo may run concurrently.
+// stageOutcome classifies how a stage ended for the stage-duration metric. A
+// stage whose job context is done was stopped, whatever error the interrupted
+// work happened to surface (often a killed subprocess rather than a context
+// error), so the context is consulted before the error.
+func stageOutcome(ctx context.Context, err error) string {
+	if err != nil && ctx.Err() != nil {
+		return metrics.Outcome(ctx.Err())
+	}
+
+	return metrics.Outcome(err)
+}
+
 func (m *Manager) runStage(ctx context.Context, repo *registry.Repo, name string, fn func() error) error {
 	m.stageMu.Lock()
 	st := repo.Stages.Get(name)
@@ -41,6 +54,7 @@ func (m *Manager) runStage(ctx context.Context, repo *registry.Repo, name string
 
 	start := time.Now()
 	err := fn()
+	m.metrics.StageFinished(ctx, name, stageOutcome(ctx, err), time.Since(start))
 
 	m.stageMu.Lock()
 	defer m.stageMu.Unlock()
@@ -537,7 +551,7 @@ func (m *Manager) refresh(ctx context.Context, repo *registry.Repo, skips runSki
 	}
 
 	if staleIgnore && snapshot.Commit == repo.LastCommit {
-		slog.Info("graph contains now-excluded files; rebuilding to apply ignore rules", "repo", repo.ID)
+		slog.Info("graph was built with different ignore rules; rebuilding to apply them", "repo", repo.ID)
 	}
 	if staleVersion && snapshot.Commit == repo.LastCommit {
 		slog.Info("graph was built by a different bag engine version; rebuilding",
@@ -565,7 +579,7 @@ func (m *Manager) refresh(ctx context.Context, repo *registry.Repo, skips runSki
 		slog.Error("rebuild merged graph", "error", err)
 	}
 
-	if err := m.CheckRepoMemories(ctx, repo.ID); err != nil {
+	if err := m.memories.CheckRepoMemories(ctx, repo.ID); err != nil {
 		slog.Error("check memory evidence", "repo", repo.ID, "error", err)
 	}
 

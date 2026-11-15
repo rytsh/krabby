@@ -21,7 +21,7 @@ func TestClientReportsVersion(t *testing.T) {
 		t.Fatal("missing graph version marker reported as current")
 	}
 	repo := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(repo, "graphify-out"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(repo, ".bag"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := builder.RecordGraphVersion(repo); err != nil {
@@ -79,6 +79,9 @@ func TestBagLibraryCompatibility(t *testing.T) {
 			t.Fatalf("build wrote .graphifyignore: %v", err)
 		}
 		graphPath := graphbuilder.GraphPath(repo)
+		if _, err := os.Stat(filepath.Join(filepath.Dir(graphPath), "cache")); !os.IsNotExist(err) {
+			t.Fatalf("build left an AST cache in the snapshot: %v", err)
+		}
 		if err := graphquery.Validate(graphPath); err != nil {
 			t.Fatalf("validate %s graph: %v", name, err)
 		}

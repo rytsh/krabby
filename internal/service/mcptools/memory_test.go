@@ -8,8 +8,8 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/rytsh/krabby/internal/service/manager"
 	"github.com/rytsh/krabby/internal/service/memory"
+	"github.com/rytsh/krabby/internal/service/memorysvc"
 )
 
 type authorMemoryService struct {
@@ -17,9 +17,9 @@ type authorMemoryService struct {
 	authors chan string
 }
 
-func (s *authorMemoryService) Remember(_ context.Context, in memory.Input) (manager.RememberResult, error) {
+func (s *authorMemoryService) Remember(_ context.Context, in memory.Input) (memorysvc.RememberResult, error) {
 	s.authors <- in.Author
-	return manager.RememberResult{Memory: &memory.Memory{ID: "test"}}, nil
+	return memorysvc.RememberResult{Memory: &memory.Memory{ID: "test"}}, nil
 }
 
 func (s *authorMemoryService) UpdateMemory(_ context.Context, _ string, patch memory.Patch) (*memory.Memory, error) {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/rytsh/krabby/internal/config"
 	"github.com/rytsh/krabby/internal/memlimit"
+	"github.com/rytsh/krabby/internal/observability/metrics"
 	"github.com/rytsh/krabby/internal/server"
 	"github.com/rytsh/krabby/internal/service/apicatalog"
 	"github.com/rytsh/krabby/internal/service/apicatalog/grpcreflect"
@@ -109,6 +110,11 @@ func run(ctx context.Context) error {
 		}
 	}()
 
+	recorder, err := metrics.New(collector.MeterProvider)
+	if err != nil {
+		return fmt.Errorf("init metrics; %w", err)
+	}
+
 	// State database + registry.
 	db, err := storage.Open(cfg.StateDir())
 	if err != nil {
@@ -200,6 +206,9 @@ func run(ctx context.Context) error {
 		}
 	}()
 	mgr.SetSettingsStore(settingsStore)
+	if err := mgr.SetMetrics(recorder); err != nil {
+		return fmt.Errorf("wire metrics; %w", err)
+	}
 	externalMCPs, err := mcpclient.New(db)
 	if err != nil {
 		return err
@@ -336,7 +345,7 @@ func run(ctx context.Context) error {
 	// Memories saved before an embedder was configured become searchable by
 	// meaning once one is.
 	background.Go(func() error {
-		if err := mgr.BackfillMemoryEmbeddings(appCtx); err != nil && appCtx.Err() == nil {
+		if err := mgr.Memories().BackfillMemoryEmbeddings(appCtx); err != nil && appCtx.Err() == nil {
 			slog.Warn("backfill memory embeddings", "error", err)
 		}
 

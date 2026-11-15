@@ -334,7 +334,7 @@ func (s *Service) selectedFile(clonePath, rel string, filters config.Filters) bo
 		}
 
 		prefix = path.Join(prefix, seg)
-		if hardSkipDirs[seg] ||
+		if hardSkip(seg) ||
 			(len(filters.Include) == 0 && defaultNoiseDirs[seg]) ||
 			repofs.MatchAny(filters.Exclude, prefix+"/") {
 			return false
@@ -639,7 +639,7 @@ func (s *Service) selectFiles(clonePath string, filters config.Filters) ([]strin
 	var out []string
 
 	err := repofs.WalkFiles(clonePath, func(rel, name string) bool {
-		return hardSkipDirs[name] ||
+		return hardSkip(name) ||
 			(len(filters.Include) == 0 && defaultNoiseDirs[name]) ||
 			repofs.MatchAny(filters.Exclude, rel+"/")
 	}, func(rel string, size int64) error {
@@ -662,10 +662,11 @@ func (s *Service) selectFiles(clonePath string, filters config.Filters) ([]strin
 	return out, nil
 }
 
-var hardSkipDirs = map[string]bool{
-	".git":         true,
-	"graphify-out": true,
-	"krabby-docs":  true,
+// hardSkip reports whether a directory is never indexed as code, whatever the
+// include rules say: what git and the graph builder write into a clone, and
+// the generated documentation older versions kept inside it.
+func hardSkip(name string) bool {
+	return repofs.IsArtefactDir(name) || name == "krabby-docs"
 }
 
 var defaultNoiseDirs = map[string]bool{

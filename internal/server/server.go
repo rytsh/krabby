@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/pprof"
+	"net/url"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/rakunlabs/ada"
@@ -44,10 +46,28 @@ func newRouter(ctx context.Context, cfg *config.Config, services routeServices, 
 	server.Use(
 		mrecover.Middleware(),
 		mserver.Middleware(config.ServiceName+":"+config.Version),
-		mcors.Middleware(),
+	)
+	// No CORS middleware at all unless an origin is configured: with nothing
+	// answering a preflight and no Access-Control-Allow-Origin on a response,
+	// a browser keeps another site's page from reading the API or sending it a
+	// preflighted request. The embedded UI is same-origin and unaffected.
+	// Order matters: crossOriginGuard below reads the decision made here.
+	if origins := cfg.Server.AllowOrigins; len(origins) > 0 {
+		server.Use(mcors.Middleware(mcors.WithConfig(mcors.Cors{
+			AllowOrigins: origins,
+			// An allowed origin is trusted with the whole API, and both the
+			// REST API (Content-Type) and the MCP transport (Mcp-Session-Id,
+			// Mcp-Protocol-Version, Last-Event-ID) need request headers a
+			// browser will not send without being told it may.
+			AllowHeaders:  []string{"*"},
+			ExposeHeaders: []string{"Mcp-Session-Id"},
+		})))
+	}
+	server.Use(
 		mrequestid.Middleware(),
 		mlog.Middleware(),
 		mtelemetry.Middleware(),
+		crossOriginGuard(),
 	)
 
 	// base mounts every route (UI, REST, MCP, webhook, healthz) under the
@@ -230,6 +250,68 @@ func newRouter(ctx context.Context, cfg *config.Config, services routeServices, 
 	base.HandleWildcard("/", uiHandler)
 
 	return server
+}
+
+// crossOriginGuard refuses state-changing requests that a browser sends on
+// behalf of another site.
+//
+// Withholding CORS headers is not enough on its own. A POST with no body or a
+// form content type needs no preflight, so the browser sends it regardless and
+// only hides the answer, and several routes here act on exactly that kind of
+// request (a refresh, a cancel, a queue bump). Nothing authenticates the
+// caller, so the browser's own account of where the request came from is the
+// only signal there is.
+//
+// An origin the CORS middleware accepted is let through: that middleware has
+// already set Access-Control-Allow-Origin by the time this runs, which keeps
+// the two decisions from ever disagreeing about a wildcard pattern. Requests
+// without Origin or Sec-Fetch-Site headers are not from a browser and pass.
+func crossOriginGuard() func(http.Handler) http.Handler {
+	protection := http.NewCrossOriginProtection()
+
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if w.Header().Get("Access-Control-Allow-Origin") == "" && !viaForwardedHost(r) {
+				if err := protection.Check(r); err != nil {
+					http.Error(w, err.Error()+"; add the calling origin to server.allow_origins",
+						http.StatusForbidden)
+
+					return
+				}
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// viaForwardedHost reports whether the request is the web UI calling home
+// through a reverse proxy that rewrote Host.
+//
+// Over plain HTTP on a name other than localhost a browser sends no
+// Sec-Fetch-Site, which leaves comparing Origin against Host, and a proxy that
+// replaces Host with the upstream address (nginx does by default) makes the
+// UI's own requests look foreign. The host the browser actually asked for
+// survives in X-Forwarded-Host. Trusting it gives another site nothing: a page
+// cannot add that header to a request without a preflight, and no preflight is
+// answered for an origin that is not allowed.
+//
+// A browser that did send Sec-Fetch-Site has already said where the request
+// came from, so its verdict is never overridden here.
+func viaForwardedHost(r *http.Request) bool {
+	if r.Header.Get("Sec-Fetch-Site") != "" {
+		return false
+	}
+
+	forwarded, _, _ := strings.Cut(r.Header.Get("X-Forwarded-Host"), ",")
+	forwarded = strings.TrimSpace(forwarded)
+	if forwarded == "" {
+		return false
+	}
+
+	origin, err := url.Parse(r.Header.Get("Origin"))
+
+	return err == nil && origin.Host != "" && strings.EqualFold(origin.Host, forwarded)
 }
 
 func mcpCatalogRoutes(root string, catalogs MCPCatalogs) map[string]*mcp.Server {

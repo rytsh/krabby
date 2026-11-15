@@ -9,6 +9,7 @@ import (
 
 	"github.com/rytsh/krabby/internal/service/manager"
 	"github.com/rytsh/krabby/internal/service/memory"
+	"github.com/rytsh/krabby/internal/service/memorysvc"
 )
 
 const memoryInstructions = `This server is Krabby's shared, durable memory for agents and people. Memories are Markdown notes grouped in spaces; every client can read every space, so never store secrets or personal data.
@@ -21,8 +22,8 @@ const memoryInstructions = `This server is Krabby's shared, durable memory for a
 - remember returns an existing memory instead of a duplicate; refine it with update_memory.`
 
 type memoryService interface {
-	Remember(context.Context, memory.Input) (manager.RememberResult, error)
-	RecallMemories(context.Context, string, string, memory.ListOptions, int) (manager.MemorySearch, error)
+	Remember(context.Context, memory.Input) (memorysvc.RememberResult, error)
+	RecallMemories(context.Context, string, string, memory.ListOptions, int) (memorysvc.Search, error)
 	Memory(context.Context, string) (*memory.Memory, error)
 	UpdateMemory(context.Context, string, memory.Patch) (*memory.Memory, error)
 	ForgetMemory(context.Context, string) error
@@ -156,10 +157,16 @@ func memoryAuthor(author string, req *mcp.CallToolRequest) string {
 	return req.Extra.Header.Get("X-User")
 }
 
-// NewMemory builds the shared memory MCP catalog.
+// NewMemory builds the shared memory MCP catalog. The tools are served by the
+// manager's memory service; tracing still goes through the manager.
 func NewMemory(mgr *manager.Manager, version string) *mcp.Server {
 	server := newServer(mgr, "krabby-memory", "Krabby shared memory", version, memoryInstructions)
-	addMemoryTools(server, mgr)
+
+	var svc *memorysvc.Service
+	if mgr != nil {
+		svc = mgr.Memories()
+	}
+	addMemoryTools(server, svc)
 
 	return server
 }

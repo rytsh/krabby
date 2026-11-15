@@ -48,6 +48,7 @@ func (m *Manager) apiCorpus(name string) docsCorpus {
 	return docsCorpus{
 		kind:   "api service",
 		logKey: "service",
+		unit:   "operations",
 		name:   name,
 		scope:  apicatalog.ScopeKey(name),
 		dir:    m.apisDir(name),
@@ -773,58 +774,29 @@ func (m *Manager) refreshAPIService(ctx context.Context, name string, forceFull 
 		}
 	}
 
-	// Repair operations whose markdown exists but whose vectors do not — an
-	// interrupted embed run, or an index migration that dropped rows.
+	// Every operation still stored is expected in the index; pruned ones were
+	// removed from existing above.
 	reconcile := make(map[string]bool, len(existing))
-	for slug := range existing {
-		reconcile[slug] = true
-	}
-	queuedChanges := pathSet(changedPaths)
+	docs := make(map[string]indexedDoc, len(existing))
 	for slug, rec := range existing {
-		path := docFileName(slug)
-		if !rec.IndexDirty || !fileExists(filepath.Join(dir, path)) {
-			continue
-		}
-		if _, ok := queuedChanges[path]; ok {
-			continue
-		}
-		changedPaths = append(changedPaths, path)
-		queuedChanges[path] = struct{}{}
-		updatedAt[path] = rec.UpdatedAt
+		reconcile[slug] = true
+		docs[slug] = indexedDoc{dirty: rec.IndexDirty, updatedAt: rec.UpdatedAt}
 	}
 
-	missing, extra, err := m.reconcileIndex(ctx, m.apiCorpus(name), reconcile, changedPaths, removedPaths)
+	indexed, err := m.syncIndex(ctx, m.apiCorpus(name), indexPlan{
+		candidates: reconcile,
+		docs:       docs,
+		changed:    changedPaths,
+		removed:    removedPaths,
+		updatedAt:  updatedAt,
+		commit: func(ctx context.Context, changed []string) error {
+			return m.commitAPIServiceHashes(ctx, name, changed)
+		},
+	})
 	if err != nil {
 		return fail(err)
 	}
-	if len(missing) > 0 {
-		slog.Info("api service reindex: repairing operations missing from the index",
-			"service", name, "missing", len(missing))
-		changedPaths = append(changedPaths, missing...)
-		for _, path := range missing {
-			slug := docSlug(path)
-			if rec := existing[slug]; rec != nil {
-				updatedAt[path] = rec.UpdatedAt
-			}
-		}
-	}
-	if len(extra) > 0 {
-		slog.Info("api service reindex: removing stale indexed operations",
-			"service", name, "extra", len(extra))
-		removedPaths = append(removedPaths, extra...)
-	}
-
-	var indexErr error
-	if len(changedPaths) > 0 || len(removedPaths) > 0 {
-		if err := m.indexPaths(ctx, m.apiCorpus(name), changedPaths, removedPaths, updatedAt); err != nil {
-			indexErr = err
-			slog.Error("api service indexing failed; watermark not advanced",
-				"service", name, "changed", len(changedPaths), "error", err)
-		}
-	}
-	if indexErr == nil {
-		indexErr = m.commitAPIServiceHashes(context.WithoutCancel(ctx), name, changedPaths)
-	}
+	changedPaths, removedPaths, indexErr := indexed.changed, indexed.removed, indexed.indexErr
 
 	if err := m.mutateService(context.WithoutCancel(ctx), name, func(cur *apicatalog.Service) error {
 		cur.LastRefreshAt = time.Now()

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -92,6 +93,18 @@ type Server struct {
 	// It is normalized to a leading slash with no trailing slash; empty (the
 	// default) serves everything at the root.
 	BasePath string `cfg:"base_path"`
+	// AllowOrigins lists the browser origins ("https://tools.example.com")
+	// other than krabby's own that may call the REST API and MCP endpoints
+	// and read the answer. '*' and '?' are wildcards inside an entry.
+	//
+	// Empty by default, which sends no CORS headers and refuses state-changing
+	// requests a browser makes on behalf of another site. The web UI is served
+	// from the same origin and needs no entry; clients that are not browsers
+	// (MCP clients, curl, webhooks) send no Origin and are never affected.
+	// krabby authenticates nothing itself, so any origin allowed here can read
+	// repository content and drive the admin API from a visitor's browser. A
+	// single "*" restores the old allow-everything behaviour.
+	AllowOrigins []string `cfg:"allow_origins"`
 	// Pprof mounts the runtime profiling endpoints under
 	// <base_path>/debug/pprof/.
 	//
@@ -580,6 +593,7 @@ func Load(ctx context.Context) (*Config, error) {
 	cfg.DataDir = dir
 
 	cfg.Server.BasePath = NormalizeBasePath(cfg.Server.BasePath)
+	cfg.Server.AllowOrigins = NormalizeOrigins(cfg.Server.AllowOrigins)
 
 	slog.Info("loaded configuration", "config", chu.MarshalMap(cfg))
 
@@ -636,6 +650,24 @@ func NormalizeBasePath(p string) string {
 	parts := strings.FieldsFunc(p, func(r rune) bool { return r == '/' })
 
 	return "/" + strings.Join(parts, "/")
+}
+
+// NormalizeOrigins trims configured origins and drops empty and duplicate
+// entries, so a trailing comma in KRABBY_SERVER_ALLOW_ORIGINS or a stray space
+// in the file cannot turn into a pattern the CORS middleware rejects at
+// startup. A trailing slash is removed because a browser never sends one in
+// the Origin header, which would make the entry silently match nothing.
+func NormalizeOrigins(origins []string) []string {
+	var out []string
+	for _, origin := range origins {
+		origin = strings.TrimRight(strings.TrimSpace(origin), "/")
+		if origin == "" || slices.Contains(out, origin) {
+			continue
+		}
+		out = append(out, origin)
+	}
+
+	return out
 }
 
 func expandHome(p string) (string, error) {

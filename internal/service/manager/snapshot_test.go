@@ -59,9 +59,11 @@ func TestSnapshotActivationLeavesActiveCloneUntouchedUntilPublish(t *testing.T) 
 		t.Fatal(err)
 	}
 
+	measured := newMetricsHarness(t)
 	m := &Manager{
 		reg: reg, git: git, graphBuilder: graphBuilder, engine: graphquery.NewEngine(0), reposDir: reposDir,
 		activity: map[string]map[string]struct{}{},
+		metrics:  measured.rec,
 	}
 	oldRead, err := m.ReadRepoFileAt(context.Background(), repo.ID, "version.txt", "", 0, 0)
 	if err != nil {
@@ -103,6 +105,10 @@ func TestSnapshotActivationLeavesActiveCloneUntouchedUntilPublish(t *testing.T) 
 	}
 	if !graphBuilder.GraphBuiltWithCurrentVersion(persisted.Path) {
 		t.Fatal("activated graph is missing its bag engine version marker")
+	}
+	// The graph stage bypasses runStage, so its measurement is its own.
+	if got := measured.counts("krabby.stage.duration"); got["outcome=ok,stage=graph"] != 1 {
+		t.Fatalf("graph stage measurements = %v, want one successful build", got)
 	}
 
 	pinned, err := m.ReadRepoFileAt(context.Background(), repo.ID, "version.txt", oldRead.Snapshot, 0, 0)

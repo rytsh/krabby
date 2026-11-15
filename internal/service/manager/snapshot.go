@@ -202,14 +202,12 @@ func (m *Manager) buildGraphSnapshot(
 		m.setActivity(repo.ID, registry.StageGraph)
 		defer m.clearActivity(repo.ID, registry.StageGraph)
 
-		if err := m.graphBuilder.Update(ctx, snapshot.StagingPath, repo.Overrides.GraphExclude); err != nil {
-			return fail(err, snapshot.StagingPath)
-		}
-		if err := graphquery.Validate(graphbuilder.GraphPath(snapshot.StagingPath)); err != nil {
-			return fail(fmt.Errorf("validate graph output; %w", err), snapshot.StagingPath)
-		}
-		if err := m.graphBuilder.RecordGraphVersion(snapshot.StagingPath); err != nil {
-			return fail(err, snapshot.StagingPath)
+		// The graph stage does not go through runStage, so it reports its own
+		// duration: the build and the checks that decide whether it is usable.
+		buildErr := m.buildGraph(ctx, repo, snapshot.StagingPath)
+		m.metrics.StageFinished(ctx, registry.StageGraph, stageOutcome(ctx, buildErr), time.Since(start))
+		if buildErr != nil {
+			return fail(buildErr, snapshot.StagingPath)
 		}
 	}
 
@@ -257,6 +255,19 @@ func (m *Manager) buildGraphSnapshot(
 	m.cleanupSnapshots(repo.ID, repo.Path)
 
 	return nil
+}
+
+// buildGraph builds, validates and version-stamps the graph inside a staging
+// clone.
+func (m *Manager) buildGraph(ctx context.Context, repo *registry.Repo, stagingPath string) error {
+	if err := m.graphBuilder.Update(ctx, stagingPath, repo.Overrides.GraphExclude); err != nil {
+		return err
+	}
+	if err := graphquery.Validate(graphbuilder.GraphPath(stagingPath)); err != nil {
+		return fmt.Errorf("validate graph output; %w", err)
+	}
+
+	return m.graphBuilder.RecordGraphVersion(stagingPath)
 }
 
 func (m *Manager) snapshotRoot(id string) string {

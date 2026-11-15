@@ -28,6 +28,7 @@ func globRepo(t *testing.T) string {
 		"_ui/build/app.ts",
 		"nested/_ui/src/app.ts",
 		".git/config",
+		".bag/graph.json",
 		"graphify-out/graph.json",
 		"vendor/dep/lib.go",
 	} {
@@ -143,7 +144,7 @@ func TestGlobFilesHidesArtefactsButNotVendoredCode(t *testing.T) {
 
 	for _, pattern := range []string{"**/*", "*.go", "config", "*.json"} {
 		for _, p := range globPaths(t, dir, pattern, MaxGlobLimit).Paths {
-			if p == ".git/config" || p == "graphify-out/graph.json" {
+			if p == ".git/config" || p == ".bag/graph.json" || p == "graphify-out/graph.json" {
 				t.Fatalf("pattern %q surfaced artefact path %s", pattern, p)
 			}
 		}
@@ -178,7 +179,7 @@ func TestGlobFilesHintNamesReachableDirectories(t *testing.T) {
 		t.Errorf("hint omits a directory a glob can search: %q", page.Hint)
 	}
 
-	if strings.Contains(page.Hint, ".git/") || strings.Contains(page.Hint, "graphify-out/") {
+	if strings.Contains(page.Hint, ".git/") || strings.Contains(page.Hint, ".bag/") || strings.Contains(page.Hint, "graphify-out/") {
 		t.Errorf("hint names a pruned artefact directory: %q", page.Hint)
 	}
 }

@@ -194,7 +194,7 @@ func TestGenerateWritesDocAndManifest(t *testing.T) {
 }
 
 // writeGraph writes a minimal graphify graph.json into the clone's
-// graphify-out dir, assigning the given files to communities via their symbol
+// .bag dir, assigning the given files to communities via their symbol
 // nodes. community maps a source file to its community id.
 func writeGraph(t *testing.T, clone string, community map[string]int) {
 	t.Helper()
@@ -224,7 +224,7 @@ func writeGraph(t *testing.T, clone string, community map[string]int) {
 		t.Fatal(err)
 	}
 
-	p := filepath.Join(clone, "graphify-out", "graph.json")
+	p := filepath.Join(clone, ".bag", "graph.json")
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -694,6 +694,51 @@ func TestSelectFilesDocumentsDeployConfig(t *testing.T) {
 	}
 	if got["k8s/deployment.yaml"] {
 		t.Errorf("arbitrary YAML should stay out of the default allowlist, got %v", files)
+	}
+}
+
+// An explicit Include hands file selection to the user, but it cannot mean the
+// graph builder's own output: "**/*.md" would otherwise document
+// GRAPH_REPORT.md, and "**/*.json" the whole graph, as if they were sources.
+func TestSelectFilesNeverDocumentsArtefacts(t *testing.T) {
+	clone := t.TempDir()
+	writeSrc(t, clone, "README.md", "# Project\n")
+	writeSrc(t, clone, "config.json", "{}\n")
+	writeSrc(t, clone, ".bag/GRAPH_REPORT.md", "# Graph report\n")
+	writeSrc(t, clone, ".bag/graph.json", "{}\n")
+	writeSrc(t, clone, "graphify-out/GRAPH_REPORT.md", "# Old graph report\n")
+	writeSrc(t, clone, "krabby-docs/documentation.md", "# Generated\n")
+	writeSrc(t, clone, ".git/description.md", "x\n")
+	// A directory that merely resembles an artefact name is content.
+	writeSrc(t, clone, "docs/.bag-notes/intro.md", "# Notes\n")
+
+	for name, include := range map[string][]string{
+		"default selection": nil,
+		"explicit include":  {"**/*.md", "**/*.json"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			gen := New(config.Docs{SkipIntegrationProfile: true, Filters: config.Filters{Include: include}}, nil, nil, nil, nil).(*llmGenerator)
+
+			files, err := gen.selectFiles(clone, gen.cfg.Filters)
+			if err != nil {
+				t.Fatalf("selectFiles: %v", err)
+			}
+
+			for _, f := range files {
+				for _, artefact := range []string{".bag/", "graphify-out/", "krabby-docs/", ".git/"} {
+					if strings.HasPrefix(f, artefact) {
+						t.Errorf("selected %q, which krabby or git wrote, not the repository's authors", f)
+					}
+				}
+			}
+
+			if include != nil {
+				got := strings.Join(files, ",")
+				if want := "README.md,config.json,docs/.bag-notes/intro.md"; got != want {
+					t.Errorf("selected %q, want %q", got, want)
+				}
+			}
+		})
 	}
 }
 

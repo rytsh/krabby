@@ -141,6 +141,7 @@ func (m *Manager) webCorpus(name string) docsCorpus {
 	return docsCorpus{
 		kind:   "web source",
 		logKey: "source",
+		unit:   "pages",
 		name:   name,
 		scope:  websource.ScopeKey(name),
 		dir:    m.sourcesDir(name),
@@ -1464,61 +1465,25 @@ func (m *Manager) refreshWebSource(ctx context.Context, name string, forceFull b
 		reconcile[slug] = true
 	}
 
-	queuedChanges := pathSet(changedPaths)
+	docs := make(map[string]indexedDoc, len(existing))
 	for slug, rec := range existing {
-		path := docFileName(slug)
-		if !reconcile[slug] || !rec.IndexDirty || !fileExists(filepath.Join(dir, path)) {
-			continue
-		}
-		if _, ok := queuedChanges[path]; ok {
-			continue
-		}
-		changedPaths = append(changedPaths, path)
-		queuedChanges[path] = struct{}{}
-		updatedAt[path] = rec.UpdatedAt
+		docs[slug] = indexedDoc{dirty: rec.IndexDirty, updatedAt: rec.UpdatedAt}
 	}
 
-	missing, extra, err := m.reconcileIndex(ctx, m.webCorpus(name), reconcile, changedPaths, removedPaths)
+	indexed, err := m.syncIndex(ctx, m.webCorpus(name), indexPlan{
+		candidates: reconcile,
+		docs:       docs,
+		changed:    changedPaths,
+		removed:    removedPaths,
+		updatedAt:  updatedAt,
+		commit: func(ctx context.Context, changed []string) error {
+			return m.commitWebSourceHashes(ctx, name, changed)
+		},
+	})
 	if err != nil {
 		return fail(err)
 	}
-	if len(missing) > 0 {
-		slog.Info("web source reindex: repairing pages missing from the index",
-			"source", name, "missing", len(missing))
-		changedPaths = append(changedPaths, missing...)
-		// Reconciled pages were not necessarily fetched this run (unchanged
-		// markdown), so their UpdatedAt may not be in the map yet; take it from
-		// the stored record so the recency stamp is preserved on re-embed.
-		for _, path := range missing {
-			slug := docSlug(path)
-			if rec := existing[slug]; rec != nil {
-				updatedAt[path] = rec.UpdatedAt
-			}
-		}
-	}
-	if len(extra) > 0 {
-		slog.Info("web source reindex: removing stale indexed pages",
-			"source", name, "extra", len(extra))
-		removedPaths = append(removedPaths, extra...)
-	}
-
-	// Reindex the changed/removed docs. If indexing fails (e.g. the embeddings
-	// provider is down or a local index write fails), do NOT
-	// advance the fetch watermark: the markdown is already on disk, but the
-	// vectors are missing, so the next sync must re-attempt the same pages
-	// rather than skip them as "already seen". The collection is marked as
-	// errored so the failure is visible and a refresh retries the work.
-	var indexErr error
-	if len(changedPaths) > 0 || len(removedPaths) > 0 {
-		if err := m.indexPaths(ctx, m.webCorpus(name), changedPaths, removedPaths, updatedAt); err != nil {
-			indexErr = err
-			slog.Error("web source indexing failed; watermark not advanced",
-				"source", name, "changed", len(changedPaths), "error", err)
-		}
-	}
-	if indexErr == nil {
-		indexErr = m.commitWebSourceHashes(context.WithoutCancel(ctx), name, changedPaths)
-	}
+	changedPaths, removedPaths, indexErr := indexed.changed, indexed.removed, indexed.indexErr
 
 	if err := m.mutateCollection(context.WithoutCancel(ctx), name, func(cur *websource.Collection) error {
 		cur.LastRefreshAt = time.Now()

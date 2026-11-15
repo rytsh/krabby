@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rytsh/krabby/internal/observability/metrics"
 	"github.com/rytsh/krabby/internal/service/coderag"
 	"github.com/rytsh/krabby/internal/service/registry"
 	"github.com/rytsh/krabby/internal/service/searchutil"
@@ -127,7 +128,7 @@ func (m *Manager) SearchCode(
 	ctx context.Context,
 	repoID, namespace, query string,
 	opts coderag.SemanticOptions,
-) (coderag.SemanticPage, error) {
+) (_ coderag.SemanticPage, err error) {
 	d, releaseDocs := m.acquireDocs()
 	defer releaseDocs()
 	if d.codeRag == nil || d.codeStore == nil {
@@ -136,6 +137,11 @@ func (m *Manager) SearchCode(
 
 	ctx, cancel := withSearchTimeout(ctx, semanticSearchTimeout)
 	defer cancel()
+
+	started := time.Now()
+	defer func() {
+		m.metrics.SearchFinished(ctx, searchKindCode, "semantic", metrics.Outcome(err), time.Since(started))
+	}()
 
 	scope, err := m.namespaceScope(ctx, repoID, namespace)
 	if err != nil {
@@ -219,7 +225,7 @@ func (m *Manager) SearchCodeText(
 ) (page coderag.SearchPage, err error) {
 	timing := newCodeSearchTiming()
 	defer func() {
-		timing.finish(ctx, slog.Default(), "text", repoID, namespace, len(page.Results), page.Total, err)
+		timing.finish(ctx, slog.Default(), m.metrics, "text", repoID, namespace, len(page.Results), page.Total, err)
 	}()
 	if m.codeText == nil {
 		return coderag.SearchPage{}, errors.New("normal code search is not configured")
@@ -273,7 +279,7 @@ func (m *Manager) SearchCodeRegex(
 ) (page coderag.RegexPage, err error) {
 	timing := newCodeSearchTiming()
 	defer func() {
-		timing.finish(ctx, slog.Default(), "regex", repoID, namespace, len(page.Results), page.Total, err)
+		timing.finish(ctx, slog.Default(), m.metrics, "regex", repoID, namespace, len(page.Results), page.Total, err)
 	}()
 	if m.codeText == nil {
 		return coderag.RegexPage{}, errors.New("regex code search is not configured")

@@ -960,7 +960,7 @@ type listFilesArgs struct {
 	Repo      string `json:"repo" jsonschema:"repository id (owner/name) whose clone to list"`
 	Subdir    string `json:"subdir,omitempty" jsonschema:"repo-relative directory to list (default: repository root)"`
 	Snapshot  string `json:"snapshot,omitempty" jsonschema:"snapshot token returned by an earlier list_files call; pass it on later pages to keep a stable listing"`
-	Recursive bool   `json:"recursive,omitempty" jsonschema:"when true, walk the whole subtree (skips .git, graphify-out and vendor); otherwise list one level"`
+	Recursive bool   `json:"recursive,omitempty" jsonschema:"when true, walk the whole subtree (skips .git, .bag, graphify-out and vendor); otherwise list one level"`
 	Cursor    string `json:"cursor,omitempty" jsonschema:"next_cursor from the previous page, passed back verbatim; omit for the first page"`
 	PerPage   int    `json:"per_page,omitempty" jsonschema:"entries per page (default 100, max 200)"`
 }

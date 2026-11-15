@@ -1,7 +1,6 @@
 package graphbuilder
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -80,82 +79,6 @@ func RemoveLegacyManagedIgnore(clonePath string) (changed bool, err error) {
 	}
 
 	return true, nil
-}
-
-// GraphHasExcludedNodes reports whether the built graph at clonePath still
-// contains nodes whose source_file matches the current exclude rules (defaults +
-// extra). It lets the refresh path rebuild a stale graph even when git did not
-// change — otherwise a graph built before the ignore rules existed would keep
-// its testdata/fixture nodes forever. Missing/unreadable graphs return false.
-func GraphHasExcludedNodes(clonePath string, extra []string) bool {
-	b, err := os.ReadFile(GraphPath(clonePath)) //nolint:gosec // clone-derived path
-	if err != nil {
-		return false
-	}
-
-	var g struct {
-		Nodes []struct {
-			SourceFile string `json:"source_file"`
-		} `json:"nodes"`
-	}
-	if err := json.Unmarshal(b, &g); err != nil {
-		return false
-	}
-
-	patterns := mergedPatterns(extra)
-	for _, n := range g.Nodes {
-		if n.SourceFile != "" && matchesExcluded(n.SourceFile, patterns) {
-			return true
-		}
-	}
-
-	return false
-}
-
-// mergedPatterns returns the deduplicated default + extra exclude patterns,
-// normalized (no surrounding slashes) for segment matching.
-func mergedPatterns(extra []string) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, p := range append(append([]string{}, DefaultGraphIgnore...), extra...) {
-		p = strings.Trim(strings.TrimSpace(p), "/")
-		if p == "" || seen[p] {
-			continue
-		}
-		seen[p] = true
-		out = append(out, p)
-	}
-
-	return out
-}
-
-// matchesExcluded reports whether a repo-relative slash path matches any exclude
-// pattern, mirroring bag's gitignore semantics: a bare pattern matches at
-// any path depth (each segment and each cumulative prefix is tested), so
-// "testdata" matches "a/b/testdata/c.json".
-func matchesExcluded(rel string, patterns []string) bool {
-	rel = strings.TrimPrefix(filepath.ToSlash(rel), "./")
-	parts := strings.Split(rel, "/")
-	base := parts[len(parts)-1]
-
-	for _, p := range patterns {
-		if ok, _ := filepath.Match(p, rel); ok {
-			return true
-		}
-		if ok, _ := filepath.Match(p, base); ok {
-			return true
-		}
-		for i, seg := range parts {
-			if ok, _ := filepath.Match(p, seg); ok {
-				return true
-			}
-			if ok, _ := filepath.Match(p, strings.Join(parts[:i+1], "/")); ok {
-				return true
-			}
-		}
-	}
-
-	return false
 }
 
 // stripManagedBlock removes a previously written managed block (and its

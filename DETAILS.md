@@ -108,7 +108,9 @@ curl localhost:8080/api/v1/repos
 
 MCP catalogs for agents (opencode, Claude Desktop, etc.) use streamable HTTP.
 Krabby performs no authentication of its own on any endpoint — deploy it behind
-a proxy that authenticates every request:
+a proxy that authenticates every request. Other websites cannot reach it through
+a visitor's browser unless allowed (see
+[Browser access from other origins](#browser-access-from-other-origins)):
 
 - `http://localhost:8080/mcp` — read-only repository, graph, file, history, and documentation tools
 - `http://localhost:8080/mcp/api` — API discovery plus `call_api_endpoint`, which sends real requests
@@ -278,6 +280,40 @@ with a small JSON descriptor instead. Nothing that a client uses is affected —
 transport — because a request without that header could only ever have received
 an error.
 
+### Browser access from other origins
+
+Krabby authenticates nothing, so what a web page in a visitor's browser may do
+to it is decided by origin alone. By default only Krabby's own web UI may:
+
+- no CORS headers are sent, so a page on another site cannot read any response
+  or get a preflight approved;
+- a state-changing request (`POST`, `PUT`, `PATCH`, `DELETE`) that a browser
+  sends on behalf of another site is refused with `403`. This covers the
+  requests a browser sends without a preflight, such as a bodiless `POST` to
+  `/repos/<id>/-/refresh`.
+
+Clients that are not browsers — MCP clients, `curl`, CI jobs, git webhooks —
+send no `Origin` header and are unaffected. To let another website call Krabby
+from the browser, list its origin:
+
+```yaml
+server:
+  allow_origins:
+    - https://tools.example.com
+    - https://*.corp.example
+```
+
+or `KRABBY_SERVER_ALLOW_ORIGINS=https://tools.example.com,https://*.corp.example`.
+An entry is matched against the whole origin including the port; `*` and `?`
+are wildcards, and a lone `*` allows every site, which was the behaviour before
+this setting existed. An allowed origin can read and administer everything.
+
+Behind a reverse proxy that rewrites `Host` and serves Krabby over plain HTTP on
+a name other than `localhost`, forward the original host
+(`proxy_set_header X-Forwarded-Host $host;` in nginx) or the web UI's own
+writes are refused. HTTPS and `localhost` need nothing: there the browser
+states the request's origin relationship itself.
+
 ## Code search modes
 
 `search_code` (and `GET /api/v1/code/search`) exposes three retrievals over
@@ -427,19 +463,30 @@ other tools (doc generators, linters, indexers) are free to read it:
 ```
 ~/.krabby/
 ├── repos/.snapshots/<host>/<group>/.../  # immutable versioned git snapshots
-│   └── <version>/graphify-out/
+│   └── <version>/.bag/
 │       ├── graph.json          # raw graph (GraphRAG-ready)
 │       ├── GRAPH_REPORT.md     # human-readable audit report
 │       ├── graph.html          # interactive visualization
-│       └── manifest.json       # incremental-update manifest
-├── merged/graph.json           # cross-repo merged graph
+│       ├── .bag_analysis.json  # communities, cohesion and god nodes behind the report
+│       ├── .bag_root           # the path the graph was built from
+│       ├── .krabby-bag-version # bag engine version that built this graph
+│       └── .krabby-bag-ignore  # fingerprint of the ignore rules it was built with
+├── merged/graph.json           # cross-repo merged graph (only with bag.merge)
 ├── keys/                       # materialized credential SSH keys (0600)
+├── docs/<host>/<group>/.../    # generated repository documentation
 ├── docs-vectors/               # embedded documentation vector index
 ├── sources/<name>/*.md         # synced web-source documents (all source types)
 ├── apis/<name>/*.md            # API catalog endpoint projections (one per operation)
+├── big-pictures/               # published Big Picture document trees
 ├── code-vectors/               # embedded source-code vector index
 └── state/                      # registry + credentials database
 ```
+
+The two `.krabby-*` markers are how a refresh decides to rebuild a graph whose
+commit has not changed: a different bag engine, or different ignore rules
+(`bag.exclude` or a repository's own), makes the stored graph stale. Clones
+built before bag v0.2.0 keep their graph under `graphify-out/` until the next
+refresh rebuilds it into `.bag/`.
 
 `GET /api/v1/repos` returns each repo's local `path` for discovery, and the
 artifact endpoints above serve the same files over HTTP for tools that have no
@@ -943,9 +990,9 @@ security boundary is who can access the admin MCP endpoint, not the network.
 
 ```
 webhook / poll / refresh_repo
-  → git fetch (new commits?) → git pull
-  → bag.Build(repo)                 # incremental/cache-backed, AST-only, no LLM
-  → bag.MergeGraphs(...) → merged/graph.json
+  → git fetch (new commits?) → clone into a private snapshot
+  → bag.Build(snapshot)             # full AST-only extraction, no LLM
+  → bag.MergeGraphs(...) → merged/graph.json   # only with bag.merge
   → code RAG index (when enabled)
   → generated docs + docs RAG index (when enabled)
 ```
@@ -963,6 +1010,9 @@ clone, so the next unskipped refresh rebuilds the graph even at the same commit.
 Krabby records the bag engine contract beside each validated graph. On startup it
 queues a one-time rebuild for graphs produced by another version (or predating
 the marker), so extractor upgrades also refresh repositories with no new commit.
+The ignore rules a graph was built with are recorded the same way: changing
+`bag.exclude` or a repository's `graph_exclude`, in either direction, rebuilds
+the graph on the next refresh.
 
 Repos are also polled on cron schedules configured in Settings. Each schedule
 targets a namespace (`*` = all, `default` = untagged) and carries one or more
@@ -998,6 +1048,29 @@ dimensions are safe.
 Generated markdown is stored outside clones under
 `data_dir/docs/<owner>/<repo>/`; older in-clone `krabby-docs/` trees are moved
 there at startup without regenerating documentation.
+
+### Metrics
+
+With an OpenTelemetry collector configured (`telemetry.collector`, or
+`OTEL_EXPORTER_OTLP_ENDPOINT`), Krabby exports its own metrics over OTLP/gRPC
+next to the HTTP server ones. Without a collector nothing is measured.
+
+| Metric | Type | Attributes | What it answers |
+| --- | --- | --- | --- |
+| `krabby.queue.tasks` | gauge | `state` (`queued`, `running`) | Is background work piling up? |
+| `krabby.queue.limit` | gauge | | The configured task concurrency |
+| `krabby.queue.task.wait.duration` | histogram, s | `kind` | How long work sits before it starts |
+| `krabby.queue.task.run.duration` | histogram, s | `kind`, `state` (`done`, `error`, `canceled`) | How long a refresh, generate or sync takes |
+| `krabby.stage.duration` | histogram, s | `stage` (`graph`, `code_index`, `docs`, `docs_index`), `outcome` | Which pipeline stage is the slow one |
+| `krabby.search.duration` | histogram, s | `kind` (`code`, `docs`), `mode`, `outcome` | Search latency per retrieval mode |
+| `krabby.graph.cache.lookups` | counter | `result` (`hit`, `miss`) | Graph cache hit ratio |
+| `krabby.graph.cache.evictions` | counter | | Graphs dropped to stay within the budget |
+| `krabby.graph.cache.entries` / `.size` / `.limit` | gauge | | What the graph cache holds against `bag.cache_max_bytes` |
+
+`outcome` is `ok`, `error`, `cancelled` or `deadline`. A rising eviction rate
+with a falling hit ratio means `bag.cache_max_bytes` is too small for the
+repositories being queried. No attribute carries a repository id or a query:
+those would create one time series per value.
 
 ### LLM observability (Langfuse)
 

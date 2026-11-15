@@ -27,13 +27,118 @@ type docsCorpus struct {
 	// logKey is the structured-logging attribute name for the corpus name
 	// ("source", "service"), kept distinct so existing log queries still match.
 	logKey string
-	name   string
-	scope  string
-	dir    string
+	// unit is the plural noun for one document of the corpus ("pages",
+	// "operations"), used in log lines.
+	unit  string
+	name  string
+	scope string
+	dir   string
 }
 
 // logArgs returns the corpus identity as structured-log key/value pairs.
 func (c docsCorpus) logArgs() []any { return []any{c.logKey, c.name} }
+
+// indexedDoc is what the index stage needs to know about one stored document.
+type indexedDoc struct {
+	// dirty is set before a document's markdown is replaced and cleared once
+	// every index has accepted it, so true means an earlier run was cut short.
+	dirty     bool
+	updatedAt time.Time
+}
+
+// indexPlan is one sync's input to syncIndex.
+type indexPlan struct {
+	// candidates are the slugs that should be in the index after this run.
+	candidates map[string]bool
+	// docs are the stored documents by slug. A slug absent from candidates is
+	// ignored even when present here (a document pruned this run).
+	docs map[string]indexedDoc
+	// changed and removed are the doc paths this run already rewrote or
+	// deleted; updatedAt maps doc paths to source last-modified times.
+	changed, removed []string
+	updatedAt        map[string]time.Time
+	// commit records that the changed paths are now indexed. It runs only
+	// after indexing succeeded.
+	commit func(ctx context.Context, changed []string) error
+}
+
+// indexOutcome is what syncIndex did.
+type indexOutcome struct {
+	changed, removed []string
+	// indexErr is set when indexing or the commit after it failed. The sync
+	// itself still succeeded: the markdown is on disk, so the caller records
+	// the error and must not advance its fetch watermark, which makes the next
+	// run retry the same documents.
+	indexErr error
+}
+
+// syncIndex brings a corpus's search indexes in line with its stored
+// documents after a sync has written them.
+//
+// Three sources of work are combined so one index pass covers them all: what
+// the sync itself changed, documents left dirty by an interrupted earlier run,
+// and the gaps reconcileIndex finds between the indexes and the records. The
+// last two matter most for incremental sources, whose routine sync fetches
+// little or nothing: keyed off the fetch alone, a page whose vectors were lost
+// would stay unsearchable until the next full resync.
+//
+// A returned error means the indexes could not even be inspected; the caller
+// treats it as a failed sync.
+func (m *Manager) syncIndex(ctx context.Context, c docsCorpus, plan indexPlan) (indexOutcome, error) {
+	changed, removed := plan.changed, plan.removed
+	updatedAt := plan.updatedAt
+
+	queued := pathSet(changed)
+	for slug, doc := range plan.docs {
+		path := docFileName(slug)
+		if !plan.candidates[slug] || !doc.dirty || !fileExists(filepath.Join(c.dir, path)) {
+			continue
+		}
+		if _, ok := queued[path]; ok {
+			continue
+		}
+		changed = append(changed, path)
+		queued[path] = struct{}{}
+		updatedAt[path] = doc.updatedAt
+	}
+
+	missing, extra, err := m.reconcileIndex(ctx, c, plan.candidates, changed, removed)
+	if err != nil {
+		return indexOutcome{}, err
+	}
+	if len(missing) > 0 {
+		slog.Info(c.kind+" reindex: repairing "+c.unit+" missing from the index",
+			append(c.logArgs(), "missing", len(missing))...)
+		changed = append(changed, missing...)
+		// A repaired document was not necessarily fetched this run, so its
+		// recency comes from the stored record.
+		for _, path := range missing {
+			if doc, ok := plan.docs[docSlug(path)]; ok {
+				updatedAt[path] = doc.updatedAt
+			}
+		}
+	}
+	if len(extra) > 0 {
+		slog.Info(c.kind+" reindex: removing stale indexed "+c.unit,
+			append(c.logArgs(), "extra", len(extra))...)
+		removed = append(removed, extra...)
+	}
+
+	out := indexOutcome{changed: changed, removed: removed}
+
+	if len(changed) > 0 || len(removed) > 0 {
+		if err := m.indexPaths(ctx, c, changed, removed, updatedAt); err != nil {
+			out.indexErr = err
+			slog.Error(c.kind+" indexing failed; watermark not advanced",
+				append(c.logArgs(), "changed", len(changed), "error", err)...)
+		}
+	}
+	if out.indexErr == nil {
+		out.indexErr = plan.commit(context.WithoutCancel(ctx), changed)
+	}
+
+	return out, nil
+}
 
 // reconcileIndex compares what the search indexes hold for a corpus against
 // what its records say should be there, and reports the gaps in both

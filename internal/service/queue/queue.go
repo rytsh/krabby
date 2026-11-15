@@ -248,8 +248,32 @@ type Queue struct {
 	// to Close (for example when Close races a blocked Save).
 	persistWG sync.WaitGroup
 
+	// onFinish, when set, is told about every task that ran to a terminal
+	// state. See SetObserver.
+	onFinish func(Item)
+
 	wake           chan struct{}
 	dispatcherDone chan struct{}
+}
+
+// SetObserver installs fn to be called once for every task that started and
+// then finished, whatever its final state, with the task's final snapshot. It
+// is called outside the queue lock, on the task's own goroutine, so it may
+// call back into the queue but must not block for long. Tasks dropped while
+// still queued never ran and are not reported.
+func (q *Queue) SetObserver(fn func(Item)) {
+	q.mu.Lock()
+	q.onFinish = fn
+	q.mu.Unlock()
+}
+
+// Depth returns the concurrency limit and the number of running and queued
+// tasks. Unlike Snapshot it copies nothing, so it is cheap enough to poll.
+func (q *Queue) Depth() (limit, running, pending int) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	return q.limit, q.running, len(q.pending)
 }
 
 // SetPersister installs the durable store for queued/running tasks. A non-nil
@@ -860,9 +884,13 @@ func (q *Queue) finish(t *task, err, runCtxErr error) {
 		q.persistWG.Add(1)
 	}
 	q.pushRecentLocked(t)
+	observe, finished := q.onFinish, t.item()
 	q.mu.Unlock()
 
 	q.wakeUp()
+	if observe != nil {
+		observe(finished)
+	}
 	if remove {
 		q.removePersisted(p, t)
 		q.persistWG.Done()

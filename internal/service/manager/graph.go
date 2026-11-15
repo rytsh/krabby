@@ -34,8 +34,9 @@ func (m *Manager) BackfillGraphs(ctx context.Context) {
 			continue
 		}
 
-		// A rebuild only helps once a graph already exists.
-		if !fileExists(graphbuilder.GraphPath(repo.Path)) {
+		// A rebuild only helps once a graph already exists. A graph left in
+		// bag's pre-v0.2.0 output dir still counts, so it moves to the new one.
+		if !fileExists(graphbuilder.GraphPath(repo.Path)) && !fileExists(graphbuilder.LegacyGraphPath(repo.Path)) {
 			continue
 		}
 

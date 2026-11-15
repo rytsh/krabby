@@ -16,6 +16,15 @@ server:
                          # subpath. Empty (default) serves everything at root.
                          # The UI uses a hash router + relative assets, so it is
                          # base-path agnostic and needs no rebuild.
+  # allow_origins:       # other websites allowed to call the REST API and MCP
+  #   - https://tools.example.com   # endpoints from a browser; '*' and '?' are
+  #   - https://*.corp.example      # wildcards. Empty (default): no CORS headers,
+                         # and state-changing requests from another site's page
+                         # are refused with 403. The web UI is same-origin and
+                         # needs no entry; MCP clients, curl and webhooks are
+                         # not browsers and are unaffected. Nothing here is
+                         # authenticated, so an allowed origin can read and
+                         # administer everything; "*" allows every site.
   # pprof: true          # mount runtime profiling at <base_path>/debug/pprof/.
                          # Off by default: the handlers are unauthenticated and
                          # a heap dump carries process memory (git tokens, LLM
@@ -80,7 +89,13 @@ memory:
 # Repositories are added at runtime via the add_repo MCP tool, the UI, or
 # POST /api/v1/repos (with an optional "namespace"); additions are persisted.
 
+# OpenTelemetry export. Unset (the default) measures and exports nothing.
+# Setting a collector enables HTTP traces and metrics plus krabby's own queue,
+# stage, search and graph-cache metrics; see DETAILS.md "Metrics".
+# OTEL_EXPORTER_OTLP_ENDPOINT is honoured when collector is empty.
 telemetry: {}
+# telemetry:
+#   collector: otel-collector:4317   # OTLP/gRPC endpoint
 
 # The "fs" web-source type (index a server-side / mounted folder) is disabled
 # until the operator allows directories through an environment variable, so a

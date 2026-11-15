@@ -33,6 +33,34 @@ type Engine struct {
 	curBytes   int64
 	maxBytes   int64
 	loadGraph  func(string) (*Graph, error)
+
+	// Cumulative since start, guarded by mu. See Stats.
+	hits, misses, evictions uint64
+}
+
+// CacheStats describes the graph cache at one instant.
+type CacheStats struct {
+	// Hits counts lookups answered by a graph already in memory; Misses the
+	// ones that had to parse graph.json or wait for a parse in flight.
+	Hits, Misses uint64
+	// Evictions counts graphs dropped to stay within the budget. Graphs
+	// replaced by a newer build or invalidated explicitly are not evictions:
+	// they say nothing about whether the budget is large enough.
+	Evictions uint64
+	Entries   int
+	// Bytes is the estimated memory held; MaxBytes the budget (<= 0 unbounded).
+	Bytes, MaxBytes int64
+}
+
+// Stats returns the cache counters and current size.
+func (e *Engine) Stats() CacheStats {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	return CacheStats{
+		Hits: e.hits, Misses: e.misses, Evictions: e.evictions,
+		Entries: e.lru.Len(), Bytes: e.curBytes, MaxBytes: e.maxBytes,
+	}
 }
 
 type cacheEntry struct {
@@ -81,11 +109,13 @@ func (e *Engine) Graph(path string) (*Graph, error) {
 		observed = el.Value.(*cacheEntry)
 		if observed.mtimeNS == mtimeNS && observed.size == size {
 			e.lru.MoveToFront(el)
+			e.hits++
 			e.mu.Unlock()
 
 			return observed.graph, nil
 		}
 	}
+	e.misses++
 
 	generation := e.generation[path]
 	if flight, ok := e.flights[path]; ok && flight.generation == generation {
@@ -153,6 +183,7 @@ func (e *Engine) evictLocked() {
 
 	for e.curBytes > e.maxBytes && e.lru.Len() > 1 {
 		e.removeElement(e.lru.Back())
+		e.evictions++
 	}
 }
 

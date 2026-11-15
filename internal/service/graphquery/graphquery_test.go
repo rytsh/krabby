@@ -636,6 +636,47 @@ func TestEngineEvictsLRUOverBudget(t *testing.T) {
 	}
 }
 
+// Stats separates the three things a cache budget is judged by: lookups served
+// from memory, lookups that had to parse, and graphs pushed out for space.
+func TestEngineStats(t *testing.T) {
+	p1 := writeGraph(t, smallGraph)
+	p2 := writeGraph(t, smallGraph)
+
+	fi, err := os.Stat(p1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	perGraph := fi.Size() * parsedSizeFactor
+	e := NewEngine(perGraph + 1) // room for one graph
+
+	if got := e.Stats(); got != (CacheStats{MaxBytes: perGraph + 1}) {
+		t.Fatalf("fresh engine stats = %+v", got)
+	}
+
+	for _, p := range []string{p1, p1, p1} {
+		if _, err := e.Graph(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := e.Stats(); got.Hits != 2 || got.Misses != 1 || got.Evictions != 0 || got.Entries != 1 || got.Bytes != perGraph {
+		t.Fatalf("after one load and two reuses: %+v", got)
+	}
+
+	// A second graph does not fit beside the first.
+	if _, err := e.Graph(p2); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.Stats(); got.Misses != 2 || got.Evictions != 1 || got.Entries != 1 {
+		t.Fatalf("after loading past the budget: %+v", got)
+	}
+
+	// Dropping a graph on purpose says nothing about the budget.
+	e.Invalidate(p2)
+	if got := e.Stats(); got.Evictions != 1 || got.Entries != 0 || got.Bytes != 0 {
+		t.Fatalf("after invalidation: %+v", got)
+	}
+}
+
 func TestEngineOversizedGraphStillServed(t *testing.T) {
 	p := writeGraph(t, smallGraph)
 	// Budget smaller than a single graph: it must never be evicted while it is

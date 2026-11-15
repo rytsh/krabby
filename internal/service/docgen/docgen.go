@@ -1230,8 +1230,7 @@ func cleanupStaleDocs(docsDir string, docs []DocMeta) {
 
 // selectFiles walks the clone and returns repo-relative slash paths that match
 // the Include globs and none of the Exclude globs. When Include is empty a set of
-// sensible source extensions is documented. graphify-out, .git and vendor are
-// skipped by repofs.ListFiles.
+// sensible source extensions is documented.
 // selectFiles picks the sources to document. It walks the clone rather than
 // listing it: repofs.ListFiles caps its result at MaxListEntries, which is
 // right for a UI listing and silently wrong here — a repository past the cap
@@ -1246,8 +1245,10 @@ func (g *llmGenerator) selectFiles(clonePath string, filters config.Filters) ([]
 	var out []string
 
 	err := repofs.WalkFiles(clonePath, func(rel, name string) bool {
-		// Never document our own output.
-		if name == docsDirName {
+		// Never document our own output, generated docs or graph alike. This
+		// holds under an explicit Include too: "**/*.md" asks for the
+		// repository's markdown, not for the graph report beside it.
+		if name == docsDirName || repofs.IsArtefactDir(name) {
 			return true
 		}
 		if noiseSkipped && docNoiseDirs[strings.ToLower(name)] {
@@ -1297,9 +1298,6 @@ var docNoiseDirs = map[string]bool{
 	"vendor":       true,
 	"dist":         true,
 	"build":        true,
-	".git":         true,
-	"graphify-out": true,
-	"krabby-docs":  true,
 }
 
 // isTestFileName recognises common test-file naming conventions across the

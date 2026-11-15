@@ -34,24 +34,34 @@ const (
 	MaxListPerPage = 200
 )
 
-// Dir excluded from listings; graph output, VCS metadata and vendored
-// third-party trees are noise when browsing a repository.
-var skipDirs = map[string]bool{
+// artefactDirs are directories inside a clone that hold no repository content:
+// git's object store and the graph builder's output. The graph output has two
+// names because bag wrote to graphify-out before v0.2.0 and a clone built by an
+// older krabby still carries it until its snapshot is retired.
+//
+// This is the one place the names live. Listing, globbing, code indexing and
+// documentation all have to agree on them, and when each kept its own copy a
+// renamed output directory had to be chased through every one — and they had
+// already drifted apart on when the rule applied.
+var artefactDirs = map[string]bool{
 	".git":         true,
+	".bag":         true,
 	"graphify-out": true,
-	"vendor":       true,
 }
 
-// Dir excluded from a glob, which is narrower than the listing set on purpose.
-// A glob is a question the caller wrote: "vendor/**" can only mean vendored
-// code, and answering it with an empty page would be a wrong answer, not a
-// tidier one. What stays pruned is what is not repository content at all -
-// git's object store and krabby's own graph output, both of which would
-// otherwise flood a "**/*.json" with artefacts the caller never committed.
-var globSkipDirs = map[string]bool{
-	".git":         true,
-	"graphify-out": true,
-}
+// IsArtefactDir reports whether a directory name is one krabby or git writes
+// into a clone, as opposed to something the repository's authors committed.
+// Such a directory is never content, whatever a caller's include rules say:
+// nobody means the graph's own output when they ask to index "**/*.json".
+func IsArtefactDir(name string) bool { return artefactDirs[name] }
+
+// skipListing reports whether a directory is left out of a listing: artefacts,
+// plus vendored third-party trees, which are noise when browsing a repository.
+//
+// A glob is deliberately narrower and prunes artefacts only. It is a question
+// the caller wrote: "vendor/**" can only mean vendored code, and answering it
+// with an empty page would be a wrong answer, not a tidier one.
+func skipListing(name string) bool { return IsArtefactDir(name) || name == "vendor" }
 
 // WalkFiles walks every regular file under rootDir, calling fn with the
 // repo-relative slash path and its size. skipDir, when non-nil, is consulted
@@ -320,7 +330,8 @@ func readFileBytes(r io.Reader, limit int, sizeHint int64) ([]byte, error) {
 }
 
 // ListFiles returns entries under subdir (repo-relative; "" = root). When
-// recursive is true it walks the whole subtree, skipping .git and graphify-out.
+// recursive is true it walks the whole subtree, skipping what skipListing
+// names: git and graph artefacts, and vendored trees.
 func ListFiles(rootDir, subdir string, recursive bool) ([]Entry, error) {
 	cleaned, err := clean(subdir)
 	if err != nil {
@@ -551,7 +562,7 @@ func walkHalf(root *os.Root, dir string, wantDirs bool, after string, want int, 
 
 		switch {
 		case c.IsDir():
-			if skipDirs[c.Name()] {
+			if skipListing(c.Name()) {
 				continue
 			}
 
@@ -630,7 +641,7 @@ func listShallow(root *os.Root, dir string) ([]Entry, error) {
 	entries := make([]Entry, 0, len(names))
 
 	for _, name := range names {
-		if dir == "." && skipDirs[name] {
+		if dir == "." && skipListing(name) {
 			continue
 		}
 
@@ -668,7 +679,7 @@ func listRecursive(root *os.Root, dir string) ([]Entry, error) {
 		}
 
 		base := path.Base(p)
-		if d.IsDir() && skipDirs[base] {
+		if d.IsDir() && skipListing(base) {
 			return fs.SkipDir
 		}
 

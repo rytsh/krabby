@@ -18,6 +18,7 @@ import (
 
 	"github.com/rytsh/krabby/internal/config"
 	"github.com/rytsh/krabby/internal/observability/langfuse"
+	"github.com/rytsh/krabby/internal/observability/metrics"
 	"github.com/rytsh/krabby/internal/service/apicatalog"
 	"github.com/rytsh/krabby/internal/service/bigpicture"
 	"github.com/rytsh/krabby/internal/service/coderag"
@@ -26,7 +27,7 @@ import (
 	"github.com/rytsh/krabby/internal/service/graphbuilder"
 	"github.com/rytsh/krabby/internal/service/graphquery"
 	"github.com/rytsh/krabby/internal/service/mcpclient"
-	"github.com/rytsh/krabby/internal/service/memory"
+	"github.com/rytsh/krabby/internal/service/memorysvc"
 	"github.com/rytsh/krabby/internal/service/queue"
 	"github.com/rytsh/krabby/internal/service/rag"
 	"github.com/rytsh/krabby/internal/service/registry"
@@ -45,7 +46,7 @@ type Manager struct {
 	creds        *credentials.Store
 	externalMCPs *mcpclient.Store
 	bigPictures  *bigpicture.Store
-	memories     *memory.Store
+	memories     *memorysvc.Service
 	codeText     *coderag.TextStore
 	docsText     *rag.TextStore
 
@@ -75,6 +76,10 @@ type Manager struct {
 	// (see SetAPICatalog).
 	apiStore     *apicatalog.Store
 	apiProviders map[string]apicatalog.Provider
+
+	// metrics records queue, stage and search measurements. Nil until
+	// SetMetrics is called, and safe to use while nil.
+	metrics *metrics.Recorder
 
 	// queue is the central bounded work queue. Every background task (repo
 	// refresh/generate, web-source sync, reindex) is submitted here so a single
@@ -114,9 +119,7 @@ type Manager struct {
 	// docsTextKeys the keys already known to be indexed. Together they keep the
 	// query path free of existence probes; see SearchDocs.
 	docsTextWarmed atomic.Bool
-	// memoryEmbedding guards the single background embedding backfill.
-	memoryEmbedding atomic.Bool
-	docsTextKeys    sync.Map
+	docsTextKeys   sync.Map
 
 	progressMu sync.Mutex
 	// progress is id -> phase -> counters. A repo runs code_index alongside
@@ -552,7 +555,7 @@ func (m *Manager) SetRepoOverrides(ctx context.Context, ref string, over registr
 	case prev.GraphChanged(updated.Overrides):
 		// The graph itself is now wrong, and every artifact derived from it
 		// with it. A full refresh is the only path that rebuilds the graph;
-		// it detects the stale ignore block and forces the rebuild.
+		// it detects the changed ignore rules and forces the rebuild.
 		if err := m.TriggerRefresh(updated.ID); err != nil {
 			return updated, fmt.Errorf("repo overrides saved but refresh enqueue failed; %w", err)
 		}
@@ -652,7 +655,7 @@ func (m *Manager) RemoveRepo(ctx context.Context, id string) error {
 	if err := m.reg.Delete(ctx, id); err != nil {
 		return err
 	}
-	if err := m.OrphanRepoMemories(ctx, id); err != nil {
+	if err := m.memories.OrphanRepoMemories(ctx, id); err != nil {
 		slog.Error("mark memories of removed repo", "repo", id, "error", err)
 	}
 

@@ -35,6 +35,19 @@ jobs:
         with:
           args: --timeout 10m
 
+  vulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # Reports only vulnerabilities this code can actually reach, including
+      # ones in the Go toolchain pinned by go.mod, so a finding here is a real
+      # upgrade to make rather than a transitive advisory to triage.
+      - name: Check known vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
   frontend:
     runs-on: ubuntu-latest
     steps:

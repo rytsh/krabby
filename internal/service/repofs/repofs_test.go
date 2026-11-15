@@ -18,6 +18,7 @@ func setupRepo(t *testing.T) string {
 	mustWrite(t, filepath.Join(dir, "main.go"), "package main\n\nfunc main() {}\n")
 	mustWrite(t, filepath.Join(dir, "listener", "processor.go"), "package listener\n")
 	mustWrite(t, filepath.Join(dir, ".git", "config"), "[core]\n")
+	mustWrite(t, filepath.Join(dir, ".bag", "graph.json"), "{}")
 	mustWrite(t, filepath.Join(dir, "graphify-out", "graph.json"), "{}")
 	mustWrite(t, filepath.Join(dir, "vendor", "dep", "lib.go"), "package dep\n")
 
@@ -303,7 +304,7 @@ func TestListFilesShallowSkipsNoise(t *testing.T) {
 	}
 
 	for _, e := range entries {
-		if e.Path == ".git" || e.Path == "graphify-out" || e.Path == "vendor" {
+		if e.Path == ".git" || e.Path == ".bag" || e.Path == "graphify-out" || e.Path == "vendor" {
 			t.Fatalf("listing must skip %s", e.Path)
 		}
 	}
@@ -325,6 +326,28 @@ func TestListFilesShallowSkipsNoise(t *testing.T) {
 	}
 }
 
+// The artefact set is shared by listing, globbing, indexing and documentation;
+// this pins what it names and what it must leave alone.
+func TestIsArtefactDir(t *testing.T) {
+	for name, want := range map[string]bool{
+		".git":         true,
+		".bag":         true,
+		"graphify-out": true,
+		// Vendored code is hidden from a listing but is repository content.
+		"vendor": false,
+		// Only an exact name is an artefact.
+		".bag-notes":    false,
+		"bag":           false,
+		".github":       false,
+		"graphify-out2": false,
+		"":              false,
+	} {
+		if got := IsArtefactDir(name); got != want {
+			t.Errorf("IsArtefactDir(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
 func TestListFilesRecursiveSkipsNoise(t *testing.T) {
 	dir := setupRepo(t)
 
@@ -335,6 +358,7 @@ func TestListFilesRecursiveSkipsNoise(t *testing.T) {
 
 	for _, e := range entries {
 		if e.Path == ".git" ||
+			e.Path == filepath.Join(".bag", "graph.json") ||
 			e.Path == filepath.Join("graphify-out", "graph.json") ||
 			e.Path == filepath.Join("vendor", "dep", "lib.go") {
 			t.Fatalf("recursive listing must skip %s", e.Path)

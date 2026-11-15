@@ -31,7 +31,7 @@ func TestCodeSearchTimingLogsStagesAndOutcome(t *testing.T) {
 		timing.times["warm"] = 42 * time.Millisecond
 		timing.retried = true
 		timing.enter("index")
-		timing.finish(context.Background(), logger, "text", "repo", "default", 2, 5, tc.err)
+		timing.finish(context.Background(), logger, nil, "text", "repo", "default", 2, 5, tc.err)
 		var record map[string]any
 		if err := json.Unmarshal(out.Bytes(), &record); err != nil {
 			t.Fatal(err)

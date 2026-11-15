@@ -3,6 +3,7 @@ package apicatalog
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -567,8 +568,12 @@ func EncodeDetail(d *Detail) (json.RawMessage, error) {
 		return raw, nil
 	}
 
+	// The struct copy shares the Responses backing array with d, and the
+	// caller renders its markdown from d afterwards, so the slice is cloned
+	// before any schema is cleared.
 	trimmed := *d
 	trimmed.Truncated = true
+	trimmed.Responses = slices.Clone(d.Responses)
 	for i := range trimmed.Responses {
 		trimmed.Responses[i].Schema = nil
 	}

@@ -649,3 +649,84 @@ func TestPanicInTaskIsContained(t *testing.T) {
 		t.Fatalf("task after panic ran %d times, want 1", got)
 	}
 }
+
+// The observer sees every task that ran, with the timestamps and final state
+// it ended on, and never a task that was dropped while still queued.
+func TestObserverReportsTasksThatRan(t *testing.T) {
+	t.Parallel()
+
+	q := New(context.Background(), 1)
+	defer q.Close()
+
+	var mu sync.Mutex
+	seen := map[string]Item{}
+	q.SetObserver(func(it Item) {
+		mu.Lock()
+		seen[it.ID] = it
+		mu.Unlock()
+	})
+
+	release := make(chan struct{})
+	started := make(chan struct{})
+	blocker := q.Submit(Task{ID: "ok", Kind: "refresh", Run: func(context.Context) error {
+		close(started)
+		<-release
+
+		return nil
+	}})
+	<-started
+
+	failing := q.Submit(Task{ID: "fails", Kind: "generate", Run: func(context.Context) error {
+		return errors.New("boom")
+	}})
+	dropped := q.Submit(Task{ID: "dropped", Kind: "reindex", Key: "dropped", Run: func(context.Context) error {
+		return nil
+	}})
+
+	if limit, running, pending := q.Depth(); limit != 1 || running != 1 || pending != 2 {
+		t.Fatalf("Depth() = %d, %d, %d; want 1 running and 2 queued under a limit of 1", limit, running, pending)
+	}
+
+	if n := q.CancelPending("dropped"); n != 1 {
+		t.Fatalf("CancelPending = %d, want 1", n)
+	}
+	<-dropped.Done()
+
+	close(release)
+	<-blocker.Done()
+	<-failing.Done()
+
+	waitFor(t, time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+
+		return len(seen) == 2
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if _, ok := seen["dropped"]; ok {
+		t.Error("observer was told about a task that never ran")
+	}
+
+	for id, want := range map[string]struct {
+		kind  string
+		state State
+	}{
+		"ok":    {"refresh", StateDone},
+		"fails": {"generate", StateError},
+	} {
+		it := seen[id]
+		if it.Kind != want.kind || it.State != want.state {
+			t.Errorf("%s reported as kind %q state %q, want %q %q", id, it.Kind, it.State, want.kind, want.state)
+		}
+		if it.StartedAt.IsZero() || it.EndedAt.IsZero() || it.StartedAt.Before(it.EnqueuedAt) || it.EndedAt.Before(it.StartedAt) {
+			t.Errorf("%s has inconsistent timestamps: enqueued %v started %v ended %v", id, it.EnqueuedAt, it.StartedAt, it.EndedAt)
+		}
+	}
+
+	if _, running, pending := q.Depth(); running != 0 || pending != 0 {
+		t.Errorf("Depth() after drain = %d running, %d queued", running, pending)
+	}
+}

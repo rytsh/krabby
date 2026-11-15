@@ -3,6 +3,8 @@ package graphbuilder
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"os"
@@ -24,7 +26,13 @@ type Builder struct {
 // TestedVersion is the linked bag extraction contract.
 const TestedVersion = bag.EngineVersion
 
-const versionFileName = ".krabby-bag-version"
+const (
+	versionFileName = ".krabby-bag-version"
+	// ignoreFileName holds the fingerprint of the exclude patterns a graph was
+	// built with, so a later change to them is a string comparison rather than
+	// a parse of the whole graph.
+	ignoreFileName = ".krabby-bag-ignore"
+)
 
 // New creates an in-process graph builder. exclude carries extra gitignore-style
 // patterns passed directly to bag for every build.
@@ -42,14 +50,14 @@ func (c *Builder) Version() string { return c.version }
 // GraphBuiltWithCurrentVersion reports whether Krabby recorded this engine version
 // after validating the repository's active graph.
 func (c *Builder) GraphBuiltWithCurrentVersion(repoPath string) bool {
-	b, err := os.ReadFile(filepath.Join(repoPath, "graphify-out", versionFileName))
+	b, err := os.ReadFile(filepath.Join(filepath.Dir(GraphPath(repoPath)), versionFileName))
 
 	return err == nil && strings.TrimSpace(string(b)) == c.version
 }
 
 // RecordGraphVersion marks a validated graph with the engine version that built it.
 func (c *Builder) RecordGraphVersion(repoPath string) error {
-	path := filepath.Join(repoPath, "graphify-out", versionFileName)
+	path := filepath.Join(filepath.Dir(GraphPath(repoPath)), versionFileName)
 	if err := os.WriteFile(path, []byte(c.version+"\n"), 0o644); err != nil {
 		return fmt.Errorf("record graph engine version; %w", err)
 	}
@@ -61,14 +69,38 @@ func (c *Builder) RecordGraphVersion(repoPath string) error {
 // effective configuration of one repository.
 func (c *Builder) Exclude() []string { return slices.Clone(c.exclude) }
 
-// GraphNeedsIgnoreRebuild reports whether the built graph for repoPath still
-// contains nodes that the current exclude rules should drop, so the refresh path
-// can rebuild a stale graph even when git did not change. extra carries the
-// repository's own patterns, which must be considered here too: adding one to a
-// repo has to invalidate its existing graph, or the excluded nodes survive
-// until some unrelated commit happens to trigger a rebuild.
+// GraphNeedsIgnoreRebuild reports whether the graph for repoPath was built
+// with exclude rules other than the current ones, so the refresh path can
+// rebuild it even when git did not change. extra carries the repository's own
+// patterns, which count here too: changing one has to invalidate the existing
+// graph, or it stays wrong until some unrelated commit triggers a rebuild.
+//
+// Any difference counts, in either direction. A removed pattern leaves files
+// out of the graph that now belong in it, which no inspection of the graph
+// could reveal. A graph with no recorded rules predates the record and is
+// rebuilt once to gain it.
 func (c *Builder) GraphNeedsIgnoreRebuild(repoPath string, extra []string) bool {
-	return GraphHasExcludedNodes(repoPath, c.ignorePatterns(extra))
+	b, err := os.ReadFile(filepath.Join(filepath.Dir(GraphPath(repoPath)), ignoreFileName))
+
+	return err != nil || strings.TrimSpace(string(b)) != ignoreFingerprint(c.buildExcludes(extra))
+}
+
+// buildExcludes is the exact pattern list handed to bag for one repository.
+func (c *Builder) buildExcludes(extra []string) []string {
+	return MergeExclude(DefaultGraphIgnore, c.ignorePatterns(extra))
+}
+
+// ignoreFingerprint identifies an ordered pattern list. Order is part of it on
+// purpose: gitignore-style rules are evaluated in sequence, so the same
+// patterns in another order are not guaranteed to select the same files.
+func ignoreFingerprint(patterns []string) string {
+	h := sha256.New()
+	for _, p := range patterns {
+		h.Write([]byte(p))
+		h.Write([]byte{0})
+	}
+
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // ignorePatterns is the effective exclude list for one repository: the
@@ -103,13 +135,27 @@ func (c *Builder) Update(ctx context.Context, repoPath string, extra []string) e
 	ctx, cancel := c.timeout(ctx)
 	defer cancel()
 
+	excludes := c.buildExcludes(extra)
+
 	start := time.Now()
 	result, err := bag.Build(ctx, repoPath, bag.BuildOptions{
-		Excludes: MergeExclude(DefaultGraphIgnore, c.ignorePatterns(extra)),
+		Excludes: excludes,
 		Force:    true,
+		// bag keys its AST cache by absolute file path and stores it inside
+		// the tree it builds. Every build here runs in a freshly named staging
+		// clone, so no entry could ever be read back: the cache would only cost
+		// a write per source file and its size again in every kept snapshot.
+		NoCache: true,
 	})
 	if err != nil {
 		return fmt.Errorf("build graph; %w", err)
+	}
+
+	// Recorded here, by the call that applied the rules, so the record cannot
+	// describe anything but the graph beside it.
+	ignorePath := filepath.Join(result.OutDir, ignoreFileName)
+	if err := os.WriteFile(ignorePath, []byte(ignoreFingerprint(excludes)+"\n"), 0o644); err != nil {
+		return fmt.Errorf("record graph ignore rules; %w", err)
 	}
 
 	slog.Debug("bag graph build", "path", repoPath, "nodes", result.Nodes,
@@ -136,6 +182,12 @@ func (c *Builder) MergeGraphs(ctx context.Context, out string, graphs ...string)
 // GraphPath returns the graph.json path for a scanned repository path.
 func GraphPath(repoPath string) string {
 	return bag.GraphPath(repoPath)
+}
+
+// LegacyGraphPath returns where bag releases before v0.2.0 wrote graph.json.
+// A clone that only has this file needs a rebuild into the current layout.
+func LegacyGraphPath(repoPath string) string {
+	return filepath.Join(repoPath, "graphify-out", "graph.json")
 }
 
 // ReportPath returns the GRAPH_REPORT.md path for a scanned repository path.

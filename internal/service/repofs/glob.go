@@ -94,7 +94,7 @@ func GlobFiles(rootDir, pattern string, limit int) (GlobPage, error) {
 			// than the one asked. A subtree that cannot contain a match is
 			// pruned too, so an anchored pattern costs its own subtree rather
 			// than the repository.
-			if globSkipDirs[path.Base(p)] || (anchored && !globCanDescend(pat, p)) {
+			if IsArtefactDir(path.Base(p)) || (anchored && !globCanDescend(pat, p)) {
 				return fs.SkipDir
 			}
 
@@ -191,7 +191,7 @@ func globHint(root *os.Root, pat string, anchored bool) string {
 	var dirs []string
 
 	for _, e := range entries {
-		if e.IsDir() && !globSkipDirs[e.Name()] {
+		if e.IsDir() && !IsArtefactDir(e.Name()) {
 			dirs = append(dirs, e.Name()+"/")
 		}
 	}

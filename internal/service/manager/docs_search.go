@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/rytsh/krabby/internal/config"
+	"github.com/rytsh/krabby/internal/observability/metrics"
 	"github.com/rytsh/krabby/internal/service/apicatalog"
 	"github.com/rytsh/krabby/internal/service/bigpicture"
 	"github.com/rytsh/krabby/internal/service/docsearch"
@@ -98,18 +99,24 @@ func docsFilter(scope, key string) (vectorstore.Filter, error) {
 // lexical retrieval. scope selects all/repos/sources; key restricts to one repo
 // or web:<collection> and wins over scope. Namespace scopes only repository
 // docs. topDocs <= 0 uses the default.
-func (m *Manager) SearchDocs(ctx context.Context, scope, key, namespace, mode, question string, topDocs int) (rag.DocsPage, error) {
+func (m *Manager) SearchDocs(ctx context.Context, scope, key, namespace, mode, question string, topDocs int) (_ rag.DocsPage, err error) {
 	searchStarted := time.Now()
 	key = strings.TrimSpace(key)
 
 	ctx, cancel := withSearchTimeout(ctx, semanticSearchTimeout)
 	defer cancel()
 
-	mode, err := NormalizeDocsSearchMode(mode)
+	mode, err = NormalizeDocsSearchMode(mode)
 	if err != nil {
 		return rag.DocsPage{}, err
 	}
 	mode = m.resolveDocsSearchMode(mode)
+	// Measured from here on, once the mode is one of the known three: a
+	// request rejected for naming an unknown mode is not a search, and its
+	// mode must not become a metric label.
+	defer func() {
+		m.metrics.SearchFinished(ctx, searchKindDocs, mode, metrics.Outcome(err), time.Since(searchStarted))
+	}()
 	page := rag.DocsPage{Results: []rag.Doc{}, Mode: mode}
 
 	if err := m.validateDocsKey(ctx, key); err != nil {
