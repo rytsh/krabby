@@ -31,13 +31,13 @@ type pushItemsRequest struct {
 func pushSourceItems(mgr sourceService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req pushItemsRequest
-		if err := c.Bind(&req); err != nil {
+		if err := bindJSONLimit(c, &req, pushBodyLimit); err != nil {
 			return c.SetStatus(http.StatusBadRequest).Err(err)
 		}
 
 		result, err := mgr.ImportWebPages(c.Request.Context(), c.Request.PathValue("name"), req.Items)
 		if err != nil {
-			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+			return sendError(c, err, http.StatusBadRequest)
 		}
 
 		return c.SendJSON(result)
@@ -51,13 +51,13 @@ type pruneItemsRequest struct {
 func prunePushItems(mgr sourceService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req pruneItemsRequest
-		if err := c.Bind(&req); err != nil {
+		if err := bindJSON(c, &req); err != nil {
 			return c.SetStatus(http.StatusBadRequest).Err(err)
 		}
 
 		n, err := mgr.PrunePushItems(c.Request.Context(), c.Request.PathValue("name"), req.Keep)
 		if err != nil {
-			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+			return sendError(c, err, http.StatusBadRequest)
 		}
 
 		return c.SendJSON(map[string]int{"removed": n})
@@ -72,7 +72,7 @@ func deletePushItem(mgr sourceService) ada.HandlerFunc {
 		}
 
 		if err := mgr.DeleteWebPage(c.Request.Context(), c.Request.PathValue("name"), manager.PushSlug(id)); err != nil {
-			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+			return sendError(c, err, http.StatusBadRequest)
 		}
 
 		return c.SendNoContent()

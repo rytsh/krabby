@@ -292,12 +292,16 @@ func (g *Git) Diff(ctx context.Context, dir, from, to, path string, patch bool) 
 		return res, nil
 	}
 
-	// Raw: a patch's trailing whitespace is part of the last hunk.
-	body, err := g.runRaw(ctx, dir, nil, g.diffArgs(from, to, path, true)...)
+	// Raw: a patch's trailing whitespace is part of the last hunk. Capped one
+	// byte past the limit, so a patch of exactly the limit is not reported
+	// cut, and git stops there instead of writing a huge diff into memory.
+	body, _, err := g.runCapped(ctx, dir, nil, MaxPatchBytes+1, g.diffArgs(from, to, path, true)...)
 	if err != nil {
 		return nil, err
 	}
 
+	// PatchBytes is what was read, which stops one past the limit: with
+	// PatchTruncated set it is a lower bound.
 	res.PatchBytes = len(body)
 	if len(body) > MaxPatchBytes {
 		body = body[:MaxPatchBytes]

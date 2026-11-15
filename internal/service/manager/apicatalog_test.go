@@ -622,3 +622,32 @@ func TestServiceUpdateRejectsBadInput(t *testing.T) {
 		})
 	}
 }
+
+// Deleting a service removes its record and its directory, and deleting one
+// that does not exist says so instead of reporting success.
+func TestDeleteAPIServiceRemovesItAndRefusesAMissingOne(t *testing.T) {
+	m, store := newAPIManager(t, &fakeAPIProvider{})
+	ctx := context.Background()
+
+	if err := store.UpsertService(ctx, &apicatalog.Service{Name: "billing", Kind: "fake"}); err != nil {
+		t.Fatal(err)
+	}
+	dir := m.apisDir("billing")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.DeleteAPIService(ctx, "billing"); err != nil {
+		t.Fatalf("DeleteAPIService: %v", err)
+	}
+	if svc, _ := store.GetService(ctx, "billing"); svc != nil {
+		t.Error("the service record survived the delete")
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("the service directory survived the delete: %v", err)
+	}
+
+	if err := m.DeleteAPIService(ctx, "billing"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("deleting a missing service: err = %v, want ErrNotFound", err)
+	}
+}

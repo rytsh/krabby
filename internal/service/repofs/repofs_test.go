@@ -533,3 +533,44 @@ func TestShallowListingHidesNestedArtefacts(t *testing.T) {
 		}
 	}
 }
+
+// Every lister shows the same entries: no symlinks, and a recursive listing
+// capped at MaxListEntries is the first entries in listing order, directories
+// included.
+func TestListersAgreeOnSymlinksAndOrder(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	mustWrite(t, filepath.Join(outside, "secret"), "x\n")
+	mustWrite(t, filepath.Join(dir, "a.go"), "package a\n")
+	mustWrite(t, filepath.Join(dir, "z", "b.go"), "package z\n")
+	if err := os.Symlink(filepath.Join(outside, "secret"), filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "linkdir")); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, recursive := range []bool{false, true} {
+		entries, err := ListFiles(dir, "", recursive)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			if strings.HasPrefix(e.Path, "link") {
+				t.Errorf("recursive=%v lists the symlink %s", recursive, e.Path)
+			}
+		}
+		if len(entries) == 0 || !entries[0].IsDir || entries[0].Path != "z" {
+			t.Errorf("recursive=%v: entries = %+v, want directories first", recursive, entries)
+		}
+	}
+}
+
+func TestNormalizeGlobRejectsAMalformedSegment(t *testing.T) {
+	if _, _, err := NormalizeGlob("src/[abc/*.go"); err == nil || !strings.Contains(err.Error(), "malformed") {
+		t.Fatalf("err = %v, want a malformed-pattern error", err)
+	}
+	if _, _, err := NormalizeGlob("src/**/[ab]*.go"); err != nil {
+		t.Fatalf("a valid class was refused: %v", err)
+	}
+}

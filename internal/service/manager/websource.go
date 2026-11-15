@@ -185,7 +185,7 @@ func (m *Manager) mutateCollection(ctx context.Context, name string, fn func(*we
 	}
 
 	if col == nil {
-		return fmt.Errorf("collection %s not found", name)
+		return notFound("collection %s not found", name)
 	}
 
 	if err := fn(col); err != nil {
@@ -401,48 +401,17 @@ func (m *Manager) DeleteWebCollection(ctx context.Context, name string) error {
 		return ErrNoWebSources
 	}
 
-	scope := websource.ScopeKey(name)
+	defer m.lockKey(websource.ScopeKey(name))()
 
-	defer m.lockKey(scope)()
+	return m.deleteCorpus(ctx, m.webCorpus(name), m.sourcesRootDir,
+		func() func() { return m.collectionLock(name) },
+		func(ctx context.Context) (bool, error) {
+			col, err := m.webStore.GetCollection(ctx, name)
 
-	// Held for the whole teardown, not just the store read: an update that
-	// slipped in between the record delete and here would re-insert the
-	// collection, leaving a record with no pages, no directory and no index
-	// entries — and no path that ever cleans it up.
-	defer m.collectionLock(name)()
-
-	col, err := m.webStore.GetCollection(ctx, name)
-	if err != nil {
-		return err
-	}
-
-	if col == nil {
-		return fmt.Errorf("collection %s not found", name)
-	}
-
-	// Best-effort: drop the collection from both docs indexes.
-	d, releaseDocs := m.acquireDocs()
-	if d.rag != nil {
-		if err := d.rag.DeleteRepo(ctx, scope); err != nil {
-			slog.Error("delete web source from docs index", "source", name, "error", err)
-		}
-	}
-	if m.docsText != nil {
-		if err := m.docsText.DeleteRepo(ctx, scope); err != nil {
-			slog.Error("delete web source from docs text index", "source", name, "error", err)
-		}
-	}
-	releaseDocs()
-
-	if err := m.webStore.DeleteCollection(ctx, name); err != nil {
-		return err
-	}
-
-	if err := removeContentDir(m.sourcesRootDir, m.sourcesDir(name), "source"); err != nil {
-		return err
-	}
-
-	return nil
+			return col != nil, err
+		},
+		func(ctx context.Context) error { return m.webStore.DeleteCollection(ctx, name) },
+	)
 }
 
 // ListWebCollections returns all collections.
@@ -571,7 +540,7 @@ func (m *Manager) addWebPageLocked(ctx context.Context, name, pageURL string) (*
 		return nil, err
 	}
 	if col == nil {
-		return nil, fmt.Errorf("collection %s not found", name)
+		return nil, notFound("collection %s not found", name)
 	}
 	if col.Type != websource.TypePages {
 		return nil, fmt.Errorf("collection %s is type %q; pages are discovered, not added manually", name, col.Type)
@@ -721,7 +690,7 @@ func (m *Manager) importWebPages(ctx context.Context, name string, imports []Web
 		return result, err
 	}
 	if col == nil {
-		return result, fmt.Errorf("collection %s not found", name)
+		return result, notFound("collection %s not found", name)
 	}
 	if !manualItemType(col.Type) {
 		return result, fmt.Errorf("collection %s is type %q; direct imports require type %q or %q", name, col.Type, websource.TypePages, websource.TypePush)
@@ -809,7 +778,7 @@ func (m *Manager) importWebPages(ctx context.Context, name string, imports []Web
 		return result, err
 	}
 	if col == nil {
-		return result, fmt.Errorf("collection %s not found", name)
+		return result, notFound("collection %s not found", name)
 	}
 	if !manualItemType(col.Type) {
 		return result, fmt.Errorf("collection %s is type %q; direct imports require type %q or %q", name, col.Type, websource.TypePages, websource.TypePush)
@@ -914,7 +883,7 @@ func (m *Manager) ImportWebSitemap(
 		return result, err
 	}
 	if col == nil {
-		return result, fmt.Errorf("collection %s not found", name)
+		return result, notFound("collection %s not found", name)
 	}
 	if col.Type != websource.TypePages {
 		return result, fmt.Errorf("collection %s is type %q; sitemaps are only supported for pages", name, col.Type)
@@ -953,7 +922,7 @@ func (m *Manager) ImportWebSitemap(
 		return result, err
 	}
 	if col == nil {
-		return result, fmt.Errorf("collection %s not found", name)
+		return result, notFound("collection %s not found", name)
 	}
 	if col.Type != websource.TypePages {
 		return result, fmt.Errorf("collection %s is type %q; sitemaps are only supported for pages", name, col.Type)
@@ -1014,7 +983,7 @@ func (m *Manager) DeleteWebPage(ctx context.Context, name, slug string) error {
 		return err
 	}
 	if col == nil {
-		return fmt.Errorf("collection %s not found", name)
+		return notFound("collection %s not found", name)
 	}
 	if !manualItemType(col.Type) {
 		return fmt.Errorf("collection %s is type %q; only pages and push source items can be deleted manually", name, col.Type)
@@ -1024,7 +993,7 @@ func (m *Manager) DeleteWebPage(ctx context.Context, name, slug string) error {
 		return err
 	}
 	if page == nil {
-		return fmt.Errorf("page %s not found in collection %s", slug, name)
+		return notFound("page %s not found in collection %s", slug, name)
 	}
 
 	if err := os.Remove(file); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -1056,7 +1025,7 @@ func (m *Manager) WebSourceDoc(ctx context.Context, name, docPath string) (*repo
 	}
 
 	if col == nil {
-		return nil, fmt.Errorf("collection %s not found", name)
+		return nil, notFound("collection %s not found", name)
 	}
 
 	return repofs.ReadFile(m.sourcesDir(name), docPath, 0, 0)
@@ -1187,7 +1156,7 @@ func (m *Manager) refreshWebSource(ctx context.Context, name string, forceFull b
 	}
 
 	if col == nil {
-		return fmt.Errorf("collection %s not found", name)
+		return notFound("collection %s not found", name)
 	}
 
 	fetcher, ok := m.webFetchers[col.Type]

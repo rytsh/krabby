@@ -157,7 +157,7 @@ func TestSettingsSaveReportsReindexEnqueueFailure(t *testing.T) {
 	bootstrapFailingTaskStore(t, m, wantErr)
 
 	_, err = m.SetDocsConfig(context.Background(), settings.Settings{})
-	if !errors.Is(err, wantErr) || !strings.Contains(err.Error(), "settings saved but reindex enqueue failed") {
+	if !errors.Is(err, wantErr) || !strings.Contains(err.Error(), "settings saved but not applied; reindex enqueue failed") {
 		t.Fatalf("SetDocsConfig error = %v, want partial-success reindex enqueue error", err)
 	}
 	if _, getErr := settingsStore.Get(context.Background()); getErr != nil {

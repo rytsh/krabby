@@ -286,7 +286,7 @@ func (m *Manager) waitRepoTask(ctx context.Context, h *queue.Handle, id string) 
 	}
 
 	if repo == nil {
-		return nil, done, fmt.Errorf("repo %s not found", id)
+		return nil, done, notFound("repo %s not found", id)
 	}
 
 	if done {

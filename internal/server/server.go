@@ -4,11 +4,14 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/pprof"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/rakunlabs/ada"
@@ -29,19 +32,29 @@ type MCPCatalogs struct {
 	Core, API, Admin, Memory *mcp.Server
 }
 
-// Handler builds the configured HTTP route graph without binding a socket.
-func Handler(ctx context.Context, cfg *config.Config, mgr *manager.Manager, catalogs MCPCatalogs) http.Handler {
-	return newRouter(ctx, cfg, managerRouteServices(mgr), catalogs)
-}
-
 // Start runs the HTTP server until ctx is cancelled.
 func Start(ctx context.Context, cfg *config.Config, mgr *manager.Manager, catalogs MCPCatalogs) error {
-	server := newRouter(ctx, cfg, managerRouteServices(mgr), catalogs)
+	server := newRouter(cfg, managerRouteServices(mgr), catalogs)
 
-	return server.StartWithContext(ctx, cfg.Server.Host+":"+cfg.Server.Port)
+	return server.StartWithContext(ctx, listenAddr(cfg))
 }
 
-func newRouter(ctx context.Context, cfg *config.Config, services routeServices, catalogs MCPCatalogs) *ada.Server {
+// CheckListen reports whether the configured address can be listened on, by
+// binding it and letting it go. It catches the common failure (the port is
+// taken) before startup commits to anything; a race for the port between
+// this check and Start is still reported by Start.
+func CheckListen(cfg *config.Config) error {
+	ln, err := net.Listen("tcp", listenAddr(cfg))
+	if err != nil {
+		return fmt.Errorf("listen on %s; %w", listenAddr(cfg), err)
+	}
+
+	return ln.Close()
+}
+
+func listenAddr(cfg *config.Config) string { return net.JoinHostPort(cfg.Server.Host, cfg.Server.Port) }
+
+func newRouter(cfg *config.Config, services routeServices, catalogs MCPCatalogs) *ada.Server {
 	server := ada.New()
 	server.Use(
 		mrecover.Middleware(),
@@ -89,7 +102,12 @@ func newRouter(ctx context.Context, cfg *config.Config, services routeServices, 
 	for path, catalog := range mcpCatalogRoutes(cfg.MCP.Path, catalogs) {
 		handler := mcp.NewStreamableHTTPHandler(
 			func(_ *http.Request) *mcp.Server { return catalog },
-			&mcp.StreamableHTTPOptions{},
+			&mcp.StreamableHTTPOptions{
+				// A client that disconnects without DELETE leaves its session
+				// behind; without a timeout those accumulate for the life of
+				// the process.
+				SessionTimeout: mcpSessionTimeout,
+			},
 		)
 		// The MCP paths carry no authentication of their own: krabby is deployed
 		// behind a proxy that authenticates every request before it arrives.
@@ -313,6 +331,10 @@ func viaForwardedHost(r *http.Request) bool {
 
 	return err == nil && origin.Host != "" && strings.EqualFold(origin.Host, forwarded)
 }
+
+// mcpSessionTimeout closes an MCP session left idle this long. Agents call in
+// bursts; a session idle for half an hour is one whose client went away.
+const mcpSessionTimeout = 30 * time.Minute
 
 func mcpCatalogRoutes(root string, catalogs MCPCatalogs) map[string]*mcp.Server {
 	return map[string]*mcp.Server{

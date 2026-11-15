@@ -5,6 +5,7 @@ package gitops
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -81,6 +82,38 @@ func (g *Git) run(ctx context.Context, dir string, auth *credentials.Auth, args 
 // no file, so a changed file would never be reindexed and its old chunks
 // never dropped.
 func (g *Git) runRaw(ctx context.Context, dir string, auth *credentials.Auth, args ...string) (string, error) {
+	out, _, err := g.runCapped(ctx, dir, auth, 0, args...)
+
+	return out, err
+}
+
+// errOutputCapped stops git once its output passed the caller's cap.
+var errOutputCapped = errors.New("git output reached its cap")
+
+// cappedBuffer keeps at most limit bytes and fails the write past them, which
+// ends git with a broken pipe instead of buffering everything it would print.
+type cappedBuffer struct {
+	buf    bytes.Buffer
+	limit  int
+	capped bool
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if room := b.limit - b.buf.Len(); len(p) > room {
+		b.buf.Write(p[:max(room, 0)])
+		b.capped = true
+
+		return 0, errOutputCapped
+	}
+
+	return b.buf.Write(p)
+}
+
+// runCapped is runRaw keeping at most limit bytes of output (0 = no limit).
+// capped reports that the output was cut there; git is stopped at that point
+// rather than allowed to produce the rest into memory, so a diff across a
+// large range costs the cap, not the size of the diff.
+func (g *Git) runCapped(ctx context.Context, dir string, auth *credentials.Auth, limit int, args ...string) (string, bool, error) {
 	// A stalled HTTP transfer (under 1 KiB/s for a minute) fails instead of
 	// holding the repository's worker until someone notices.
 	full := append([]string{
@@ -99,15 +132,30 @@ func (g *Git) runRaw(ctx context.Context, dir string, auth *credentials.Auth, ar
 	// the pipe open and Wait blocked. WaitDelay bounds that.
 	cmd.WaitDelay = 10 * time.Second
 
-	var out, errOut bytes.Buffer
-	cmd.Stdout = &out
+	var errOut bytes.Buffer
 	cmd.Stderr = &errOut
-
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("git %s; %w; %s", redactArgs(args), err, redactURLs(strings.TrimSpace(errOut.String())))
+	var out bytes.Buffer
+	capped := &cappedBuffer{limit: limit}
+	if limit > 0 {
+		cmd.Stdout = capped
+	} else {
+		cmd.Stdout = &out
 	}
 
-	return out.String(), nil
+	if err := cmd.Run(); err != nil {
+		// A cut output is the expected end of a capped run: git died of the
+		// write failing, and what was kept is the answer.
+		if capped.capped {
+			return capped.buf.String(), true, nil
+		}
+
+		return "", false, fmt.Errorf("git %s; %w; %s", redactArgs(args), err, redactURLs(strings.TrimSpace(errOut.String())))
+	}
+	if limit > 0 {
+		return capped.buf.String(), capped.capped, nil
+	}
+
+	return out.String(), false, nil
 }
 
 // shellQuote quotes s for a POSIX shell.
@@ -283,9 +331,10 @@ func parseBlamePorcelain(out string) []BlameLine {
 			cur = BlameLine{}
 			have = false
 		case !have:
-			// Header line: "<40-hex-sha> <orig> <final> [group-size]".
+			// Header line: "<sha> <orig> <final> [group-size]", where the
+			// sha is 40 hex digits, or 64 in a SHA-256 repository.
 			fields := strings.Fields(ln)
-			if len(fields) >= 3 && len(fields[0]) == 40 {
+			if len(fields) >= 3 && (len(fields[0]) == 40 || len(fields[0]) == 64) {
 				cur.Commit = fields[0]
 				cur.Line, _ = strconv.Atoi(fields[2])
 				have = true

@@ -351,6 +351,14 @@ func run(ctx context.Context) error {
 
 		return nil
 	})
+	// Fail before any restored work starts if the server cannot listen. The
+	// listener is bound inside server.Start, after the queue is running; a
+	// taken port found only there would start clones and builds just to
+	// cancel them during teardown.
+	if err := server.CheckListen(cfg); err != nil {
+		return err
+	}
+
 	// Every restored closure now has its stores/configuration, and all startup
 	// durable submissions have sequence values above the persisted maximum.
 	mgr.StartTaskQueue()

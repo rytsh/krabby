@@ -105,7 +105,8 @@ func TestCompleteAndPing(t *testing.T) {
 
 		_ = json.NewEncoder(w).Encode(chatResponse{
 			Choices: []struct {
-				Message Message `json:"message"`
+				Message      Message `json:"message"`
+				FinishReason string  `json:"finish_reason"`
 			}{{Message: Message{Role: "assistant", Content: "pong"}}},
 		})
 	}))

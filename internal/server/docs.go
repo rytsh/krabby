@@ -18,7 +18,7 @@ func listRepoFiles(mgr docsService) ada.HandlerFunc {
 
 		entries, token, err := mgr.ListRepoFilesAt(c.Request.Context(), repoID(c.Request), subdir, snapshot, recursive)
 		if err != nil {
-			return c.SetStatus(http.StatusNotFound).SendJSON(map[string]string{"error": err.Error()})
+			return sendError(c, err, http.StatusNotFound)
 		}
 		c.Response.Header().Set("X-Krabby-Snapshot", token)
 
@@ -36,7 +36,7 @@ func globRepoFiles(mgr docsService) ada.HandlerFunc {
 
 		page, err := mgr.GlobRepoFiles(c.Request.Context(), repoID(c.Request), params.Get("snapshot"), pattern, queryInt(params.Get("limit"), 0))
 		if err != nil {
-			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+			return sendError(c, err, http.StatusBadRequest)
 		}
 		c.Response.Header().Set("X-Krabby-Snapshot", page.Snapshot)
 
@@ -67,7 +67,7 @@ func readRepoFile(mgr docsService) ada.HandlerFunc {
 
 		fc, err := mgr.ReadRepoFileAt(c.Request.Context(), repoID(c.Request), path, c.Request.URL.Query().Get("snapshot"), offset, maxBytes)
 		if err != nil {
-			return c.SetStatus(http.StatusNotFound).SendJSON(map[string]string{"error": err.Error()})
+			return sendError(c, err, http.StatusNotFound)
 		}
 
 		return c.SendJSON(fc)
@@ -78,7 +78,7 @@ func listDocs(mgr docsService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		docs, err := mgr.ListDocs(c.Request.Context(), repoID(c.Request))
 		if err != nil {
-			return c.SetStatus(http.StatusNotFound).SendJSON(map[string]string{"error": err.Error()})
+			return sendError(c, err, http.StatusNotFound)
 		}
 
 		return c.SendJSON(docs)
@@ -94,7 +94,7 @@ func getDoc(mgr docsService) ada.HandlerFunc {
 
 		doc, err := mgr.GetDoc(c.Request.Context(), repoID(c.Request), path, 0, 0)
 		if err != nil {
-			return c.SetStatus(http.StatusNotFound).SendJSON(map[string]string{"error": err.Error()})
+			return sendError(c, err, http.StatusNotFound)
 		}
 
 		return c.SendJSON(doc)
@@ -125,7 +125,7 @@ func searchDocs(mgr docsService) ada.HandlerFunc {
 
 		docs, err := mgr.SearchDocs(c.Request.Context(), scope, repo, namespace, mode, q, top)
 		if err != nil {
-			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+			return sendError(c, err, http.StatusBadRequest)
 		}
 
 		return c.SendJSON(docs)
@@ -155,7 +155,7 @@ func searchCode(mgr docsService) ada.HandlerFunc {
 				Path:    params.Get("path"),
 			})
 			if err != nil {
-				return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+				return sendError(c, err, http.StatusBadRequest)
 			}
 
 			return c.SendJSON(result)
@@ -175,7 +175,7 @@ func searchCode(mgr docsService) ada.HandlerFunc {
 
 			result, err := mgr.SearchCodeRegex(c.Request.Context(), repo, namespace, q, opts)
 			if err != nil {
-				return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+				return sendError(c, err, http.StatusBadRequest)
 			}
 
 			return c.SendJSON(result)
@@ -185,7 +185,7 @@ func searchCode(mgr docsService) ada.HandlerFunc {
 				Path: params.Get("path"),
 			})
 			if err != nil {
-				return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+				return sendError(c, err, http.StatusBadRequest)
 			}
 
 			return c.SendJSON(page)
@@ -206,6 +206,7 @@ func mergedGraph(mgr docsService) http.HandlerFunc {
 			return
 		}
 
+		setArtifactHeaders(w.Header())
 		http.ServeFile(w, r, path)
 	}
 }

@@ -440,7 +440,7 @@ func (p *Provider) get(ctx context.Context, cfg resolvedConfig, state syncState,
 	}
 
 	if res.StatusCode != http.StatusOK {
-		return nil, meta, fmt.Errorf("fetch api document: status %s: %s", res.Status, strutil.Truncate(string(body), 300))
+		return nil, meta, fmt.Errorf("fetch api document: status %s: %s", res.Status, strutil.ErrorExcerpt(body, res.Header.Get("Content-Type"), 300))
 	}
 	if len(body) == 0 {
 		return nil, meta, errors.New("api document is empty")
@@ -489,6 +489,14 @@ func describe(doc []byte) string {
 	head := string(trimmed[:min(len(trimmed), 512)])
 	if lower := strings.ToLower(head); strings.HasPrefix(lower, "<!doctype") || strings.HasPrefix(lower, "<html") {
 		return " (the url returned an HTML page, not a specification: point it at the raw document, e.g. /swagger.json, /v2/api-docs or /openapi.yaml)"
+	}
+
+	// A JSON envelope around the spec is the common case worth showing. Any
+	// other body (plain text, an unknown format) is described, not echoed:
+	// the preview tool fetches whatever URL it is given, and echoing the body
+	// would read it back to the caller.
+	if !strings.HasPrefix(head, "{") && !strings.HasPrefix(head, "[") {
+		return fmt.Sprintf(" (the url returned %d bytes that are not a JSON or YAML specification)", len(trimmed))
 	}
 
 	return " (document begins: " + strutil.Truncate(head, 200) + ")"

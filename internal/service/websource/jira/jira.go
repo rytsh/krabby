@@ -696,7 +696,7 @@ func (f *Fetcher) search(ctx context.Context, cfg resolvedConfig, jql string, st
 	}
 
 	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("search jira issues: status %s: %s", res.Status, strutil.Truncate(string(body), 300))
+		return nil, fmt.Errorf("search jira issues: status %s: %s", res.Status, strutil.ErrorExcerpt(body, res.Header.Get("Content-Type"), 300))
 	}
 
 	var result searchResult

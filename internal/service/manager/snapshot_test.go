@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -360,5 +361,36 @@ func TestSnapshotFollowsAForcePushedBranch(t *testing.T) {
 	}
 	if got := snapshotTestRead(t, filepath.Join(activePath, "version.txt")); got != "old\n" {
 		t.Fatalf("active clone changed: %q", got)
+	}
+}
+
+// add_repo on a tracked repository applies the overrides the call names and
+// keeps the rest. A whole-set replacement wiped a tuned docs prompt and skip
+// list because the call only mentioned include_extra.
+func TestAddRepoMergesOverridesIntoATrackedRepo(t *testing.T) {
+	m, id := readSymbolManager(t, map[string]string{"a.go": "package a\n"})
+	ctx := context.Background()
+
+	if _, _, err := m.reg.SetOverrides(ctx, id, registry.Overrides{
+		DocsPromptExtra: "Focus on billing.",
+		SkipStages:      []string{registry.StageCodeIndex},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, repo, existed, err := m.registerRepo(ctx, RepoSpec{
+		URL:       "https://example.com/team/billing.git",
+		Overrides: registry.Overrides{IncludeExtra: []string{"deploy/**/*.yaml"}},
+	})
+	if err != nil || !existed {
+		t.Fatalf("registerRepo = existed %v, err %v", existed, err)
+	}
+
+	got := repo.Overrides
+	if !slices.Equal(got.IncludeExtra, []string{"deploy/**/*.yaml"}) {
+		t.Errorf("IncludeExtra = %v, want the one the call named", got.IncludeExtra)
+	}
+	if got.DocsPromptExtra != "Focus on billing." || !got.SkipsStage(registry.StageCodeIndex) {
+		t.Errorf("overrides the call did not name were lost: %+v", got)
 	}
 }

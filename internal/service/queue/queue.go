@@ -517,19 +517,16 @@ func (q *Queue) Restore(seq uint64, t Task) (*Handle, RestoreResult) {
 	return q.submit(t)
 }
 
-// CancelPending drops queued (not-yet-started) tasks whose ID matches id,
-// marking them canceled and closing their handles. Running tasks are
-// unaffected (cancel those through their own job context). It reports how many
-// queued tasks were removed.
-func (q *Queue) CancelPending(id string) int {
-	q.mu.Lock()
-
+// cancelPendingLocked removes every queued task match selects, marking it
+// canceled and recording it in recent history. It returns the tasks whose
+// handles are to be completed and whose durable records are to be removed;
+// the caller does both, through removeAndComplete, after releasing q.mu. A
+// task still being persisted is completed by its Submit once that finishes.
+// Callers hold q.mu.
+func (q *Queue) cancelPendingLocked(match func(*task) bool) (n int, remove, complete []*task) {
 	kept := q.pending[:0]
-	var remove, complete []*task
-	p := q.persist
-	n := 0
 	for _, t := range q.pending {
-		if t.id != id {
+		if !match(t) {
 			kept = append(kept, t)
 
 			continue
@@ -542,87 +539,28 @@ func (q *Queue) CancelPending(id string) int {
 		q.pushRecentLocked(t)
 		if !t.persisting {
 			complete = append(complete, t)
-			if p != nil && t.persisted {
+			if q.persist != nil && t.persisted {
 				remove = append(remove, t)
 				q.persistWG.Add(1)
 			}
 		}
 		n++
 	}
+	// Clear the tail so canceled tasks are not kept reachable by the backing
+	// array.
+	clear(q.pending[len(kept):])
 	q.pending = kept
-	q.mu.Unlock()
 
-	q.removeAndComplete(p, remove, complete)
-	q.wakeUp()
-
-	return n
+	return n, remove, complete
 }
 
-// CancelAllPending drops every queued task without affecting running work. The
-// canceled tasks remain in recent history so the cancellation is visible.
-func (q *Queue) CancelAllPending() int {
-	q.mu.Lock()
-
-	n := len(q.pending)
-	var remove, complete []*task
-	p := q.persist
-	for _, t := range q.pending {
-		t.state = StateCanceled
-		t.endedAt = time.Now()
-		t.canceled = true
-		q.removeKeyLocked(t)
-		q.pushRecentLocked(t)
-		if !t.persisting {
-			complete = append(complete, t)
-			if p != nil && t.persisted {
-				remove = append(remove, t)
-				q.persistWG.Add(1)
-			}
-		}
-	}
-	q.pending = nil
-	q.mu.Unlock()
-
-	q.removeAndComplete(p, remove, complete)
-	q.wakeUp()
-
-	return n
-}
-
-// CancelID cancels every queued and running task whose ID matches id. It
-// returns the number of tasks cancellation was requested for.
-func (q *Queue) CancelID(id string) int {
-	q.mu.Lock()
-
-	kept := q.pending[:0]
-	var remove, complete []*task
-	p := q.persist
+// cancelActiveLocked cancels the context of every running task match
+// selects and not already canceled. It reaches the terminal canceled state
+// when its Run returns. Callers hold q.mu.
+func (q *Queue) cancelActiveLocked(match func(*task) bool) int {
 	n := 0
-	for _, t := range q.pending {
-		if t.id != id {
-			kept = append(kept, t)
-
-			continue
-		}
-
-		t.state = StateCanceled
-		t.endedAt = time.Now()
-		t.canceled = true
-		q.removeKeyLocked(t)
-		q.pushRecentLocked(t)
-		if !t.persisting {
-			complete = append(complete, t)
-			if p != nil && t.persisted {
-				remove = append(remove, t)
-				q.persistWG.Add(1)
-			}
-		}
-		n++
-	}
-	q.pending = kept
-
 	for _, t := range q.active {
-		if t.id != id || t.canceled {
+		if t.canceled || !match(t) {
 			continue
 		}
 
@@ -632,12 +570,45 @@ func (q *Queue) CancelID(id string) int {
 		}
 		n++
 	}
+
+	return n
+}
+
+// cancelMatching cancels queued tasks match selects and, when running is set,
+// running ones too. It returns how many tasks cancellation was requested for.
+func (q *Queue) cancelMatching(match func(*task) bool, running bool) int {
+	q.mu.Lock()
+	p := q.persist
+	n, remove, complete := q.cancelPendingLocked(match)
+	if running {
+		n += q.cancelActiveLocked(match)
+	}
 	q.mu.Unlock()
 
 	q.removeAndComplete(p, remove, complete)
 	q.wakeUp()
 
 	return n
+}
+
+// CancelPending drops queued (not-yet-started) tasks whose ID matches id,
+// marking them canceled and closing their handles. Running tasks are
+// unaffected (cancel those through their own job context). It reports how many
+// queued tasks were removed.
+func (q *Queue) CancelPending(id string) int {
+	return q.cancelMatching(func(t *task) bool { return t.id == id }, false)
+}
+
+// CancelAllPending drops every queued task without affecting running work. The
+// canceled tasks remain in recent history so the cancellation is visible.
+func (q *Queue) CancelAllPending() int {
+	return q.cancelMatching(func(*task) bool { return true }, false)
+}
+
+// CancelID cancels every queued and running task whose ID matches id. It
+// returns the number of tasks cancellation was requested for.
+func (q *Queue) CancelID(id string) int {
+	return q.cancelMatching(func(t *task) bool { return t.id == id }, true)
 }
 
 // LiveState returns the current state of work for id. Running wins over queued
@@ -664,51 +635,7 @@ func (q *Queue) LiveState(id string) State {
 // queued task is removed immediately; a running task's context is canceled and
 // reaches the terminal canceled state when its Run function returns.
 func (q *Queue) CancelSeq(seq uint64) bool {
-	q.mu.Lock()
-
-	for i, t := range q.pending {
-		if t.seq != seq {
-			continue
-		}
-
-		q.pending = append(q.pending[:i], q.pending[i+1:]...)
-		t.state = StateCanceled
-		t.endedAt = time.Now()
-		t.canceled = true
-		q.removeKeyLocked(t)
-		q.pushRecentLocked(t)
-		p := q.persist
-		complete := !t.persisting
-		remove := complete && p != nil && t.persisted
-		if remove {
-			q.persistWG.Add(1)
-		}
-		q.mu.Unlock()
-
-		if remove {
-			q.removePersisted(p, t)
-			q.persistWG.Done()
-		}
-		if complete {
-			t.handle.complete(t.err)
-		}
-		q.wakeUp()
-
-		return true
-	}
-
-	if t, ok := q.active[seq]; ok {
-		t.canceled = true
-		if t.cancel != nil {
-			t.cancel()
-		}
-		q.mu.Unlock()
-
-		return true
-	}
-	q.mu.Unlock()
-
-	return false
+	return q.cancelMatching(func(t *task) bool { return t.seq == seq }, true) > 0
 }
 
 // Bump moves the queued task with the given seq to the front of the backlog so

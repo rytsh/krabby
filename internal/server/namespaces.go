@@ -33,7 +33,7 @@ type upsertNamespaceRequest struct {
 func upsertNamespace(mgr repoAdmin) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req upsertNamespaceRequest
-		if err := c.Bind(&req); err != nil {
+		if err := bindJSON(c, &req); err != nil {
 			return c.SetStatus(http.StatusBadRequest).Err(err)
 		}
 
@@ -69,7 +69,7 @@ func setRepoNamespace(mgr repoAdmin) ada.HandlerFunc {
 		id := repoID(c.Request)
 
 		var req setRepoNamespaceRequest
-		if err := c.Bind(&req); err != nil {
+		if err := bindJSON(c, &req); err != nil {
 			return c.SetStatus(http.StatusBadRequest).Err(err)
 		}
 

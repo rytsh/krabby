@@ -101,9 +101,21 @@ type Client struct {
 // Option customizes a client at construction.
 type Option func(*Client)
 
-// WithResponseLimit bounds response bytes, including SSE framing. Zero keeps
-// existing unbounded behavior; callers doing bounded research should set it.
-func WithResponseLimit(bytes int) Option { return func(c *Client) { c.responseLimit = max(0, bytes) } }
+// WithResponseLimit bounds response bytes, including SSE framing. Zero or less
+// keeps defaultResponseLimit.
+func WithResponseLimit(bytes int) Option {
+	return func(c *Client) {
+		if bytes > 0 {
+			c.responseLimit = bytes
+		}
+	}
+}
+
+// defaultResponseLimit bounds a reply when the caller sets no limit. The idle
+// timer resets on every line, so an endpoint that keeps streaming would
+// otherwise grow memory without end; 32 MiB is far beyond any reply a
+// documentation or summary prompt produces.
+const defaultResponseLimit = 32 << 20
 
 // WithTracer attaches an LLM-observability tracer. Passing nil is allowed and
 // leaves the client untraced.
@@ -146,10 +158,11 @@ func New(cfg config.LLM, opts ...Option) (*Client, error) {
 		model:   cfg.Model,
 		// No total timeout on the http.Client: streaming responses can be
 		// long-lived. Liveness is enforced by the per-chunk idle timer.
-		http:        &http.Client{},
-		idleTimeout: idle,
-		tracer:      langfuse.Disabled(),
-		system:      langfuse.SystemFromBaseURL(cfg.BaseURL),
+		http:          &http.Client{},
+		idleTimeout:   idle,
+		tracer:        langfuse.Disabled(),
+		system:        langfuse.SystemFromBaseURL(cfg.BaseURL),
+		responseLimit: defaultResponseLimit,
 	}
 
 	for _, opt := range opts {
@@ -202,12 +215,19 @@ type Meta struct {
 	FirstTokenAt time.Time
 	// Attempts counts how many HTTP requests were made, including retries.
 	Attempts int
+	// Truncated reports a reply that did not end on its own: the model hit
+	// its token limit (finish_reason "length"), or the stream closed without
+	// the [DONE] marker. The text is what arrived, and its end may be
+	// missing; a caller that relies on the whole reply should treat it as
+	// incomplete.
+	Truncated bool
 }
 
 type chatResponse struct {
 	Model   string `json:"model"`
 	Choices []struct {
-		Message Message `json:"message"`
+		Message      Message `json:"message"`
+		FinishReason string  `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *Usage    `json:"usage,omitempty"`
 	Error *apiError `json:"error,omitempty"`
@@ -391,6 +411,7 @@ func (c *Client) complete(ctx context.Context, messages []Message, maxTokens int
 		if err == nil {
 			meta.Usage = res.usage
 			meta.FirstTokenAt = res.firstTokenAt
+			meta.Truncated = res.truncated
 			if res.model != "" {
 				meta.Model = res.model
 			}
@@ -463,6 +484,7 @@ type completion struct {
 	// firstTokenAt is when the first content delta arrived; zero when the
 	// gateway returned a non-streamed body.
 	firstTokenAt time.Time
+	truncated    bool
 }
 
 // completeOnce performs a single streaming chat call. retryable reports whether
@@ -581,6 +603,8 @@ func (c *Client) readStream(body io.Reader, onProgress func()) (completion, erro
 		out           strings.Builder
 		res           completion
 		sawData       bool
+		sawDone       bool
+		finishLength  bool
 		allRaw        strings.Builder // captured for the non-streaming fallback
 		responseBytes int
 	)
@@ -589,11 +613,16 @@ func (c *Client) readStream(body io.Reader, onProgress func()) (completion, erro
 		onProgress()
 		raw := sc.Text()
 		responseBytes += len(raw) + 1
-		if c.responseLimit > 0 && responseBytes > c.responseLimit {
+		if responseBytes > c.responseLimit {
 			return completion{}, ErrResponseTooLarge
 		}
-		allRaw.WriteString(raw)
-		allRaw.WriteByte('\n')
+		// The raw copy only serves the non-streaming fallback. Once the body
+		// has proved to be a stream, keeping it doubles the memory a long
+		// reply costs for nothing.
+		if !sawData {
+			allRaw.WriteString(raw)
+			allRaw.WriteByte('\n')
+		}
 
 		line := strings.TrimSpace(raw)
 		if line == "" || !strings.HasPrefix(line, "data:") {
@@ -602,6 +631,8 @@ func (c *Client) readStream(body io.Reader, onProgress func()) (completion, erro
 
 		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if payload == "[DONE]" {
+			sawDone = true
+
 			break
 		}
 
@@ -623,6 +654,9 @@ func (c *Client) readStream(body io.Reader, onProgress func()) (completion, erro
 		}
 
 		for _, ch := range chunk.Choices {
+			if ch.FinishReason != nil && *ch.FinishReason == "length" {
+				finishLength = true
+			}
 			if ch.Delta.Content == "" {
 				continue
 			}
@@ -644,6 +678,7 @@ func (c *Client) readStream(body io.Reader, onProgress func()) (completion, erro
 
 	if sawData {
 		res.text = out.String()
+		res.truncated = finishLength || !sawDone
 
 		return res, nil
 	}
@@ -661,6 +696,7 @@ func (c *Client) readStream(body io.Reader, onProgress func()) (completion, erro
 
 			res.model = whole.Model
 			res.text = whole.Choices[0].Message.Content
+			res.truncated = whole.Choices[0].FinishReason == "length"
 
 			return res, nil
 		}

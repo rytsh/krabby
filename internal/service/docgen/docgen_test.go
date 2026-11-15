@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/rytsh/krabby/internal/config"
 	"github.com/rytsh/krabby/internal/service/graphquery"
@@ -913,5 +914,141 @@ func TestFailedSynthesisKeepsThePreviousDocument(t *testing.T) {
 	}
 	if man.PromptHash != "" {
 		t.Error("manifest records a prompt hash for a document this run did not write; the next build would reuse it as current")
+	}
+}
+
+// A file the model left out of a group summary gets a placeholder for this
+// build only. Cached under the file's hash, the placeholder would be reused
+// until the file changed, and the file would never be summarized.
+func TestOmittedFileIsSummarizedAgainNextBuild(t *testing.T) {
+	clone := t.TempDir()
+	writeSrc(t, clone, "a.go", "package a\nfunc A() {}\n")
+	writeSrc(t, clone, "b.go", "package a\nfunc B() {}\n")
+
+	var omitB atomic.Bool
+	omitB.Store(true)
+	var summaryCalls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(body), "Summarize each of the following files") {
+			// Without a graph each file is its own group. The model answers
+			// a.go and, while omitB is set, gives an empty reply for b.go.
+			atomic.AddInt32(&summaryCalls, 1)
+			reply := `summary a`
+			if strings.Contains(string(body), "FILE: b.go") {
+				reply = `summary b`
+				if omitB.Load() {
+					reply = ` `
+				}
+			}
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"` + reply + `"}}]}`))
+
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"# Doc"}}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	client, err := llm.New(config.LLM{BaseURL: srv.URL, Model: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gen := New(config.Docs{SkipIntegrationProfile: true}, client, nil, nil, nil)
+	docsDir := filepath.Join(t.TempDir(), "docs")
+	if _, err := gen.Generate(context.Background(), "owner/repo", clone, docsDir, config.DocsOverride{}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	omitB.Store(false)
+	before := atomic.LoadInt32(&summaryCalls)
+	if _, err := gen.Generate(context.Background(), "owner/repo", clone, docsDir, config.DocsOverride{}, false); err != nil {
+		t.Fatal(err)
+	}
+	if atomic.LoadInt32(&summaryCalls) == before {
+		t.Fatal("the omitted file was not summarized again; its placeholder was cached as final")
+	}
+	raw, err := os.ReadFile(filepath.Join(docsDir, summariesDir, "b.go.sum"))
+	if err != nil || !strings.Contains(string(raw), "summary b") {
+		t.Fatalf("b.go summary = %q, %v; want the real summary", raw, err)
+	}
+}
+
+// When a group fails to summarize, the summary set is missing its files. The
+// previous documentation.md must stay, not be rewritten without that area.
+func TestFailedGroupKeepsThePreviousDocument(t *testing.T) {
+	clone := t.TempDir()
+	writeSrc(t, clone, "a.go", "package a\nfunc A() {}\n")
+
+	var failB atomic.Bool
+	var synthCalls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		switch {
+		case strings.Contains(string(body), "Per-file summaries"):
+			atomic.AddInt32(&synthCalls, 1)
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"# Doc v` + fmt.Sprint(atomic.LoadInt32(&synthCalls)) + `"}}]}`))
+		case failB.Load() && strings.Contains(string(body), "FILE: b.go"):
+			http.Error(w, "overloaded", http.StatusBadRequest)
+		default:
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"a summary"}}]}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	client, err := llm.New(config.LLM{BaseURL: srv.URL, Model: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gen := New(config.Docs{SkipIntegrationProfile: true}, client, nil, nil, nil)
+	docsDir := filepath.Join(t.TempDir(), "docs")
+	if _, err := gen.Generate(context.Background(), "owner/repo", clone, docsDir, config.DocsOverride{}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	writeSrc(t, clone, "b.go", "package a\nfunc B() {}\n")
+	failB.Store(true)
+	if _, err := gen.Generate(context.Background(), "owner/repo", clone, docsDir, config.DocsOverride{}, false); err == nil {
+		t.Fatal("Generate succeeded while a group failed")
+	}
+
+	if n := atomic.LoadInt32(&synthCalls); n != 1 {
+		t.Errorf("synthesis ran %d times, want once: a partial summary set must not replace the document", n)
+	}
+	raw, _ := os.ReadFile(filepath.Join(docsDir, DocName))
+	if !strings.Contains(string(raw), "Doc v1") {
+		t.Errorf("documentation = %q, want the previous one kept", raw)
+	}
+}
+
+// The synthesis budget is a cap, whatever the file count, and a cut never
+// splits a character.
+func TestJoinSummariesStaysWithinBudget(t *testing.T) {
+	dir := t.TempDir()
+	var metas []DocMeta
+	for i := range 200 {
+		name := fmt.Sprintf("s%03d.sum", i)
+		body := strings.Repeat("é", 300) // 600 bytes of two-byte runes
+		if i < 5 {
+			body = "short"
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		metas = append(metas, DocMeta{Path: name})
+	}
+
+	const budget = 20_000
+	out := joinSummaries(dir, metas, budget)
+
+	// Separators and "(truncated)" markers come on top of the content share.
+	overhead := len(metas) * len("\n\n---\n\n\n(truncated)")
+	if len(out) > budget+overhead {
+		t.Errorf("joined %d bytes for a %d budget", len(out), budget)
+	}
+	if !utf8.ValidString(out) {
+		t.Error("a truncation split a multi-byte character")
+	}
+	if strings.Count(out, "short") != 5 {
+		t.Error("short summaries were cut although they fit their share")
 	}
 }

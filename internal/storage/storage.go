@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/dgraph-io/badger/v4"
@@ -157,22 +156,4 @@ func countMemFiles(path string) int {
 	}
 
 	return n
-}
-
-// DirSize returns the on-disk size of a database directory, for logging how
-// much data the tuned caches are working against. It reports 0 on any error.
-func DirSize(path string) int64 {
-	var total int64
-	_ = filepath.WalkDir(path, func(_ string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil //nolint:nilerr // best-effort accounting
-		}
-		if info, ierr := d.Info(); ierr == nil {
-			total += info.Size()
-		}
-
-		return nil
-	})
-
-	return total
 }

@@ -6,12 +6,14 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
 	"github.com/rytsh/krabby/internal/service/gitops"
+	"github.com/rytsh/krabby/internal/service/registry"
 )
 
 // gitPushEvent covers the repository identity fields used by GitHub, GitLab,
@@ -32,10 +34,22 @@ type gitPushEvent struct {
 	RepositoryURL string `json:"repository_url"`
 }
 
+// maxWebhookBodyBytes is GitHub's documented push payload ceiling.
+const maxWebhookBodyBytes = 25 << 20
+
 func gitWebhook(mgr webhookService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		// GitHub sends push payloads of up to 25 MB. A body cut at a smaller
+		// limit fails the signature check and reads as a forged request, so
+		// an oversized one is refused as what it is.
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxWebhookBodyBytes))
 		if err != nil {
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
+
+				return
+			}
 			http.Error(w, "read body", http.StatusBadRequest)
 
 			return
@@ -67,7 +81,11 @@ func gitWebhook(mgr webhookService) http.HandlerFunc {
 
 		repo, err := mgr.ResolveRepo(r.Context(), ref)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			status := http.StatusInternalServerError
+			if errors.Is(err, registry.ErrAmbiguousRepo) {
+				status = http.StatusConflict
+			}
+			http.Error(w, err.Error(), status)
 
 			return
 		}

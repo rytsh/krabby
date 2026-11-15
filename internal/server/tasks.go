@@ -45,7 +45,7 @@ type taskConcurrencyRequest struct {
 func setTaskConcurrency(mgr queueService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req taskConcurrencyRequest
-		if err := c.Bind(&req); err != nil {
+		if err := bindJSON(c, &req); err != nil {
 			return c.SetStatus(http.StatusBadRequest).Err(err)
 		}
 

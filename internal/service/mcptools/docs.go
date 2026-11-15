@@ -3,6 +3,7 @@ package mcptools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -1099,8 +1100,9 @@ func addDocConfigTools(server *mcp.Server, mgr docsSettingsService) {
 		Name: "set_docs_config",
 		Description: "Update the docs/RAG configuration and rebuild the clients live (no restart). " +
 			"API key fields are write-only: leave them empty to keep the existing secret. " +
-			"Returns the redacted resulting config; a rebuild error is reported while the previous " +
-			"working configuration stays active.",
+			"Returns the redacted resulting config. When the save succeeds but rebuilding the clients fails, " +
+			"the result is an error that carries the stored config: the running clients stay the previous " +
+			"ones until the next successful save or a restart, which applies what was stored.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args setDocsConfigArgs) (*mcp.CallToolResult, any, error) {
 		patch, err := args.patch(req.Params.Arguments)
 		if err != nil {
@@ -1108,6 +1110,14 @@ func addDocConfigTools(server *mcp.Server, mgr docsSettingsService) {
 		}
 
 		cfg, err := mgr.PatchDocsConfig(ctx, patch)
+		if errors.Is(err, manager.ErrSavedNotApplied) {
+			cfg.DocsDefaultPrompt = ""
+			res := jsonResult(cfg)
+			res.IsError = true
+			res.Content = append([]mcp.Content{&mcp.TextContent{Text: err.Error()}}, res.Content...)
+
+			return res, nil, nil
+		}
 		if err != nil {
 			return nil, nil, err
 		}

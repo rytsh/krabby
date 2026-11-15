@@ -61,7 +61,7 @@ func (m *Manager) PrunePushItems(ctx context.Context, name string, keep []string
 		return 0, err
 	}
 	if col == nil {
-		return 0, fmt.Errorf("collection %s not found", name)
+		return 0, notFound("collection %s not found", name)
 	}
 	if col.Type != websource.TypePush {
 		return 0, fmt.Errorf("collection %s is type %q; prune requires type %q", name, col.Type, websource.TypePush)

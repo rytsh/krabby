@@ -13,6 +13,7 @@ import (
 	"github.com/rakunlabs/bw"
 	"github.com/rakunlabs/query"
 
+	"github.com/rytsh/krabby/internal/service/searchutil"
 	"github.com/rytsh/krabby/internal/service/vectorstore"
 	"github.com/rytsh/krabby/internal/storage"
 )
@@ -95,7 +96,7 @@ type TextStore struct {
 
 	// statsBucket holds the corpus-derived query tuning; see textstats.go.
 	statsBucket *bw.Bucket[textStats]
-	stats       statsCache
+	stats       searchutil.StatsCache
 
 	// A full-text write expands into one key per distinct term, so how many
 	// records fit in one Badger transaction depends on how long and how varied

@@ -166,7 +166,8 @@ func (s *scheduler) reconcileWeb(ctx context.Context) {
 	crons := s.buildWebCrons(schedules)
 
 	// No web schedules: tear down any existing set and remember the empty
-	// signature so we do not rebuild every tick.
+	// signature. With no cron set the check above still runs each tick, which
+	// only costs this short path.
 	if len(crons) == 0 {
 		s.stopWeb()
 		s.webSig = sig

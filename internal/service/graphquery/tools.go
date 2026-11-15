@@ -109,7 +109,7 @@ func (g *Graph) QueryGraph(question string, opts QueryGraphOpts) string {
 func (g *Graph) GetNode(label string) string {
 	matches := g.findNode(strings.ToLower(label))
 	if len(matches) == 0 {
-		return fmt.Sprintf("No node matching '%s' found.", strings.ToLower(label))
+		return fmt.Sprintf("No node matching '%s' found.", sanitize(strings.ToLower(label)))
 	}
 
 	id := matches[0]
@@ -153,7 +153,7 @@ func (g *Graph) GetNode(label string) string {
 func (g *Graph) GetNeighborsPage(label, relationFilter string, page, perPage int) string {
 	matches := g.findNode(strings.ToLower(label))
 	if len(matches) == 0 {
-		return fmt.Sprintf("No node matching '%s' found.", strings.ToLower(label))
+		return fmt.Sprintf("No node matching '%s' found.", sanitize(strings.ToLower(label)))
 	}
 
 	nid := matches[0]
@@ -248,16 +248,8 @@ func (g *Graph) GodNodes(topN int) string {
 	}
 
 	lines := []string{"God nodes (most connected):"}
-	i := 0
-	for _, id := range g.nodesByDegreeDesc() {
-		if g.isFileNode(id) || g.isConceptNode(id) || g.isJSONKeyNode(id) {
-			continue
-		}
-		i++
-		lines = append(lines, fmt.Sprintf("  %d. %s - %d edges", i, g.labelOf(id), g.Degree(id)))
-		if i >= topN {
-			break
-		}
+	for i, n := range g.GodNodesList(topN) {
+		lines = append(lines, fmt.Sprintf("  %d. %s - %d edges", i+1, sanitize(n.Label), n.Degree))
 	}
 
 	return strings.Join(lines, "\n")
@@ -309,17 +301,17 @@ func (g *Graph) ShortestPath(source, target string, maxHops int) string {
 	srcScored := g.scoreNodes(splitLower(source))
 	tgtScored := g.scoreNodes(splitLower(target))
 	if len(srcScored) == 0 {
-		return fmt.Sprintf("No node matching source '%s' found.", source)
+		return fmt.Sprintf("No node matching source '%s' found.", sanitize(source))
 	}
 	if len(tgtScored) == 0 {
-		return fmt.Sprintf("No node matching target '%s' found.", target)
+		return fmt.Sprintf("No node matching target '%s' found.", sanitize(target))
 	}
 
 	srcID, tgtID := srcScored[0].id, tgtScored[0].id
 	if srcID == tgtID {
 		return fmt.Sprintf(
 			"'%s' and '%s' both resolved to the same node '%s'. Use a more specific label or the exact node ID.",
-			source, target, srcID)
+			sanitize(source), sanitize(target), sanitize(srcID))
 	}
 
 	var warnings []string
@@ -337,20 +329,23 @@ func (g *Graph) ShortestPath(source, target string, maxHops int) string {
 		}
 	}
 
-	path, ok := g.undirectedShortestPath(srcID, tgtID)
+	// One hop past the limit is searched so a path that is merely too long
+	// is reported as such, not as missing.
+	path, ok := g.undirectedShortestPath(srcID, tgtID, maxHops+1)
 	if !ok {
-		return fmt.Sprintf("No path found between '%s' and '%s'.", g.labelOf(srcID), g.labelOf(tgtID))
+		return fmt.Sprintf("No path within %d hops between '%s' and '%s'.", maxHops+1,
+			sanitize(g.labelOf(srcID)), sanitize(g.labelOf(tgtID)))
 	}
 
 	hops := len(path) - 1
 	if hops > maxHops {
-		return fmt.Sprintf("Path exceeds max_hops=%d (%d hops found).", maxHops, hops)
+		return fmt.Sprintf("Path exceeds max_hops=%d (at least %d hops).", maxHops, hops)
 	}
 
 	var segments []string
 	for i, hop := range path {
 		if i == 0 {
-			segments = append(segments, g.labelOf(hop.node))
+			segments = append(segments, sanitize(g.labelOf(hop.node)))
 
 			continue
 		}
@@ -365,9 +360,9 @@ func (g *Graph) ShortestPath(source, target string, maxHops int) string {
 		}
 
 		if hop.forward {
-			segments = append(segments, fmt.Sprintf("--%s%s--> %s", rel, confStr, g.labelOf(hop.node)))
+			segments = append(segments, fmt.Sprintf("--%s%s--> %s", sanitize(rel), confStr, sanitize(g.labelOf(hop.node))))
 		} else {
-			segments = append(segments, fmt.Sprintf("<--%s%s-- %s", rel, confStr, g.labelOf(hop.node)))
+			segments = append(segments, fmt.Sprintf("<--%s%s-- %s", sanitize(rel), confStr, sanitize(g.labelOf(hop.node))))
 		}
 	}
 
@@ -389,8 +384,10 @@ type pathHop struct {
 }
 
 // undirectedShortestPath is BFS over the undirected view (successors +
-// predecessors), returning the hops of the path and whether one exists.
-func (g *Graph) undirectedShortestPath(src, tgt string) ([]pathHop, bool) {
+// predecessors), returning the hops of the path and whether one exists within
+// maxDepth edges. The bound stops a miss on a large graph from walking all of
+// it; maxDepth <= 0 means no bound.
+func (g *Graph) undirectedShortestPath(src, tgt string, maxDepth int) ([]pathHop, bool) {
 	if src == tgt {
 		return []pathHop{{node: src}}, true
 	}
@@ -404,6 +401,7 @@ func (g *Graph) undirectedShortestPath(src, tgt string) ([]pathHop, bool) {
 	}
 
 	prev := map[string]step{src: {}}
+	depth := map[string]int{src: 0}
 	queue := []string{src}
 	for len(queue) > 0 {
 		cur := queue[0]
@@ -424,9 +422,13 @@ func (g *Graph) undirectedShortestPath(src, tgt string) ([]pathHop, bool) {
 			return path, true
 		}
 
+		if maxDepth > 0 && depth[cur] >= maxDepth {
+			continue
+		}
 		for _, nb := range g.undirectedEdges(cur) {
 			if _, seen := prev[nb.other]; !seen {
 				prev[nb.other] = step{from: cur, edge: nb.edge, forward: nb.forward}
+				depth[nb.other] = depth[cur] + 1
 				queue = append(queue, nb.other)
 			}
 		}

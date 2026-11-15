@@ -480,6 +480,17 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 	incremental := watermark != ""
 
 	var maxSeen time.Time
+	// oldestFailed is the earliest version time of a page that could not be
+	// converted. The watermark must not pass it, or that page would never be
+	// fetched again until someone edited it.
+	var oldestFailed time.Time
+	emitTracked := func(r websource.RemotePage) error {
+		if r.Err != nil && !r.UpdatedAt.IsZero() && (oldestFailed.IsZero() || r.UpdatedAt.Before(oldestFailed)) {
+			oldestFailed = r.UpdatedAt
+		}
+
+		return emit(r)
+	}
 
 	// A zero cap is uncapped: the walk streams, so its memory does not grow
 	// with the space and there is nothing to protect against by stopping early.
@@ -517,7 +528,7 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 				continue
 			}
 
-			if err := emit(pageToRemote(base, page)); err != nil {
+			if err := emitTracked(pageToRemote(base, page)); err != nil {
 				return nil, err
 			}
 		}
@@ -563,7 +574,7 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 			}
 			rootChanged := !incremental || !w.Before(parseConfluenceTime(watermark))
 			if rootChanged && labelSelected(*root, cfg.IncludeLabels, cfg.ExcludeLabels) {
-				if err := emit(pageToRemote(base, *root)); err != nil {
+				if err := emitTracked(pageToRemote(base, *root)); err != nil {
 					return nil, err
 				}
 			}
@@ -574,6 +585,9 @@ func (f *Fetcher) Fetch(ctx context.Context, col *websource.Collection, _ []*web
 	// pages modified within the boundary minute are not skipped next run (the
 	// manager's hash check makes the small re-fetch a no-op).
 	nextWatermark := state.Watermark
+	if !oldestFailed.IsZero() && oldestFailed.Before(maxSeen) {
+		maxSeen = oldestFailed
+	}
 	if !maxSeen.IsZero() {
 		nextWatermark = maxSeen.Add(-time.Minute).Format(confluenceTimeLayout)
 	}
@@ -765,7 +779,7 @@ func (f *Fetcher) get(ctx context.Context, cfg resolvedConfig, endpoint string) 
 	}
 
 	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("confluence request: status %s: %s", res.Status, strutil.Truncate(string(body), 300))
+		return nil, fmt.Errorf("confluence request: status %s: %s", res.Status, strutil.ErrorExcerpt(body, res.Header.Get("Content-Type"), 300))
 	}
 
 	return body, nil

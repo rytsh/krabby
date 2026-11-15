@@ -414,10 +414,10 @@ func (m *Manager) tryLockKey(key string) (func(), bool) {
 
 // RepoSpec describes a repository to track. Only URL is required.
 //
-// Namespace and Overrides apply to a newly registered repo only: adding a repo
-// that is already tracked stays the idempotent "just refresh it" operation it
-// has always been, rather than silently rewriting the configuration someone
-// tuned earlier. Use SetRepoNamespace / SetRepoOverrides to change those.
+// Namespace and Branch apply to a newly registered repo only. For a repo that
+// is already tracked, the overrides the spec sets are merged into the stored
+// ones and the rest are kept (see Overrides.Merge); SetRepoNamespace and
+// SetRepoOverrides change the others, and SetRepoOverrides can clear fields.
 type RepoSpec struct {
 	URL       string
 	Branch    string
@@ -533,7 +533,17 @@ func (m *Manager) registerRepo(ctx context.Context, spec RepoSpec) (id string, r
 		updated, _, serr := func() (*registry.Repo, registry.Overrides, error) {
 			defer m.lockKey(id)()
 
-			return m.reg.SetOverrides(ctx, id, spec.Overrides)
+			// Re-read under the lock: the merge must start from what is
+			// stored now, not from the copy read before waiting for it.
+			cur, err := m.reg.Get(ctx, id)
+			if err != nil {
+				return nil, registry.Overrides{}, err
+			}
+			if cur == nil {
+				return nil, registry.Overrides{}, notFound("repo %s not found", id)
+			}
+
+			return m.reg.SetOverrides(ctx, id, cur.Overrides.Merge(spec.Overrides))
 		}()
 		if serr != nil {
 			return "", nil, false, serr
@@ -568,7 +578,7 @@ func (m *Manager) SetRepoNamespace(ctx context.Context, ref, namespace string) (
 		return nil, err
 	}
 	if repo == nil {
-		return nil, fmt.Errorf("repo %s not found", ref)
+		return nil, notFound("repo %s not found", ref)
 	}
 
 	defer m.lockKey(repo.ID)()
@@ -590,7 +600,7 @@ func (m *Manager) SetRepoOverrides(ctx context.Context, ref string, over registr
 		return nil, err
 	}
 	if repo == nil {
-		return nil, fmt.Errorf("repo %s not found", ref)
+		return nil, notFound("repo %s not found", ref)
 	}
 
 	// Serialize against the pipeline: a build reads the overrides it was
@@ -710,7 +720,7 @@ func (m *Manager) RemoveRepo(ctx context.Context, id string) error {
 	}
 
 	if repo == nil {
-		return fmt.Errorf("repo %s not found", id)
+		return notFound("repo %s not found", id)
 	}
 
 	m.engine.Invalidate(graphbuilder.GraphPath(repo.Path))

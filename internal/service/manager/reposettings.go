@@ -2,7 +2,6 @@ package manager
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/rytsh/krabby/internal/config"
 	"github.com/rytsh/krabby/internal/service/docgen"
@@ -98,7 +97,7 @@ func (m *Manager) RepoSettings(ctx context.Context, ref string) (*RepoSettings, 
 		return nil, err
 	}
 	if repo == nil {
-		return nil, fmt.Errorf("repo %s not found", ref)
+		return nil, notFound("repo %s not found", ref)
 	}
 
 	s, err := m.settings.Get(ctx)

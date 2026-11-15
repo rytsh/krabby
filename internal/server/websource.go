@@ -147,7 +147,7 @@ func listSources(mgr sourceService) ada.HandlerFunc {
 func testSourceConfig(mgr sourceService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req sourceConfigTestRequest
-		if err := c.Bind(&req); err != nil {
+		if err := bindJSON(c, &req); err != nil {
 			return c.SetStatus(http.StatusBadRequest).Err(err)
 		}
 
@@ -158,17 +158,17 @@ func testSourceConfig(mgr sourceService) ada.HandlerFunc {
 func addSource(mgr sourceService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req sourceRequest
-		if err := c.Bind(&req); err != nil {
+		if err := bindJSON(c, &req); err != nil {
 			return c.SetStatus(http.StatusBadRequest).Err(err)
 		}
 
 		col, err := req.collection()
 		if err != nil {
-			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+			return sendError(c, err, http.StatusBadRequest)
 		}
 
 		if err := mgr.AddWebCollection(c.Request.Context(), col); err != nil {
-			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+			return sendError(c, err, http.StatusBadRequest)
 		}
 
 		return c.SetStatus(http.StatusAccepted).SendJSON(viewSource(mgr, col, 0))
@@ -250,7 +250,7 @@ func queryInt(s string, def int) int {
 func updateSource(mgr sourceService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req sourceUpdateRequest
-		if err := c.Bind(&req); err != nil {
+		if err := bindJSON(c, &req); err != nil {
 			return c.SetStatus(http.StatusBadRequest).Err(err)
 		}
 
@@ -258,14 +258,14 @@ func updateSource(mgr sourceService) ada.HandlerFunc {
 		ctx := c.Request.Context()
 
 		if err := mgr.UpdateWebCollection(ctx, name, req.CollectionUpdate, req.Config); err != nil {
-			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+			return sendError(c, err, http.StatusBadRequest)
 		}
 
 		// Read the stored record back so the response shows the merge result
 		// rather than the request that produced it.
 		col, err := mgr.WebCollection(ctx, name)
 		if err != nil {
-			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+			return sendError(c, err, http.StatusBadRequest)
 		}
 
 		return c.SendJSON(viewSource(mgr, col, 0))
@@ -277,7 +277,7 @@ func deleteSource(mgr sourceService) ada.HandlerFunc {
 		name := c.Request.PathValue("name")
 
 		if err := mgr.DeleteWebCollection(c.Request.Context(), name); err != nil {
-			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+			return sendError(c, err, http.StatusBadRequest)
 		}
 
 		return c.SendNoContent()
@@ -335,13 +335,13 @@ type importPagesRequest struct {
 func addSourcePage(mgr sourceService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req addPageRequest
-		if err := c.Bind(&req); err != nil {
+		if err := bindJSON(c, &req); err != nil {
 			return c.SetStatus(http.StatusBadRequest).Err(err)
 		}
 
 		page, err := mgr.AddWebPage(c.Request.Context(), c.Request.PathValue("name"), req.URL)
 		if err != nil {
-			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+			return sendError(c, err, http.StatusBadRequest)
 		}
 
 		return c.SetStatus(http.StatusAccepted).SendJSON(page)
@@ -351,7 +351,7 @@ func addSourcePage(mgr sourceService) ada.HandlerFunc {
 func importSourceSitemap(mgr sourceService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req importSitemapRequest
-		if err := c.Bind(&req); err != nil {
+		if err := bindJSON(c, &req); err != nil {
 			return c.SetStatus(http.StatusBadRequest).Err(err)
 		}
 		if strings.TrimSpace(req.URL) == "" {
@@ -360,7 +360,7 @@ func importSourceSitemap(mgr sourceService) ada.HandlerFunc {
 
 		result, err := mgr.ImportWebSitemap(c.Request.Context(), c.Request.PathValue("name"), req.URL)
 		if err != nil {
-			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+			return sendError(c, err, http.StatusBadRequest)
 		}
 
 		return c.SetStatus(http.StatusAccepted).SendJSON(result)
@@ -370,13 +370,13 @@ func importSourceSitemap(mgr sourceService) ada.HandlerFunc {
 func importSourcePages(mgr sourceService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req importPagesRequest
-		if err := c.Bind(&req); err != nil {
+		if err := bindJSONLimit(c, &req, pushBodyLimit); err != nil {
 			return c.SetStatus(http.StatusBadRequest).Err(err)
 		}
 
 		result, err := mgr.ImportWebPages(c.Request.Context(), c.Request.PathValue("name"), req.Pages)
 		if err != nil {
-			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+			return sendError(c, err, http.StatusBadRequest)
 		}
 
 		return c.SendJSON(result)
@@ -391,7 +391,7 @@ func deleteSourcePage(mgr sourceService) ada.HandlerFunc {
 		}
 
 		if err := mgr.DeleteWebPage(c.Request.Context(), c.Request.PathValue("name"), slug); err != nil {
-			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+			return sendError(c, err, http.StatusBadRequest)
 		}
 
 		return c.SendNoContent()
@@ -407,7 +407,7 @@ func getSourceDoc(mgr sourceService) ada.HandlerFunc {
 
 		doc, err := mgr.WebSourceDoc(c.Request.Context(), c.Request.PathValue("name"), path)
 		if err != nil {
-			return c.SetStatus(http.StatusNotFound).SendJSON(map[string]string{"error": err.Error()})
+			return sendError(c, err, http.StatusNotFound)
 		}
 
 		page, err := mgr.WebPage(

@@ -256,6 +256,28 @@ Because each endpoint publishes only its own catalog, a client pays the
 | `DELETE /api/v1/credentials?pattern=...` | Remove a credential |
 | `POST /webhook/git` | Provider-neutral git push webhook; generic bearer/shared-token auth plus common server formats |
 
+### Request bodies and errors
+
+- **Bodies are JSON.** A body sent with another `Content-Type` is refused with
+  `400` rather than skipped (`curl -d` sends form encoding unless told
+  otherwise; add `-H 'Content-Type: application/json'`). A missing
+  `Content-Type` is read as JSON. Bodies are capped at 1 MiB, 48 MiB for page
+  import and push items; the push webhook accepts up to 25 MiB and answers
+  `413` above it.
+- **Status codes follow the cause.** `404` for something krabby does not have
+  (an untracked repository, an unknown source, an artefact not built yet),
+  `400` for a request it cannot act on, `409` for an ambiguous repository
+  name, `503` for a feature that is not configured, `504` for an upstream
+  timeout, `500` otherwise. Saving settings that are stored but cannot be
+  applied answers `500` with the stored `config` in the body.
+- **Cancelling** a source's or an API service's sync answers `409` when none is
+  queued or running.
+- **Served artefacts** (`graph.html`, `graph.json`, the report and the merged
+  graph) carry `Content-Security-Policy: sandbox allow-scripts` and
+  `X-Content-Type-Options: nosniff`, so the generated graph page runs in an
+  opaque origin and cannot reach the API.
+- **MCP sessions** idle for 30 minutes are closed.
+
 ### Health checks and the MCP endpoint
 
 Point liveness and readiness probes at **`/healthz`** (or `<base_path>/healthz`).

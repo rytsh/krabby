@@ -81,7 +81,7 @@ func dispatchRepo(mgr repoReader, routes map[string]ada.HandlerFunc) ada.Handler
 
 		repo, err := mgr.ResolveRepo(c.Request.Context(), id)
 		if err != nil {
-			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+			return sendError(c, err, http.StatusBadRequest)
 		}
 
 		if repo != nil {
@@ -148,14 +148,10 @@ func listRepos(mgr repoReader) ada.HandlerFunc {
 			views = append(views, viewRepo(mgr, repo))
 		}
 
-		page := opts.Page
-		if page <= 0 {
-			page = 1
-		}
-		perPage := opts.PerPage
-		if perPage <= 0 {
-			perPage = len(views)
-		}
+		// The page size actually applied, not the number returned: a client
+		// paging with page*per_page < total would otherwise stop one page
+		// early whenever the last page is short.
+		page, perPage := registry.PageParams(opts)
 
 		return c.SendJSON(pagedRepos{Items: views, Total: total, Page: page, PerPage: perPage})
 	}
@@ -196,7 +192,7 @@ func setRepoOverrides(mgr repoAdmin) ada.HandlerFunc {
 		id := repoID(c.Request)
 
 		var req setRepoOverridesRequest
-		if err := c.Bind(&req); err != nil {
+		if err := bindJSON(c, &req); err != nil {
 			return c.SetStatus(http.StatusBadRequest).Err(err)
 		}
 
@@ -248,7 +244,7 @@ func listActiveRepos(mgr repoReader) ada.HandlerFunc {
 func addRepo(mgr repoAdmin) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req addRepoRequest
-		if err := c.Bind(&req); err != nil {
+		if err := bindJSON(c, &req); err != nil {
 			return c.SetStatus(http.StatusBadRequest).Err(err)
 		}
 
@@ -257,7 +253,7 @@ func addRepo(mgr repoAdmin) ada.HandlerFunc {
 		}
 
 		if err := validateStages(req.Skip); err != nil {
-			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+			return sendError(c, err, http.StatusBadRequest)
 		}
 
 		// Registration must finish even if the UI navigates away. The clone/build
@@ -331,7 +327,7 @@ func refreshRepo(mgr repoService) ada.HandlerFunc {
 		}
 
 		if err := validateStages(req.Skip); err != nil {
-			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+			return sendError(c, err, http.StatusBadRequest)
 		}
 
 		if err := mgr.TriggerRefresh(id, req.Skip...); err != nil {
@@ -383,7 +379,7 @@ func generateRepo(mgr repoService) ada.HandlerFunc {
 		}
 
 		var req generateRequest
-		if err := c.Bind(&req); err != nil {
+		if err := bindJSON(c, &req); err != nil {
 			return c.SetStatus(http.StatusBadRequest).Err(err)
 		}
 
@@ -445,8 +441,24 @@ func repoArtifact(mgr repoReader, pathFn func(repoPath string) string) ada.Handl
 			})
 		}
 
+		setArtifactHeaders(c.Response.Header())
 		http.ServeFile(c.Response, c.Request, path)
 
 		return nil
 	}
+}
+
+// setArtifactHeaders isolates a served build artefact from krabby's origin.
+//
+// The artefacts are generated from repository content, and graph.html runs
+// scripts. Served from krabby's own origin, any injection that survived the
+// generator's escaping would run with the same reach as the UI: an
+// unauthenticated admin API, and same-origin requests the cross-origin guard
+// lets through. The sandbox CSP gives the page an opaque origin, so its
+// scripts still run (the graph stays interactive) but cannot call krabby or
+// read its storage. nosniff keeps a .json or .md artefact from being sniffed
+// into HTML.
+func setArtifactHeaders(h http.Header) {
+	h.Set("Content-Security-Policy", "sandbox allow-scripts")
+	h.Set("X-Content-Type-Options", "nosniff")
 }

@@ -152,7 +152,7 @@ func (m *Manager) GraphPathFor(ctx context.Context, repoID string) (string, erro
 		}
 
 		if !fileExists(m.mergedPath) {
-			return "", fmt.Errorf("merged graph not built yet; add repos and wait for builds")
+			return "", notFound("merged graph not built yet; add repos and wait for builds")
 		}
 
 		return m.mergedPath, nil
@@ -164,12 +164,12 @@ func (m *Manager) GraphPathFor(ctx context.Context, repoID string) (string, erro
 	}
 
 	if repo == nil {
-		return "", fmt.Errorf("repo %s not found", repoID)
+		return "", notFound("repo %s not found", repoID)
 	}
 
 	gp := graphbuilder.GraphPath(repo.Path)
 	if !fileExists(gp) {
-		return "", fmt.Errorf("graph for %s not built yet (status: %s)", repoID, repo.Status)
+		return "", notFound("graph for %s not built yet (status: %s)", repoID, repo.Status)
 	}
 
 	return gp, nil

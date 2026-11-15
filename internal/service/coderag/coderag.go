@@ -74,10 +74,12 @@ type Service struct {
 	text   *TextStore
 }
 
-// maxSearchResults bounds one vector query's candidate window. It matches the
+// maxSearchResults bounds the results one vector query returns. It matches the
 // widening a namespace-filtered search asks for (namespaceScope.fetch): a lower
 // cap here would silently discard the widening, and the filter it exists to
-// feed would starve on a large install.
+// feed would starve on a large install. The store is asked for three times
+// this many candidates, because overlapping fallback chunks are deduplicated
+// before results are cut to size.
 const maxSearchResults = 200
 
 // New builds the shared code indexing service. text provides normal BM25
@@ -222,88 +224,50 @@ func (s *Service) IndexChangedProgress(ctx context.Context, repo, clonePath stri
 
 	// Normalize to the repo-relative slash form used as DocPath in both stores.
 	paths := make([]string, 0, len(changed))
+	selected := make([]string, 0, len(changed))
 	for _, rel := range changed {
-		paths = append(paths, path.Clean(filepath.ToSlash(rel)))
+		rel = path.Clean(filepath.ToSlash(rel))
+		paths = append(paths, rel)
+		// Deleted or excluded files only have their rows dropped below.
+		if s.selectedFile(clonePath, rel, filters) {
+			selected = append(selected, rel)
+		}
 	}
 
+	// Streamed in batches like a full index. A large rebase arrives here as
+	// thousands of changed files, and collecting all their chunks and vectors
+	// first is the unbounded memory the full path was rewritten to avoid. The
+	// symbols are computed once and shared by both passes.
 	var syms map[string][]symbol
-
-	var (
-		items     []vectorstore.Item
-		reindexed int
-	)
-
-	for _, rel := range paths {
-		if !s.selectedFile(clonePath, rel, filters) {
-			continue // deleted/excluded: rows are dropped below, nothing to add
-		}
-
-		fc, err := repofs.ReadFile(clonePath, rel, 0, 0)
-		if err != nil {
-			slog.Warn("coderag: skip unreadable file", "repo", repo, "file", rel, "error", err)
-
-			continue
-		}
-
-		if fc.Truncated || strings.ContainsRune(fc.Content, '\x00') {
-			continue
-		}
-
-		if syms == nil {
-			syms = s.fileSymbols(clonePath)
-		}
-
-		for i, c := range chunkFile(fc.Content, syms[rel], s.cfg.ChunkSize, s.cfg.ChunkOverlap) {
-			items = append(items, vectorstore.Item{
-				ID: fmt.Sprintf("%s/%s#%d", repo, rel, i),
-				Payload: vectorstore.Payload{
-					Repo:      repo,
-					DocPath:   rel,
-					Symbol:    c.Symbol,
-					StartLine: c.StartLine,
-					EndLine:   c.EndLine,
-					Chunk:     c.Text,
-				},
-			})
-		}
-
-		reindexed++
+	if len(selected) > 0 {
+		syms = s.fileSymbols(clonePath)
 	}
 
 	if s.text != nil {
 		if err := s.text.DeletePaths(ctx, repo, paths); err != nil {
 			return fmt.Errorf("drop changed code search chunks; %w", err)
 		}
+	}
 
-		if err := s.text.InsertItems(ctx, items); err != nil {
+	total := 0
+	if err := s.streamFiles(ctx, clonePath, repo, selected, syms, func(batch []vectorstore.Item) error {
+		total += len(batch)
+		if s.text == nil {
+			return nil
+		}
+		if err := s.text.InsertItems(ctx, batch); err != nil {
 			return fmt.Errorf("insert changed code search chunks; %w", err)
 		}
+
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	if s.emb == nil || s.store == nil {
-		slog.Info("code text index updated", "repo", repo, "changed", len(changed), "files", reindexed, "chunks", len(items))
+		slog.Info("code text index updated", "repo", repo, "changed", len(changed), "files", len(selected), "chunks", total)
 
 		return nil
-	}
-
-	if len(items) > 0 {
-		texts := make([]string, len(items))
-		for i := range items {
-			texts[i] = items[i].Payload.Chunk
-		}
-
-		vecs, err := s.emb.EmbedWithProgress(ctx, texts, onProgress)
-		if err != nil {
-			return fmt.Errorf("embed %d code chunks; %w", len(texts), err)
-		}
-
-		if len(vecs) != len(items) {
-			return fmt.Errorf("embedder returned %d vectors for %d chunks", len(vecs), len(items))
-		}
-
-		for i := range items {
-			items[i].Vector = vecs[i]
-		}
 	}
 
 	// Drop prior vectors of every changed path (stale chunk counts, deletions),
@@ -312,13 +276,26 @@ func (s *Service) IndexChangedProgress(ctx context.Context, repo, clonePath stri
 		return fmt.Errorf("drop changed code vectors; %w", err)
 	}
 
-	if len(items) > 0 {
-		if err := s.store.Upsert(ctx, items); err != nil {
-			return fmt.Errorf("upsert %d code vectors; %w", len(items), err)
+	done := 0
+	if err := s.streamFiles(ctx, clonePath, repo, selected, syms, func(batch []vectorstore.Item) error {
+		if err := s.embedInto(ctx, batch); err != nil {
+			return err
 		}
+		if err := s.store.Upsert(ctx, batch); err != nil {
+			return fmt.Errorf("upsert %d code vectors; %w", len(batch), err)
+		}
+
+		done += len(batch)
+		if onProgress != nil {
+			onProgress(min(done, total), total)
+		}
+
+		return nil
+	}); err != nil {
+		return err
 	}
 
-	slog.Info("code indexes updated", "repo", repo, "changed", len(changed), "files", reindexed, "chunks", len(items))
+	slog.Info("code indexes updated", "repo", repo, "changed", len(changed), "files", len(selected), "chunks", total)
 
 	return nil
 }
@@ -401,7 +378,22 @@ func (s *Service) streamItems(
 		return 0, fmt.Errorf("select source files; %w", err)
 	}
 
-	symsByFile := s.fileSymbols(clonePath)
+	return len(files), s.streamFiles(ctx, clonePath, repo, files, nil, flush)
+}
+
+// streamFiles chunks the given files and hands the chunks to flush in
+// batches of at most indexFlushChunks. symsByFile may be nil; it is then
+// computed from the graph once. flush must not retain the slice it is given.
+func (s *Service) streamFiles(
+	ctx context.Context,
+	clonePath, repo string,
+	files []string,
+	symsByFile map[string][]symbol,
+	flush func([]vectorstore.Item) error,
+) error {
+	if symsByFile == nil {
+		symsByFile = s.fileSymbols(clonePath)
+	}
 
 	batch := make([]vectorstore.Item, 0, indexFlushChunks)
 	drain := func() error {
@@ -421,7 +413,7 @@ func (s *Service) streamItems(
 
 	for _, rel := range files {
 		if err := ctx.Err(); err != nil {
-			return 0, err
+			return err
 		}
 
 		fc, err := repofs.ReadFile(clonePath, rel, 0, 0)
@@ -451,17 +443,13 @@ func (s *Service) streamItems(
 
 			if len(batch) >= indexFlushChunks {
 				if err := drain(); err != nil {
-					return 0, err
+					return err
 				}
 			}
 		}
 	}
 
-	if err := drain(); err != nil {
-		return 0, err
-	}
-
-	return len(files), nil
+	return drain()
 }
 
 // DeleteRepo removes a repo's vectors from the code index (on repo removal).
@@ -513,6 +501,11 @@ func (s *Service) RetrieveTimed(
 
 	if strings.TrimSpace(query) == "" {
 		return nil, timing, errors.New("query is empty")
+	}
+	// New documents emb and store as optional; without them there is no
+	// semantic search to run, which is an answer, not a nil dereference.
+	if s.emb == nil || s.store == nil {
+		return nil, timing, errors.New("semantic code search is not configured")
 	}
 
 	if topK <= 0 {

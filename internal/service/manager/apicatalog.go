@@ -81,7 +81,7 @@ func (m *Manager) mutateService(ctx context.Context, name string, fn func(*apica
 		return err
 	}
 	if svc == nil {
-		return fmt.Errorf("api service %s not found", name)
+		return notFound("api service %s not found", name)
 	}
 
 	if err := fn(svc); err != nil {
@@ -250,47 +250,17 @@ func (m *Manager) DeleteAPIService(ctx context.Context, name string) error {
 		return ErrNoAPICatalog
 	}
 
-	scope := apicatalog.ScopeKey(name)
-	defer m.lockKey(scope)()
+	defer m.lockKey(apicatalog.ScopeKey(name))()
 
-	release := m.serviceLock(name)
-	err := m.apiStore.DeleteService(ctx, name)
-	release()
+	return m.deleteCorpus(ctx, m.apiCorpus(name), m.apisRootDir,
+		func() func() { return m.serviceLock(name) },
+		func(ctx context.Context) (bool, error) {
+			svc, err := m.apiStore.GetService(ctx, name)
 
-	if err != nil {
-		return err
-	}
-
-	// Logged rather than returned for the same reason as dropAPIIndex below:
-	// the record is already gone, so refusing to finish would leave a service
-	// that cannot be deleted at all.
-	if err := removeContentDir(m.apisRootDir, m.apisDir(name), "api service"); err != nil {
-		slog.Warn("remove api service directory", "service", name, "error", err)
-	}
-
-	m.dropAPIIndex(ctx, scope)
-
-	return nil
-}
-
-// dropAPIIndex removes a deleted service's entries from every configured search
-// index. A failure is logged rather than returned: the record and the markdown
-// are already gone, and refusing to complete the delete would leave a service
-// that cannot be removed at all.
-func (m *Manager) dropAPIIndex(ctx context.Context, scope string) {
-	d, release := m.acquireDocs()
-	defer release()
-
-	if d.rag != nil {
-		if err := d.rag.DeleteRepo(ctx, scope); err != nil {
-			slog.Warn("drop api service vectors", "scope", scope, "error", err)
-		}
-	}
-	if m.docsText != nil {
-		if err := m.docsText.DeleteRepo(ctx, scope); err != nil {
-			slog.Warn("drop api service text index", "scope", scope, "error", err)
-		}
-	}
+			return svc != nil, err
+		},
+		func(ctx context.Context) error { return m.apiStore.DeleteService(ctx, name) },
+	)
 }
 
 // APIService returns one service record, or nil when it does not exist.
@@ -429,7 +399,7 @@ func (m *Manager) CallAPIOperation(
 		return out, err
 	}
 	if svc == nil {
-		return out, fmt.Errorf("api service %s not found", service)
+		return out, notFound("api service %s not found", service)
 	}
 
 	provider, ok := m.apiProviders[svc.Kind]
@@ -447,7 +417,7 @@ func (m *Manager) CallAPIOperation(
 		return out, err
 	}
 	if op == nil {
-		return out, fmt.Errorf("operation %s not found in api service %s", handle, service)
+		return out, notFound("operation %s not found in api service %s", handle, service)
 	}
 	if len(op.Detail) == 0 {
 		return out, fmt.Errorf("operation %s has no stored detail; refresh the service", handle)
@@ -574,7 +544,7 @@ func (m *Manager) refreshAPIService(ctx context.Context, name string, forceFull 
 		return err
 	}
 	if svc == nil {
-		return fmt.Errorf("api service %s not found", name)
+		return notFound("api service %s not found", name)
 	}
 
 	provider, ok := m.apiProviders[svc.Kind]

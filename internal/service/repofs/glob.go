@@ -161,6 +161,15 @@ func NormalizeGlob(pattern string) (string, bool, error) {
 		if seg == ".." {
 			return "", false, fmt.Errorf(`glob pattern %q must not contain ".."; patterns are matched against repository-relative paths, so there is nothing above the root to name`, pattern)
 		}
+		// path.Match reports a malformed segment ("[abc") only when it is
+		// tried, and the matcher treats that as no match: the caller would
+		// get an empty result and a hint about the wrong directory instead of
+		// the real problem.
+		if seg != "**" {
+			if _, err := path.Match(seg, ""); err != nil {
+				return "", false, fmt.Errorf("glob pattern %q has a malformed segment %q; %w", pattern, seg, err)
+			}
+		}
 	}
 
 	return pat, anchored, nil

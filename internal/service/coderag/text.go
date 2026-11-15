@@ -11,6 +11,7 @@ import (
 	"github.com/rakunlabs/bw"
 	"github.com/rakunlabs/query"
 
+	"github.com/rytsh/krabby/internal/service/searchutil"
 	"github.com/rytsh/krabby/internal/service/vectorstore"
 	"github.com/rytsh/krabby/internal/storage"
 )
@@ -96,7 +97,7 @@ type TextStore struct {
 	// statsBucket holds the corpus-derived frequent-term set; stats memoises
 	// it because search reads it on every query.
 	statsBucket *bw.Bucket[codeStats]
-	stats       statsCache
+	stats       searchutil.StatsCache
 }
 
 func NewTextStore(db *bw.DB) (*TextStore, error) {

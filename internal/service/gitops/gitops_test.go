@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -168,5 +169,14 @@ func TestShellQuote(t *testing.T) {
 		if got := shellQuote(in); got != want {
 			t.Errorf("shellQuote(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestParseBlamePorcelainSHA256(t *testing.T) {
+	sha := strings.Repeat("a", 64)
+	out := sha + " 1 1 1\nauthor Alice\n\tline one"
+	lines := parseBlamePorcelain(out)
+	if len(lines) != 1 || lines[0].Commit != sha || lines[0].Content != "line one" {
+		t.Fatalf("SHA-256 blame = %+v", lines)
 	}
 }

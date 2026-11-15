@@ -40,7 +40,7 @@ func TestRouterBasePathAndFallbackPrecedence(t *testing.T) {
 		Server: config.Server{BasePath: "/krabby"},
 		MCP:    config.MCP{Path: "/mcp"},
 	}
-	handler := newRouter(context.Background(), cfg, routeServices{}, MCPCatalogs{})
+	handler := newRouter(cfg, routeServices{}, MCPCatalogs{})
 
 	tests := []struct {
 		name         string
@@ -101,7 +101,7 @@ func TestRouterBasePathAndFallbackPrecedence(t *testing.T) {
 // of it.
 func TestPprofIsOffByDefault(t *testing.T) {
 	cfg := &config.Config{Server: config.Server{}, MCP: config.MCP{Path: "/mcp"}}
-	handler := newRouter(context.Background(), cfg, routeServices{}, MCPCatalogs{})
+	handler := newRouter(cfg, routeServices{}, MCPCatalogs{})
 
 	for _, path := range []string{
 		"/debug/pprof/",
@@ -130,7 +130,7 @@ func TestPprofMountsWhenEnabled(t *testing.T) {
 		Server: config.Server{BasePath: "/krabby", Pprof: true},
 		MCP:    config.MCP{Path: "/mcp"},
 	}
-	handler := newRouter(context.Background(), cfg, routeServices{}, MCPCatalogs{})
+	handler := newRouter(cfg, routeServices{}, MCPCatalogs{})
 
 	// A named profile behind a base path is the case pprof.Index cannot serve
 	// itself, so it is the one worth asserting.

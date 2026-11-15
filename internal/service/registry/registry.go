@@ -234,18 +234,16 @@ func (r *Registry) Get(ctx context.Context, id string) (*Repo, error) {
 
 // List returns all tracked repos.
 func (r *Registry) List(ctx context.Context) ([]*Repo, error) {
-	q, err := query.Parse("_limit=10000")
-	if err != nil {
-		return nil, fmt.Errorf("parse query; %w", err)
-	}
+	// Walked, not found with a limit: every caller (warm, migration, graph
+	// backfill, scheduling) means every repository, and a limit would drop
+	// the ones past it without a word.
+	repos := []*Repo{}
+	if err := r.bucket.Walk(ctx, query.New(), func(rec *Repo) error {
+		repos = append(repos, rec)
 
-	repos, err := r.bucket.Find(ctx, q)
-	if err != nil {
+		return nil
+	}); err != nil {
 		return nil, fmt.Errorf("list repos; %w", err)
-	}
-
-	if repos == nil {
-		repos = []*Repo{}
 	}
 
 	return repos, nil
@@ -378,15 +376,14 @@ func (r *Registry) ListPaged(ctx context.Context, opts ListOptions) (repos []*Re
 func (r *Registry) ListNamespace(ctx context.Context, ns string) ([]*Repo, error) {
 	q := query.New()
 	buildNamespaceFilter(q, ns)
-	q.SetLimit(100000)
 
-	repos, err := r.bucket.Find(ctx, q)
-	if err != nil {
+	repos := []*Repo{}
+	if err := r.bucket.Walk(ctx, q, func(rec *Repo) error {
+		repos = append(repos, rec)
+
+		return nil
+	}); err != nil {
 		return nil, fmt.Errorf("list repos by namespace; %w", err)
-	}
-
-	if repos == nil {
-		repos = []*Repo{}
 	}
 
 	return repos, nil
@@ -636,6 +633,49 @@ func (r *Registry) SetOverrides(ctx context.Context, id string, over Overrides) 
 	return repo, prev, nil
 }
 
+// Merge returns o with every field that is set in patch replaced by patch's
+// value. A field patch leaves at its zero value keeps o's.
+//
+// It is what "apply the overrides named in this call" means for a caller,
+// such as add_repo on a tracked repository, that sends only the fields it
+// wants changed: a whole-set replacement would wipe the docs prompt and skip
+// stages someone tuned earlier because the call mentioned include_extra.
+// Clearing a field still goes through SetOverrides with the full set.
+func (o Overrides) Merge(patch Overrides) Overrides {
+	if patch.Include != nil {
+		o.Include = patch.Include
+	}
+	if patch.IncludeExtra != nil {
+		o.IncludeExtra = patch.IncludeExtra
+	}
+	if patch.Exclude != nil {
+		o.Exclude = patch.Exclude
+	}
+	if patch.GraphExclude != nil {
+		o.GraphExclude = patch.GraphExclude
+	}
+	if patch.DocsPrompt != "" {
+		o.DocsPrompt = patch.DocsPrompt
+	}
+	if patch.DocsPromptExtra != "" {
+		o.DocsPromptExtra = patch.DocsPromptExtra
+	}
+	if patch.DocsMaxSourceBytes != 0 {
+		o.DocsMaxSourceBytes = patch.DocsMaxSourceBytes
+	}
+	if patch.DocsMaxGroupBytes != 0 {
+		o.DocsMaxGroupBytes = patch.DocsMaxGroupBytes
+	}
+	if patch.DocsMaxSynthesisBytes != 0 {
+		o.DocsMaxSynthesisBytes = patch.DocsMaxSynthesisBytes
+	}
+	if patch.SkipStages != nil {
+		o.SkipStages = patch.SkipStages
+	}
+
+	return o
+}
+
 // Changed reports whether two override sets differ at all.
 func (o Overrides) Changed(other Overrides) bool { return !o.equal(other) }
 
@@ -714,11 +754,16 @@ func (o Overrides) equal(other Overrides) bool {
 		slices.Equal(o.SkipStages, other.SkipStages)
 }
 
+// ErrAmbiguousRepo is returned by Resolve when a suffix names more than one
+// tracked repository: the caller must name it in full.
+var ErrAmbiguousRepo = errors.New("ambiguous repo")
+
 // Resolve returns the repo identified by ref. An exact id match wins; when
 // none exists, ref is treated as a path suffix (e.g. the legacy "owner/name"
 // form, a webhook full_name, or a hostless path) and matched against the
 // tracked ids segment-wise. A unique suffix match resolves; an ambiguous one
-// returns an error listing the candidates so callers can be precise.
+// returns an error wrapping ErrAmbiguousRepo and listing the candidates so
+// callers can be precise.
 func (r *Registry) Resolve(ctx context.Context, ref string) (*Repo, error) {
 	ref = strings.Trim(strings.TrimSpace(ref), "/")
 	if ref == "" {
@@ -754,7 +799,7 @@ func (r *Registry) Resolve(ctx context.Context, ref string) (*Repo, error) {
 	default:
 		sort.Strings(matches)
 
-		return nil, fmt.Errorf("ambiguous repo %q: matches %s", ref, strings.Join(matches, ", "))
+		return nil, fmt.Errorf("%w %q: matches %s", ErrAmbiguousRepo, ref, strings.Join(matches, ", "))
 	}
 }
 

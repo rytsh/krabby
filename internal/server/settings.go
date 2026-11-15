@@ -2,11 +2,13 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"github.com/rakunlabs/ada"
 
 	"github.com/rytsh/krabby/internal/config"
+	"github.com/rytsh/krabby/internal/service/manager"
 	"github.com/rytsh/krabby/internal/service/settings"
 )
 
@@ -75,18 +77,23 @@ func getDocsConfig(mgr docsSettingsService) ada.HandlerFunc {
 func setDocsConfig(mgr docsSettingsService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var patch settings.Patch
-		if err := c.Bind(&patch); err != nil {
+		if err := bindJSON(c, &patch); err != nil {
 			return c.SetStatus(http.StatusBadRequest).Err(err)
 		}
 
 		cfg, err := mgr.PatchDocsConfig(c.Request.Context(), patch)
-		if err != nil {
-			// Settings were saved but the client rebuild failed: report the
-			// error while still returning the redacted (persisted) config.
-			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]any{
+		if errors.Is(err, manager.ErrSavedNotApplied) {
+			// The settings were stored; what failed was rebuilding the clients
+			// or queueing the reindex. That is no fault of the request, and a
+			// 4xx would tell the client to change it. A 500 with the stored
+			// config says the save happened and the rest did not.
+			return c.SetStatus(http.StatusInternalServerError).SendJSON(map[string]any{
 				"error":  err.Error(),
 				"config": cfg,
 			})
+		}
+		if err != nil {
+			return sendError(c, err, http.StatusBadRequest)
 		}
 
 		return c.SendJSON(cfg)
@@ -96,10 +103,8 @@ func setDocsConfig(mgr docsSettingsService) ada.HandlerFunc {
 func testLLM(mgr docsSettingsService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var patch settings.Patch
-		if c.Request.ContentLength != 0 {
-			if err := c.Bind(&patch); err != nil {
-				return c.SetStatus(http.StatusBadRequest).Err(err)
-			}
+		if err := bindOptionalJSON(c, &patch); err != nil {
+			return c.SetStatus(http.StatusBadRequest).Err(err)
 		}
 
 		merged, err := applySettingsPatch(c.Request.Context(), mgr, patch)
@@ -114,10 +119,8 @@ func testLLM(mgr docsSettingsService) ada.HandlerFunc {
 func testEmbedder(mgr docsSettingsService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var patch settings.Patch
-		if c.Request.ContentLength != 0 {
-			if err := c.Bind(&patch); err != nil {
-				return c.SetStatus(http.StatusBadRequest).Err(err)
-			}
+		if err := bindOptionalJSON(c, &patch); err != nil {
+			return c.SetStatus(http.StatusBadRequest).Err(err)
 		}
 
 		merged, err := applySettingsPatch(c.Request.Context(), mgr, patch)
@@ -132,10 +135,8 @@ func testEmbedder(mgr docsSettingsService) ada.HandlerFunc {
 func testLangfuse(mgr docsSettingsService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var patch settings.Patch
-		if c.Request.ContentLength != 0 {
-			if err := c.Bind(&patch); err != nil {
-				return c.SetStatus(http.StatusBadRequest).Err(err)
-			}
+		if err := bindOptionalJSON(c, &patch); err != nil {
+			return c.SetStatus(http.StatusBadRequest).Err(err)
 		}
 
 		merged, err := applySettingsPatch(c.Request.Context(), mgr, patch)
@@ -150,10 +151,8 @@ func testLangfuse(mgr docsSettingsService) ada.HandlerFunc {
 func testCodeEmbedder(mgr docsSettingsService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var patch settings.Patch
-		if c.Request.ContentLength != 0 {
-			if err := c.Bind(&patch); err != nil {
-				return c.SetStatus(http.StatusBadRequest).Err(err)
-			}
+		if err := bindOptionalJSON(c, &patch); err != nil {
+			return c.SetStatus(http.StatusBadRequest).Err(err)
 		}
 
 		merged, err := applySettingsPatch(c.Request.Context(), mgr, patch)

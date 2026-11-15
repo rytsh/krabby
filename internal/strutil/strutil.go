@@ -3,6 +3,7 @@
 package strutil
 
 import (
+	"fmt"
 	"strings"
 	"unicode/utf8"
 )
@@ -42,4 +43,29 @@ func Truncate(s string, n int) string {
 // arrive padded (command output, free-text fields).
 func TruncateSpace(s string, n int) string {
 	return Truncate(strings.TrimSpace(s), n)
+}
+
+// ErrorExcerpt renders a failed response's body for an error message: a short
+// excerpt when it is a structured error (a JSON object, as APIs answer a bad
+// token or a missing page with), and only its size and type otherwise.
+//
+// The fetchers that use this take URLs from configuration, and the config
+// preview tools run them on demand. Echoing an arbitrary body would turn a
+// preview into a way to read whatever the URL points at, an internal service
+// or a cloud metadata endpoint included, a few hundred bytes at a time. A
+// JSON error object is what diagnosing a failed fetch needs; an HTML page or
+// a plain-text document is not.
+func ErrorExcerpt(body []byte, contentType string, n int) string {
+	trimmed := strings.TrimSpace(string(body))
+	if trimmed == "" {
+		return "(empty body)"
+	}
+	if strings.HasPrefix(trimmed, "{") && (contentType == "" || strings.Contains(strings.ToLower(contentType), "json")) {
+		return Truncate(trimmed, n)
+	}
+	if contentType == "" {
+		contentType = "unknown type"
+	}
+
+	return fmt.Sprintf("(%d-byte %s body not shown)", len(body), contentType)
 }

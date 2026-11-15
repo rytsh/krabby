@@ -163,14 +163,14 @@ func listAPIGroups(mgr apiCatalogService) ada.HandlerFunc {
 func upsertAPIGroup(mgr apiCatalogService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req apiGroupRequest
-		if err := c.Bind(&req); err != nil {
+		if err := bindJSON(c, &req); err != nil {
 			return c.SetStatus(http.StatusBadRequest).Err(err)
 		}
 
 		// A navigating client must not be able to abort a write half-way.
 		group, err := mgr.UpsertAPIGroup(context.WithoutCancel(c.Request.Context()), req.Name, req.Description)
 		if err != nil {
-			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+			return sendError(c, err, http.StatusBadRequest)
 		}
 
 		return c.SendJSON(group)
@@ -226,17 +226,17 @@ func listAPIServices(mgr apiCatalogService) ada.HandlerFunc {
 func addAPIService(mgr apiCatalogService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req apiServiceRequest
-		if err := c.Bind(&req); err != nil {
+		if err := bindJSON(c, &req); err != nil {
 			return c.SetStatus(http.StatusBadRequest).Err(err)
 		}
 
 		svc, err := req.service()
 		if err != nil {
-			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+			return sendError(c, err, http.StatusBadRequest)
 		}
 
 		if err := mgr.AddAPIService(context.WithoutCancel(c.Request.Context()), svc); err != nil {
-			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+			return sendError(c, err, http.StatusBadRequest)
 		}
 
 		return c.SetStatus(http.StatusAccepted).SendJSON(viewAPIService(mgr, svc))
@@ -344,7 +344,7 @@ func callAPIOperation(mgr apiCatalogService) ada.HandlerFunc {
 		name := c.Request.PathValue("name")
 
 		var req apiCallRequest
-		if err := c.Bind(&req); err != nil {
+		if err := bindJSON(c, &req); err != nil {
 			return c.SetStatus(http.StatusBadRequest).Err(err)
 		}
 		if strings.TrimSpace(req.Endpoint) == "" {
@@ -359,7 +359,7 @@ func callAPIOperation(mgr apiCatalogService) ada.HandlerFunc {
 			Timeout:    time.Duration(req.TimeoutSec) * time.Second,
 		})
 		if err != nil {
-			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+			return sendError(c, err, http.StatusBadRequest)
 		}
 
 		return c.SendJSON(res)
@@ -369,14 +369,14 @@ func callAPIOperation(mgr apiCatalogService) ada.HandlerFunc {
 func updateAPIService(mgr apiCatalogService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req apiServiceUpdateRequest
-		if err := c.Bind(&req); err != nil {
+		if err := bindJSON(c, &req); err != nil {
 			return c.SetStatus(http.StatusBadRequest).Err(err)
 		}
 
 		name := c.Request.PathValue("name")
 
 		if err := mgr.UpdateAPIService(context.WithoutCancel(c.Request.Context()), name, req.ServiceUpdate, req.Config); err != nil {
-			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+			return sendError(c, err, http.StatusBadRequest)
 		}
 
 		svc, err := mgr.APIService(c.Request.Context(), name)
@@ -435,7 +435,14 @@ func cancelAPIService(mgr apiCatalogService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		name := c.Request.PathValue("name")
 
+		// As cancelling a source does: "cancelled" for nothing in flight would
+		// tell the caller something stopped when nothing was running.
 		cancelled := mgr.CancelTasks(apicatalog.ScopeKey(name))
+		if cancelled == 0 {
+			return c.SetStatus(http.StatusConflict).SendJSON(map[string]string{
+				"error": "no sync queued or running for " + name,
+			})
+		}
 
 		return c.SendJSON(map[string]any{"status": "cancelled", "tasks": cancelled})
 	}
@@ -444,13 +451,13 @@ func cancelAPIService(mgr apiCatalogService) ada.HandlerFunc {
 func testAPIServiceConfig(mgr apiCatalogService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req apiConfigTestRequest
-		if err := c.Bind(&req); err != nil {
+		if err := bindJSON(c, &req); err != nil {
 			return c.SetStatus(http.StatusBadRequest).Err(err)
 		}
 
 		result, err := mgr.TestAPIServiceConfig(c.Request.Context(), req.ExistingName, req.Kind, req.Config, req.SpecPatch)
 		if err != nil {
-			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+			return sendError(c, err, http.StatusBadRequest)
 		}
 
 		return c.SendJSON(result)

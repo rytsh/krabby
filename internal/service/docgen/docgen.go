@@ -26,6 +26,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/rytsh/krabby/internal/config"
 	"github.com/rytsh/krabby/internal/observability/langfuse"
@@ -494,7 +495,18 @@ func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir st
 	sort.Slice(summaries, func(i, j int) bool { return summaries[i].Path < summaries[j].Path })
 
 	// Synthesis: skip the LLM call when nothing changed and the doc exists.
-	docMeta, synthesized, synthErr := g.maybeSynthesize(ctx, repo, docsDir, graph, summaries, priorMan, regen, promptHash, over, limits)
+	//
+	// When some groups failed to summarize, the summary set is missing those
+	// files. With a previous document on disk, re-synthesizing now would
+	// replace it with one that leaves their area out, and pay for two model
+	// calls to do it; the previous document is kept and the next build, with
+	// the failed groups retried, synthesizes from the full set. The same goes
+	// for the integration profile.
+	synthRegen, synthPrior := regen, priorMan
+	if genErr != nil && priorMan != nil {
+		synthRegen, synthPrior = 0, priorForPartialRun(priorMan, summaries)
+	}
+	docMeta, synthesized, synthErr := g.maybeSynthesize(ctx, repo, docsDir, graph, summaries, synthPrior, synthRegen, promptHash, over, limits)
 
 	var docs []DocMeta
 	if docMeta != nil {
@@ -507,7 +519,7 @@ func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir st
 	var profileErr error
 	if !g.cfg.SkipIntegrationProfile {
 		profileHash = hashString(ProfilePrompt)
-		profileMeta, profiled, profileErr = g.maybeProfile(ctx, repo, docsDir, graph, summaries, priorMan, regen, profileHash, limits)
+		profileMeta, profiled, profileErr = g.maybeProfile(ctx, repo, docsDir, graph, summaries, synthPrior, synthRegen, profileHash, limits)
 	}
 	if profileMeta != nil {
 		docs = append(docs, *profileMeta)
@@ -818,17 +830,21 @@ func (g *llmGenerator) summaryForGroup(
 	for _, p := range todo {
 		content := p.content
 		if len(content) > budget {
-			content = content[:budget] + "\n(truncated)"
+			content = truncateUTF8(content, budget) + "\n(truncated)"
 		}
 		fmt.Fprintf(&user, "===== FILE: %s =====\n```\n%s\n```\n\n", p.rel, content)
 	}
 
-	out, _, err := g.sum.CompleteOp(ctx, "chat.summary", []llm.Message{
+	out, meta, err := g.sum.CompleteOp(ctx, "chat.summary", []llm.Message{
 		{Role: "system", Content: groupSummaryPrompt},
 		{Role: "user", Content: user.String()},
 	})
 	if err != nil {
 		return nil, 0, err
+	}
+	if meta.Truncated {
+		slog.Warn("group summary reply was cut short; files it did not reach will be summarized again next build",
+			"files", len(todo))
 	}
 
 	todoPaths := make([]string, len(todo))
@@ -841,10 +857,21 @@ func (g *llmGenerator) summaryForGroup(
 	now := time.Now()
 	for _, p := range todo {
 		body, ok := sections[p.rel]
+		// A cut-off reply can end inside a section; only one that ended on its
+		// own is known to be whole.
+		complete := ok && strings.TrimSpace(body) != "" && (!meta.Truncated || !isLastSection(sections, todoPaths, p.rel))
 		if !ok || strings.TrimSpace(body) == "" {
-			// The model omitted this file; record a minimal placeholder so the
-			// cache still advances and synthesis has something to reference.
+			// The model omitted this file. A placeholder gives synthesis
+			// something to reference this build.
 			body = fmt.Sprintf("## %s\n\n(No summary produced for this file.)", p.rel)
+		}
+		// Only a real summary is cached against the source. A placeholder
+		// recorded under the file's hash would never be replaced until the
+		// file itself changed: one omission by the model (or a reply cut at
+		// its token limit) would become permanent.
+		hash := p.hash
+		if !complete {
+			hash = ""
 		}
 
 		sumRel := summaryPath(p.rel)
@@ -857,13 +884,36 @@ func (g *llmGenerator) summaryForGroup(
 			Path:       sumRel,
 			Title:      p.rel,
 			SourcePath: p.rel,
-			SourceHash: p.hash,
+			SourceHash: hash,
 			Generated:  now,
 		})
 		regen++
 	}
 
 	return metas, regen, nil
+}
+
+// priorForPartialRun returns a copy of prior whose summary count matches this
+// run's, so the reuse checks in maybeSynthesize and maybeProfile keep the
+// previous documents rather than regenerate them from an incomplete set.
+func priorForPartialRun(prior *Manifest, summaries []DocMeta) *Manifest {
+	cp := *prior
+	cp.Summaries = make([]DocMeta, len(summaries))
+
+	return &cp
+}
+
+// isLastSection reports whether rel is the last of paths the reply has a
+// section for: the one a reply cut at its token limit may have ended inside.
+func isLastSection(sections map[string]string, paths []string, rel string) bool {
+	last := ""
+	for _, p := range paths {
+		if _, ok := sections[p]; ok {
+			last = p
+		}
+	}
+
+	return last == rel
 }
 
 // reuseCachedSummary returns the cached summary meta for rel when the prior run
@@ -940,6 +990,12 @@ func splitSummarySections(out string, files []string) map[string]string {
 		}
 	}
 	flush()
+
+	// A group of one file needs no heading to tell its summary apart: a reply
+	// that left the heading out is still that file's summary, not an omission.
+	if len(files) == 1 && len(sections) == 0 && strings.TrimSpace(out) != "" {
+		sections[files[0]] = "## " + files[0] + "\n" + strings.TrimSpace(out)
+	}
 
 	return sections
 }
@@ -1150,8 +1206,11 @@ func (g *llmGenerator) synthesisPrompt(over config.DocsOverride) string {
 }
 
 // joinSummaries concatenates summary contents within a byte budget. When the
-// total exceeds the budget every summary is truncated to an equal share so the
-// synthesis still sees the whole repository.
+// total exceeds the budget every summary gets a fair share so the synthesis
+// still sees the whole repository: short summaries are kept whole, and what
+// they leave unused goes to the longer ones (water-filling). The budget is a
+// hard cap; an older floor of 400 bytes per summary let 10k files send 4 MB
+// whatever the budget said.
 func joinSummaries(docsDir string, summaries []DocMeta, budget int) string {
 	contents := make([]string, 0, len(summaries))
 	total := 0
@@ -1176,19 +1235,49 @@ func joinSummaries(docsDir string, summaries []DocMeta, budget int) string {
 	}
 
 	if total > budget && len(contents) > 0 {
-		share := budget / len(contents)
-		if share < 400 {
-			share = 400
-		}
-
+		share := fairShare(contents, budget)
 		for i, c := range contents {
 			if len(c) > share {
-				contents[i] = c[:share] + "\n(truncated)"
+				contents[i] = truncateUTF8(c, share) + "\n(truncated)"
 			}
 		}
 	}
 
 	return strings.Join(contents, "\n\n---\n\n")
+}
+
+// fairShare is the largest per-summary cap that keeps the total within
+// budget when every summary is cut to it: summaries shorter than the cap
+// keep their length, and the rest split what is left equally.
+func fairShare(contents []string, budget int) int {
+	lengths := make([]int, len(contents))
+	for i, c := range contents {
+		lengths[i] = len(c)
+	}
+	sort.Ints(lengths)
+
+	remaining := max(budget, 0)
+	for i, n := range lengths {
+		share := remaining / (len(lengths) - i)
+		if n > share {
+			return share
+		}
+		remaining -= n
+	}
+
+	return remaining
+}
+
+// truncateUTF8 cuts s to at most n bytes without splitting a character.
+func truncateUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+
+	return s[:n]
 }
 
 // cleanupStaleDocs removes user-facing markdown files that are not referenced

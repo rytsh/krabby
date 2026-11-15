@@ -519,10 +519,13 @@ func addAPIAdminTools(server *mcp.Server, mgr apiAdminService) {
 
 	addTool(server, &mcp.Tool{
 		Name:        "cancel_api_service",
-		Description: "Cancel a service's queued or running sync.",
+		Description: "Cancel a service's queued or running sync. Fails when no sync is in flight.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, args apiServiceNameArgs) (*mcp.CallToolResult, any, error) {
 		name := strings.TrimSpace(strings.ToLower(args.Name))
 		n := mgr.CancelTasks(apicatalog.ScopeKey(name))
+		if n == 0 {
+			return nil, nil, fmt.Errorf("no sync queued or running for %s", name)
+		}
 
 		return jsonResult(map[string]any{"status": "cancelled", "tasks": n}), nil, nil
 	})

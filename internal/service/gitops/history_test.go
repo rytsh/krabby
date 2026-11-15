@@ -377,3 +377,31 @@ func TestGitOutputKeepsContentAndPathsExact(t *testing.T) {
 		t.Errorf("Log = %+v", commits)
 	}
 }
+
+// A patch larger than the cap is cut at the cap and marked, without git's
+// whole output being held in memory first.
+func TestDiffPatchIsCappedWhileRead(t *testing.T) {
+	dir := testRepo(t)
+	big := strings.Repeat("line of a very large generated file\n", (MaxPatchBytes/36)*3)
+	if err := os.WriteFile(filepath.Join(dir, "big.txt"), []byte(big), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, dir, "add", "big.txt")
+	gitRun(t, dir, "commit", "-q", "-m", "big file")
+
+	res, err := New("").Diff(context.Background(), dir, "", "HEAD", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.PatchTruncated || len(res.Patch) != MaxPatchBytes {
+		t.Fatalf("patch = %d bytes, truncated %v; want cut at %d", len(res.Patch), res.PatchTruncated, MaxPatchBytes)
+	}
+
+	small, err := New("").Diff(context.Background(), dir, "HEAD~2", "HEAD~1", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if small.PatchTruncated {
+		t.Fatal("a small patch was marked truncated")
+	}
+}

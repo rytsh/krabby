@@ -109,7 +109,7 @@ func (m *Manager) repoDocsDir(ctx context.Context, repoID string) (string, error
 			return "", err
 		}
 		if svc == nil {
-			return "", fmt.Errorf("api service %s not found", name)
+			return "", notFound("api service %s not found", name)
 		}
 
 		return m.apisDir(name), nil
@@ -131,7 +131,7 @@ func (m *Manager) repoDocsDir(ctx context.Context, repoID string) (string, error
 			return "", err
 		}
 		if col == nil {
-			return "", fmt.Errorf("web source %s not found", name)
+			return "", notFound("web source %s not found", name)
 		}
 
 		return m.sourcesDir(name), nil
@@ -142,10 +142,10 @@ func (m *Manager) repoDocsDir(ctx context.Context, repoID string) (string, error
 		return "", err
 	}
 	if repo == nil {
-		return "", fmt.Errorf("repo %s not found", repoID)
+		return "", notFound("repo %s not found", repoID)
 	}
 	if repo.Path == "" || !fileExists(filepath.Join(repo.Path, ".git")) {
-		return "", fmt.Errorf("repo %s not cloned yet (status: %s)", repoID, repo.Status)
+		return "", notFound("repo %s not cloned yet (status: %s)", repoID, repo.Status)
 	}
 
 	return m.docsDirForRepo(repo)

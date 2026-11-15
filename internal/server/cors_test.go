@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -30,7 +29,7 @@ func corsRouter(t *testing.T, origins ...string) (http.Handler, *countingQueue) 
 		MCP:    config.MCP{Path: "/mcp"},
 	}
 
-	return newRouter(context.Background(), cfg, routeServices{queue: q, tracing: &manager.Manager{}}, MCPCatalogs{}), q
+	return newRouter(cfg, routeServices{queue: q, tracing: &manager.Manager{}}, MCPCatalogs{}), q
 }
 
 func serve(h http.Handler, method, path string, header map[string]string) *httptest.ResponseRecorder {

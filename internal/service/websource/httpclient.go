@@ -105,7 +105,7 @@ func Do(client *http.Client, req *http.Request, limit int64) (*Response, error) 
 	}
 	if res.StatusCode < 200 || res.StatusCode > 299 {
 		return nil, fmt.Errorf("%s %s: status %s: %s", req.Method, redactURL(req.URL), res.Status,
-			strutil.Truncate(strings.TrimSpace(string(body)), 300))
+			strutil.ErrorExcerpt(body, res.Header.Get("Content-Type"), 300))
 	}
 	finalURL := req.URL.String()
 	if res.Request != nil && res.Request.URL != nil {

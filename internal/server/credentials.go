@@ -30,7 +30,7 @@ func listCredentials(mgr credentialService) ada.HandlerFunc {
 func setCredential(mgr credentialService) ada.HandlerFunc {
 	return func(c *ada.Context) error {
 		var req setCredentialRequest
-		if err := c.Bind(&req); err != nil {
+		if err := bindJSON(c, &req); err != nil {
 			return c.SetStatus(http.StatusBadRequest).Err(err)
 		}
 
@@ -41,7 +41,7 @@ func setCredential(mgr credentialService) ada.HandlerFunc {
 			Secret:   req.Secret,
 		}
 		if err := mgr.SetCredential(c.Request.Context(), cred); err != nil {
-			return c.SetStatus(http.StatusBadRequest).SendJSON(map[string]string{"error": err.Error()})
+			return sendError(c, err, http.StatusBadRequest)
 		}
 
 		return c.SetStatus(http.StatusCreated).SendJSON(cred)

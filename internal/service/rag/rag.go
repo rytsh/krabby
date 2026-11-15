@@ -349,7 +349,14 @@ func (s *Service) streamPaths(
 		}
 
 		content := string(b)
-		chunks := chunk(searchableMarkdown(content, s.cfg.KeepMarkdownTargets), s.cfg.ChunkSize, s.cfg.ChunkOverlap)
+		// The per-call option wins, as it does for the text index; the two
+		// indexes must strip the same link targets or a query matching a URL
+		// finds the page in one and not the other.
+		keepTargets := s.cfg.KeepMarkdownTargets
+		if opts != nil {
+			keepTargets = opts.KeepMarkdownTargets
+		}
+		chunks := chunk(searchableMarkdown(content, keepTargets), s.cfg.ChunkSize, s.cfg.ChunkOverlap)
 
 		if batch == nil {
 			*count += len(chunks)

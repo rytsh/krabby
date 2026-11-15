@@ -21,6 +21,13 @@ var ErrManagerClosed = errors.New("manager is shutting down")
 // settings store has been attached.
 var ErrNoSettingsStore = errors.New("settings store not configured")
 
+// ErrSavedNotApplied marks a settings update that was persisted but not
+// (fully) applied: the clients could not be rebuilt, or the follow-up work
+// could not be queued. The caller did nothing wrong, and the returned config
+// is what is stored. Until the next successful save or restart the running
+// clients are the previous ones; after a restart the stored settings apply.
+var ErrSavedNotApplied = errors.New("settings saved but not applied")
+
 // SetSettingsStore attaches the persisted settings store. Called once at
 // startup, before Configure.
 func (m *Manager) SetSettingsStore(s *settings.Store) {
@@ -203,7 +210,7 @@ func (m *Manager) setDocsConfig(ctx context.Context, next settings.Settings, rei
 	m.SetTaskConcurrency(saved.TaskConcurrency)
 
 	if err := m.Configure(ctx, saved); err != nil {
-		return redactSettings(saved), fmt.Errorf("settings saved but rebuild failed; %w", err)
+		return redactSettings(saved), fmt.Errorf("%w; rebuild failed; %w", ErrSavedNotApplied, err)
 	}
 
 	// Existing repositories may be unchanged, so a normal refresh would return
@@ -212,12 +219,12 @@ func (m *Manager) setDocsConfig(ctx context.Context, next settings.Settings, rei
 	var enqueueErrs []error
 	if reindex {
 		if err := m.TriggerReindexAll(); err != nil {
-			enqueueErrs = append(enqueueErrs, fmt.Errorf("settings saved but reindex enqueue failed; %w", err))
+			enqueueErrs = append(enqueueErrs, fmt.Errorf("%w; reindex enqueue failed; %w", ErrSavedNotApplied, err))
 		}
 	}
 	if imageChanged {
 		if err := m.triggerImageSourceRefreshes(ctx); err != nil {
-			enqueueErrs = append(enqueueErrs, fmt.Errorf("settings saved but image refresh enqueue failed; %w", err))
+			enqueueErrs = append(enqueueErrs, fmt.Errorf("%w; image refresh enqueue failed; %w", ErrSavedNotApplied, err))
 		}
 	}
 	if err := errors.Join(enqueueErrs...); err != nil {

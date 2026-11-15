@@ -63,3 +63,22 @@ func TestTruncateSpaceTrimsFirst(t *testing.T) {
 		t.Errorf("TruncateSpace = %q, want %q", got, want)
 	}
 }
+
+// An error body is shown when it is a structured error and described
+// otherwise, so a fetch of an arbitrary URL cannot be read back through it.
+func TestErrorExcerpt(t *testing.T) {
+	for name, tc := range map[string]struct {
+		body, contentType, want string
+	}{
+		"json error":            {`{"message":"bad token"}`, "application/json", `{"message":"bad token"}`},
+		"json without a type":   {`{"message":"bad token"}`, "", `{"message":"bad token"}`},
+		"html page":             {"<html>secret</html>", "text/html", "(19-byte text/html body not shown)"},
+		"metadata text":         {"ami-id\ninstance-id\n", "text/plain", "(19-byte text/plain body not shown)"},
+		"json-looking but text": {`{"k":"v"}`, "text/plain", "(9-byte text/plain body not shown)"},
+		"empty":                 {"  ", "", "(empty body)"},
+	} {
+		if got := ErrorExcerpt([]byte(tc.body), tc.contentType, 300); got != tc.want {
+			t.Errorf("%s: ErrorExcerpt = %q, want %q", name, got, tc.want)
+		}
+	}
+}

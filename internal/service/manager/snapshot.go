@@ -82,7 +82,7 @@ func (m *Manager) prepareSnapshot(ctx context.Context, repo *registry.Repo, forc
 // contract while still avoiding writes to the published snapshot.
 func (m *Manager) prepareCurrentSnapshot(ctx context.Context, repo *registry.Repo) (*preparedSnapshot, error) {
 	if !fileExists(filepath.Join(repo.Path, ".git")) {
-		return nil, fmt.Errorf("repo %s has no clone yet; refresh it first", repo.ID)
+		return nil, notFound("repo %s has no clone yet; refresh it first", repo.ID)
 	}
 
 	return m.createSnapshot(ctx, repo, nil, true, false)
@@ -374,7 +374,7 @@ func (m *Manager) repoCloneDirAt(ctx context.Context, repoID, snapshot string) (
 	}
 
 	if repo == nil {
-		return "", "", fmt.Errorf("repo %s not found", repoID)
+		return "", "", notFound("repo %s not found", repoID)
 	}
 
 	// A pinned token: honor it only while that version is still on disk. A
@@ -393,7 +393,7 @@ func (m *Manager) repoCloneDirAt(ctx context.Context, repoID, snapshot string) (
 
 	// Current active snapshot (empty, matching, or retired/unknown token).
 	if repo.Path == "" || !fileExists(filepath.Join(repo.Path, ".git")) {
-		return "", "", fmt.Errorf("repo %s not cloned yet (status: %s)", repoID, repo.Status)
+		return "", "", notFound("repo %s not cloned yet (status: %s)", repoID, repo.Status)
 	}
 
 	return repo.Path, m.snapshotToken(repoID, repo.Path), nil

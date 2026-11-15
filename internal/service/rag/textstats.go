@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sync"
 	"time"
 
 	"github.com/rakunlabs/bw"
@@ -32,37 +31,6 @@ type textStats struct {
 	UpdatedAt time.Time `bw:"updated_at"`
 }
 
-// statsCache memoises the persisted frequent-term set. Search reads it on every
-// query, while it only changes when the index is rebuilt.
-type statsCache struct {
-	mu     sync.RWMutex
-	terms  searchutil.StopWords
-	loaded bool
-}
-
-func (c *statsCache) get() (searchutil.StopWords, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	return c.terms, c.loaded
-}
-
-func (c *statsCache) set(terms searchutil.StopWords) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.terms = terms
-	c.loaded = true
-}
-
-func (c *statsCache) invalidate() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.terms = nil
-	c.loaded = false
-}
-
 // FrequentTerms returns the corpus-derived terms that are too common to be
 // worth searching, for use as searchutil.LexicalQuery's stop set. It returns nil
 // when statistics have not been computed yet, which simply means no filtering.
@@ -72,7 +40,8 @@ func (c *statsCache) invalidate() {
 // domain, where a word like "payment" in a payments-only collection is exactly
 // as uninformative as "the".
 func (s *TextStore) FrequentTerms(ctx context.Context) searchutil.StopWords {
-	if terms, ok := s.stats.get(); ok {
+	terms, ok, gen := s.stats.Get()
+	if ok {
 		return terms
 	}
 
@@ -82,12 +51,11 @@ func (s *TextStore) FrequentTerms(ctx context.Context) searchutil.StopWords {
 		return nil
 	}
 
-	var terms searchutil.StopWords
 	if rec != nil {
 		terms = searchutil.NewStopWords(rec.Frequent)
 	}
 
-	s.stats.set(terms)
+	s.stats.Fill(gen, terms)
 
 	return terms
 }
@@ -107,7 +75,7 @@ func (s *TextStore) RefreshStats(ctx context.Context) error {
 		if err := s.statsBucket.Delete(ctx, docsStatsRecordID); err != nil && !errors.Is(err, bw.ErrNotFound) {
 			return fmt.Errorf("clear docs search stats; %w", err)
 		}
-		s.stats.invalidate()
+		s.stats.Invalidate()
 
 		return nil
 	}
@@ -145,7 +113,7 @@ func (s *TextStore) RefreshStats(ctx context.Context) error {
 		return fmt.Errorf("save docs search stats; %w", err)
 	}
 
-	s.stats.set(searchutil.NewStopWords(frequent))
+	s.stats.Publish(searchutil.NewStopWords(frequent))
 
 	slog.Info("docs search stats refreshed",
 		"chunks", total, "sampled", sampled, "frequent_terms", len(frequent))

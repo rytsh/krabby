@@ -171,7 +171,7 @@ func (m *Manager) ReadSymbol(ctx context.Context, repoID, namespace, symbol stri
 
 	graphPath := graphbuilder.GraphPath(dir)
 	if !fileExists(graphPath) {
-		return out, fmt.Errorf("graph for %s not built yet", repo)
+		return out, notFound("graph for %s not built yet", repo)
 	}
 
 	switch {
@@ -224,7 +224,7 @@ func (m *Manager) resolveRepoRef(ctx context.Context, ref string) (id, selection
 		return "", "", err
 	}
 	if r == nil {
-		return "", "", fmt.Errorf("unknown repository %q; use list_repos for its exact id", ref)
+		return "", "", notFound("unknown repository %q; use list_repos for its exact id", ref)
 	}
 
 	return r.ID, "", nil

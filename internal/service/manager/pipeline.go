@@ -293,11 +293,11 @@ func (m *Manager) Generate(ctx context.Context, id string, targets []string, for
 	}
 
 	if repo == nil {
-		return fmt.Errorf("repo %s not found", id)
+		return notFound("repo %s not found", id)
 	}
 
 	if !fileExists(filepath.Join(repo.Path, ".git")) {
-		return fmt.Errorf("repo %s has no clone yet; refresh it first", id)
+		return notFound("repo %s has no clone yet; refresh it first", id)
 	}
 
 	// A stage this repository opted out of is not silently turned into a no-op
@@ -486,7 +486,7 @@ func (m *Manager) Refresh(ctx context.Context, id string, skip ...string) error 
 	}
 
 	if repo == nil {
-		return fmt.Errorf("repo %s not found", id)
+		return notFound("repo %s not found", id)
 	}
 
 	jobCtx, finish := m.registerJob(ctx, id)

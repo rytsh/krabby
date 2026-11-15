@@ -402,14 +402,17 @@ func ListFiles(rootDir, subdir string, recursive bool) ([]Entry, error) {
 	}
 	defer func() { _ = root.Close() }()
 
-	var entries []Entry
-
+	// A recursive listing is the first MaxListEntries of the cursor pager's
+	// walk. A separate walk used to stop at MaxListEntries in walk order and
+	// sort afterwards, so the result was not the first entries in listing
+	// order (directories found after the cut were missing while their files
+	// were present), and it listed symlinks as files where the pager skips
+	// them. One walk gives both callers the same entries.
 	if recursive {
-		entries, err = listRecursive(root, cleaned)
-	} else {
-		entries, err = listShallow(root, cleaned)
+		return listCursorRecursive(root, cleaned, true, "", MaxListEntries)
 	}
 
+	entries, err := listShallow(root, cleaned)
 	if err != nil {
 		return nil, err
 	}
@@ -720,8 +723,11 @@ func listShallow(root *os.Root, dir string) ([]Entry, error) {
 			rel = path.Join(dir, name)
 		}
 
-		info, err := root.Stat(rel)
-		if err != nil {
+		// Lstat, and only directories and regular files, as the recursive
+		// walk does: a symlink is not followed, so a listing never shows a
+		// link as the thing it points at, inside the clone or out of it.
+		info, err := root.Lstat(rel)
+		if err != nil || (!info.IsDir() && !info.Mode().IsRegular()) {
 			continue
 		}
 
@@ -731,46 +737,6 @@ func listShallow(root *os.Root, dir string) ([]Entry, error) {
 		}
 
 		entries = append(entries, e)
-	}
-
-	return entries, nil
-}
-
-func listRecursive(root *os.Root, dir string) ([]Entry, error) {
-	var entries []Entry
-
-	walkFn := func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil //nolint:nilerr // skip unreadable entries
-		}
-
-		if p == "." {
-			return nil
-		}
-
-		base := path.Base(p)
-		if d.IsDir() && skipListing(base) {
-			return fs.SkipDir
-		}
-
-		e := Entry{Path: p, IsDir: d.IsDir()}
-		if !d.IsDir() {
-			if info, ierr := d.Info(); ierr == nil {
-				e.Size = info.Size()
-			}
-		}
-
-		entries = append(entries, e)
-
-		if len(entries) >= MaxListEntries {
-			return fs.SkipAll
-		}
-
-		return nil
-	}
-
-	if err := fs.WalkDir(root.FS(), dir, walkFn); err != nil {
-		return nil, fmt.Errorf("walk %s; %w", dir, err)
 	}
 
 	return entries, nil

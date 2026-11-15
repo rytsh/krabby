@@ -337,3 +337,52 @@ func (m *Manager) syncTask(c docsCorpus, taskKind string, forceFull bool, refres
 		},
 	}
 }
+
+// deleteCorpus removes a web source or API service: its search index
+// entries, its record, then its markdown directory. The web-source and
+// API-catalog deletes were copies of one another that had drifted apart (one
+// checked the record existed and held its lock through the teardown, the
+// other did neither and deleted in the opposite order), so both go through
+// here.
+//
+// The caller holds the scope lock, which keeps a sync from running. The
+// record lock is held for the whole teardown, so an update cannot slip in
+// between the steps and re-create a record whose pages and index are gone.
+//
+// The indexes go first: a failure there is logged and the delete carries on,
+// but with the record still present the source stays visible and can be
+// deleted again. The directory goes last; removing it is the one step whose
+// failure is returned after the record is gone, and a retry finds nothing to
+// delete and reports it as not found.
+func (m *Manager) deleteCorpus(ctx context.Context, c docsCorpus, root string, recordLock func() func(),
+	exists func(context.Context) (bool, error), deleteRecord func(context.Context) error,
+) error {
+	defer recordLock()()
+
+	ok, err := exists(ctx)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return notFound("%s %s not found", c.kind, c.name)
+	}
+
+	d, release := m.acquireDocs()
+	if d.rag != nil {
+		if err := d.rag.DeleteRepo(ctx, c.scope); err != nil {
+			slog.Error("delete "+c.kind+" from docs index", append(c.logArgs(), "error", err)...)
+		}
+	}
+	if m.docsText != nil {
+		if err := m.docsText.DeleteRepo(ctx, c.scope); err != nil {
+			slog.Error("delete "+c.kind+" from docs text index", append(c.logArgs(), "error", err)...)
+		}
+	}
+	release()
+
+	if err := deleteRecord(ctx); err != nil {
+		return err
+	}
+
+	return removeContentDir(root, c.dir, c.kind)
+}

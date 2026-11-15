@@ -3,7 +3,6 @@ package manager
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io/fs"
 	"strings"
 	"time"
@@ -81,7 +80,7 @@ func (m *Manager) RepoOverview(ctx context.Context, id string) (RepoOverview, er
 		return out, err
 	}
 	if repo == nil {
-		return out, fmt.Errorf("unknown repository %q; use list_repos for its exact id", id)
+		return out, notFound("unknown repository %q; use list_repos for its exact id", id)
 	}
 	out.DocsStatus = repo.Stages.Docs.Status
 	out.DocsCommit, out.CloneCommit = repo.Stages.Docs.Commit, repo.LastCommit
