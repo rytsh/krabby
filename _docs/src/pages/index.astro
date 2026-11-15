@@ -148,7 +148,7 @@ const repo = "https://github.com/rytsh/krabby";
             <li class="panel">
               <h3 class="caption tiny">3. Serve to agents</h3>
               <img src={plate("step3-art")} alt="" width="1400" height="920" loading="lazy" />
-              <p>Code search, docs and graph analysis go out over MCP, split into read-only, API and admin catalogs.</p>
+              <p>Code search, docs and graph analysis go out over MCP, split into read-only, API, admin and shared-memory catalogs.</p>
             </li>
             <li class="panel">
               <h3 class="caption tiny">4. Get real answers</h3>
@@ -181,8 +181,8 @@ const repo = "https://github.com/rytsh/krabby";
             </li>
             <li class="panel case-panel">
               <p class="caption tiny">Finally, read only the evidence</p>
-              <p>Open the file around the reported line and answer with paths your team can check.</p>
-              <code>read_file &#123; repo: "github.com/acme/payments", path: "internal/payment/retry.go" &#125;</code>
+              <p>Read the whole function, first line to last, and answer with paths your team can check.</p>
+              <code>read_symbol &#123; repo: "github.com/acme/payments", symbol: "retryWithBackoff" &#125;</code>
               <p class="balloon">Case closed, with sources.</p>
             </li>
           </ol>
@@ -205,8 +205,8 @@ const repo = "https://github.com/rytsh/krabby";
             </article>
             <article>
               <h3>Symbols, not guesses</h3>
-              <p>A definition is a node with a path and a line. A reference is a real incoming edge you can filter by context.</p>
-              <p class="tools">find_definition · find_references · glob</p>
+              <p>A definition is a node with a path and a line range. A reference is a real incoming edge you can filter by context.</p>
+              <p class="tools">find_definition · find_references · read_symbol</p>
             </article>
             <article>
               <h3>Regex with exact hits</h3>
@@ -285,6 +285,7 @@ docker run -d \
             <li><code>/mcp</code><b>Everyday code work.</b> Read-only code, graph, files, history and docs. Keep it on.</li>
             <li><code>/mcp/api</code><b>Live API work.</b> Discovers catalogued endpoints and can call them. Enable when needed.</li>
             <li><code>/mcp/admin</code><b>Setup and changes.</b> Adds, refreshes or deletes resources. Turn it off for analysis.</li>
+            <li><code>/mcp/memory</code><b>Shared memory.</b> Decisions and gotchas agents and people keep across sessions, pinned to code.</li>
           </ul>
         </div>
       </section>

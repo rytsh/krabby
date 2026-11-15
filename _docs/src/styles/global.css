@@ -867,7 +867,7 @@ section {
 
 .catalogs {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 24px;
   margin: 32px 0 0;
   padding: 18px 0 0;
