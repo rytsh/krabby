@@ -95,7 +95,14 @@ func LexicalQuery(question string, stop StopWords) string {
 
 	for _, word := range strings.Fields(trimmed) {
 		word = strings.Trim(word, ",;:!?()[]{}<>\"'`")
-		if word == "" {
+		// A sentence's closing period (or ellipsis) is punctuation, not part
+		// of the last word; kept, the dot makes "bug." look like an
+		// identifier and turns it into a required term. Dots inside a word
+		// ("v0.39.0", "a.b") are untouched.
+		word = strings.TrimRight(word, ".…")
+		// A token with no letter or digit ("—", "...") matches nothing a
+		// reader would ask for, but as a required term it empties the result.
+		if !strings.ContainsFunc(word, func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }) {
 			continue
 		}
 

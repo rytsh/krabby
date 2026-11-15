@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -69,7 +70,7 @@ func (m *Manager) namespaceScope(ctx context.Context, repoID, namespace string) 
 			return namespaceScope{}, err
 		}
 		if repo == nil {
-			return namespaceScope{}, fmt.Errorf("repository %q is not tracked; list_repos names the tracked ids, and omitting repo searches the default namespace", repoID)
+			return namespaceScope{}, metrics.Invalid(fmt.Errorf("repository %q is not tracked; list_repos names the tracked ids, and omitting repo searches the default namespace", repoID))
 		}
 
 		return namespaceScope{all: true}, nil
@@ -95,7 +96,7 @@ func (m *Manager) namespaceScope(ctx context.Context, repoID, namespace string) 
 
 	switch len(scope.repos) {
 	case 0:
-		return namespaceScope{}, fmt.Errorf("no repository in namespace %s; retry with namespace \"*\" to search all", displayNamespace(namespace))
+		return namespaceScope{}, metrics.Invalid(fmt.Errorf("no repository in namespace %s; retry with namespace \"*\" to search all", displayNamespace(namespace)))
 	case 1:
 		scope.single = scope.repos[0]
 	}
@@ -150,7 +151,7 @@ func (m *Manager) SearchCode(
 
 	matchPath, err := coderag.Scope{Path: opts.Path}.PathMatcher()
 	if err != nil {
-		return coderag.SemanticPage{}, err
+		return coderag.SemanticPage{}, metrics.Invalid(err)
 	}
 
 	searchStarted := time.Now()
@@ -276,10 +277,22 @@ func (m *Manager) SearchCodeRegex(
 	ctx context.Context,
 	repoID, namespace, pattern string,
 	opts coderag.RegexOptions,
+) (coderag.RegexPage, error) {
+	return m.searchCodeRegex(ctx, m.metrics, repoID, namespace, pattern, opts)
+}
+
+// searchCodeRegex is SearchCodeRegex with the recorder to report to. Krabby's
+// own background searches pass nil: the search-duration metric describes the
+// latency callers see, and a Big Picture run's batch query is not one of them.
+func (m *Manager) searchCodeRegex(
+	ctx context.Context,
+	rec *metrics.Recorder,
+	repoID, namespace, pattern string,
+	opts coderag.RegexOptions,
 ) (page coderag.RegexPage, err error) {
 	timing := newCodeSearchTiming()
 	defer func() {
-		timing.finish(ctx, slog.Default(), m.metrics, "regex", repoID, namespace, len(page.Results), page.Total, err)
+		timing.finish(ctx, slog.Default(), rec, "regex", repoID, namespace, len(page.Results), page.Total, err)
 	}()
 	if m.codeText == nil {
 		return coderag.RegexPage{}, errors.New("regex code search is not configured")
@@ -291,6 +304,12 @@ func (m *Manager) SearchCodeRegex(
 	filter, repos, err := m.codeScope(ctx, repoID, namespace, opts.Path, timing)
 	if err != nil {
 		return coderag.RegexPage{}, err
+	}
+
+	// Compiled here only to tell a malformed pattern, the caller's mistake,
+	// from a failing index; the store compiles it again with its flags.
+	if _, cerr := regexp.Compile("(?m)" + pattern); cerr != nil {
+		return coderag.RegexPage{}, metrics.Invalid(fmt.Errorf("invalid regex %q; %w", pattern, cerr))
 	}
 
 	timing.enter("index")
@@ -350,7 +369,7 @@ func (m *Manager) codeScope(
 
 	filter, err := scope.KeyFilter()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, metrics.Invalid(err)
 	}
 
 	return filter, repos, nil
@@ -515,18 +534,7 @@ func (m *Manager) ensureCodeIndexForSearch(ctx context.Context, repoID string, s
 		return nil
 	}
 
-	repo, err := m.reg.Get(ctx, target)
-	if err != nil {
-		return fmt.Errorf("load repo %s for code index warmup: %w", target, err)
-	}
-	if repo == nil {
-		// A repository can be removed after namespace resolution or the
-		// startup list. It no longer participates in this search.
-		m.clearCodeWarmPending(target)
-
-		return nil
-	}
-	if err := m.ensureCodeIndex(ctx, target, repo.Path); err != nil {
+	if err := m.ensureCodeIndex(ctx, target); err != nil {
 		return fmt.Errorf("warm code index for %s: %w", target, err)
 	}
 

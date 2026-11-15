@@ -77,13 +77,30 @@ func (m *Manager) pictureGenerateTask(spec queue.Spec) queue.Task {
 	}}
 }
 
+// pictureCompleter returns the model client Big Picture generation uses, or
+// nil when generation is not configured.
+func (m *Manager) pictureCompleter() bigpicture.Completer {
+	b, release := m.acquireDocs()
+	defer release()
+	if b == nil {
+		return nil
+	}
+
+	return b.pictureChat
+}
+
 // runPictureGeneration returns the run status. Unchanged evidence and patches
 // with no document changes are recorded without publishing a new revision.
 func (m *Manager) runPictureGeneration(ctx context.Context, name string, p *bigpicture.Picture, run *bigpicture.Run) (string, error) {
+	// The model client is taken under a short lease and the lease dropped at
+	// once. A run lasts minutes to hours, and holding the docs read lock that
+	// long would stall Configure, and through Go's writer-preferring RWMutex
+	// every search behind it; worse, research reaches code paths that lease
+	// the bundle again, and a second read lock taken while a writer waits
+	// never returns. The client owns nothing a bundle swap closes.
+	chat := m.pictureCompleter()
 	pub, status, err := func() (*bigpicture.Publication, string, error) {
-		b, release := m.acquireDocs()
-		defer release()
-		if b == nil || b.pictureChat == nil {
+		if chat == nil {
 			return nil, "", bigpicture.ErrGenerationUnavailable
 		}
 		if err := m.validatePictureSources(ctx, p.Sources); err != nil {
@@ -95,7 +112,7 @@ func (m *Manager) runPictureGeneration(ctx context.Context, name string, p *bigp
 		}
 		cache := pictureNoteCache{m.bigPictures, p}
 		lookupKeys := map[string]bool{}
-		m.pictureLookups(ctx, b.pictureChat, cache, p, &research, lookupKeys)
+		m.pictureLookups(ctx, chat, cache, p, &research, lookupKeys)
 		run.ResearchHash = bigpicture.Fingerprint(p, research)
 		if p.CurrentRevision != "" {
 			previous, err := m.BigPictureSnapshot(ctx, name, p.CurrentRevision)
@@ -110,7 +127,7 @@ func (m *Manager) runPictureGeneration(ctx context.Context, name string, p *bigp
 		// Large research is condensed per source (and merged if needed) so
 		// any number of sources fits one synthesis call.
 		raw := research.Items
-		research, used, err := bigpicture.Condense(ctx, b.pictureChat, cache, p, research)
+		research, used, err := bigpicture.Condense(ctx, chat, cache, p, research)
 		if err != nil {
 			return nil, "", err
 		}
@@ -120,7 +137,7 @@ func (m *Manager) runPictureGeneration(ctx context.Context, name string, p *bigp
 		research.Collected = raw
 		m.bigPictures.PruneNotes(p, used)
 		if p.CurrentRevision == "" {
-			generated, err := bigpicture.Generate(ctx, b.pictureChat, p, research)
+			generated, err := bigpicture.Generate(ctx, chat, p, research)
 			if err != nil {
 				return nil, "", err
 			}
@@ -135,7 +152,7 @@ func (m *Manager) runPictureGeneration(ctx context.Context, name string, p *bigp
 		if err != nil {
 			return nil, "", err
 		}
-		pub, err := bigpicture.Update(ctx, b.pictureChat, p, research, previous, documents)
+		pub, err := bigpicture.Update(ctx, chat, p, research, previous, documents)
 		if errors.Is(err, bigpicture.ErrNoChanges) {
 			run.Message = "Model found no document changes for the new evidence."
 			return nil, bigpicture.RunNoChanges, nil

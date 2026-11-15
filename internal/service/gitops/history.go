@@ -188,9 +188,11 @@ func (g *Git) Log(ctx context.Context, dir string, opts LogOptions) ([]Commit, e
 	}
 	// The separator keeps a path that looks like a revision from being read as
 	// one, which is exactly how a file named "HEAD" or a branch-shaped
-	// directory would otherwise be mis-resolved.
+	// directory would otherwise be mis-resolved. It goes in even without a
+	// path: with none, a revision that is also a file name is ambiguous.
+	args = append(args, "--")
 	if opts.Path != "" {
-		args = append(args, "--", opts.Path)
+		args = append(args, opts.Path)
 	}
 
 	out, err := g.run(ctx, dir, nil, args...)
@@ -290,7 +292,8 @@ func (g *Git) Diff(ctx context.Context, dir, from, to, path string, patch bool) 
 		return res, nil
 	}
 
-	body, err := g.run(ctx, dir, nil, g.diffArgs(from, to, path, true)...)
+	// Raw: a patch's trailing whitespace is part of the last hunk.
+	body, err := g.runRaw(ctx, dir, nil, g.diffArgs(from, to, path, true)...)
 	if err != nil {
 		return nil, err
 	}
@@ -345,8 +348,9 @@ func (g *Git) diffArgs(from, to, path string, patch bool) []string {
 		args = append(args, "--name-status", "--no-renames")
 	}
 
+	args = append(args, "--")
 	if path != "" {
-		args = append(args, "--", path)
+		args = append(args, path)
 	}
 
 	return args

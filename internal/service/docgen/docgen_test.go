@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -857,5 +858,60 @@ func TestSelectFilesPrunesNoiseDirs(t *testing.T) {
 	}
 	if len(got) != 1 || got[0] != "main.go" {
 		t.Fatalf("selected %v, want only main.go", got)
+	}
+}
+
+// One failed synthesis call must not cost the repository its documentation:
+// the previous documentation.md stays on disk and in the manifest, and the
+// next build tries the synthesis again.
+func TestFailedSynthesisKeepsThePreviousDocument(t *testing.T) {
+	clone := t.TempDir()
+	writeSrc(t, clone, "a.go", "package a\nfunc A() {}\n")
+
+	// Once failing is set, only the synthesis call fails: the summary of the
+	// new file still succeeds, so the run reaches synthesis.
+	var failing atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if failing.Load() && strings.Contains(string(body), "Per-file summaries") {
+			http.Error(w, "upstream overloaded", http.StatusBadRequest)
+
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"# Doc\n\ngood"}}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	client, err := llm.New(config.LLM{BaseURL: srv.URL, Model: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gen := New(config.Docs{SkipIntegrationProfile: true}, client, nil, nil, nil)
+	docsDir := filepath.Join(t.TempDir(), "docs")
+	if _, err := gen.Generate(context.Background(), "owner/repo", clone, docsDir, config.DocsOverride{}, false); err != nil {
+		t.Fatalf("first Generate: %v", err)
+	}
+
+	// A new file changes the summary set, so the next build re-synthesizes,
+	// and that call fails.
+	writeSrc(t, clone, "b.go", "package a\nfunc B() {}\n")
+	failing.Store(true)
+	man, err := gen.Generate(context.Background(), "owner/repo", clone, docsDir, config.DocsOverride{}, false)
+	if err == nil {
+		t.Fatal("Generate succeeded while the model was failing")
+	}
+
+	raw, rerr := os.ReadFile(filepath.Join(docsDir, DocName))
+	if rerr != nil || !strings.Contains(string(raw), "good") {
+		t.Fatalf("previous %s lost after a failed synthesis: %v %q", DocName, rerr, raw)
+	}
+	if man == nil || len(man.Docs) != 1 || man.Docs[0].Path != DocName {
+		t.Fatalf("manifest docs = %+v, want the previous %s kept", man, DocName)
+	}
+	if !strings.Contains(err.Error(), "synthesize") {
+		t.Fatalf("err = %v, want the synthesis failure", err)
+	}
+	if man.PromptHash != "" {
+		t.Error("manifest records a prompt hash for a document this run did not write; the next build would reuse it as current")
 	}
 }

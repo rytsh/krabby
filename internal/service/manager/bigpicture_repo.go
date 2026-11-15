@@ -128,7 +128,7 @@ func (m *Manager) pictureRepoSignals(ctx context.Context, repo *registry.Repo) (
 	if m.codeText == nil {
 		return nil, "code index unavailable; communication signals not collected."
 	}
-	page, err := m.SearchCodeRegex(ctx, repo.ID, "", pictureSignalPattern, coderag.RegexOptions{MaxMatches: 6, PerPage: 100, MaxFiles: 400})
+	page, err := m.searchCodeRegex(ctx, nil, repo.ID, "", pictureSignalPattern, coderag.RegexOptions{MaxMatches: 6, PerPage: 100, MaxFiles: 400})
 	if err != nil {
 		return nil, "communication signal search failed; signals not collected."
 	}

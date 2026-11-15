@@ -53,6 +53,7 @@ type repoAdminService interface {
 	RefreshWait(context.Context, string, ...string) (*registry.Repo, bool, error)
 	CancelJob(string) bool
 	RepoSettings(context.Context, string) (*manager.RepoSettings, error)
+	ResolveRepo(context.Context, string) (*registry.Repo, error)
 	Activity(string) string
 }
 

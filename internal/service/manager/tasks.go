@@ -233,11 +233,7 @@ func (m *Manager) rebuildTask(spec queue.Spec) (queue.Task, bool) {
 }
 
 // RefreshWait pulls and rebuilds a repository in the background and waits until
-// the run finishes or ctx is done, then returns the latest repo record. done
-// reports whether the refresh completed within the wait; when false the build
-// continues detached and the record reflects the in-progress state.
-// A build failure is surfaced via the record's Status/LastError rather than a
-// Go error; enqueue and unexpected lookup failures return an error.
+// the run finishes or ctx is done; see waitRepoTask for what it returns.
 // skip names stages this run must not execute, on top of the repo's persisted
 // skip_stages override.
 func (m *Manager) RefreshWait(ctx context.Context, id string, skip ...string) (*registry.Repo, bool, error) {
@@ -249,6 +245,32 @@ func (m *Manager) RefreshWait(ctx context.Context, id string, skip ...string) (*
 		return nil, false, fmt.Errorf("enqueue refresh for %s; %w", id, err)
 	}
 
+	return m.waitRepoTask(ctx, h, id)
+}
+
+// RunFailedError is returned with the repository record when a waited-for run
+// finished with an error. The record is still the latest state, and is
+// returned alongside it.
+//
+// A refresh records most failures on the record (Status, LastError), but a
+// selective generate refuses many runs without touching it: a stage blocked
+// by skip_stages, an unknown target, a repository with no clone yet. Read
+// from the record alone, those looked like success.
+type RunFailedError struct {
+	Repo string
+	Err  error
+}
+
+func (e *RunFailedError) Error() string { return fmt.Sprintf("run for %s failed; %v", e.Repo, e.Err) }
+
+func (e *RunFailedError) Unwrap() error { return e.Err }
+
+// waitRepoTask waits for a submitted repository task until it finishes or ctx
+// is done, then returns the latest repository record. done reports whether
+// the task completed within the wait; when false it continues detached and
+// the record reflects the in-progress state. A task that finished with an
+// error returns the record together with a *RunFailedError.
+func (m *Manager) waitRepoTask(ctx context.Context, h *queue.Handle, id string) (*registry.Repo, bool, error) {
 	done := false
 	select {
 	case <-h.Done():
@@ -265,6 +287,12 @@ func (m *Manager) RefreshWait(ctx context.Context, id string, skip ...string) (*
 
 	if repo == nil {
 		return nil, done, fmt.Errorf("repo %s not found", id)
+	}
+
+	if done {
+		if runErr := h.Err(); runErr != nil {
+			return repo, done, &RunFailedError{Repo: id, Err: runErr}
+		}
 	}
 
 	return repo, done, nil
@@ -384,11 +412,8 @@ func (m *Manager) TriggerGenerate(id string, targets []string, force bool) error
 }
 
 // GenerateWait runs the selected generation stages for a repo in the background
-// and waits until the run finishes or ctx is done, then returns the latest repo
-// record. done reports whether the generation completed within the wait; when
-// false the run continues detached and the record reflects the in-progress
-// state. Stage failures are surfaced via the record's Status/LastError rather
-// than a Go error; enqueue and unexpected lookup failures return an error.
+// and waits until the run finishes or ctx is done; see waitRepoTask for what
+// it returns.
 func (m *Manager) GenerateWait(ctx context.Context, id string, targets []string, force bool) (*registry.Repo, bool, error) {
 	// The generation runs on the manager lifecycle context: a client that stops
 	// waiting (client-side tool timeout, ctrl+c, MCP cancellation) must not
@@ -398,25 +423,7 @@ func (m *Manager) GenerateWait(ctx context.Context, id string, targets []string,
 		return nil, false, fmt.Errorf("enqueue generate for %s; %w", id, err)
 	}
 
-	done := false
-	select {
-	case <-h.Done():
-		done = true
-	case <-ctx.Done():
-	}
-
-	// Read the record even after a caller cancel so the in-progress (or
-	// terminal) state is always returned.
-	repo, err := m.reg.Get(context.WithoutCancel(ctx), id)
-	if err != nil {
-		return nil, done, err
-	}
-
-	if repo == nil {
-		return nil, done, fmt.Errorf("repo %s not found", id)
-	}
-
-	return repo, done, nil
+	return m.waitRepoTask(ctx, h, id)
 }
 
 // TriggerReindexAll rebuilds optional docs/code indexes for every ready repo

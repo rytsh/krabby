@@ -30,6 +30,7 @@ import (
 	"github.com/worldline-go/types"
 
 	"github.com/rytsh/krabby/internal/service/apicatalog"
+	"github.com/rytsh/krabby/internal/service/websource"
 	"github.com/rytsh/krabby/internal/strutil"
 )
 
@@ -49,7 +50,7 @@ type Provider struct {
 
 // New creates the provider.
 func New() *Provider {
-	return &Provider{client: &http.Client{Timeout: fetchTimeout}}
+	return &Provider{client: &http.Client{Timeout: fetchTimeout, CheckRedirect: websource.StripCredentialsOnRedirect}}
 }
 
 // Config is owned entirely by this provider. Every field is a types.Null so a
@@ -428,9 +429,14 @@ func (p *Provider) get(ctx context.Context, cfg resolvedConfig, state syncState,
 		return nil, meta, nil
 	}
 
-	body, err := io.ReadAll(io.LimitReader(res.Body, maxDocumentBytes))
+	body, err := io.ReadAll(io.LimitReader(res.Body, maxDocumentBytes+1))
 	if err != nil {
 		return nil, meta, fmt.Errorf("read api document; %w", err)
+	}
+	// A cut document can still parse - YAML especially - into fewer
+	// operations, and a complete-looking fetch prunes the rest. Refuse it.
+	if len(body) > maxDocumentBytes {
+		return nil, meta, fmt.Errorf("api document is larger than %d MiB", maxDocumentBytes>>20)
 	}
 
 	if res.StatusCode != http.StatusOK {
@@ -462,7 +468,7 @@ func (p *Provider) clientFor(cfg resolvedConfig) *http.Client {
 	}
 	clone.TLSClientConfig.InsecureSkipVerify = true
 
-	return &http.Client{Timeout: fetchTimeout, Transport: clone}
+	return &http.Client{Timeout: fetchTimeout, Transport: clone, CheckRedirect: websource.StripCredentialsOnRedirect}
 }
 
 // describe says what was actually fetched when a document fails to parse.

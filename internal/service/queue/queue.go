@@ -870,6 +870,8 @@ func (q *Queue) finish(t *task, err, runCtxErr error) {
 		// task is re-enqueued (as queued) on the next start instead of lost.
 		// runCtxErr is captured before the task-local cancel, so a task that
 		// merely finishes while the queue is closed still removes its record.
+		// A nil error does not change that: many runs return nil once they see
+		// cancellation, having stopped part-way, so it cannot be read as done.
 		t.state = StateCanceled
 		t.err = err
 	case err != nil:

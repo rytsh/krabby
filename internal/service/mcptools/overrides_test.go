@@ -114,7 +114,11 @@ func (s *stubRepoService) RefreshWait(context.Context, string, ...string) (*regi
 	return nil, false, errStubReached
 }
 
-func (s *stubRepoService) CancelJob(string) bool        { return false }
+func (s *stubRepoService) CancelJob(string) bool { return false }
+
+func (s *stubRepoService) ResolveRepo(_ context.Context, ref string) (*registry.Repo, error) {
+	return &registry.Repo{ID: ref}, nil
+}
 func (s *stubRepoService) TaskSnapshot() queue.Snapshot { return queue.Snapshot{} }
 func (s *stubRepoService) ClearTaskHistory()            {}
 func (s *stubRepoService) CancelPendingTasks() int      { return 0 }

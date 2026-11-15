@@ -862,3 +862,39 @@ func TestRelationFilterValidStillWorks(t *testing.T) {
 		t.Errorf("valid filter leaked non-matching edge:\n%s", got)
 	}
 }
+
+// Every retired snapshot path is invalidated once. With no load in flight
+// there is nothing for a generation counter to tell, so none may be left
+// behind for the path.
+func TestInvalidateLeavesNoStateForAnIdlePath(t *testing.T) {
+	e := NewEngine(0)
+	for range 3 {
+		p := writeGraph(t, smallGraph)
+		if _, err := e.Graph(p); err != nil {
+			t.Fatal(err)
+		}
+		e.Invalidate(p)
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if len(e.generation) != 0 || len(e.entries) != 0 {
+		t.Fatalf("after invalidating idle paths: %d generation entries, %d cached graphs", len(e.generation), len(e.entries))
+	}
+}
+
+// A node id repeated in the file is one node, listed and counted once.
+func TestDuplicateNodeIDIsListedOnce(t *testing.T) {
+	p := writeGraph(t, `{"nodes":[
+		{"id":"a","label":"First","community":0},
+		{"id":"a","label":"Second","community":0}
+	],"links":[]}`)
+
+	g, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(g.nodeList) != 1 || len(g.communities[0]) != 1 || g.Nodes["a"].Label != "Second" {
+		t.Fatalf("nodeList=%v community=%v label=%q, want one node, the later definition", g.nodeList, g.communities[0], g.Nodes["a"].Label)
+	}
+}

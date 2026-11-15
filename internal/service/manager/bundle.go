@@ -45,30 +45,76 @@ type docsBundle struct {
 }
 
 // acquireDocs leases the active bundle until the returned release function is
-// called. Configure waits for all leases before closing replaced stores, so an
-// in-flight search/index can never race a live settings update.
+// called. Configure waits for all leases on a bundle before closing its
+// stores, so an in-flight search/index can never race a live settings update.
 func (m *Manager) acquireDocs() (*docsBundle, func()) {
 	return m.bundleState.acquire()
 }
 
-// bundleState retains the existing lease policy: a replacement waits until
-// all readers release the old bundle. Writers are serialized by configureMu
-// at the manager boundary, including shutdown and resource ownership transfer.
+// bundleState holds the active bundle and counts the leases on each one.
+//
+// A lease never blocks. Leases are held for as long as the work they serve -
+// a docs build or a Big Picture run can take hours - so a design where a
+// pending replacement held new leases back (a sync.RWMutex, which prefers
+// writers) would stall every search and every traced request behind one
+// settings save, and deadlock a goroutine that leased twice. Instead a
+// replacement swaps the bundle at once: new leases get the new one, and the
+// old one is closed when its last lease is released. replace waits for that,
+// so the caller still knows the old resources are gone when it returns.
+//
+// Writers are serialized by configureMu at the manager boundary, including
+// shutdown and resource ownership transfer.
 type bundleState struct {
-	docsMu sync.RWMutex
+	mu     sync.Mutex
 	docs   *docsBundle
+	leases map[*docsBundle]int
+	// drained is closed and replaced whenever a lease is released, waking
+	// any replace waiting for its bundle's count to reach zero.
+	drained chan struct{}
 }
 
 func (s *bundleState) acquire() (*docsBundle, func()) {
-	s.docsMu.RLock()
-	return s.docs, s.docsMu.RUnlock
+	s.mu.Lock()
+	b := s.docs
+	if s.leases == nil {
+		s.leases = map[*docsBundle]int{}
+	}
+	s.leases[b]++
+	s.mu.Unlock()
+
+	var once sync.Once
+
+	return b, func() { once.Do(func() { s.release(b) }) }
+}
+
+func (s *bundleState) release(b *docsBundle) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.leases[b]--; s.leases[b] <= 0 {
+		delete(s.leases, b)
+	}
+	if s.drained != nil {
+		close(s.drained)
+		s.drained = nil
+	}
 }
 
 func (s *bundleState) replace(next *docsBundle) error {
-	s.docsMu.Lock()
+	s.mu.Lock()
 	prev := s.docs
 	s.docs = next
-	s.docsMu.Unlock()
+	for s.leases[prev] > 0 {
+		if s.drained == nil {
+			s.drained = make(chan struct{})
+		}
+		wait := s.drained
+		s.mu.Unlock()
+		<-wait
+		s.mu.Lock()
+	}
+	s.mu.Unlock()
+
 	return prev.closeExcept(next)
 }
 

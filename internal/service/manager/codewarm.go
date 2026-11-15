@@ -58,7 +58,7 @@ func (m *Manager) WarmCodeSearch(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := m.ensureCodeIndex(ctx, repo.ID, repo.Path); err != nil {
+		if err := m.ensureCodeIndex(ctx, repo.ID); err != nil {
 			errs = append(errs, fmt.Errorf("warm code index for %s: %w", repo.ID, err))
 		}
 	}
@@ -97,7 +97,12 @@ func (m *Manager) clearCodeWarmPending(repoID string) {
 // still pending, serialized per repo so the background warm pass and an
 // on-demand warm triggered by a search never index the same repo twice. A
 // no-op once the index exists.
-func (m *Manager) ensureCodeIndex(ctx context.Context, repoID, clonePath string) error {
+//
+// The clone is read from the record once the warm lock is held, not from
+// what the caller saw earlier: a refresh may have published a newer snapshot
+// in between, and warming from the old one would put stale content back into
+// an index the refresh had just made current.
+func (m *Manager) ensureCodeIndex(ctx context.Context, repoID string) error {
 	if m.codeText == nil {
 		return nil
 	}
@@ -120,7 +125,17 @@ func (m *Manager) ensureCodeIndex(ctx context.Context, repoID, clonePath string)
 		return nil
 	}
 
-	if clonePath == "" || !fileExists(filepath.Join(clonePath, ".git")) {
+	// The warm pass runs outside a build, so the record is fetched here rather
+	// than threaded through: its overrides decide which files are indexed, and
+	// warming with the install-wide selection would produce an index that
+	// disagrees with every later refresh of the same repo.
+	repo, err := m.reg.Get(ctx, repoID)
+	if err != nil {
+		return err
+	}
+	// A removed repository, or one without a clone, has nothing to warm, and
+	// indexing it would bring back entries its removal deleted.
+	if repo == nil || repo.Path == "" || !fileExists(filepath.Join(repo.Path, ".git")) {
 		m.clearCodeWarmPending(repoID)
 		return nil
 	}
@@ -131,16 +146,7 @@ func (m *Manager) ensureCodeIndex(ctx context.Context, repoID, clonePath string)
 		return nil
 	}
 
-	// The warm pass runs outside a build, so the record is fetched here rather
-	// than threaded through: its overrides decide which files are indexed, and
-	// warming with the install-wide selection would produce an index that
-	// disagrees with every later refresh of the same repo.
-	repo, err := m.reg.Get(ctx, repoID)
-	if err != nil {
-		return err
-	}
-
-	if err := d.codeRag.IndexText(ctx, repoID, clonePath, repoFilters(repo)); err != nil {
+	if err := d.codeRag.IndexText(ctx, repoID, repo.Path, repoFilters(repo)); err != nil {
 		return err
 	}
 

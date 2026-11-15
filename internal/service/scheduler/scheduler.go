@@ -119,7 +119,10 @@ func (s *scheduler) reconcile(ctx context.Context) {
 
 	// Swap only after the new set has started successfully, then stop the old
 	// one. A brief overlap is harmless: per-repo refresh triggers coalesce.
-	s.stop()
+	// Only the repo set is replaced: stopping the web, API and Big Picture
+	// sets as well would cancel whatever job of theirs is running, over a
+	// change that has nothing to do with them.
+	s.stopRepos()
 	s.cron = job
 	s.sig = sig
 
@@ -283,13 +286,18 @@ func (s *scheduler) buildAPICrons(schedules []manager.APISchedule) []hardloop.Cr
 
 // stop cancels every loaded cron set (if any) and waits for in-flight jobs.
 func (s *scheduler) stop() {
+	s.stopRepos()
+	s.stopWeb()
+	s.stopAPI()
+	s.stopPictures()
+}
+
+// stopRepos cancels the loaded repo poll cron set (if any).
+func (s *scheduler) stopRepos() {
 	if s.cron != nil {
 		s.cron.Stop()
 		s.cron = nil
 	}
-	s.stopWeb()
-	s.stopAPI()
-	s.stopPictures()
 }
 
 // stopWeb cancels the loaded web-source cron set (if any).

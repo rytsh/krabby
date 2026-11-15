@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/rytsh/krabby/internal/service/credentials"
 )
@@ -37,10 +38,14 @@ func (g *Git) env(auth *credentials.Auth) []string {
 		keyPath = auth.SSHKeyPath
 	}
 
+	// git runs GIT_SSH_COMMAND through a shell, so the key path is quoted: a
+	// data directory with a space in it would otherwise split the argument.
+	// BatchMode keeps ssh from waiting on a prompt nobody can answer, and the
+	// connect timeout keeps an unreachable host from holding a worker.
 	if keyPath != "" {
 		env = append(env, fmt.Sprintf(
-			"GIT_SSH_COMMAND=ssh -i %s -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new",
-			keyPath,
+			"GIT_SSH_COMMAND=ssh -i %s -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=30",
+			shellQuote(keyPath),
 		))
 	}
 
@@ -59,26 +64,76 @@ func (g *Git) env(auth *credentials.Auth) []string {
 	return env
 }
 
+// run executes git and returns its output with surrounding whitespace
+// trimmed, which suits single values (a sha, a ref) and line lists. Output
+// whose edges are content, a patch or blame of a file ending in a blank line,
+// goes through runRaw.
 func (g *Git) run(ctx context.Context, dir string, auth *credentials.Auth, args ...string) (string, error) {
-	full := args
+	out, err := g.runRaw(ctx, dir, auth, args...)
+
+	return strings.TrimSpace(out), err
+}
+
+// runRaw executes git and returns its output as written.
+//
+// core.quotePath=false makes git print paths as they are: by default a name
+// with non-ASCII bytes comes back C-quoted ("caf\303\251.go"), which matches
+// no file, so a changed file would never be reindexed and its old chunks
+// never dropped.
+func (g *Git) runRaw(ctx context.Context, dir string, auth *credentials.Auth, args ...string) (string, error) {
+	// A stalled HTTP transfer (under 1 KiB/s for a minute) fails instead of
+	// holding the repository's worker until someone notices.
+	full := append([]string{
+		"-c", "core.quotePath=false",
+		"-c", "http.lowSpeedLimit=1024", "-c", "http.lowSpeedTime=60",
+	}, args...)
 	if auth != nil && auth.Token != "" {
 		// Reset any system credential helpers, then install ours.
-		full = append([]string{"-c", "credential.helper=", "-c", "credential.helper=" + tokenHelper}, args...)
+		full = append([]string{"-c", "credential.helper=", "-c", "credential.helper=" + tokenHelper}, full...)
 	}
 
 	cmd := exec.CommandContext(ctx, "git", full...)
 	cmd.Dir = dir
 	cmd.Env = g.env(auth)
+	// Cancelling kills git, but an ssh child that inherited its stdout keeps
+	// the pipe open and Wait blocked. WaitDelay bounds that.
+	cmd.WaitDelay = 10 * time.Second
 
 	var out, errOut bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errOut
 
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("git %s; %w; %s", strings.Join(args, " "), err, strings.TrimSpace(errOut.String()))
+		return "", fmt.Errorf("git %s; %w; %s", redactArgs(args), err, redactURLs(strings.TrimSpace(errOut.String())))
 	}
 
-	return strings.TrimSpace(out.String()), nil
+	return out.String(), nil
+}
+
+// shellQuote quotes s for a POSIX shell.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// redactArgs renders git arguments for an error message without the
+// credentials a URL can carry.
+func redactArgs(args []string) string {
+	out := make([]string, len(args))
+	for i, a := range args {
+		out[i] = redactURLs(a)
+	}
+
+	return strings.Join(out, " ")
+}
+
+// userinfoRe matches the user:password@ part of a URL.
+var userinfoRe = regexp.MustCompile(`(://)[^/@\s]+@`)
+
+// redactURLs removes userinfo from every URL in s. A clone URL such as
+// https://user:token@host/... would otherwise put the token into the error,
+// and from there into LastError, the API and the logs.
+func redactURLs(s string) string {
+	return userinfoRe.ReplaceAllString(s, "${1}[redacted]@")
 }
 
 // Clone clones url into dest. Branch may be empty for the default branch.
@@ -87,7 +142,9 @@ func (g *Git) Clone(ctx context.Context, url, branch, dest string, auth *credent
 	if branch != "" {
 		args = append(args, "--branch", branch)
 	}
-	args = append(args, url, dest)
+	// "--" ends the options: a URL or path beginning with "-" is data, never
+	// an option such as --upload-pack, which runs a command.
+	args = append(args, "--", url, dest)
 
 	if _, err := g.run(ctx, "", auth, args...); err != nil {
 		return err
@@ -100,7 +157,7 @@ func (g *Git) Clone(ctx context.Context, url, branch, dest string, auth *credent
 // clones the active local version for speed, then restores the real origin
 // before fetching updates.
 func (g *Git) SetRemoteURL(ctx context.Context, dir, url string) error {
-	_, err := g.run(ctx, dir, nil, "remote", "set-url", "origin", url)
+	_, err := g.run(ctx, dir, nil, "remote", "set-url", "--", "origin", url)
 
 	return err
 }
@@ -134,9 +191,19 @@ func (g *Git) RemoteHead(ctx context.Context, dir, branch string) (string, error
 	return g.run(ctx, dir, nil, "rev-parse", ref)
 }
 
-// Pull fast-forwards the working tree to the remote branch.
-func (g *Git) Pull(ctx context.Context, dir string, auth *credentials.Auth) error {
-	_, err := g.run(ctx, dir, auth, "pull", "--ff-only")
+// ResetToRemote moves the checked-out branch and working tree to the fetched
+// remote branch ("" = the upstream of HEAD), whatever its history.
+//
+// It is for krabby's private staging clones, which nobody edits: there is no
+// local work a reset could lose, and a fast-forward-only pull would leave a
+// repository failing every refresh once its upstream was force-pushed.
+func (g *Git) ResetToRemote(ctx context.Context, dir, branch string) error {
+	ref := "@{upstream}"
+	if branch != "" {
+		ref = "origin/" + branch
+	}
+
+	_, err := g.run(ctx, dir, nil, "reset", "--hard", ref, "--")
 
 	return err
 }
@@ -145,7 +212,7 @@ func (g *Git) Pull(ctx context.Context, dir string, auth *credentials.Auth) erro
 // (added, modified and deleted). Renames are reported as delete+add so callers
 // can treat every returned path uniformly: drop old data, index what exists.
 func (g *Git) DiffNames(ctx context.Context, dir, from, to string) ([]string, error) {
-	out, err := g.run(ctx, dir, nil, "diff", "--name-only", "--no-renames", from, to)
+	out, err := g.run(ctx, dir, nil, "diff", "--name-only", "--no-renames", from, to, "--")
 	if err != nil {
 		return nil, err
 	}
@@ -187,12 +254,14 @@ func (g *Git) Blame(ctx context.Context, dir, file string, start, end int) ([]Bl
 	}
 	args = append(args, "--", file)
 
-	out, err := g.run(ctx, dir, nil, args...)
+	// Raw: the last source line of blame output is a tab and the line's
+	// content, and trimming would drop a blank final line entirely.
+	out, err := g.runRaw(ctx, dir, nil, args...)
 	if err != nil {
 		return nil, err
 	}
 
-	return parseBlamePorcelain(out), nil
+	return parseBlamePorcelain(strings.TrimSuffix(out, "\n")), nil
 }
 
 // parseBlamePorcelain parses `git blame --line-porcelain` output. Each line is
@@ -253,6 +322,14 @@ var repoIDRe = regexp.MustCompile(`^[\w.-]+(/[\w.-]+)+$`)
 // servers or in different groups can never collide. A bare "a/b/c" input is
 // kept as-is.
 func ParseRepoID(url string) (string, error) {
+	// A repository is cloned from a remote. A local path or file:// URL would
+	// let anyone who can add a repository clone any git directory on this
+	// host and read it back through the tools.
+	if trimmed := strings.TrimSpace(url); strings.HasPrefix(trimmed, "/") || strings.HasPrefix(trimmed, ".") ||
+		strings.HasPrefix(strings.ToLower(trimmed), "file:") {
+		return "", fmt.Errorf("cannot derive repo id from url %s: local paths are not remote repositories", url)
+	}
+
 	s := strings.TrimSuffix(strings.TrimSpace(url), "/")
 	s = strings.TrimSuffix(s, ".git")
 
@@ -295,6 +372,17 @@ func ParseRepoID(url string) (string, error) {
 
 	if !repoIDRe.MatchString(id) {
 		return "", fmt.Errorf("cannot derive repo id from url: %s", url)
+	}
+	// The id becomes a directory path under the data dir. A "." or ".."
+	// segment would point that path at another repository's clones, or above
+	// the repos directory altogether, and the snapshot cleanup deletes what
+	// it finds there.
+	// A segment beginning with "-" reads as an option to git wherever the id
+	// or the URL it came from ends up on a command line.
+	for seg := range strings.SplitSeq(id, "/") {
+		if seg == "." || seg == ".." || strings.HasPrefix(seg, "-") {
+			return "", fmt.Errorf("cannot derive repo id from url %s: path segment %q", url, seg)
+		}
 	}
 
 	return id, nil

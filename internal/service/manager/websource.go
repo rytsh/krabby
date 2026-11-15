@@ -535,27 +535,46 @@ func (m *Manager) WebPagesPaged(ctx context.Context, name, team, titleQuery stri
 
 // AddWebPage registers a page URL on a "pages" collection and triggers a
 // background sync.
+//
+// It holds the collection's scope lock while it writes, as the sitemap import
+// and the deletes do: unlocked, a page could be written after its collection
+// was deleted (and resurface in a new collection of the same name), or replace
+// a record a running sync had just committed with a stale copy.
 func (m *Manager) AddWebPage(ctx context.Context, name, pageURL string) (*websource.Page, error) {
 	if m.webStore == nil {
 		return nil, ErrNoWebSources
 	}
 
-	col, err := m.webStore.GetCollection(ctx, name)
+	pageURL, err := validateWebPageURL(pageURL)
+	if err != nil {
+		return nil, fmt.Errorf("page url; %w", err)
+	}
+
+	page, err := m.addWebPageLocked(ctx, name, pageURL)
 	if err != nil {
 		return nil, err
 	}
 
+	// After the lock is released, so the queued sync does not start blocked on it.
+	if err := m.TriggerWebRefresh(name); err != nil {
+		return page, fmt.Errorf("page saved but refresh enqueue failed; %w", err)
+	}
+
+	return page, nil
+}
+
+func (m *Manager) addWebPageLocked(ctx context.Context, name, pageURL string) (*websource.Page, error) {
+	defer m.lockKey(websource.ScopeKey(name))()
+
+	col, err := m.webStore.GetCollection(ctx, name)
+	if err != nil {
+		return nil, err
+	}
 	if col == nil {
 		return nil, fmt.Errorf("collection %s not found", name)
 	}
-
 	if col.Type != websource.TypePages {
 		return nil, fmt.Errorf("collection %s is type %q; pages are discovered, not added manually", name, col.Type)
-	}
-
-	pageURL, err = validateWebPageURL(pageURL)
-	if err != nil {
-		return nil, fmt.Errorf("page url; %w", err)
 	}
 
 	slug, page, err := m.pageForURL(ctx, name, pageURL)
@@ -570,10 +589,6 @@ func (m *Manager) AddWebPage(ctx context.Context, name, pageURL string) (*websou
 
 	if err := m.webStore.UpsertPage(ctx, page); err != nil {
 		return nil, err
-	}
-
-	if err := m.TriggerWebRefresh(name); err != nil {
-		return page, fmt.Errorf("page saved but refresh enqueue failed; %w", err)
 	}
 
 	return page, nil

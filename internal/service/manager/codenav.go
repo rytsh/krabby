@@ -72,9 +72,15 @@ func (m *Manager) graphPathForQuery(ctx context.Context, repoID, namespace, tool
 // graphs decide: one candidate is used, an id named in the arguments is inferred,
 // and a genuinely ambiguous set yields the "Repository selection required"
 // instruction instead of a silent guess at the wrong repository.
+//
+// A named repository may be a unique suffix of its id ("acme/api" for
+// "github.com/acme/api"), as everywhere else a repo is named.
 func (m *Manager) resolveGraphRepo(ctx context.Context, repoID, namespace, tool string, args map[string]any) (resolved, selection string, err error) {
-	if repoID != "" || m.mergeEnabled {
-		return repoID, "", nil
+	if repoID != "" {
+		return m.resolveRepoRef(ctx, repoID)
+	}
+	if m.mergeEnabled {
+		return "", "", nil
 	}
 
 	repoIDs, err := m.graphRepoIDs(ctx, namespace)
@@ -211,17 +217,22 @@ func (m *Manager) ReadSymbol(ctx context.Context, repoID, namespace, symbol stri
 // applies the usual selection rules, except that a merged graph never stands
 // in for a repository: with merging enabled and no repo given, the choice is
 // made the same way it would be without merging.
+// resolveRepoRef resolves a repository named by id or unique id suffix.
+func (m *Manager) resolveRepoRef(ctx context.Context, ref string) (id, selection string, err error) {
+	r, err := m.reg.Resolve(ctx, ref)
+	if err != nil {
+		return "", "", err
+	}
+	if r == nil {
+		return "", "", fmt.Errorf("unknown repository %q; use list_repos for its exact id", ref)
+	}
+
+	return r.ID, "", nil
+}
+
 func (m *Manager) singleGraphRepo(ctx context.Context, repoID, namespace, symbol string) (repo, selection string, err error) {
 	if repoID != "" {
-		r, err := m.reg.Resolve(ctx, repoID)
-		if err != nil {
-			return "", "", err
-		}
-		if r == nil {
-			return "", "", fmt.Errorf("unknown repository %q; use list_repos for its exact id", repoID)
-		}
-
-		return r.ID, "", nil
+		return m.resolveRepoRef(ctx, repoID)
 	}
 
 	repoIDs, err := m.graphRepoIDs(ctx, namespace)

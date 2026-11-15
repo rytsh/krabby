@@ -123,7 +123,7 @@ func (g *Graph) Definitions(symbol string, limit int) SymbolDefs {
 		line, endLine := parseSourceLocation(d.SourceLocation)
 		// bag records where a declaration ends separately from where it
 		// starts; an end written into the location itself is older graphs.
-		if endLine == 0 && d.EndLine > line && line > 0 {
+		if endLine == 0 && d.EndLine >= line && line > 0 {
 			endLine = d.EndLine
 		}
 		def := Definition{

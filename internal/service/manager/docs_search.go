@@ -125,10 +125,10 @@ func (m *Manager) SearchDocs(ctx context.Context, scope, key, namespace, mode, q
 
 	filter, err := docsFilter(scope, key)
 	if err != nil {
-		return rag.DocsPage{}, err
+		return rag.DocsPage{}, metrics.Invalid(err)
 	}
 	if strings.TrimSpace(question) == "" {
-		return rag.DocsPage{}, errors.New("question is empty")
+		return rag.DocsPage{}, metrics.Invalid(errors.New("question is empty"))
 	}
 
 	ragCfg := m.ragConfigSnapshot()
@@ -261,40 +261,40 @@ func (m *Manager) validateDocsKey(ctx context.Context, key string) error {
 	if strings.HasPrefix(key, websource.ScopePrefix) {
 		name := websource.CollectionName(key)
 		if name == "" || m.webStore == nil {
-			return fmt.Errorf("unknown web source scope %q; use list_sources and pass its scope_key", key)
+			return metrics.Invalid(fmt.Errorf("unknown web source scope %q; use list_sources and pass its scope_key", key))
 		}
 		col, err := m.webStore.GetCollection(ctx, name)
 		if err != nil {
 			return err
 		}
 		if col == nil {
-			return fmt.Errorf("unknown web source scope %q; use list_sources and pass its scope_key", key)
+			return metrics.Invalid(fmt.Errorf("unknown web source scope %q; use list_sources and pass its scope_key", key))
 		}
 		return nil
 	}
 	if strings.HasPrefix(key, apicatalog.ScopePrefix) {
 		name := apicatalog.ServiceName(key)
 		if name == "" || m.apiStore == nil {
-			return fmt.Errorf("unknown api scope %q; use list_api_services and pass api:<name>", key)
+			return metrics.Invalid(fmt.Errorf("unknown api scope %q; use list_api_services and pass api:<name>", key))
 		}
 		svc, err := m.apiStore.GetService(ctx, name)
 		if err != nil {
 			return err
 		}
 		if svc == nil {
-			return fmt.Errorf("unknown api scope %q; use list_api_services and pass api:<name>", key)
+			return metrics.Invalid(fmt.Errorf("unknown api scope %q; use list_api_services and pass api:<name>", key))
 		}
 		return nil
 	}
 	if m.reg == nil {
-		return fmt.Errorf("unknown repository scope %q; use list_repos and pass its exact id", key)
+		return metrics.Invalid(fmt.Errorf("unknown repository scope %q; use list_repos and pass its exact id", key))
 	}
 	repo, err := m.reg.Get(ctx, key)
 	if err != nil {
 		return err
 	}
 	if repo == nil {
-		return fmt.Errorf("unknown repository scope %q; use list_repos and pass its exact id", key)
+		return metrics.Invalid(fmt.Errorf("unknown repository scope %q; use list_repos and pass its exact id", key))
 	}
 	return nil
 }
@@ -378,42 +378,4 @@ func (m *Manager) retrieveSemanticCandidates(
 	}
 
 	return d.rag.RetrieveCandidatesTimed(ctx, filter, question, candidates)
-}
-
-// filterDocsByNamespace keeps web-source and API-catalog docs (neither is
-// namespaced) and repo docs whose repo is in the namespace, then trims to
-// topDocs. It resolves the namespace's repo set once and matches doc.Repo
-// against it.
-func (m *Manager) filterDocsByNamespace(ctx context.Context, docs []rag.Doc, namespace string, topDocs int) ([]rag.Doc, error) {
-	repos, err := m.reg.List(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	inNamespace := map[string]struct{}{}
-	for _, repo := range repos {
-		if repoInNamespace(repo, namespace) {
-			inNamespace[repo.ID] = struct{}{}
-		}
-	}
-
-	out := docs[:0]
-	for _, doc := range docs {
-		// Web sources and catalogued APIs belong to no namespace, so a
-		// namespace filter must pass them through rather than drop them for
-		// failing a repo-set lookup they can never satisfy.
-		if strings.HasPrefix(doc.Repo, websource.ScopePrefix) || strings.HasPrefix(doc.Repo, apicatalog.ScopePrefix) {
-			out = append(out, doc)
-			continue
-		}
-		if _, ok := inNamespace[doc.Repo]; ok {
-			out = append(out, doc)
-		}
-	}
-
-	if topDocs > 0 && len(out) > topDocs {
-		out = out[:topDocs]
-	}
-
-	return out, nil
 }

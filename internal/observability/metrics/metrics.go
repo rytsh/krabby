@@ -30,7 +30,28 @@ const (
 	OutcomeError     = "error"
 	OutcomeCancelled = "cancelled"
 	OutcomeDeadline  = "deadline"
+	// OutcomeInvalid is a request the caller got wrong: an unknown repository,
+	// a pattern that does not compile, an empty question. Counting those as
+	// errors would make a typo look like the service failing.
+	OutcomeInvalid = "invalid"
 )
+
+// errInvalid marks an error as the caller's mistake; see Invalid.
+var errInvalid = errors.New("invalid request")
+
+type invalidError struct{ error }
+
+func (e invalidError) Unwrap() []error { return []error{e.error, errInvalid} }
+
+// Invalid marks err as caller error, so Outcome reports it as
+// OutcomeInvalid. The message is unchanged, and errors.Is/As still see err.
+func Invalid(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	return invalidError{err}
+}
 
 // Bucket boundaries in seconds. The SDK default is tuned for milliseconds and
 // would put every observation here in its first two buckets.
@@ -106,6 +127,8 @@ func Outcome(err error) string {
 		return OutcomeCancelled
 	case errors.Is(err, context.DeadlineExceeded):
 		return OutcomeDeadline
+	case errors.Is(err, errInvalid):
+		return OutcomeInvalid
 	default:
 		return OutcomeError
 	}

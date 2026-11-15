@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -492,6 +493,43 @@ func TestWalkFilesPruningIsCallerControlled(t *testing.T) {
 	for _, rel := range got {
 		if strings.HasPrefix(rel, "skipme/") {
 			t.Fatalf("skipDir was ignored, got %v", got)
+		}
+	}
+}
+
+// A recursive listing of a directory that does not exist is an error, not an
+// empty page that reads as an empty directory.
+func TestListFilesCursorRecursiveRejectsAMissingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "src", "a.go"), "package a\n")
+
+	if _, err := ListFilesCursor(dir, "srcc", "", true, 50); err == nil {
+		t.Fatal("listing a missing directory returned no error")
+	}
+	if _, err := ListFilesCursor(dir, "src/a.go", "", true, 50); err == nil {
+		t.Fatal("listing a file as a directory returned no error")
+	}
+	page, err := ListFilesCursor(dir, "src", "", true, 50)
+	if err != nil || len(page.Entries) != 1 {
+		t.Fatalf("listing an existing directory = %+v, %v", page, err)
+	}
+}
+
+// Vendored and artefact directories are hidden below the root as well as at
+// it, by the shallow listing as by the recursive ones.
+func TestShallowListingHidesNestedArtefacts(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "src", "a.go"), "package a\n")
+	mustWrite(t, filepath.Join(dir, "src", "vendor", "v.go"), "package v\n")
+	mustWrite(t, filepath.Join(dir, "src", ".bag", "graph.json"), "{}\n")
+
+	entries, err := ListFiles(dir, "src", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if base := path.Base(e.Path); base == "vendor" || base == ".bag" {
+			t.Errorf("shallow listing of src shows %s", e.Path)
 		}
 	}
 }

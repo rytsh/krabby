@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -130,7 +131,7 @@ func (m *Manager) createSnapshot(
 			if err := m.git.Fetch(ctx, stagingPath, auth); err != nil {
 				return nil, fmt.Errorf("fetch snapshot; %w", err)
 			}
-			if err := m.git.Pull(ctx, stagingPath, auth); err != nil {
+			if err := m.git.ResetToRemote(ctx, stagingPath, repo.Branch); err != nil {
 				return nil, fmt.Errorf("update snapshot; %w", err)
 			}
 		}
@@ -172,14 +173,20 @@ func (m *Manager) buildGraphSnapshot(
 		if ctx.Err() != nil {
 			err = ErrCancelled
 		}
-		st.Status = registry.StageError
-		st.Error = err.Error()
-		st.Commit = snapshot.Commit
-		st.FinishedAt = time.Now()
-		// Logged rather than returned: err is the failure the caller needs to
-		// see, but a lost write leaves the stage looking like it never failed.
-		if upErr := m.reg.Upsert(context.WithoutCancel(ctx), repo); upErr != nil {
-			slog.Error("persist graph stage failure", "repo", repo.ID, "error", upErr)
+		// A skipped graph stage records no state, even when the promotion
+		// after it fails: that failure is the caller's to report, not the
+		// stage's.
+		if !skipGraph {
+			st.Status = registry.StageError
+			st.Error = err.Error()
+			st.Commit = snapshot.Commit
+			st.FinishedAt = time.Now()
+			// Logged rather than returned: err is the failure the caller needs
+			// to see, but a lost write leaves the stage looking like it never
+			// failed.
+			if upErr := m.reg.Upsert(context.WithoutCancel(ctx), repo); upErr != nil {
+				slog.Error("persist graph stage failure", "repo", repo.ID, "error", upErr)
+			}
 		}
 		if rmErr := os.RemoveAll(path); rmErr != nil {
 			slog.Warn("remove failed graph output", "path", path, "error", rmErr)
@@ -204,8 +211,11 @@ func (m *Manager) buildGraphSnapshot(
 
 		// The graph stage does not go through runStage, so it reports its own
 		// duration: the build and the checks that decide whether it is usable.
+		// Timed from here, as runStage times the other stages: the registry
+		// write above is bookkeeping, not graph work.
+		buildStart := time.Now()
 		buildErr := m.buildGraph(ctx, repo, snapshot.StagingPath)
-		m.metrics.StageFinished(ctx, registry.StageGraph, stageOutcome(ctx, buildErr), time.Since(start))
+		m.metrics.StageFinished(ctx, registry.StageGraph, stageOutcome(ctx, buildErr), time.Since(buildStart))
 		if buildErr != nil {
 			return fail(buildErr, snapshot.StagingPath)
 		}
@@ -278,11 +288,25 @@ func (m *Manager) legacyRepoPath(id string) string {
 	return filepath.Join(m.reposDir, filepath.FromSlash(id))
 }
 
+// snapshotDirRe matches the names createSnapshot gives versions:
+// <unix nanos>-<short sha>.
+var snapshotDirRe = regexp.MustCompile(`^[0-9]+-[0-9a-f]{1,40}$`)
+
 // cleanupSnapshots keeps the active and newest previous snapshot. Older
 // versions are reaped once snapshotGracePeriod has elapsed, without delaying
 // refresh or mutating a published tree.
+//
+// Only directories this code named are touched. The snapshot root is the
+// repository id joined onto a shared root, so anything else found there is
+// not one of this repository's versions, and deleting it is how a bad id
+// would take other repositories with it.
 func (m *Manager) cleanupSnapshots(id, activePath string) {
 	root := m.snapshotRoot(id)
+	if !strictlyWithin(root, filepath.Join(m.reposDir, ".snapshots")) {
+		slog.Error("snapshot root escapes the snapshots directory; not cleaning up", "repo", id, "root", root)
+
+		return
+	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return
@@ -301,7 +325,7 @@ func (m *Manager) cleanupSnapshots(id, activePath string) {
 			}
 			continue
 		}
-		if !entry.IsDir() || filepath.Clean(path) == filepath.Clean(activePath) {
+		if !entry.IsDir() || !snapshotDirRe.MatchString(entry.Name()) || filepath.Clean(path) == filepath.Clean(activePath) {
 			continue
 		}
 		info, err := entry.Info()
@@ -321,8 +345,12 @@ func (m *Manager) cleanupSnapshots(id, activePath string) {
 		}
 	}
 
+	// The legacy clone is a git checkout directly under the repos directory.
+	// Anything else at that path (the snapshots directory, another
+	// repository's group directory) is not it.
 	legacyPath := m.legacyRepoPath(id)
-	if filepath.Clean(legacyPath) == filepath.Clean(activePath) {
+	if filepath.Clean(legacyPath) == filepath.Clean(activePath) || !strictlyWithin(legacyPath, m.reposDir) ||
+		pathWithin(filepath.Join(m.reposDir, ".snapshots"), legacyPath) || !fileExists(filepath.Join(legacyPath, ".git")) {
 		return
 	}
 	if info, err := os.Stat(legacyPath); err == nil && time.Since(info.ModTime()) >= snapshotGracePeriod {

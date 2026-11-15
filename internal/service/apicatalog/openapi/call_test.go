@@ -240,3 +240,95 @@ func TestCallRedirectStripsCredentials(t *testing.T) {
 		t.Fatalf("Authorization %q leaked across origins", elsewhereAuth)
 	}
 }
+
+// A document's servers entry is fetched content. When it points at a host
+// the operator never configured, the call is made without the stored
+// credentials, and the result says why.
+func TestCallKeepsCredentialsFromAHostTheDocumentChose(t *testing.T) {
+	other, seen := callServer(t, http.StatusOK, `{}`)
+
+	svc := &apicatalog.Service{
+		Name:            "billing",
+		ResolvedBaseURL: other.URL,
+		Config:          json.RawMessage(`{"url":"https://docs.example.com/openapi.json","token":"secret","headers":{"X-Api-Key":"k"}}`),
+	}
+
+	res, err := New().Call(context.Background(), svc, callDetail("GET", "/v1/x"), apicatalog.CallRequest{})
+	if err != nil {
+		t.Fatalf("Call() error = %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("call failed: %+v", res)
+	}
+	if got := seen.Header.Get("Authorization"); got != "" {
+		t.Errorf("Authorization %q sent to a host the document chose", got)
+	}
+	if got := seen.Header.Get("X-Api-Key"); got != "" {
+		t.Errorf("X-Api-Key %q sent to a host the document chose", got)
+	}
+	if len(res.Notes) == 0 || !strings.Contains(res.Notes[0], "base_url") {
+		t.Errorf("notes = %v, want one pointing at base_url", res.Notes)
+	}
+
+	// Naming the host as base_url is how the operator trusts it.
+	svc.BaseURL = other.URL
+	if _, err := New().Call(context.Background(), svc, callDetail("GET", "/v1/x"), apicatalog.CallRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := seen.Header.Get("Authorization"); got != "Bearer secret" {
+		t.Errorf("with base_url set, Authorization = %q, want the stored token", got)
+	}
+}
+
+// A relative server ("/v1") is relative to the document's URL, and a server
+// the operation declares beats the document's.
+func TestCallResolvesTheMostSpecificServer(t *testing.T) {
+	server, seen := callServer(t, http.StatusOK, `{}`)
+
+	svc := &apicatalog.Service{
+		Name:            "billing",
+		ResolvedBaseURL: "https://wrong.example.com",
+		Config:          json.RawMessage(fmt.Sprintf(`{"url":%q,"token":"secret"}`, server.URL+"/docs/openapi.json")),
+	}
+	d := callDetail("GET", "/me")
+	d.BaseURL = "/v2"
+
+	res, err := New().Call(context.Background(), svc, d, apicatalog.CallRequest{})
+	if err != nil {
+		t.Fatalf("Call() error = %v", err)
+	}
+	if !res.OK || seen.Path != "/v2/me" {
+		t.Fatalf("call went to %q (%+v), want /v2/me on the document's host", seen.Path, res)
+	}
+	if got := seen.Header.Get("Authorization"); got != "Bearer secret" {
+		t.Errorf("same-origin call lost its credentials: Authorization = %q", got)
+	}
+}
+
+// Configured headers are credentials; a redirect off the origin drops them.
+func TestCallRedirectStripsConfiguredHeaders(t *testing.T) {
+	var elsewhereKey string
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		elsewhereKey = r.Header.Get("X-Api-Key")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(elsewhere.Close)
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL+"/moved", http.StatusFound)
+	}))
+	t.Cleanup(origin.Close)
+
+	svc := &apicatalog.Service{
+		Name:            "billing",
+		ResolvedBaseURL: origin.URL,
+		Config:          json.RawMessage(fmt.Sprintf(`{"url":%q,"headers":{"X-Api-Key":"k"}}`, origin.URL)),
+	}
+
+	if _, err := New().Call(context.Background(), svc, callDetail("GET", "/v1/x"), apicatalog.CallRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if elsewhereKey != "" {
+		t.Fatalf("X-Api-Key %q leaked across origins", elsewhereKey)
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/rytsh/krabby/internal/config"
@@ -369,5 +370,54 @@ func TestNonStreamedFallbackCapturesUsage(t *testing.T) {
 
 	if meta.Usage.PromptTokens != 7 || meta.Usage.CompletionTokens != 2 {
 		t.Fatalf("usage = %+v", meta.Usage)
+	}
+}
+
+// Requests already in flight when the endpoint first rejects stream_options
+// sent the field too. Each must replay without it, not fail as a plain 400
+// because another request flipped the client-wide flag first.
+func TestStreamOptionsRejectionReplaysConcurrentRequests(t *testing.T) {
+	const parallel = 8
+
+	// Hold every first attempt until all have arrived, so they are all in
+	// flight with stream_options when the rejections go out.
+	var arrived sync.WaitGroup
+	arrived.Add(parallel)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+
+		if _, ok := body["stream_options"]; ok {
+			arrived.Done()
+			arrived.Wait()
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"error":{"message":"unknown parameter: stream_options"}}`)
+
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	c, err := New(config.LLM{BaseURL: srv.URL, Model: "test-model"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	errs := make(chan error, parallel)
+	for range parallel {
+		go func() {
+			_, err := c.Complete(context.Background(), []Message{{Role: "user", Content: "hi"}})
+			errs <- err
+		}()
+	}
+	for range parallel {
+		if err := <-errs; err != nil {
+			t.Errorf("concurrent request failed: %v", err)
+		}
 	}
 }

@@ -106,6 +106,19 @@ func TestParseRepoID(t *testing.T) {
 		{url: "git@gitlab.com:group/sub/deeper/project.git", want: "gitlab.com/group/sub/deeper/project"},
 		{url: "owner/name", want: "owner/name"},
 		{url: "not-a-url", wantErr: true},
+		// The id becomes a directory path; "." and ".." would point it at
+		// other repositories' data or above the repos directory.
+		{url: "https://host/../..", wantErr: true},
+		{url: "https://github.com/acme/../other", wantErr: true},
+		{url: "git@github.com:acme/./name.git", wantErr: true},
+		// A leading "-" would be read by git as an option (--upload-pack runs
+		// a command), and a local path clones whatever is on this host.
+		{url: "-ufoo/bar", wantErr: true},
+		{url: "-uX:a/b", wantErr: true},
+		{url: "https://host/--upload-pack=touch/x", wantErr: true},
+		{url: "/srv/git/secret", wantErr: true},
+		{url: "./relative/repo", wantErr: true},
+		{url: "file:///srv/git/secret", wantErr: true},
 		{url: "", wantErr: true},
 	}
 
@@ -127,6 +140,33 @@ func TestParseRepoID(t *testing.T) {
 
 		if got != tt.want {
 			t.Errorf("ParseRepoID(%q) = %q, want %q", tt.url, got, tt.want)
+		}
+	}
+}
+
+// Credentials in a URL must not reach an error message, which is stored as
+// LastError and served by the API.
+func TestRedactURLs(t *testing.T) {
+	for in, want := range map[string]string{
+		"clone -- https://user:ghp_secret@github.com/acme/api.git /x": "clone -- https://[redacted]@github.com/acme/api.git /x",
+		"fatal: unable to access 'https://tok@host/r/': 403":          "fatal: unable to access 'https://[redacted]@host/r/': 403",
+		"clone -- git@github.com:acme/api.git /x":                     "clone -- git@github.com:acme/api.git /x",
+		"https://github.com/acme/api":                                 "https://github.com/acme/api",
+	} {
+		if got := redactURLs(in); got != want {
+			t.Errorf("redactURLs(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestShellQuote(t *testing.T) {
+	for in, want := range map[string]string{
+		"/data/keys/a": "'/data/keys/a'",
+		"/my data/key": "'/my data/key'",
+		"/it's/key":    `'/it'\''s/key'`,
+	} {
+		if got := shellQuote(in); got != want {
+			t.Errorf("shellQuote(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

@@ -50,7 +50,10 @@ func chunkFile(content string, syms []symbol, size, overlap int) []chunk {
 		overlap = size / 3
 	}
 
-	lines := strings.Split(content, "\n")
+	// A file's final newline ends its last line; it does not start another.
+	// Split alone would add an empty line after it, and a chunk reaching the
+	// end of the file would report an end line one past the file's last.
+	lines := strings.Split(strings.TrimSuffix(content, "\n"), "\n")
 
 	sections := sectionize(lines, syms)
 	if len(sections) == 0 {

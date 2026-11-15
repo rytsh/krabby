@@ -274,7 +274,8 @@ func (m *Manager) startWork() bool {
 	return true
 }
 
-// ReconcileInterruptedStages marks persisted running stages as failed. Activity
+// ReconcileInterruptedStages marks persisted running stages, and repositories
+// left cloning or building, as failed. Activity
 // is intentionally in-memory, so no work from a previous process can still be
 // running when a new Manager starts.
 func (m *Manager) ReconcileInterruptedStages(ctx context.Context) error {
@@ -297,6 +298,15 @@ func (m *Manager) ReconcileInterruptedStages(ctx context.Context) error {
 			st.FinishedAt = time.Now()
 			changed = true
 		}
+		// The repository's own status is persisted mid-run too. Left at
+		// cloning or building, it reads as live work forever, and reindexAll
+		// skips it because it only rebuilds ready repositories. A refresh
+		// restored from the task store sets it again when it runs.
+		if repo.Status == registry.StatusCloning || repo.Status == registry.StatusBuilding {
+			repo.Status = registry.StatusError
+			repo.LastError = "interrupted by service restart"
+			changed = true
+		}
 		if changed {
 			if err := m.reg.Upsert(ctx, repo); err != nil {
 				errs = append(errs, err)
@@ -311,20 +321,23 @@ func (m *Manager) ReconcileInterruptedStages(ctx context.Context) error {
 
 // reconcileInterruptedSyncs clears the "fetching" status left by a sync that
 // died with the process. The status is a lock as much as a label: the interval
-// poll skips a collection that claims to be fetching, so a kill (an OOM during
-// a large sweep is the likely one) would otherwise park the source forever,
-// with the UI polling it every two seconds because it looks live.
+// poll skips a web source or API service that claims to be fetching, so a kill
+// (an OOM during a large sweep is the likely one) would otherwise park it
+// forever, with the UI polling it every two seconds because it looks live.
 func (m *Manager) reconcileInterruptedSyncs(ctx context.Context) error {
+	var errs []error
+	if err := m.reconcileInterruptedAPISyncs(ctx); err != nil {
+		errs = append(errs, err)
+	}
 	if m.webStore == nil {
-		return nil
+		return errors.Join(errs...)
 	}
 
 	cols, err := m.webStore.ListCollections(ctx)
 	if err != nil {
-		return err
+		return errors.Join(append(errs, err)...)
 	}
 
-	var errs []error
 	for _, col := range cols {
 		if col.Status != websource.StatusFetching {
 			continue
@@ -335,6 +348,39 @@ func (m *Manager) reconcileInterruptedSyncs(ctx context.Context) error {
 		// Do not stamp LastRefreshAt: nothing was completed, and the next poll
 		// should pick this collection straight back up.
 		if err := m.webStore.UpsertCollection(ctx, col); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+// reconcileInterruptedAPISyncs is reconcileInterruptedSyncs for API services.
+func (m *Manager) reconcileInterruptedAPISyncs(ctx context.Context) error {
+	if m.apiStore == nil {
+		return nil
+	}
+
+	svcs, err := m.apiStore.ListServices(ctx)
+	if err != nil {
+		return err
+	}
+
+	var errs []error
+	for _, svc := range svcs {
+		if svc.Status != apicatalog.StatusFetching {
+			continue
+		}
+
+		err := m.mutateService(ctx, svc.Name, func(cur *apicatalog.Service) error {
+			if cur.Status == apicatalog.StatusFetching {
+				cur.Status = apicatalog.StatusError
+				cur.LastError = "interrupted by service restart"
+			}
+
+			return nil
+		})
+		if err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -405,9 +451,9 @@ func (m *Manager) AddRepo(ctx context.Context, spec RepoSpec, skip ...string) (*
 // wait ends early the current in-progress record is returned with done=false
 // and the build keeps running (poll repo_status for the final state).
 //
-// A build failure is reported through the returned record's Status ("error") and
-// LastError, not as a Go error, so callers always get the final state back. An
-// enqueue failure is returned immediately.
+// A build failure is returned as a *RunFailedError together with the record,
+// whose Status and LastError describe it, so callers always get the final
+// state back. An enqueue failure is returned immediately.
 // skip drops stages from this build only; see AddRepo.
 func (m *Manager) AddRepoWait(ctx context.Context, spec RepoSpec, skip ...string) (*registry.Repo, bool, error) {
 	id, repo, existed, err := m.registerRepo(ctx, spec)
@@ -417,6 +463,11 @@ func (m *Manager) AddRepoWait(ctx context.Context, spec RepoSpec, skip ...string
 
 	registered := repo
 	repo, done, err := m.RefreshWait(ctx, id, skip...)
+	var runErr *RunFailedError
+	if errors.As(err, &runErr) {
+		// The build ran and failed; the record carries that, as documented.
+		return repo, done, err
+	}
 	if err != nil {
 		return registered, done, m.recordRepoEnqueueFailure(ctx, registered, existed, err)
 	}
@@ -465,6 +516,11 @@ func (m *Manager) registerRepo(ctx context.Context, spec RepoSpec) (id string, r
 	existing, gerr := m.reg.Get(ctx, id)
 	if gerr != nil {
 		return "", nil, false, gerr
+	}
+	if existing == nil {
+		if err := m.checkRepoIDNesting(ctx, id); err != nil {
+			return "", nil, false, err
+		}
 	}
 	if existing != nil {
 		if !spec.Overrides.Changed(registry.Overrides{}) {
@@ -613,8 +669,39 @@ func (m *Manager) DeleteNamespace(ctx context.Context, name string) error {
 	return m.reg.DeleteNamespace(ctx, name)
 }
 
+// checkRepoIDNesting refuses an id that is a path prefix of a tracked one, or
+// has one as its prefix.
+//
+// Every per-repository directory (snapshots, the legacy clone, generated docs)
+// is the id joined onto a root, so "github.com/acme" - what pasting an org URL
+// produces - owns the directories of every tracked github.com/acme/* repo.
+// Removing it, or its snapshot cleanup, would delete theirs.
+func (m *Manager) checkRepoIDNesting(ctx context.Context, id string) error {
+	repos, err := m.reg.List(ctx)
+	if err != nil {
+		return err
+	}
+
+	for _, r := range repos {
+		switch {
+		case strings.HasPrefix(r.ID, id+"/"):
+			return fmt.Errorf("repository id %s would contain the tracked repository %s; add the repository's own URL, not its group's", id, r.ID)
+		case strings.HasPrefix(id, r.ID+"/"):
+			return fmt.Errorf("repository id %s would sit inside the tracked repository %s", id, r.ID)
+		}
+	}
+
+	return nil
+}
+
 // RemoveRepo deletes the record, local clone, generated docs and derived indexes.
 func (m *Manager) RemoveRepo(ctx context.Context, id string) error {
+	// Queued work for the repository would only fail once it is gone, and a
+	// running build holds the lock taken below for as long as it runs, which
+	// can be hours. Cancel both first so the removal does not wait on work
+	// whose result it is about to delete.
+	m.CancelJob(id)
+
 	defer m.lockKey(id)()
 
 	repo, err := m.reg.Get(ctx, id)
@@ -659,14 +746,25 @@ func (m *Manager) RemoveRepo(ctx context.Context, id string) error {
 		slog.Error("mark memories of removed repo", "repo", id, "error", err)
 	}
 
+	// The directories are the id joined onto shared roots. They are removed
+	// only when they lie strictly inside those roots; an id from before
+	// ParseRepoID refused "." and ".." segments must not take a root with it.
 	snapshotRoot := m.snapshotRoot(id)
-	if err := os.RemoveAll(snapshotRoot); err != nil {
-		return fmt.Errorf("remove snapshots for %s; %w", id, err)
+	if strictlyWithin(snapshotRoot, filepath.Join(m.reposDir, ".snapshots")) {
+		if err := os.RemoveAll(snapshotRoot); err != nil {
+			return fmt.Errorf("remove snapshots for %s; %w", id, err)
+		}
+	} else {
+		slog.Error("snapshot root escapes the snapshots directory; left in place", "repo", id, "root", snapshotRoot)
 	}
 
 	legacyPath := m.legacyRepoPath(id)
-	if err := os.RemoveAll(legacyPath); err != nil {
-		return fmt.Errorf("remove legacy clone %s; %w", legacyPath, err)
+	if strictlyWithin(legacyPath, m.reposDir) && !pathWithin(filepath.Join(m.reposDir, ".snapshots"), legacyPath) {
+		if err := os.RemoveAll(legacyPath); err != nil {
+			return fmt.Errorf("remove legacy clone %s; %w", legacyPath, err)
+		}
+	} else {
+		slog.Error("legacy clone path escapes the repos directory; left in place", "repo", id, "path", legacyPath)
 	}
 	if repo.Path != "" && repo.Path != legacyPath && !pathWithin(repo.Path, snapshotRoot) && pathWithin(repo.Path, m.reposDir) {
 		if err := os.RemoveAll(repo.Path); err != nil {

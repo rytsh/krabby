@@ -71,6 +71,21 @@ func TestLexicalQueryBuildsOrChain(t *testing.T) {
 			want: "how does it",
 		},
 		{
+			name: "a sentence's closing period is not an identifier",
+			in:   "fix the login bug.",
+			want: "fix OR the OR login OR bug",
+		},
+		{
+			name: "dots inside a word keep it an identifier",
+			in:   "upgrade to v0.39.0.",
+			want: "upgrade OR to v0.39.0",
+		},
+		{
+			name: "tokens with no letter or digit are dropped",
+			in:   "retry — backoff ...",
+			want: "retry OR backoff",
+		},
+		{
 			name: "empty stays empty",
 			in:   "   ",
 			want: "",

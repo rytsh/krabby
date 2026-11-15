@@ -1090,7 +1090,7 @@ next to the HTTP server ones. Without a collector nothing is measured.
 | `krabby.graph.cache.evictions` | counter | | Graphs dropped to stay within the budget |
 | `krabby.graph.cache.entries` / `.size` / `.limit` | gauge | | What the graph cache holds against `bag.cache_max_bytes` |
 
-`outcome` is `ok`, `error`, `cancelled` or `deadline`. A rising eviction rate
+`outcome` is `ok`, `error`, `cancelled`, `deadline` or `invalid` (the caller's mistake: an unknown repository or scope, a pattern that does not compile, an empty question). A rising eviction rate
 with a falling hit ratio means `bag.cache_max_bytes` is too small for the
 repositories being queried. No attribute carries a repository id or a query:
 those would create one time series per value.

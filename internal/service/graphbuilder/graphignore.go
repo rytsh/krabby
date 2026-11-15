@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -54,6 +55,16 @@ const (
 // If the generated block was the file's only content, the file is removed.
 func RemoveLegacyManagedIgnore(clonePath string) (changed bool, err error) {
 	path := filepath.Join(clonePath, legacyIgnoreFileName)
+	// Only a regular file is krabby's to rewrite. The clone is repository
+	// content, and a committed symlink here would turn the rewrite below into
+	// a write wherever it points.
+	if info, err := os.Lstat(path); os.IsNotExist(err) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("inspect %s; %w", legacyIgnoreFileName, err)
+	} else if !info.Mode().IsRegular() {
+		return false, nil
+	}
 	existing, err := os.ReadFile(path) //nolint:gosec // path is a tracked clone root
 	if os.IsNotExist(err) {
 		return false, nil
@@ -96,6 +107,21 @@ func stripManagedBlock(content string) string {
 		sawBlock bool
 	)
 
+	// A begin marker with no end would swallow every line after it, all of
+	// them the user's. Such a file is left exactly as it is.
+	begins, ends := 0, 0
+	for _, line := range lines {
+		switch strings.TrimSpace(line) {
+		case managedBegin:
+			begins++
+		case managedEnd:
+			ends++
+		}
+	}
+	if begins != ends {
+		return content
+	}
+
 	for _, line := range lines {
 		switch {
 		case strings.TrimSpace(line) == managedBegin:
@@ -129,15 +155,5 @@ func stripManagedBlock(content string) string {
 // that order, without aliasing either input. It mirrors what a build applies,
 // so callers surfacing the effective configuration cannot drift from it.
 func MergeExclude(global, repo []string) []string {
-	if len(repo) == 0 {
-		return global
-	}
-	if len(global) == 0 {
-		return repo
-	}
-
-	out := make([]string, 0, len(global)+len(repo))
-	out = append(out, global...)
-
-	return append(out, repo...)
+	return slices.Concat(global, repo)
 }

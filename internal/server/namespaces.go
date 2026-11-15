@@ -54,7 +54,7 @@ func deleteNamespace(mgr repoAdmin) ada.HandlerFunc {
 			return c.Err(err)
 		}
 
-		return c.SetStatus(http.StatusNoContent).SendJSON(nil)
+		return c.SendNoContent()
 	}
 }
 

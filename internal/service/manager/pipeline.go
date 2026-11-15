@@ -17,10 +17,6 @@ import (
 	"github.com/rytsh/krabby/internal/service/registry"
 )
 
-// runStage executes one generation stage, persisting its running/ok/error state
-// on the repo record and exposing it as a current activity while it runs.
-// Stage-state mutation and persistence are serialized on stageMu so multiple
-// stages of the same repo may run concurrently.
 // stageOutcome classifies how a stage ended for the stage-duration metric. A
 // stage whose job context is done was stopped, whatever error the interrupted
 // work happened to surface (often a killed subprocess rather than a context
@@ -33,6 +29,10 @@ func stageOutcome(ctx context.Context, err error) string {
 	return metrics.Outcome(err)
 }
 
+// runStage executes one generation stage, persisting its running/ok/error state
+// on the repo record and exposing it as a current activity while it runs.
+// Stage-state mutation and persistence are serialized on stageMu so multiple
+// stages of the same repo may run concurrently.
 func (m *Manager) runStage(ctx context.Context, repo *registry.Repo, name string, fn func() error) error {
 	m.stageMu.Lock()
 	st := repo.Stages.Get(name)
@@ -664,7 +664,12 @@ func (m *Manager) buildDocsAndIndex(
 		return
 	}
 
-	docsChanged := true
+	// Only the docs stage writes the generated docs directory. When it does
+	// not run (no generator configured, or docs skipped for this repository)
+	// the markdown is what the last successful index saw, and re-embedding it
+	// on every new commit would cost a full pass for nothing. The index is
+	// still rebuilt when its stage is not OK or an index lost the repository.
+	docsChanged := false
 	docsRan := false
 	if d.gen != nil && !skips.skips(repo, registry.StageDocs) {
 		// Refresh stays incremental; force is exposed only by Generate.
@@ -674,9 +679,7 @@ func (m *Manager) buildDocsAndIndex(
 		}
 
 		docsRan = true
-		if man != nil {
-			docsChanged = man.ChangedDocs
-		}
+		docsChanged = man == nil || man.ChangedDocs
 	}
 
 	if d.rag == nil && m.docsText == nil {

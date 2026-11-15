@@ -166,6 +166,11 @@ func (e *Engine) Graph(path string) (*Graph, error) {
 	if e.flights[path] == flight {
 		delete(e.flights, path)
 	}
+	// An Invalidate during this load bumped the counter for it alone; with
+	// the load finished and no other in flight, it has done its job.
+	if _, inFlight := e.flights[path]; !inFlight && !current {
+		delete(e.generation, path)
+	}
 	close(flight.done)
 	e.mu.Unlock()
 
@@ -201,8 +206,15 @@ func (e *Engine) Invalidate(path string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	e.generation[path]++
-	delete(e.flights, path)
+	// The generation only tells an in-flight load that it was overtaken. With
+	// no load in flight there is nothing to tell, and keeping the counter would
+	// leave an entry behind for every retired snapshot path, forever.
+	if _, inFlight := e.flights[path]; inFlight {
+		e.generation[path]++
+		delete(e.flights, path)
+	} else {
+		delete(e.generation, path)
+	}
 	if el, ok := e.entries[path]; ok {
 		e.removeElement(el)
 	}

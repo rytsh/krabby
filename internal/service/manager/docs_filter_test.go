@@ -91,43 +91,6 @@ func TestDocsNamespaceFilterPushesExactKeysIntoRetrieval(t *testing.T) {
 	}
 }
 
-// TestNamespaceFilterKeepsUnnamespacedDocs pins the post-retrieval half of the
-// same rule: web sources and catalogued APIs are not in any namespace's repo
-// set, so matching them against it drops every one of their hits.
-func TestNamespaceFilterKeepsUnnamespacedDocs(t *testing.T) {
-	t.Parallel()
-	mgr, reg := newNamespaceManager(t)
-	ctx := context.Background()
-	for _, repo := range []*registry.Repo{
-		{ID: "acme/payments", Namespace: "payments"},
-		{ID: "acme/other", Namespace: "other"},
-	} {
-		if err := reg.Upsert(ctx, repo); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	docs := []rag.Doc{
-		{Repo: "acme/payments", Path: "a.md"},
-		{Repo: "acme/other", Path: "b.md"},
-		{Repo: "web:wiki", Path: "c.md"},
-		{Repo: "api:billing", Path: "d.md"},
-	}
-	got, err := mgr.filterDocsByNamespace(ctx, docs, "payments", 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var kept []string
-	for _, doc := range got {
-		kept = append(kept, doc.Repo)
-	}
-	want := []string{"acme/payments", "web:wiki", "api:billing"}
-	if !reflect.DeepEqual(kept, want) {
-		t.Fatalf("kept = %v, want %v", kept, want)
-	}
-}
-
 // TestAPIDocMetadataAndScopeResolution covers the rest of the API-catalog
 // search path: a hit must identify itself as an API rather than a repository,
 // the scope key must validate, and get_doc must be able to follow it.

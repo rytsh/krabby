@@ -36,6 +36,13 @@ func (m *Manager) runCodeIndexStage(ctx context.Context, repo *registry.Repo, d 
 		}
 		return d.codeRag.IndexProgress(ctx, repo.ID, repo.Path, repoFilters(repo), onProgress)
 	})
+	// A full index leaves nothing for the startup warm to do. Left pending,
+	// the warm would index the repository a second time, possibly from the
+	// snapshot this run just replaced. An incremental run only touches the
+	// changed files, so it cannot stand in for a missing index.
+	if err == nil && !opts.incremental {
+		m.clearCodeWarmPending(repo.ID)
+	}
 
 	// Corpus statistics are only query tuning; failure must not fail indexing.
 	if opts.refreshStats && m.codeText != nil {

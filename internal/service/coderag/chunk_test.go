@@ -276,3 +276,20 @@ func TestIndexChangedIncremental(t *testing.T) {
 		t.Fatalf("new file not searchable: %#v, %v", page, err)
 	}
 }
+
+// A file ending in a newline has as many lines as newlines; the last chunk
+// must not claim the line after the end.
+func TestChunkFileEndLineStopsAtTheLastLine(t *testing.T) {
+	for name, content := range map[string]string{
+		"trailing newline":    "a := 1\nb := 2\nc := 3\n",
+		"no trailing newline": "a := 1\nb := 2\nc := 3",
+	} {
+		chunks := chunkFile(content, nil, 3000, 0)
+		if len(chunks) == 0 {
+			t.Fatalf("%s: no chunks", name)
+		}
+		if last := chunks[len(chunks)-1]; last.EndLine != 3 {
+			t.Errorf("%s: last chunk ends on line %d, want 3", name, last.EndLine)
+		}
+	}
+}

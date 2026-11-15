@@ -2,6 +2,7 @@ package mcptools
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -9,6 +10,7 @@ import (
 
 	"github.com/rytsh/krabby/internal/service/manager"
 	"github.com/rytsh/krabby/internal/service/registry"
+	"github.com/rytsh/krabby/internal/storage"
 )
 
 func TestRefreshRepoArgsValidateStages(t *testing.T) {
@@ -92,8 +94,25 @@ func TestRefreshRepoArgsValidateSkip(t *testing.T) {
 	}
 }
 
-func TestRefreshRepoToolReportsEnqueueRejection(t *testing.T) {
-	mgr := manager.New(context.Background(), nil, nil, nil, nil, nil, nil, "", "", false, manager.DocsDeps{})
+func refreshTestSession(t *testing.T, repos ...string) *mcp.ClientSession {
+	t.Helper()
+
+	db, err := storage.Open(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	reg, err := registry.New(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range repos {
+		if err := reg.Upsert(context.Background(), &registry.Repo{ID: id, URL: "https://" + id + ".git"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	mgr := manager.New(context.Background(), reg, nil, nil, nil, nil, nil, "", "", false, manager.DocsDeps{})
 	if err := mgr.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +127,28 @@ func TestRefreshRepoToolReportsEnqueueRejection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = session.Close() }()
+	t.Cleanup(func() { _ = session.Close() })
+
+	return session
+}
+
+// An id that names no tracked repository is refused before anything is
+// queued; queued work is only checked when it runs, where nobody sees the
+// failure.
+func TestRefreshRepoToolRefusesAnUnknownRepository(t *testing.T) {
+	session := refreshTestSession(t, "example.com/acme/api")
+
+	for _, tool := range []string{"refresh_repo", "cancel_repo_job"} {
+		text, isErr := callToolText(t, session, tool, map[string]any{"repo": "acme/nope"})
+		if !isErr || !strings.Contains(text, "unknown repository") {
+			t.Errorf("%s on an unknown repo = %q (error %v), want unknown repository", tool, text, isErr)
+		}
+	}
+}
+
+func TestRefreshRepoToolReportsEnqueueRejection(t *testing.T) {
+	// A unique suffix names the repository, as the schema says.
+	session := refreshTestSession(t, "example.com/owner/repo")
 
 	result, callErr := session.CallTool(context.Background(), &mcp.CallToolParams{
 		Name:      "refresh_repo",

@@ -9,29 +9,26 @@ import (
 	"strings"
 )
 
+// pathWithin reports whether path is root itself or lies under it, comparing
+// whole path elements. It is the containment test to use before a destructive
+// operation: the lexical filepath.HasPrefix would accept "/data/srcs-evil" as
+// living under "/data/srcs".
 func pathWithin(path, root string) bool {
 	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
 
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
+// strictlyWithin is pathWithin without the root itself: path lies under root
+// and is not root.
+func strictlyWithin(path, root string) bool {
+	return pathWithin(path, root) && filepath.Clean(path) != filepath.Clean(root)
+}
+
 func fileExists(p string) bool {
 	_, err := os.Stat(p)
 
 	return err == nil
-}
-
-// withinDir reports whether path is root itself or lies under it, comparing
-// whole path elements. It is the containment test to use before a destructive
-// operation: the lexical filepath.HasPrefix would accept "/data/srcs-evil" as
-// living under "/data/srcs".
-func withinDir(root, path string) bool {
-	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
-	if err != nil {
-		return false
-	}
-
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // removeContentDir deletes a generated-content directory, but only after
@@ -51,7 +48,7 @@ func removeContentDir(root, dir, what string) error {
 		return nil
 	}
 
-	if !withinDir(root, dir) {
+	if !pathWithin(dir, root) {
 		slog.Warn("refusing to remove content outside its root", "kind", what, "dir", dir, "root", root)
 
 		return nil

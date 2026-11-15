@@ -27,8 +27,16 @@ const memFileExt = ".mem"
 
 // Open creates/opens the bw state database under the process memory budget.
 func Open(path string) (*bw.DB, error) {
-	if err := os.MkdirAll(path, 0o755); err != nil {
+	// Owner-only. The state database holds credential secrets and API keys in
+	// the clear, and Badger creates its files with the process umask, which
+	// usually leaves them world-readable; a private directory keeps other
+	// local users out whatever the file modes are. An existing directory is
+	// tightened too, so an install from before this keeps no open state dir.
+	if err := os.MkdirAll(path, 0o700); err != nil {
 		return nil, fmt.Errorf("mkdir state dir; %w", err)
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		return nil, fmt.Errorf("restrict state dir; %w", err)
 	}
 
 	db, err := OpenTuned(path, memlimit.Current())

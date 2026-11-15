@@ -106,14 +106,20 @@ func (s *FrequentTermSampler) ObserveSample(fields ...string) {
 	}
 }
 
+// minFrequentSample is the fewest documents a frequency can be judged from.
+// Below it the ratio rounds to a threshold of 0 or 1 documents, every term
+// counts as frequent, and every prose word would be dropped from queries.
+const minFrequentSample = 20
+
 // Result returns the sorted frequent terms and how many documents were
-// inspected. A zero sample yields no terms, which simply means no filtering.
+// inspected. A sample too small to judge yields no terms, which simply means
+// no filtering.
 func (s *FrequentTermSampler) Result() (frequent []string, sampled int) {
-	if s.sampled == 0 {
-		return nil, 0
+	if s.sampled < minFrequentSample {
+		return nil, s.sampled
 	}
 
-	minDocs := int(frequentTermRatio * float64(s.sampled))
+	minDocs := int(math.Ceil(frequentTermRatio * float64(s.sampled)))
 	frequent = make([]string, 0, 64)
 	for term, df := range s.counts {
 		if df >= minDocs {

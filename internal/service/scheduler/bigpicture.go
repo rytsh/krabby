@@ -12,7 +12,7 @@ import (
 func (s *scheduler) reconcilePictures(ctx context.Context) {
 	schedules, err := s.mgr.BigPictureSchedules(ctx)
 	if err != nil {
-		slog.Warn("load big picture schedules failed")
+		slog.Warn("load big picture schedules failed", "error", err)
 		return
 	}
 	data, _ := json.Marshal(schedules)
@@ -28,11 +28,11 @@ func (s *scheduler) reconcilePictures(ctx context.Context) {
 	}
 	job, err := hardloop.NewCron(crons...)
 	if err != nil {
-		slog.Warn("build big picture schedules failed")
+		slog.Warn("build big picture schedules failed", "error", err)
 		return
 	}
 	if err := job.Start(ctx); err != nil {
-		slog.Warn("start big picture schedules failed")
+		slog.Warn("start big picture schedules failed", "error", err)
 		return
 	}
 	s.stopPictures()

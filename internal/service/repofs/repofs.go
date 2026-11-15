@@ -564,6 +564,15 @@ func listCursorShallow(root *os.Root, dir string, inDirs bool, after string, wan
 // before files, so it runs the directory half first and continues into the file
 // half only once the directory half is exhausted within this page.
 func listCursorRecursive(root *os.Root, dir string, inDirs bool, after string, want int) ([]Entry, error) {
+	// The walk skips unreadable subdirectories, but the directory asked for
+	// must exist: a mistyped path would otherwise list as an empty directory,
+	// an answer the caller cannot tell from the truth.
+	if info, err := root.Stat(dir); err != nil {
+		return nil, fmt.Errorf("open %s; %w", dir, err)
+	} else if !info.IsDir() {
+		return nil, fmt.Errorf("%s is not a directory", dir)
+	}
+
 	page := make([]Entry, 0, want)
 
 	if inDirs {
@@ -698,8 +707,11 @@ func listShallow(root *os.Root, dir string) ([]Entry, error) {
 
 	entries := make([]Entry, 0, len(names))
 
+	// Artefacts and vendored trees are hidden at every depth, as the
+	// recursive listers hide them: listing "src" must not surface src/vendor
+	// when listing the root would not surface vendor.
 	for _, name := range names {
-		if dir == "." && skipListing(name) {
+		if skipListing(name) {
 			continue
 		}
 

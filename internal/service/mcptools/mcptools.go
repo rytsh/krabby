@@ -5,7 +5,10 @@ package mcptools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
+	"runtime/debug"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -90,10 +93,35 @@ func newServer(mgr tracingService, name, title, version, instructions string) *m
 	})
 
 	// One receiving middleware covers every tool, so instrumentation cannot
-	// drift out of sync as tools are added.
-	server.AddReceivingMiddleware(traceMiddleware(mgr))
+	// drift out of sync as tools are added. The first middleware listed is the
+	// outermost, so recovery also catches a panic in tracing.
+	server.AddReceivingMiddleware(recoverMiddleware(name), traceMiddleware(mgr))
 
 	return server
+}
+
+// recoverMiddleware turns a panic in a handler into an error for that one
+// request. The SDK runs handlers on their own goroutines, out of reach of the
+// HTTP server's recovery, so without this one nil dereference in any tool
+// ends the process for every client.
+func recoverMiddleware(server string) mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (res mcp.Result, err error) {
+			defer func() {
+				if r := recover(); r != nil {
+					tool := ""
+					if call, ok := req.(*mcp.CallToolRequest); ok {
+						tool = call.Params.Name
+					}
+					slog.Error("mcp handler panicked", "server", server, "method", method, "tool", tool,
+						"panic", r, "stack", string(debug.Stack()))
+					res, err = nil, fmt.Errorf("internal error in %s", method)
+				}
+			}()
+
+			return next(ctx, method, req)
+		}
+	}
 }
 
 // ---- management tools -------------------------------------------------------
@@ -167,11 +195,11 @@ type setRepoOverridesArgs struct {
 }
 
 type repoIDArgs struct {
-	Repo string `json:"repo" jsonschema:"repository id in owner/name form"`
+	Repo string `json:"repo" jsonschema:"repository id as list_repos shows it (host/group/name); a unique suffix such as group/name also works"`
 }
 
 type refreshRepoArgs struct {
-	Repo   string   `json:"repo" jsonschema:"repository id in owner/name form"`
+	Repo   string   `json:"repo" jsonschema:"repository id as list_repos shows it (host/group/name); a unique suffix such as group/name also works"`
 	Wait   bool     `json:"wait,omitempty" jsonschema:"when true, block until the pull and graph rebuild finish and return the final status (ready or error) instead of returning immediately"`
 	Stages []string `json:"stages,omitempty" jsonschema:"optional subset of pipeline stages to rebuild against the existing clone without pulling git: graph, docs, docs_index, code_index. Empty runs the full pull+rebuild pipeline. Use e.g. ['docs_index'] to re-embed docs after they were regenerated. Missing prerequisites (docs_index needs docs, which needs graph) are built automatically only when their output is absent"`
 	Force  bool     `json:"force,omitempty" jsonschema:"when true, the docs stage ignores its incremental caches and regenerates every per-file summary and documentation.md even if nothing changed. Requires stages to include 'docs' (otherwise docs are reused because unchanged). Ignored by the full pull+rebuild pipeline (empty stages)"`
@@ -344,11 +372,11 @@ func addManagementTools(
 			defer cancel()
 
 			repo, done, err := adminService.AddRepoWait(wctx, args.spec())
-			if err != nil {
+			if err != nil && !isRunFailure(err) {
 				return nil, nil, err
 			}
 
-			return waitResult(adminService, repo, done), nil, nil
+			return waitResult(adminService, repo, done, err), nil, nil
 		})
 
 		addTool(server, &mcp.Tool{
@@ -473,6 +501,13 @@ func addManagementTools(
 			if err := args.validateSkip(); err != nil {
 				return nil, nil, err
 			}
+			// Queued work is only checked when it runs, so an unknown id would
+			// be answered "queued" and then fail where nobody sees it.
+			id, err := resolveRepoArg(ctx, adminService, args.Repo)
+			if err != nil {
+				return nil, nil, err
+			}
+			args.Repo = id
 
 			if len(args.Stages) > 0 {
 				if err := args.validateStages(); err != nil {
@@ -491,11 +526,11 @@ func addManagementTools(
 				defer cancel()
 
 				repo, done, err := adminService.GenerateWait(wctx, args.Repo, args.Stages, args.Force)
-				if err != nil {
+				if err != nil && !isRunFailure(err) {
 					return nil, nil, err
 				}
 
-				return waitResult(adminService, repo, done), nil, nil
+				return waitResult(adminService, repo, done, err), nil, nil
 			}
 
 			if !args.Wait {
@@ -514,11 +549,11 @@ func addManagementTools(
 			defer cancel()
 
 			repo, done, err := adminService.RefreshWait(wctx, args.Repo, args.Skip...)
-			if err != nil {
+			if err != nil && !isRunFailure(err) {
 				return nil, nil, err
 			}
 
-			return waitResult(adminService, repo, done), nil, nil
+			return waitResult(adminService, repo, done, err), nil, nil
 		})
 	}
 
@@ -550,7 +585,12 @@ func addManagementTools(
 				"The in-flight step is aborted and recorded as 'cancelled by user'; the repo can be " +
 				"refreshed again later. Fails if no job is running (check the 'running' field of repo_status). " +
 				"It only reaches work already running: use cancel_task with repo to drop the repository's queued tasks too.",
-		}, func(_ context.Context, _ *mcp.CallToolRequest, args repoIDArgs) (*mcp.CallToolResult, any, error) {
+		}, func(ctx context.Context, _ *mcp.CallToolRequest, args repoIDArgs) (*mcp.CallToolResult, any, error) {
+			id, err := resolveRepoArg(ctx, adminService, args.Repo)
+			if err != nil {
+				return nil, nil, err
+			}
+			args.Repo = id
 			if !adminService.CancelJob(args.Repo) {
 				return nil, nil, fmt.Errorf("no job running for %s", args.Repo)
 			}
@@ -671,8 +711,36 @@ func waitContext(ctx context.Context, timeout time.Duration) (context.Context, c
 // waitResult renders the outcome of a wait=true call. When the build did not
 // finish within the wait, a note explains that it keeps running in the
 // background and how to follow up.
-func waitResult(mgr activityService, repo *registry.Repo, done bool) *mcp.CallToolResult {
+// resolveRepoArg turns a repository named by id or unique id suffix into its
+// id, or explains that no tracked repository has that name.
+func resolveRepoArg(ctx context.Context, svc repoAdminService, ref string) (string, error) {
+	repo, err := svc.ResolveRepo(ctx, ref)
+	if err != nil {
+		return "", err
+	}
+	if repo == nil {
+		return "", fmt.Errorf("unknown repository %q; list_repos names the tracked ids", ref)
+	}
+
+	return repo.ID, nil
+}
+
+// isRunFailure reports whether a wait ended because the run itself failed,
+// which is an answer to show with the record rather than a tool error.
+func isRunFailure(err error) bool {
+	var runErr *manager.RunFailedError
+
+	return errors.As(err, &runErr)
+}
+
+func waitResult(mgr activityService, repo *registry.Repo, done bool, runErr error) *mcp.CallToolResult {
 	res := jsonResult(viewRepo(mgr, repo))
+	if runErr != nil {
+		res.IsError = true
+		res.Content = append([]mcp.Content{&mcp.TextContent{Text: runErr.Error()}}, res.Content...)
+
+		return res
+	}
 	if !done {
 		note := &mcp.TextContent{Text: "build still in progress: the wait ended before it finished, " +
 			"but it continues in the background; poll repo_status " + repo.ID +

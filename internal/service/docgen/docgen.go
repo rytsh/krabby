@@ -519,6 +519,13 @@ func (g *llmGenerator) Generate(ctx context.Context, repo, clonePath, docsDir st
 		profileHash = ""
 	}
 
+	if synthErr != nil {
+		// The document kept is the previous one, written for whatever the
+		// summaries were then. Recording this run's prompt hash would let the
+		// next build reuse it as current; an empty one makes it try again.
+		promptHash = ""
+	}
+
 	man = &Manifest{
 		Repo:        repo,
 		Model:       g.llm.Model(),
@@ -978,6 +985,11 @@ func sortedCommunityIDs(byCommunity map[int][]string) []int {
 // maybeSynthesize produces documentation.md from the summaries, reusing the
 // previous document when no summary changed and the file still exists. The
 // second return reports whether a fresh document was written.
+//
+// On a failed model call the previous document, if there is one, is returned
+// with the error, as maybeProfile does. Without it the manifest would list no
+// documentation.md, and the stale-doc cleanup that follows would delete a
+// good document over one transient model error (a 429, a timeout).
 func (g *llmGenerator) maybeSynthesize(
 	ctx context.Context,
 	repo, docsDir string,
@@ -991,16 +1003,19 @@ func (g *llmGenerator) maybeSynthesize(
 ) (*DocMeta, bool, error) {
 	docAbs := filepath.Join(docsDir, DocName)
 
-	if regen == 0 && priorMan != nil && priorMan.PromptHash == promptHash {
-		for _, d := range priorMan.Docs {
-			if d.Path != DocName {
-				continue
-			}
-
-			if _, err := os.Stat(docAbs); err == nil && len(priorMan.Summaries) == len(summaries) {
-				return &d, false, nil
+	var prior *DocMeta
+	if priorMan != nil {
+		for i := range priorMan.Docs {
+			if priorMan.Docs[i].Path == DocName {
+				if _, err := os.Stat(docAbs); err == nil {
+					prior = &priorMan.Docs[i]
+				}
 			}
 		}
+	}
+
+	if prior != nil && regen == 0 && priorMan.PromptHash == promptHash && len(priorMan.Summaries) == len(summaries) {
+		return prior, false, nil
 	}
 
 	if len(summaries) == 0 {
@@ -1026,7 +1041,7 @@ func (g *llmGenerator) maybeSynthesize(
 		{Role: "user", Content: user.String()},
 	})
 	if err != nil {
-		return nil, false, err
+		return prior, false, err
 	}
 
 	markdown := strings.TrimSpace(out) + "\n"

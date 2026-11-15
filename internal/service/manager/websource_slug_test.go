@@ -198,7 +198,7 @@ func TestValidSlug(t *testing.T) {
 	}
 }
 
-func TestWithinDir(t *testing.T) {
+func TestPathWithin(t *testing.T) {
 	cases := []struct {
 		root, path string
 		want       bool
@@ -211,8 +211,8 @@ func TestWithinDir(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		if got := withinDir(c.root, c.path); got != c.want {
-			t.Errorf("withinDir(%q, %q) = %v, want %v", c.root, c.path, got, c.want)
+		if got := pathWithin(c.path, c.root); got != c.want {
+			t.Errorf("pathWithin(%q, %q) = %v, want %v", c.path, c.root, got, c.want)
 		}
 	}
 }

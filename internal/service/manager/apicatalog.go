@@ -673,7 +673,8 @@ func (m *Manager) refreshAPIService(ctx context.Context, name string, forceFull 
 		}
 
 		if remote.Err != nil {
-			// Keep the previous definition; record the failure on the service.
+			// Keep the previous definition. The failure is only logged: one
+			// operation that does not render must not fail the service's sync.
 			slog.Warn("api operation render failed",
 				"service", name, "operation", remote.OperationID, "error", remote.Err)
 

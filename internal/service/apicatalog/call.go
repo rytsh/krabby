@@ -97,7 +97,9 @@ type CallResponse struct {
 	// Body is the response payload as text, cut at MaxCallBodyBytes. For a
 	// streaming gRPC call it is a JSON array of the collected messages.
 	Body string `json:"body,omitempty"`
-	// BodyBytes is the size of the payload before any cut.
+	// BodyBytes is the size of the payload before any cut, as far as krabby
+	// read it: a body is never read past MaxCallBodyBytes+1, so with
+	// Truncated set this is a lower bound, not the payload's real size.
 	BodyBytes int `json:"body_bytes,omitempty"`
 	// Truncated reports that Body was cut, or that a stream stopped at
 	// MaxStreamMessages.

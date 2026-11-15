@@ -137,7 +137,7 @@ type configView struct {
 
 // New creates the fetcher.
 func New() *Fetcher {
-	return &Fetcher{client: &http.Client{Timeout: 60 * time.Second}}
+	return &Fetcher{client: websource.DefaultHTTPClient()}
 }
 
 // decodeConfig unmarshals the raw config and returns its resolved (plain) form.

@@ -16,7 +16,52 @@ import (
 // DefaultHTTPClient is the client providers use when they need no special
 // transport.
 func DefaultHTTPClient() *http.Client {
-	return &http.Client{Timeout: 60 * time.Second}
+	return &http.Client{Timeout: 60 * time.Second, CheckRedirect: StripCredentialsOnRedirect}
+}
+
+// maxRedirects matches net/http's own default.
+const maxRedirects = 10
+
+// redirectSafeHeaders are the request headers that carry no credential and
+// may follow a redirect to another origin.
+var redirectSafeHeaders = map[string]bool{
+	"Accept":            true,
+	"Accept-Encoding":   true,
+	"Accept-Language":   true,
+	"Cache-Control":     true,
+	"Content-Type":      true,
+	"If-Modified-Since": true,
+	"If-None-Match":     true,
+	"User-Agent":        true,
+}
+
+// StripCredentialsOnRedirect is an http.Client CheckRedirect that drops every
+// header but a few harmless ones when a redirect leaves the original origin.
+//
+// net/http already drops Authorization and Cookie when the host changes, but
+// it forwards everything else, and sources here authenticate with headers it
+// does not know about: GitLab's PRIVATE-TOKEN, an API's X-Api-Key, whatever an
+// operator configured. A redirect is the peer's choice, so a credential that
+// follows one goes wherever the peer says.
+func StripCredentialsOnRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("stopped after %d redirects", maxRedirects)
+	}
+	if len(via) == 0 || sameOrigin(via[0].URL, req.URL) {
+		return nil
+	}
+
+	for name := range req.Header {
+		if !redirectSafeHeaders[http.CanonicalHeaderKey(name)] {
+			req.Header.Del(name)
+		}
+	}
+
+	return nil
+}
+
+func sameOrigin(a, b *url.URL) bool {
+	return strings.EqualFold(a.Scheme, b.Scheme) && strings.EqualFold(a.Host, b.Host)
 }
 
 // ApplyAuth applies the Atlassian-style convention used across providers: a

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -311,5 +312,68 @@ func TestRevRange(t *testing.T) {
 
 	if _, err := revRange("--all", "v2"); err == nil {
 		t.Error("revRange must validate both endpoints")
+	}
+}
+
+// gitRun runs git in dir with a fixed identity and no user config.
+func gitRun(t *testing.T, dir string, args ...string) {
+	t.Helper()
+
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=Alice", "GIT_AUTHOR_EMAIL=alice@example.com",
+		"GIT_COMMITTER_NAME=Alice", "GIT_COMMITTER_EMAIL=alice@example.com",
+		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, out)
+	}
+}
+
+// Output edges are content for blame and patches, and paths are data. Each
+// case here was wrong before: a blank last line vanished from blame, a
+// non-ASCII name came back C-quoted, and a file named like the revision made
+// log fail as ambiguous.
+func TestGitOutputKeepsContentAndPathsExact(t *testing.T) {
+	dir := testRepo(t)
+	g := New("")
+	ctx := context.Background()
+
+	if err := os.WriteFile(filepath.Join(dir, "blank.txt"), []byte("a\n\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "café.go"), []byte("package app\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A file with the name of a revision.
+	if err := os.WriteFile(filepath.Join(dir, "main"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, dir, "add", ".")
+	gitRun(t, dir, "commit", "-q", "-m", "edge cases")
+
+	lines, err := g.Blame(ctx, dir, "blank.txt", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lines) != 2 || lines[1].Content != "" {
+		t.Errorf("blame of a file ending in a blank line = %+v, want 2 lines", lines)
+	}
+
+	files, err := g.DiffNames(ctx, dir, "HEAD~1", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(files, "café.go") {
+		t.Errorf("DiffNames = %q, want the non-ASCII name as written", files)
+	}
+
+	commits, err := g.Log(ctx, dir, LogOptions{To: "main", Limit: 1})
+	if err != nil {
+		t.Fatalf("Log of a revision that is also a file name: %v", err)
+	}
+	if len(commits) != 1 || commits[0].Subject != "edge cases" {
+		t.Errorf("Log = %+v", commits)
 	}
 }

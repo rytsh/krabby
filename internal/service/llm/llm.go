@@ -377,6 +377,11 @@ func (c *Client) complete(ctx context.Context, messages []Message, maxTokens int
 	if err != nil {
 		return "", meta, err
 	}
+	// Whether this request's body carries stream_options. Each request that
+	// sent the field replays once without it when the endpoint rejects it,
+	// not only the one that happened to flip the client-wide flag: requests
+	// in flight at that moment would otherwise fail as a plain 400.
+	sentStreamOpts := !c.noStreamOpts.Load()
 
 	var lastErr error
 	for attempt := 1; ; attempt++ {
@@ -398,16 +403,18 @@ func (c *Client) complete(ctx context.Context, messages []Message, maxTokens int
 		// A gateway that does not understand stream_options answers 400 on
 		// every attempt, so retrying the same body is pointless. Drop the
 		// field once and replay immediately rather than burning a backoff.
-		if errors.Is(err, errStreamOptsRejected) && c.noStreamOpts.CompareAndSwap(false, true) {
-			slog.Warn("endpoint rejected stream_options; retrying without token usage reporting",
-				"model", c.model)
+		if errors.Is(err, errStreamOptsRejected) && sentStreamOpts {
+			if c.noStreamOpts.CompareAndSwap(false, true) {
+				slog.Warn("endpoint rejected stream_options; retrying without token usage reporting",
+					"model", c.model)
+			}
 
 			retry, merr := c.marshalRequest(messages, maxTokens)
 			if merr != nil {
 				return "", meta, merr
 			}
 
-			body = retry
+			body, sentStreamOpts = retry, false
 
 			continue
 		}

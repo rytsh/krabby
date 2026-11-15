@@ -222,7 +222,14 @@ func fromRaw(raw *rawGraph) (*Graph, error) {
 			FileType:       n.FileType,
 			Community:      n.Community,
 		}
+		// A repeated id replaces the node, as a map would, but is listed
+		// once: graphs that skip Validate (merged ones, or one committed in a
+		// repository) would otherwise count and print it twice.
+		_, seen := g.Nodes[n.ID]
 		g.Nodes[n.ID] = node
+		if seen {
+			continue
+		}
 		g.nodeList = append(g.nodeList, n.ID)
 
 		if n.Community != nil {

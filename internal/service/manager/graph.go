@@ -307,9 +307,6 @@ func graphRepoSelectionText(tool, namespace string, repoIDs []string) string {
 	return text
 }
 
-// GraphEngine exposes the native graph engine for in-process consumers (docgen).
-func (m *Manager) GraphEngine() *graphquery.Engine { return m.engine }
-
 // GraphEngineVersion returns the linked bag extraction contract version.
 func (m *Manager) GraphEngineVersion() string {
 	if m.graphBuilder == nil {

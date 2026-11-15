@@ -192,6 +192,7 @@ func TestOutcome(t *testing.T) {
 		metrics.OutcomeCancelled: fmt.Errorf("search; %w", context.Canceled),
 		metrics.OutcomeDeadline:  fmt.Errorf("search; %w", context.DeadlineExceeded),
 		metrics.OutcomeError:     errors.New("index unavailable"),
+		metrics.OutcomeInvalid:   fmt.Errorf("search; %w", metrics.Invalid(errors.New("unknown repository"))),
 	} {
 		if got := metrics.Outcome(err); got != want {
 			t.Errorf("Outcome(%v) = %q, want %q", err, got, want)
@@ -277,5 +278,17 @@ func TestNilRecorderRecordsNothing(t *testing.T) {
 	}
 	if err := rec.ObserveGraphCache(func() metrics.GraphCache { return metrics.GraphCache{} }); err != nil {
 		t.Errorf("ObserveGraphCache on nil recorder: %v", err)
+	}
+}
+
+// Marking an error as the caller's keeps its message and its chain.
+func TestInvalidKeepsTheError(t *testing.T) {
+	base := fmt.Errorf("parse; %w", context.Canceled)
+	err := metrics.Invalid(base)
+	if err.Error() != base.Error() || !errors.Is(err, context.Canceled) {
+		t.Errorf("Invalid changed the error: %q, Is(Canceled)=%v", err, errors.Is(err, context.Canceled))
+	}
+	if metrics.Invalid(nil) != nil {
+		t.Error("Invalid(nil) is not nil")
 	}
 }

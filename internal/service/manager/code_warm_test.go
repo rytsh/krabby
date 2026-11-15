@@ -199,7 +199,7 @@ func TestEnsureCodeIndexWaitHonoursCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	result := make(chan error, 1)
-	go func() { result <- m.ensureCodeIndex(ctx, repoID, "") }()
+	go func() { result <- m.ensureCodeIndex(ctx, repoID) }()
 	cancel()
 	select {
 	case err := <-result:

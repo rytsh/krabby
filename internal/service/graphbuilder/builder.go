@@ -27,6 +27,8 @@ type Builder struct {
 const TestedVersion = bag.EngineVersion
 
 const (
+	// bagOutDir is where bag writes inside the tree it builds.
+	bagOutDir       = ".bag"
 	versionFileName = ".krabby-bag-version"
 	// ignoreFileName holds the fingerprint of the exclude patterns a graph was
 	// built with, so a later change to them is a string comparison rather than
@@ -113,8 +115,44 @@ func (c *Builder) ignorePatterns(extra []string) []string {
 }
 
 func (c *Builder) timeout(ctx context.Context) (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithTimeout(ctx, c.buildTimeout)
-	return ctx, cancel
+	// No configured timeout means no limit. WithTimeout(ctx, 0) would be
+	// expired already, and every build would fail before it started.
+	if c.buildTimeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+
+	return context.WithTimeout(ctx, c.buildTimeout)
+}
+
+// clearOutputPath makes sure the graph's output directory inside a clone is a
+// real directory of the clone, or absent.
+//
+// The clone is the repository's content, and a repository can commit .bag as
+// a symlink. bag writes graph.json, the report and the HTML through that path,
+// and krabby writes its markers beside them, so a link pointing elsewhere
+// would have the build write outside the clone: into another repository's
+// active snapshot, replacing its graph, or anywhere the process can write.
+// A link (or any non-directory) at that name is removed; bag recreates the
+// directory.
+func clearOutputPath(repoPath string) error {
+	path := filepath.Join(repoPath, bagOutDir)
+	info, err := os.Lstat(path)
+	switch {
+	case os.IsNotExist(err):
+		return nil
+	case err != nil:
+		return fmt.Errorf("inspect graph output dir; %w", err)
+	case info.IsDir():
+		return nil
+	}
+
+	slog.Warn("removing a committed non-directory where the graph output goes",
+		"path", path, "mode", info.Mode().String())
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("remove %s from the clone; %w", bagOutDir, err)
+	}
+
+	return nil
 }
 
 // Update replaces the graph with a full AST-only build for repoPath.
@@ -127,6 +165,9 @@ func (c *Builder) timeout(ctx context.Context) (context.Context, context.CancelF
 // Forcing is safe here because krabby only ever runs a
 // deterministic full AST re-extraction (no partial LLM chunks to lose).
 func (c *Builder) Update(ctx context.Context, repoPath string, extra []string) error {
+	if err := clearOutputPath(repoPath); err != nil {
+		return err
+	}
 	if _, err := RemoveLegacyManagedIgnore(repoPath); err != nil {
 		// Non-fatal: duplicate exclusions in the legacy file do not change output.
 		slog.Warn("bag: could not remove legacy managed ignore block", "path", repoPath, "error", err)

@@ -24,12 +24,14 @@ import (
 // safe to hand this to a model — but can still say "the same endpoint, with my
 // token".
 //
-// Credentials are the ones configured for fetching the document. That is a
-// compromise worth naming: the package doc calls fetching a spec and calling
-// the API it describes different acts, and they are. In practice an internal
-// service publishes its spec behind the same gateway that guards the API, so
-// reusing the configured token is right far more often than it is wrong — and
-// when it is wrong the caller overrides Authorization per request.
+// Credentials are the ones configured for fetching the document, and they go
+// only to an origin the operator named: the document's own URL, or the
+// service's base_url override. The document itself does not get to choose
+// where they go. Its servers entry is fetched content, and a spec that points
+// at another host (by mistake, or because the docs host was compromised) would
+// otherwise receive the stored token on the first call. A call to such a host
+// is still made, without the stored credentials, and a note says how to send
+// them: set base_url to that host.
 func (p *Provider) Call(ctx context.Context, svc *apicatalog.Service, d *apicatalog.Detail, req apicatalog.CallRequest) (apicatalog.CallResponse, error) {
 	var out apicatalog.CallResponse
 
@@ -42,10 +44,11 @@ func (p *Provider) Call(ctx context.Context, svc *apicatalog.Service, d *apicata
 		return out, err
 	}
 
-	target, err := callURL(svc, d, req)
+	target, err := callURL(svc, d, cfg.URL, req)
 	if err != nil {
 		return out, err
 	}
+	trusted := credentialOrigin(svc, cfg, target)
 
 	method := strings.ToUpper(strings.TrimSpace(d.Method))
 	if method == "" {
@@ -70,10 +73,13 @@ func (p *Provider) Call(ctx context.Context, svc *apicatalog.Service, d *apicata
 		return out, fmt.Errorf("build request; %w", err)
 	}
 
-	applyCallHeaders(httpReq, cfg, d, req, len(body) > 0)
+	applyCallHeaders(httpReq, cfg, d, req, len(body) > 0, trusted)
 
 	out.Method = method
 	out.URL = target
+	if !trusted && hasStoredCredentials(cfg) {
+		out.Notes = append(out.Notes, "the stored credentials were not sent: the document points this call at a host the service was not configured for. Set base_url on the service to that host to send them.")
+	}
 
 	started := time.Now()
 	res, err := p.callClient(cfg, target).Do(httpReq)
@@ -118,16 +124,21 @@ func (p *Provider) Call(ctx context.Context, svc *apicatalog.Service, d *apicata
 
 // callURL resolves the operation's templated path against the service's base
 // URL and the caller's parameters.
-func callURL(svc *apicatalog.Service, d *apicatalog.Detail, req apicatalog.CallRequest) (string, error) {
+//
+// The most specific base wins: the operator's base_url, then a server the
+// operation or its path declares, then the document's. A relative server
+// ("/v1", common in specs served by the API itself) is resolved against the
+// document's URL, as the OpenAPI specification says it must be.
+func callURL(svc *apicatalog.Service, d *apicatalog.Detail, docURL string, req apicatalog.CallRequest) (string, error) {
 	// The service override wins over the base URL frozen into the detail at
 	// ingest: an operator who repoints base_url expects the next call to go
 	// there, not after the next sync.
 	base := strings.TrimSpace(svc.BaseURL)
 	if base == "" {
-		base = strings.TrimSpace(svc.ResolvedBaseURL)
+		base = strings.TrimSpace(d.BaseURL)
 	}
 	if base == "" {
-		base = strings.TrimSpace(d.BaseURL)
+		base = strings.TrimSpace(svc.ResolvedBaseURL)
 	}
 	if base == "" {
 		return "", errors.New("the service has no base url: the document declares none, so set base_url on the service")
@@ -136,6 +147,12 @@ func callURL(svc *apicatalog.Service, d *apicatalog.Detail, req apicatalog.CallR
 	parsed, err := url.Parse(base)
 	if err != nil {
 		return "", fmt.Errorf("parse base url %q; %w", base, err)
+	}
+	if !parsed.IsAbs() && docURL != "" {
+		if doc, derr := url.Parse(docURL); derr == nil && doc.IsAbs() {
+			parsed = doc.ResolveReference(parsed)
+			base = parsed.String()
+		}
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return "", fmt.Errorf("base url %q must be an http(s) URL", base)
@@ -153,6 +170,22 @@ func callURL(svc *apicatalog.Service, d *apicatalog.Detail, req apicatalog.CallR
 	target += path
 
 	return apicatalog.AppendQuery(target, req.Query)
+}
+
+// credentialOrigin reports whether target is an origin the operator gave the
+// stored credentials to: the document's URL, or the base_url override.
+func credentialOrigin(svc *apicatalog.Service, cfg resolvedConfig, target string) bool {
+	if base := strings.TrimSpace(svc.BaseURL); base != "" && sameOrigin(base, target) {
+		return true
+	}
+
+	return cfg.URL != "" && sameOrigin(cfg.URL, target)
+}
+
+// hasStoredCredentials reports whether the service config carries anything a
+// call would send on the caller's behalf.
+func hasStoredCredentials(cfg resolvedConfig) bool {
+	return cfg.Token != "" || cfg.User != "" || len(cfg.Headers) > 0
 }
 
 // callBody returns the request payload, refusing one that is too large to be an
@@ -180,6 +213,7 @@ func applyCallHeaders(
 	d *apicatalog.Detail,
 	req apicatalog.CallRequest,
 	hasBody bool,
+	withCredentials bool,
 ) {
 	httpReq.Header.Set("Accept", "application/json, */*")
 
@@ -191,17 +225,19 @@ func applyCallHeaders(
 		httpReq.Header.Set("Content-Type", contentType)
 	}
 
-	for name, value := range cfg.Headers {
-		if name = strings.TrimSpace(name); name != "" {
-			httpReq.Header.Set(name, value)
+	if withCredentials {
+		for name, value := range cfg.Headers {
+			if name = strings.TrimSpace(name); name != "" {
+				httpReq.Header.Set(name, value)
+			}
 		}
-	}
 
-	switch {
-	case cfg.User != "":
-		httpReq.SetBasicAuth(cfg.User, cfg.Token)
-	case cfg.Token != "":
-		httpReq.Header.Set("Authorization", "Bearer "+cfg.Token)
+		switch {
+		case cfg.User != "":
+			httpReq.SetBasicAuth(cfg.User, cfg.Token)
+		case cfg.Token != "":
+			httpReq.Header.Set("Authorization", "Bearer "+cfg.Token)
+		}
 	}
 
 	for name, value := range req.Headers {
@@ -240,6 +276,11 @@ func (p *Provider) callClient(cfg resolvedConfig, target string) *http.Client {
 			redirect.Header.Del("Authorization")
 			redirect.Header.Del("Cookie")
 			redirect.Header.Del("Proxy-Authorization")
+			// Configured headers are credentials too (X-Api-Key and the like),
+			// and Go only strips the standard ones on its own.
+			for name := range cfg.Headers {
+				redirect.Header.Del(strings.TrimSpace(name))
+			}
 		}
 
 		return nil

@@ -52,10 +52,25 @@ func TestSamplerEmptyAndCap(t *testing.T) {
 	for i := range maxFrequentTerms + 50 {
 		fields = append(fields, fmt.Sprintf("term%04d", i))
 	}
-	sampler.ObserveSample(fields...)
+	for range minFrequentSample {
+		sampler.ObserveSample(fields...)
+	}
 	terms, count := sampler.Result()
-	if count != 1 || len(terms) != maxFrequentTerms || !slices.IsSorted(terms) {
+	if count != minFrequentSample || len(terms) != maxFrequentTerms || !slices.IsSorted(terms) {
 		t.Fatalf("capped sampler = %d terms/%d samples", len(terms), count)
+	}
+}
+
+// On a handful of documents every term appears in "35%" of them, and treating
+// them all as frequent would strip every prose word from a query. Too small a
+// sample yields no frequent terms.
+func TestSamplerIgnoresATooSmallSample(t *testing.T) {
+	sampler := NewFrequentTermSampler(0)
+	for range minFrequentSample - 1 {
+		sampler.ObserveSample("payment retry backoff")
+	}
+	if terms, count := sampler.Result(); len(terms) != 0 || count != minFrequentSample-1 {
+		t.Fatalf("small sample = %v from %d documents, want no frequent terms", terms, count)
 	}
 }
 

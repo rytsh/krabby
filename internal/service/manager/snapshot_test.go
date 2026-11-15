@@ -258,3 +258,107 @@ func snapshotTestRead(t *testing.T, path string) string {
 
 	return string(b)
 }
+
+// The snapshot root and legacy path are the repository id joined onto shared
+// directories. Cleanup must delete only what it created there: an id that
+// names a group ("github.com/acme") owns the directories of every repository
+// in it, and those are not its versions.
+func TestCleanupSnapshotsDeletesOnlyItsOwnVersions(t *testing.T) {
+	reposDir := t.TempDir()
+	m := &Manager{reposDir: reposDir, engine: graphquery.NewEngine(0)}
+	old := time.Now().Add(-snapshotGracePeriod - time.Minute)
+
+	mkdir := func(parts ...string) string {
+		t.Helper()
+		p := filepath.Join(append([]string{reposDir}, parts...)...)
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+
+		return p
+	}
+
+	// Two repositories of the group, each with its own snapshot directory.
+	sibling := mkdir(".snapshots", "github.com", "acme", "api")
+	other := mkdir(".snapshots", "github.com", "acme", "web")
+	// Two versions of the group "repository" itself, both old.
+	stale := mkdir(".snapshots", "github.com", "acme", "1600000000000000000-def456")
+	newest := mkdir(".snapshots", "github.com", "acme", "1700000000000000000-abc123")
+	newer := old.Add(time.Second)
+	if err := os.Chtimes(newest, newer, newer); err != nil {
+		t.Fatal(err)
+	}
+	// A legacy-layout clone of a group repository: a directory, not a clone.
+	legacyGroup := mkdir("github.com", "acme")
+
+	m.cleanupSnapshots("github.com/acme", "")
+
+	for _, keep := range []string{sibling, other, legacyGroup} {
+		if _, err := os.Stat(keep); err != nil {
+			t.Errorf("%s was deleted: %v", keep, err)
+		}
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("the group's own old version %s was kept: %v", stale, err)
+	}
+
+	// An id that climbs out of the snapshots directory is refused outright.
+	m.cleanupSnapshots("x/../..", "")
+	if _, err := os.Stat(filepath.Join(reposDir, ".snapshots")); err != nil {
+		t.Fatalf("the snapshots directory itself was deleted: %v", err)
+	}
+}
+
+// Adding a repository whose id contains, or sits inside, a tracked one is
+// refused: their per-repository directories would overlap.
+func TestAddRepoRefusesNestedIDs(t *testing.T) {
+	m, _ := readSymbolManager(t, map[string]string{"a.go": "package a\n"})
+
+	for _, url := range []string{"https://example.com/team", "https://example.com/team/billing/sub"} {
+		if _, _, _, err := m.registerRepo(context.Background(), RepoSpec{URL: url}); err == nil {
+			t.Errorf("registerRepo(%s) succeeded next to example.com/team/billing", url)
+		}
+	}
+	if _, _, _, err := m.registerRepo(context.Background(), RepoSpec{URL: "https://example.com/team/billing-v2"}); err != nil {
+		t.Errorf("a sibling whose name only shares a prefix was refused: %v", err)
+	}
+}
+
+// After the upstream branch is rewritten a fast-forward is impossible. The
+// staging clone is private, so the new snapshot takes the remote's history
+// as it now is, instead of failing every refresh from then on.
+func TestSnapshotFollowsAForcePushedBranch(t *testing.T) {
+	dataDir := t.TempDir()
+	remote, work := snapshotTestRemote(t, dataDir)
+	reposDir := filepath.Join(dataDir, "repos")
+	activePath := filepath.Join(reposDir, "example.com", "team", "repo")
+	git := gitops.New("")
+	if err := git.Clone(context.Background(), remote, "main", activePath, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshotTestWrite(t, filepath.Join(work, "version.txt"), "rewritten\n")
+	snapshotTestGit(t, work, "add", "version.txt")
+	snapshotTestGit(t, work, "commit", "--amend", "-m", "rewritten history")
+	snapshotTestGit(t, work, "push", "--force", "origin", "main")
+
+	m := &Manager{git: git, engine: graphquery.NewEngine(0), reposDir: reposDir}
+	repo := &registry.Repo{ID: "example.com/team/repo", URL: remote, Branch: "main", Path: activePath}
+
+	if err := git.Fetch(context.Background(), activePath, nil); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := m.createSnapshot(context.Background(), repo, nil, true, true)
+	if err != nil {
+		t.Fatalf("snapshot after a force-push: %v", err)
+	}
+	if got := snapshotTestRead(t, filepath.Join(snapshot.StagingPath, "version.txt")); got != "rewritten\n" {
+		t.Fatalf("snapshot content = %q, want the rewritten history", got)
+	}
+	if got := snapshotTestRead(t, filepath.Join(activePath, "version.txt")); got != "old\n" {
+		t.Fatalf("active clone changed: %q", got)
+	}
+}

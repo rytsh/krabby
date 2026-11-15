@@ -3,6 +3,7 @@ package manager
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -145,17 +146,24 @@ func TestCodeSearchIsMeasured(t *testing.T) {
 	if _, err := m.SearchCodeRegex(ctx, "acme/api", "", `func \w+\(`, coderag.RegexOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	// A repository that is not tracked is refused: still a search that was
-	// attempted and failed, and it must not vanish from the numbers.
+	// A repository that is not tracked, or a pattern that does not compile,
+	// is refused. Both are still searches that were attempted and must not
+	// vanish from the numbers, but they are the caller's mistake: counted as
+	// errors, a typo would read as the service failing.
 	if _, err := m.SearchCodeText(ctx, "acme/missing", "", "Middleware", coderag.TextSearchOptions{}); err == nil {
 		t.Fatal("search in an untracked repository succeeded")
+	}
+	if _, err := m.SearchCodeRegex(ctx, "acme/api", "", `func (`, coderag.RegexOptions{}); err == nil ||
+		!strings.Contains(err.Error(), "invalid regex") {
+		t.Fatalf("malformed pattern: err = %v, want invalid regex", err)
 	}
 
 	got := h.counts("krabby.search.duration")
 	for want, n := range map[string]uint64{
-		"kind=code,mode=text,outcome=ok":    1,
-		"kind=code,mode=regex,outcome=ok":   1,
-		"kind=code,mode=text,outcome=error": 1,
+		"kind=code,mode=text,outcome=ok":       1,
+		"kind=code,mode=regex,outcome=ok":      1,
+		"kind=code,mode=text,outcome=invalid":  1,
+		"kind=code,mode=regex,outcome=invalid": 1,
 	} {
 		if got[want] != n {
 			t.Errorf("search series %q has %d observations, want %d (all: %v)", want, got[want], n, got)
