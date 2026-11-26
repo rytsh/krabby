@@ -149,6 +149,7 @@ Example OpenCode config with core and admin registered separately:
 | `search_code` | First choice for symbols, literals, usages and implementation locations; `mode` selects term (`normal`), regular-expression (`regex`) or vector (`semantic`) retrieval, and `path` narrows any of them to a file glob |
 | `find_definition` / `find_references` | Locate a known symbol's definitions, or its usages as real graph edges, with a path and a line for each |
 | `read_symbol` | Read a function, method or type whole: each definition with its source from first line to last |
+| `file_outline` | List one file's declarations - functions, types, classes and their methods - with line ranges and no bodies |
 | `read_file` / `list_files` / `glob` | Page through a known source file, inspect one directory, or find files by path pattern. Browsing hides vendored trees; `glob` does not, because a caller who writes `vendor/**` asked for them |
 | `query_graph` | Architecture, dependency, call/data-flow, and cross-file relationship questions |
 | `get_node` / `get_neighbors` / `get_community` | Node-level inspection |
@@ -499,6 +500,34 @@ a function runs.
 - It reads from one repository's graph only. With `bag.merge` enabled and no
   `repo` given it still chooses a single repository, because a path in the
   merged graph does not say which clone it belongs to.
+
+**Qualified names.** A common name (`String`, `New`, `Total`) has many
+definitions. `find_definition`, `find_references` and `read_symbol` accept the
+name qualified by its owner and answer only that one:
+
+- by type or class: `Invoice.Total`, `Invoice/Total`, `Cart::total`,
+  `Cart#total` (a trailing `()` is fine). Methods are found through the graph's
+  `method` edges, so a Go method declared in another file than its type still
+  belongs to it. A method the type does not declare is looked up on the types
+  it inherits from, nearest first; an override hides what it overrides.
+- by file: `billing/invoice.go/Total`, or a unique tail such as
+  `invoice.go/Total`; the two combine (`invoice.go/Invoice.Total`).
+- by Go package: `manager.New` is `New` in a directory ending in `manager/`.
+
+A label that really is dotted (`http.Handler`) still matches exactly first.
+When nothing matches the qualified reading either, the name is resolved as
+before.
+
+`file_outline` lists one file's declarations from the graph: top-level
+functions, types and classes in source order, each with its methods and line
+range, and no bodies. It is the cheap way to see a file's structure before
+reading it, followed by `read_symbol` for the parts that matter. A file that
+only adds methods to a type declared elsewhere (common in Go) shows that type
+with `declared_in` and those methods under it. A path that
+matches several files returns them as `candidates`; a file the graph has no
+declarations for (a language bag does not parse) says so and points at
+`read_file`. One answer lists at most 500 declarations. Without `repo`, the
+repository is never guessed from the path.
 
 ## Data layout & external tools
 

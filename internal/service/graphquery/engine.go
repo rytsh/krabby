@@ -276,6 +276,17 @@ func (e *Engine) References(path, symbol string, contexts []string, page, perPag
 	return g.References(symbol, contexts, page, perPage), nil
 }
 
+// Outline lists one file's declarations from the graph at path, sharing the
+// cache with Call for the same reason as Definitions.
+func (e *Engine) Outline(path, file string) (FileOutline, error) {
+	g, err := e.Graph(path)
+	if err != nil {
+		return FileOutline{}, err
+	}
+
+	return g.Outline(file), nil
+}
+
 func argStr(m map[string]any, k string) string {
 	if v, ok := m[k].(string); ok {
 		return v

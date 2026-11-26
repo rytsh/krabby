@@ -150,7 +150,7 @@ type SymbolSources struct {
 func (m *Manager) ReadSymbol(ctx context.Context, repoID, namespace, symbol string, limit int) (SymbolSources, error) {
 	out := SymbolSources{Symbol: symbol, Symbols: []SymbolSource{}}
 
-	repo, selection, err := m.singleGraphRepo(ctx, repoID, namespace, symbol)
+	repo, selection, err := m.singleGraphRepo(ctx, repoID, namespace, symbol, "read_symbol")
 	if err != nil {
 		return out, err
 	}
@@ -213,10 +213,6 @@ func (m *Manager) ReadSymbol(ctx context.Context, repoID, namespace, symbol stri
 	return out, nil
 }
 
-// singleGraphRepo resolves the one repository read_symbol runs against. It
-// applies the usual selection rules, except that a merged graph never stands
-// in for a repository: with merging enabled and no repo given, the choice is
-// made the same way it would be without merging.
 // resolveRepoRef resolves a repository named by id or unique id suffix.
 func (m *Manager) resolveRepoRef(ctx context.Context, ref string) (id, selection string, err error) {
 	r, err := m.reg.Resolve(ctx, ref)
@@ -230,7 +226,16 @@ func (m *Manager) resolveRepoRef(ctx context.Context, ref string) (id, selection
 	return r.ID, "", nil
 }
 
-func (m *Manager) singleGraphRepo(ctx context.Context, repoID, namespace, symbol string) (repo, selection string, err error) {
+// singleGraphRepo resolves the one repository read_symbol and file_outline run
+// against. It applies the usual selection rules, except that a merged graph
+// never stands in for a repository: with merging enabled and no repo given,
+// the choice is made the same way it would be without merging.
+//
+// hint is what a repository may be inferred from when several are ready. A
+// path is never a hint: its directory names ("internal/service/...") match
+// repository names by accident, and the wrong repository answers "no such
+// file" where asking for the repository would have been right.
+func (m *Manager) singleGraphRepo(ctx context.Context, repoID, namespace, hint, tool string) (repo, selection string, err error) {
 	if repoID != "" {
 		return m.resolveRepoRef(ctx, repoID)
 	}
@@ -246,12 +251,53 @@ func (m *Manager) singleGraphRepo(ctx context.Context, repoID, namespace, symbol
 	case 1:
 		return repoIDs[0], "", nil
 	default:
-		if inferred := inferRepoID(repoIDs, map[string]any{"symbol": symbol}); inferred != "" {
-			return inferred, "", nil
+		if hint != "" {
+			if inferred := inferRepoID(repoIDs, map[string]any{"hint": hint}); inferred != "" {
+				return inferred, "", nil
+			}
 		}
 
-		return "", graphRepoSelectionText("read_symbol", namespace, repoIDs), nil
+		return "", graphRepoSelectionText(tool, namespace, repoIDs), nil
 	}
+}
+
+// FileOutline lists the declarations of one file in a repository's graph:
+// functions, types and classes with their methods and line ranges, and no
+// bodies. Like read_symbol it reads one repository's graph, because a path in
+// a merged graph does not say which clone it belongs to; the snapshot token
+// lets the caller continue with read_file on that version.
+func (m *Manager) FileOutline(ctx context.Context, repoID, namespace, path string) (graphquery.FileOutline, error) {
+	out := graphquery.FileOutline{Symbols: []graphquery.OutlineSymbol{}}
+
+	repo, selection, err := m.singleGraphRepo(ctx, repoID, namespace, "", "file_outline")
+	if err != nil {
+		return out, err
+	}
+	if selection != "" {
+		out.Note = selection
+
+		return out, nil
+	}
+
+	dir, token, err := m.repoCloneDirAt(ctx, repo, "")
+	if err != nil {
+		return out, err
+	}
+
+	graphPath := graphbuilder.GraphPath(dir)
+	if !fileExists(graphPath) {
+		return out, notFound("graph for %s not built yet", repo)
+	}
+
+	out, err = m.engine.Outline(graphPath, path)
+	if err != nil {
+		return out, fmt.Errorf("outlining %s; %w", path, err)
+	}
+	if out.Path != "" {
+		out.Snapshot = token
+	}
+
+	return out, nil
 }
 
 // readDefinition reads one definition's source, at most maxLines of it.

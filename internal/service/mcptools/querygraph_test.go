@@ -78,6 +78,10 @@ func (s *stubGraphQuery) ReadSymbol(context.Context, string, string, string, int
 	return manager.SymbolSources{}, nil
 }
 
+func (s *stubGraphQuery) FileOutline(context.Context, string, string, string) (graphquery.FileOutline, error) {
+	return graphquery.FileOutline{}, nil
+}
+
 func queryToolSession(t *testing.T) (*mcp.ClientSession, *stubGraphQuery) {
 	t.Helper()
 

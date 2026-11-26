@@ -66,6 +66,14 @@ type Graph struct {
 
 	communities map[int][]string // community id -> node ids (insertion order)
 
+	// files maps a source_file to its node ids in insertion order, so file
+	// outlines and file-qualified names do not scan every node.
+	files map[string][]string
+
+	// labels maps a lowercased label without method punctuation (".Run()"
+	// -> "run") to its node ids in insertion order, for qualified names.
+	labels map[string][]string
+
 	// idfCache memoises IDF weights per query term (see scoring.go). Rebuilt with
 	// the graph, so it auto-invalidates on reload.
 	idfMu    sync.Mutex
@@ -199,6 +207,7 @@ func fromRaw(raw *rawGraph) (*Graph, error) {
 		in:          map[string][]edgeRef{},
 		degree:      map[string]int{},
 		communities: map[int][]string{},
+		files:       map[string][]string{},
 		idfCache:    map[string]float64{},
 	}
 
@@ -225,12 +234,26 @@ func fromRaw(raw *rawGraph) (*Graph, error) {
 		// A repeated id replaces the node, as a map would, but is listed
 		// once: graphs that skip Validate (merged ones, or one committed in a
 		// repository) would otherwise count and print it twice.
-		_, seen := g.Nodes[n.ID]
+		prev, seen := g.Nodes[n.ID]
 		g.Nodes[n.ID] = node
 		if seen {
+			if prev.SourceFile != node.SourceFile {
+				if rest := removeID(g.files[prev.SourceFile], n.ID); len(rest) > 0 {
+					g.files[prev.SourceFile] = rest
+				} else {
+					delete(g.files, prev.SourceFile)
+				}
+				if node.SourceFile != "" {
+					g.files[node.SourceFile] = append(g.files[node.SourceFile], n.ID)
+				}
+			}
+
 			continue
 		}
 		g.nodeList = append(g.nodeList, n.ID)
+		if node.SourceFile != "" {
+			g.files[node.SourceFile] = append(g.files[node.SourceFile], n.ID)
+		}
 
 		if n.Community != nil {
 			g.communities[*n.Community] = append(g.communities[*n.Community], n.ID)
@@ -272,11 +295,29 @@ func fromRaw(raw *rawGraph) (*Graph, error) {
 
 	g.hubThreshold = computeHubThreshold(g)
 
+	g.labels = make(map[string][]string, len(g.nodeList))
+	for _, id := range g.nodeList {
+		k := bareMethodLabel(normLabelOf(g.Nodes[id]))
+		g.labels[k] = append(g.labels[k], id)
+	}
+
 	return g, nil
 }
 
 // NumNodes returns the node count.
 func (g *Graph) NumNodes() int { return len(g.nodeList) }
+
+// removeID returns ids without id, keeping the order of the rest.
+func removeID(ids []string, id string) []string {
+	out := ids[:0]
+	for _, x := range ids {
+		if x != id {
+			out = append(out, x)
+		}
+	}
+
+	return out
+}
 
 // NumEdges returns the directed edge count.
 func (g *Graph) NumEdges() int {

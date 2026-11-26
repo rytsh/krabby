@@ -34,7 +34,7 @@ Coexistence with live tools:
 Tool selection:
 - Use search_code first for symbols, literals, usages and implementation locations; regex handles punctuation/line anchors, semantic handles concepts. Narrow with repo/path.
 - Use repo_overview for orientation in an unfamiliar repo: it returns the existing generated introduction, section offsets and generation metadata. Follow a relevant section with get_doc, then verify paths/symbols with search_code/read_file.
-- Use find_definition/find_references for exact graph symbols; context:['call'] follows calls. read_symbol returns a symbol's whole source. query_graph explains dependencies and cross-file relationships.
+- Use find_definition/find_references for graph symbols ('Type.Method' if common); context:['call'] follows calls. read_symbol returns source, file_outline a file's symbols. query_graph explains relationships.
 - Use glob for file names; list_files for one directory; read_file for source. Preserve returned snapshot tokens on continuation reads.
 - Use git_blame, git_diff, git_log and list_refs for commit evidence and release comparisons.
 - Use search_docs for generated docs and indexed knowledge. Semantic is the default when configured, otherwise lexical. Use lexical for exact Jira keys/titles/identifiers, hybrid for combined retrieval. Inspect evidence kind and sync metadata; cite the original URL for synced content.
@@ -837,17 +837,23 @@ func (a queryGraphArgs) traversalMode() (string, error) {
 }
 
 type findSymbolArgs struct {
-	Symbol    string `json:"symbol" jsonschema:"exact symbol name, e.g. 'SearchCodeText'; resolution falls back to a prefix then a substring match and reports the other candidates it saw"`
+	Symbol    string `json:"symbol" jsonschema:"exact symbol name, e.g. 'SearchCodeText', or qualified by its type or file to pick one of many: 'Manager.ReadSymbol', 'Cart::total', 'manager/codenav.go/readDefinition'; resolution falls back to a prefix then a substring match and reports the other candidates it saw"`
 	Repo      string `json:"repo,omitempty" jsonschema:"repository id (owner/name); always provide when known"`
 	Namespace string `json:"namespace,omitempty" jsonschema:"namespace to scope to when repo is omitted; empty means the 'default' namespace, '*' searches all namespaces"`
 	Limit     int    `json:"limit,omitempty" jsonschema:"maximum definitions to return (default 50, max 200)"`
 }
 
 type readSymbolArgs struct {
-	Symbol    string `json:"symbol" jsonschema:"exact symbol name, e.g. 'SearchCodeText'; resolution falls back to a prefix then a substring match and reports the other candidates it saw"`
+	Symbol    string `json:"symbol" jsonschema:"exact symbol name, e.g. 'SearchCodeText', or qualified by its type or file to pick one of many: 'Manager.ReadSymbol', 'Cart::total', 'manager/codenav.go/readDefinition'; resolution falls back to a prefix then a substring match and reports the other candidates it saw"`
 	Repo      string `json:"repo,omitempty" jsonschema:"repository id (owner/name); always provide when known"`
 	Namespace string `json:"namespace,omitempty" jsonschema:"namespace to scope to when repo is omitted; empty means the 'default' namespace, '*' searches all namespaces"`
 	Limit     int    `json:"limit,omitempty" jsonschema:"maximum definitions to return with source (default 5, max 20)"`
+}
+
+type fileOutlineArgs struct {
+	Path      string `json:"path" jsonschema:"repo-relative source file, e.g. 'internal/service/manager/codenav.go', or a unique tail of it such as 'manager/codenav.go'"`
+	Repo      string `json:"repo,omitempty" jsonschema:"repository id (owner/name); always provide when known"`
+	Namespace string `json:"namespace,omitempty" jsonschema:"namespace to scope to when repo is omitted; empty means the 'default' namespace, '*' searches all namespaces"`
 }
 
 type findReferencesArgs struct {
@@ -946,6 +952,20 @@ func addQueryTools(server *mcp.Server, mgr graphQueryService) {
 			"The returned snapshot token continues on the same version with read_file. " + repoField + ".",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args readSymbolArgs) (*mcp.CallToolResult, any, error) {
 		res, err := mgr.ReadSymbol(ctx, args.Repo, args.Namespace, args.Symbol, args.Limit)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return jsonResult(res), nil, nil
+	})
+
+	addTool(server, &mcp.Tool{
+		Name: "file_outline",
+		Description: "List the declarations of one source file from the knowledge graph - functions, types and classes in source order, each with its methods and line range, without their bodies. " +
+			"Use it to see a file's structure before reading it, then read_symbol for the declarations you need instead of read_file for the whole file. " +
+			"A file the graph does not parse comes back with a note pointing at read_file. " + repoField + ".",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args fileOutlineArgs) (*mcp.CallToolResult, any, error) {
+		res, err := mgr.FileOutline(ctx, args.Repo, args.Namespace, args.Path)
 		if err != nil {
 			return nil, nil, err
 		}

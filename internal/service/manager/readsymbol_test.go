@@ -225,3 +225,109 @@ func TestReadSymbolBoundsTheAnswer(t *testing.T) {
 		t.Errorf("%d definitions with %d lines of source; budget is %d lines", withSource, lines, maxReadSymbolTotalLines)
 	}
 }
+
+const receiptSource = `package billing
+
+type Receipt struct{}
+
+func (r *Receipt) Total() int { return 1 }
+`
+
+const refundSource = `package billing
+
+func (i *Invoice) Refund() int {
+	return -i.Total()
+}
+`
+
+// A qualified name reads the one Total the caller meant, from a graph the real
+// builder made: two types declare Total.
+func TestReadSymbolQualifiedByType(t *testing.T) {
+	m, repo := readSymbolManager(t, map[string]string{
+		"billing/invoice.go": invoiceSource,
+		"billing/receipt.go": receiptSource,
+		"billing/refund.go":  refundSource,
+	})
+
+	bare, err := m.ReadSymbol(context.Background(), repo, "", "Total", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bare.Total != 2 {
+		t.Fatalf("bare Total = %d definitions, want 2", bare.Total)
+	}
+
+	for symbol, path := range map[string]string{
+		"Invoice.Total":              "billing/invoice.go",
+		"Receipt::Total":             "billing/receipt.go",
+		"billing/receipt.go/Total":   "billing/receipt.go",
+		"invoice.go/Invoice.Total()": "billing/invoice.go",
+		// Refund is declared on Invoice in a third file.
+		"Invoice.Refund":             "billing/refund.go",
+		"invoice.go/Invoice.Refund":  "billing/refund.go",
+	} {
+		got, err := m.ReadSymbol(context.Background(), repo, "", symbol, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Total != 1 || got.Symbols[0].Path != path || got.Symbols[0].Source == nil {
+			t.Errorf("%s = %+v (note %q), want the one in %s", symbol, got.Symbols, got.Note, path)
+		}
+	}
+}
+
+func TestFileOutlineFromTheBuiltGraph(t *testing.T) {
+	m, repo := readSymbolManager(t, map[string]string{
+		"billing/invoice.go": invoiceSource,
+		"billing/refund.go":  refundSource,
+		"py/shop.py":         "class Cart:\n    def __init__(self):\n        self.items = []\n\n    def total(self):\n        return sum(self.items)\n\ndef helper(x):\n    return x\n",
+	})
+
+	got, err := m.FileOutline(context.Background(), repo, "", "billing/invoice.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Path != "billing/invoice.go" || got.Snapshot == "" {
+		t.Fatalf("outline = %+v", got)
+	}
+
+	found := map[string]graphquery.OutlineSymbol{}
+	var walk func([]graphquery.OutlineSymbol)
+	walk = func(syms []graphquery.OutlineSymbol) {
+		for _, s := range syms {
+			found[s.Label] = s
+			walk(s.Members)
+		}
+	}
+	walk(got.Symbols)
+	for _, want := range []string{"Invoice", ".Total()", "Zero()"} {
+		if _, ok := found[want]; !ok {
+			t.Errorf("outline lacks %s: %+v", want, got.Symbols)
+		}
+	}
+	if total := found[".Total()"]; total.Line != 9 || total.EndLine != 16 {
+		t.Errorf(".Total() = L%d-%d, want L9-16", total.Line, total.EndLine)
+	}
+	if _, ok := found[".Refund()"]; ok {
+		t.Errorf("invoice.go lists Refund, which refund.go declares")
+	}
+
+	// A file that only adds a method shows the type it belongs to, and where
+	// that type is declared.
+	refund, err := m.FileOutline(context.Background(), repo, "", "refund.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refund.Symbols) != 1 || refund.Symbols[0].Label != "Invoice" || refund.Symbols[0].DeclaredIn != "billing/invoice.go" ||
+		len(refund.Symbols[0].Members) != 1 || refund.Symbols[0].Members[0].Label != ".Refund()" {
+		t.Errorf("refund.go outline = %+v", refund.Symbols)
+	}
+
+	py, err := m.FileOutline(context.Background(), repo, "", "shop.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(py.Symbols) != 2 || py.Symbols[0].Label != "Cart" || len(py.Symbols[0].Members) != 2 || py.Symbols[1].Label != "helper()" {
+		t.Errorf("python outline = %+v", py.Symbols)
+	}
+}

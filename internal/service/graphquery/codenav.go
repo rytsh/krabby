@@ -2,6 +2,7 @@ package graphquery
 
 import (
 	"fmt"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -120,12 +121,7 @@ func (g *Graph) Definitions(symbol string, limit int) SymbolDefs {
 		}
 
 		d := g.Nodes[id]
-		line, endLine := parseSourceLocation(d.SourceLocation)
-		// bag records where a declaration ends separately from where it
-		// starts; an end written into the location itself is older graphs.
-		if endLine == 0 && d.EndLine >= line && line > 0 {
-			endLine = d.EndLine
-		}
+		line, endLine := g.location(id)
 		def := Definition{
 			Label:   g.labelOf(id),
 			ID:      id,
@@ -176,13 +172,17 @@ func (g *Graph) References(symbol string, contexts []string, page, perPage int) 
 		return out
 	}
 
-	nid := hits[0]
+	nid := g.preferDefinition(hits)
 	out.Resolved = nid
 
 	// Other same-tier matches are candidates too: references belong to exactly one
 	// node, so every equally-strong match not chosen must stay visible.
 	alternates := make([]string, 0, len(hits)-1+len(weaker))
-	alternates = append(alternates, hits[1:]...)
+	for _, id := range hits {
+		if id != nid {
+			alternates = append(alternates, id)
+		}
+	}
 	alternates = append(alternates, weaker...)
 	out.Candidates = g.candidateList(alternates)
 
@@ -252,6 +252,18 @@ func (g *Graph) resolveSymbol(symbol string) (hits, weaker []string) {
 	exact, prefix, substring := g.findNodeTiers(strings.ToLower(symbol))
 	exact, prefix, substring = g.promoteMethodLabels(symbol, exact, prefix, substring)
 
+	// A label that really is "http.Handler" is the exact answer; reading the
+	// name as qualified only comes after it, but before any fuzzy tier. The
+	// shared resolver tokenises the query, so it never matches such a label
+	// exactly and the comparison is made here.
+	if len(exact) == 0 {
+		if literal := g.labelMatches(strings.TrimSuffix(strings.TrimSpace(symbol), "()")); len(literal) > 0 {
+			exact = literal
+		} else if qualified := g.resolveQualified(symbol); len(qualified) > 0 {
+			return qualified, append(prefix, substring...)
+		}
+	}
+
 	switch {
 	case len(exact) > 0:
 		return exact, append(prefix, substring...)
@@ -260,6 +272,21 @@ func (g *Graph) resolveSymbol(symbol string) (hits, weaker []string) {
 	default:
 		return substring, nil
 	}
+}
+
+// preferDefinition picks the node References answers for among equally strong
+// matches: the first real definition, ahead of the sourceless stubs a
+// graph builder leaves for a name it could not resolve. A stub holds only the
+// references of the one file that made it, so choosing one for "Manager"
+// answered with a test helper instead of the type's callers.
+func (g *Graph) preferDefinition(hits []string) string {
+	for _, id := range hits {
+		if g.definitionKind(id) == kindSymbol {
+			return id
+		}
+	}
+
+	return hits[0]
 }
 
 // promoteMethodLabels moves nodes whose label is the graph's method form of
@@ -322,11 +349,264 @@ func (g *Graph) definitionKind(id string) string {
 		return kindConcept
 	case g.isJSONKeyNode(id):
 		return kindJSONKey
-	case d.Label == filepath.Base(d.SourceFile):
+	case isFileLabel(d):
 		return kindFile
 	default:
 		return kindSymbol
 	}
+}
+
+// isFileLabel reports whether a node is its file's own placeholder. bag labels
+// it with the file name, or with the path when the name alone is ambiguous
+// ("manager/codenav.go").
+func isFileLabel(d *Node) bool {
+	return d.Label == filepath.Base(d.SourceFile) || d.Label == d.SourceFile ||
+		(strings.Contains(d.Label, "/") && strings.HasSuffix(d.SourceFile, "/"+d.Label))
+}
+
+// location returns a node's first and last line. bag records where a
+// declaration ends separately from where it starts; an end written into the
+// location itself is older graphs.
+func (g *Graph) location(id string) (line, endLine int) {
+	d := g.Nodes[id]
+	line, endLine = parseSourceLocation(d.SourceLocation)
+	if endLine == 0 && d.EndLine >= line && line > 0 {
+		endLine = d.EndLine
+	}
+
+	return line, endLine
+}
+
+// resolveQualified resolves a name qualified by its owner: a type or class
+// ("Manager.ReadSymbol", "Manager/ReadSymbol", "Cart::total", "Cart#total"),
+// a source file ("manager/codenav.go/readDefinition"), or both
+// ("codenav.go/Manager.ReadSymbol"). It answers the question a bare name
+// cannot - which of the many "New" or "String" - from the graph's structure:
+// a member is a method edge out of its type (or a type it inherits from), and
+// a file's declarations are the symbols whose source_file it is.
+//
+// An owner can name a file and a type at once ("order.Total" with an order/
+// directory and an Order type); both readings are answered.
+//
+// It returns nil when symbol is not qualified or nothing matches, so the
+// caller falls back to plain resolution and a name that only looks qualified
+// ("os.path" as a label) still matches as before.
+func (g *Graph) resolveQualified(symbol string) []string {
+	owner, member, ok := splitQualified(symbol)
+	if !ok {
+		return nil
+	}
+
+	want := strings.ToLower(member)
+	seen := map[string]bool{}
+	var out []string
+	add := func(id string) {
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+
+	for _, f := range g.filesMatching(owner) {
+		for _, id := range g.files[f] {
+			if g.definitionKind(id) == kindSymbol && bareMethodLabel(normLabelOf(g.Nodes[id])) == want {
+				add(id)
+			}
+		}
+	}
+
+	types, inFiles := g.ownersNamed(owner)
+	for _, o := range types {
+		ownerHere := inFiles == nil || inFiles[g.Nodes[o].SourceFile]
+		for _, id := range g.memberNamed(o, want) {
+			if ownerHere || inFiles[g.Nodes[id].SourceFile] {
+				add(id)
+			}
+		}
+	}
+
+	// Go names a package function by its package: "manager.New" is New in a
+	// directory ending in manager/.
+	if len(out) == 0 {
+		for _, id := range g.packageMembers(owner, want) {
+			add(id)
+		}
+	}
+
+	return out
+}
+
+// packageMembers returns the top-level definitions named want in source
+// files whose directory is dir, or ends in "/"+dir.
+func (g *Graph) packageMembers(dir, want string) []string {
+	dir = cleanGraphPath(dir)
+	if dir == "" || strings.HasSuffix(dir, "/") {
+		return nil
+	}
+
+	var out []string
+	for f, nodeIDs := range g.files {
+		d := path.Dir(f)
+		if d != dir && !strings.HasSuffix(d, "/"+dir) {
+			continue
+		}
+		for _, id := range nodeIDs {
+			if g.definitionKind(id) == kindSymbol && bareMethodLabel(normLabelOf(g.Nodes[id])) == want && !g.isMember(id) {
+				out = append(out, id)
+			}
+		}
+	}
+	sort.Strings(out)
+
+	return out
+}
+
+// isMember reports whether a type or class claims the node as its method.
+func (g *Graph) isMember(id string) bool {
+	for _, r := range g.in[id] {
+		if r.edge.Relation == relationMethod {
+			return true
+		}
+	}
+
+	return false
+}
+
+// ownersNamed resolves the owner half of a qualified name to type nodes and,
+// when a file narrows it ("shop/cart.go/Cart"), the files that narrow it. A Go
+// type's methods are spread over files, so the file may declare the type or
+// only some of its methods; the caller keeps the members either way.
+func (g *Graph) ownersNamed(owner string) (types []string, files map[string]bool) {
+	file, typ, ok := splitQualified(owner)
+	if !ok || strings.ContainsAny(typ, "/") {
+		return g.labelMatches(owner), nil
+	}
+
+	matched := g.filesMatching(file)
+	if len(matched) == 0 {
+		return g.labelMatches(owner), nil
+	}
+
+	files = make(map[string]bool, len(matched))
+	for _, f := range matched {
+		files[f] = true
+	}
+
+	return g.labelMatches(typ), files
+}
+
+// Relations the qualified resolver follows. A method edge links a type or
+// class to its own methods; the supertype relations let "Child.method" find a
+// method inherited from a parent.
+const relationMethod = "method"
+
+var supertypeRelations = map[string]bool{"inherits": true, "extends": true, "implements": true}
+
+// maxSupertypeDepth bounds how far up an inheritance chain members are
+// collected; it also stops a cyclic graph.
+const maxSupertypeDepth = 8
+
+// memberNamed returns the methods named want of a type, or, when it declares
+// none, of the nearest types it inherits from. An override hides the method
+// it overrides, as it does in the language.
+func (g *Graph) memberNamed(typeID, want string) []string {
+	visited := map[string]bool{}
+	level := []string{typeID}
+
+	for depth := 0; len(level) > 0 && depth <= maxSupertypeDepth; depth++ {
+		var found, next []string
+		for _, t := range level {
+			if visited[t] {
+				continue
+			}
+			visited[t] = true
+
+			for _, r := range g.out[t] {
+				switch {
+				case r.edge.Relation == relationMethod:
+					if bareMethodLabel(normLabelOf(g.Nodes[r.other])) == want {
+						found = append(found, r.other)
+					}
+				case supertypeRelations[r.edge.Relation]:
+					next = append(next, r.other)
+				}
+			}
+		}
+		if len(found) > 0 {
+			return found
+		}
+		level = next
+	}
+
+	return nil
+}
+
+// splitQualified splits a qualified name at its last separator. A trailing
+// "()" on the member is the graph's own method form and is dropped; a leading
+// separator (".Name()", the label of a method) is not a qualification.
+func splitQualified(symbol string) (owner, member string, ok bool) {
+	s := strings.TrimSuffix(strings.TrimSpace(strings.ReplaceAll(symbol, `\`, "/")), "()")
+	i := strings.LastIndexAny(s, "/.#:")
+	if i <= 0 || i == len(s)-1 {
+		return "", "", false
+	}
+
+	owner = strings.TrimRight(s[:i], ":")
+	member = s[i+1:]
+	if owner == "" || strings.ContainsAny(member, " \t") {
+		return "", "", false
+	}
+
+	return owner, member, true
+}
+
+// labelMatches returns the definition nodes whose label is name, ignoring
+// case and the method punctuation.
+func (g *Graph) labelMatches(name string) []string {
+	var out []string
+	for _, id := range g.labels[strings.ToLower(strings.TrimSpace(name))] {
+		if g.definitionKind(id) == kindSymbol {
+			out = append(out, id)
+		}
+	}
+
+	return out
+}
+
+// filesMatching returns, sorted, the source files that path names: the file
+// itself or one ending in "/"+path, so a caller can name a file by its tail.
+func (g *Graph) filesMatching(path string) []string {
+	path = cleanGraphPath(path)
+	if path == "" {
+		return nil
+	}
+
+	if _, ok := g.files[path]; ok {
+		return []string{path}
+	}
+
+	var out []string
+	suffix := "/" + path
+	for f := range g.files {
+		if strings.HasSuffix(f, suffix) {
+			out = append(out, f)
+		}
+	}
+	sort.Strings(out)
+
+	return out
+}
+
+// cleanGraphPath normalises a caller's path to the repo-relative,
+// slash-separated form the graph stores in source_file. A Windows path is
+// normalised too: filepath.ToSlash only rewrites the host's separator.
+func cleanGraphPath(p string) string {
+	p = strings.TrimSpace(strings.ReplaceAll(p, `\`, "/"))
+	for strings.HasPrefix(p, "./") {
+		p = p[2:]
+	}
+
+	return strings.TrimPrefix(p, "/")
 }
 
 // contextVocabularyNote explains what a caller may filter on instead.

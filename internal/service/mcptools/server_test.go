@@ -56,8 +56,8 @@ func TestToolCatalogs(t *testing.T) {
 		absent  []string
 	}{
 		{
-			name: "core", server: func() *mcp.Server { return NewCore(nil, "test") }, count: 29,
-			present: []string{"list_repos", "repo_status", "repo_overview", "search_code", "query_graph", "find_definition", "read_symbol", "find_references", "search_docs", "list_files", "glob", "get_source", "list_big_pictures", "get_big_picture"},
+			name: "core", server: func() *mcp.Server { return NewCore(nil, "test") }, count: 30,
+			present: []string{"list_repos", "repo_status", "repo_overview", "search_code", "query_graph", "find_definition", "read_symbol", "file_outline", "find_references", "search_docs", "list_files", "glob", "get_source", "list_big_pictures", "get_big_picture"},
 			absent:  []string{"add_repo", "remove_repo", "refresh_repo", "queue_status", "call_api_endpoint", "set_docs_config", "publish_big_picture", "save_big_picture", "delete_big_picture"},
 		},
 		{
@@ -171,8 +171,8 @@ func TestToolCatalogs(t *testing.T) {
 			}
 		})
 	}
-	if len(allNames) != 97 {
-		t.Fatalf("catalog union has %d tools, want 97", len(allNames))
+	if len(allNames) != 98 {
+		t.Fatalf("catalog union has %d tools, want 98", len(allNames))
 	}
 }
 

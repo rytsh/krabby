@@ -106,7 +106,7 @@ and lines in the answer:
 The normal read-only flow is:
 
 1. `search_code` locates the implementation in the selected repository.
-2. `find_definition` or `find_references` verifies the symbol and its real graph relationships; `read_symbol` returns a function or type's whole source.
+2. `find_definition` or `find_references` verifies the symbol and its real graph relationships (qualify a common name: `Invoice.Total`); `file_outline` shows a file's declarations and `read_symbol` returns a function or type's whole source.
 3. `read_file` reads only the source needed to explain the result.
 4. `git_blame` and `git_diff` can add change history when the question asks why the code exists.
 

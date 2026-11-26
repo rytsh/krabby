@@ -72,6 +72,7 @@ type graphQueryService interface {
 	FindDefinition(context.Context, string, string, string, int) (graphquery.SymbolDefs, error)
 	FindReferences(context.Context, string, string, string, []string, int, int) (graphquery.SymbolRefs, error)
 	ReadSymbol(context.Context, string, string, string, int) (manager.SymbolSources, error)
+	FileOutline(context.Context, string, string, string) (graphquery.FileOutline, error)
 }
 
 type repoFileService interface {

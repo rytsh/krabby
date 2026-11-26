@@ -110,6 +110,20 @@ func TestFindDefinitionReportsRepoSelectionInNote(t *testing.T) {
 	}
 }
 
+// A path names directories that can match a repository name by accident
+// ("team/one/..." here), so file_outline never infers the repository from it.
+func TestFileOutlineDoesNotInferTheRepoFromThePath(t *testing.T) {
+	m := codeNavManager(t, "example.com/team/apiserver", "example.com/team/billing")
+
+	got, err := m.FileOutline(context.Background(), "", "", "apiserver/pkga/a.go")
+	if err != nil {
+		t.Fatalf("FileOutline: %v", err)
+	}
+	if !strings.Contains(got.Note, "Retry file_outline with repo") || len(got.Symbols) != 0 {
+		t.Errorf("outline = %+v, want the repository selection instruction", got)
+	}
+}
+
 // No graph at all is an error, not an empty result: the caller must know the
 // repository has not been indexed yet.
 func TestFindDefinitionWithoutAnyGraphErrors(t *testing.T) {
